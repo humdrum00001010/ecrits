@@ -1,7 +1,13 @@
 # `:browser` is the Wallaby suite (real Chromium + chromedriver). It is
 # excluded from the default `mix test` run to keep the unit suite fast and
 # Chromium-free. CI / sprite runs `mix test --include browser`.
-ExUnit.start(exclude: [:live_smtp, :live, :live_openai, :live_law_mcp, :browser])
+#
+# `:external_hwpx` shells out to a third-party `pyhwpxlib` binary to
+# validate generated HWPX bytes against an external parser. Excluded by
+# default; run with `mix test --include external_hwpx`.
+ExUnit.start(
+  exclude: [:live_smtp, :live, :live_openai, :live_law_mcp, :browser, :external_hwpx]
+)
 
 # Engine and other pure-mechanics tests run without the database. We only
 # switch the sandbox into :manual mode when the Repo actually started up.

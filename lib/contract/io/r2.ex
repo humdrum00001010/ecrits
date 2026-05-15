@@ -122,13 +122,15 @@ defmodule Contract.IO.R2 do
     end
   end
 
-  defp invoke_render({m, f, a}, payload), do: invoke_render(fn p -> apply(m, f, [p | a]) end, payload)
+  defp invoke_render({m, f, a}, payload),
+    do: invoke_render(fn p -> apply(m, f, [p | a]) end, payload)
 
   defp format_extension(:pdf), do: "pdf"
   defp format_extension(:docx), do: "docx"
   defp format_extension(:html), do: "html"
   defp format_extension(:md), do: "md"
   defp format_extension(:markdown), do: "md"
+  defp format_extension(:hwpx), do: "hwpx"
   defp format_extension(other), do: to_string(other)
 
   defp bucket!(opts) do
@@ -143,7 +145,8 @@ defmodule Contract.IO.R2 do
     retries = Keyword.get(opts, :retries, max_attempts: 1, base_backoff_in_ms: 1)
 
     config = [
-      access_key_id: Keyword.get(opts, :access_key_id) || cfg[:access_key_id] || "test-access-key",
+      access_key_id:
+        Keyword.get(opts, :access_key_id) || cfg[:access_key_id] || "test-access-key",
       secret_access_key:
         Keyword.get(opts, :secret_access_key) || cfg[:secret_access_key] || "test-secret",
       region: Keyword.get(opts, :region, "auto"),

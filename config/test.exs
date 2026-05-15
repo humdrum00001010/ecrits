@@ -117,3 +117,18 @@ config :ex_aws,
   access_key_id: "test-access-key",
   secret_access_key: "test-secret",
   region: "auto"
+
+# External HWPX validator — used by `test/contract/export/hwpx_external_validator_test.exs`
+# (tag `:external_hwpx`, excluded from the default suite).
+#
+# `pyhwpxlib` is a third-party Python CLI for parsing/validating HWPX files;
+# the validator test shells out via `System.cmd/3` to confirm our writer's
+# output is well-formed enough for an external parser to accept. On the
+# sprite, install with:
+#
+#     python3 -m venv ~/.venvs/hwpx && ~/.venvs/hwpx/bin/pip install pyhwpxlib
+#
+# Override via `HWPX_VALIDATOR_CMD=/path/to/pyhwpxlib`.
+config :contract,
+       :hwpx_validator,
+       System.get_env("HWPX_VALIDATOR_CMD", "/home/sprite/.venvs/hwpx/bin/pyhwpxlib")
