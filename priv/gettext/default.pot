@@ -16,18 +16,18 @@ msgstr ""
 msgid "Actions"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:224
-#: lib/contract_web/components/layouts.ex:236
+#: lib/contract_web/components/layouts.ex:323
+#: lib/contract_web/components/layouts.ex:335
 #, elixir-autogen, elixir-format
 msgid "Attempting to reconnect"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:231
+#: lib/contract_web/components/layouts.ex:330
 #, elixir-autogen, elixir-format
 msgid "Something went wrong!"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:219
+#: lib/contract_web/components/layouts.ex:318
 #, elixir-autogen, elixir-format
 msgid "We can't find the internet"
 msgstr ""
@@ -35,4 +35,9 @@ msgstr ""
 #: lib/contract_web/components/core_components.ex:81
 #, elixir-autogen, elixir-format
 msgid "close"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:72
+#, elixir-autogen, elixir-format
+msgid "Close menu"
 msgstr ""

@@ -38,7 +38,7 @@ defmodule ContractWeb.AuthComponents do
         <div class="space-y-2">
           <Brand.wordmark size="lg" />
           <p class="text-xs text-base-content/50 tracking-wide uppercase">
-            AI-led legal-document studio
+            Legal-document studio for Korean lawyers
           </p>
         </div>
 
@@ -60,7 +60,7 @@ defmodule ContractWeb.AuthComponents do
           <div class="lg:hidden mb-8 flex justify-center">
             <Brand.wordmark size="lg" />
           </div>
-          <div class="rounded-box border border-base-200 bg-base-100 p-6 sm:p-8 shadow-sm">
+          <div class="rounded-box border border-base-200 bg-base-100 p-6 sm:p-8">
             {render_slot(@form)}
           </div>
         </div>

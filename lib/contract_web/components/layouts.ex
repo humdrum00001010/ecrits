@@ -239,7 +239,7 @@ defmodule ContractWeb.Layouts do
         <div class="space-y-3">
           <Brand.wordmark size="base" />
           <p class="text-base-content/60 leading-relaxed">
-            An AI-led legal-document studio for Korean lawyers. Built to be precise, auditable, and quiet.
+            A legal-document studio for Korean lawyers. Built to be precise, auditable, and quiet.
           </p>
         </div>
         <div>
