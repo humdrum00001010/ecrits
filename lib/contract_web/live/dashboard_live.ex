@@ -34,7 +34,7 @@ defmodule ContractWeb.DashboardLive do
 
     socket =
       socket
-      |> assign(:page_title, "Dashboard")
+      |> assign(:page_title, dgettext("dashboard", "Dashboard"))
       |> assign(:show_new_doc_modal, false)
       |> assign(:contract_types, contract_types)
       |> load_data()
@@ -59,7 +59,11 @@ defmodule ContractWeb.DashboardLive do
      |> assign(:show_new_doc_modal, false)
      |> put_flash(
        :info,
-       "Document creation for #{type_key} is queued. Persistence ships with Wave 3C2."
+       dgettext(
+         "dashboard",
+         "Document creation for %{type_key} is queued. Persistence ships with Wave 3C2.",
+         type_key: type_key
+       )
      )}
   end
 
@@ -168,10 +172,11 @@ defmodule ContractWeb.DashboardLive do
               {today_label()}
             </p>
             <h1 class="text-3xl font-semibold tracking-tight">
-              Good day, <span class="text-primary">{persona_first_name(@current_scope)}</span>.
+              {dgettext("dashboard", "Good day,")}
+              <span class="text-primary">{persona_first_name(@current_scope)}</span>.
             </h1>
             <p class="text-base-content/60 mt-1">
-              Pick up where you left off, or open a new matter.
+              {dgettext("dashboard", "Pick up where you left off, or open a new matter.")}
             </p>
           </div>
           <div class="flex flex-wrap gap-2">
@@ -180,10 +185,10 @@ defmodule ContractWeb.DashboardLive do
               phx-click="open_new_document"
               class="btn btn-primary flex-1 sm:flex-none"
             >
-              <.icon name="hero-document-plus" class="size-4" /> New Document
+              <.icon name="hero-document-plus" class="size-4" /> {dgettext("dashboard", "New Document")}
             </button>
             <.link navigate={~p"/studio"} class="btn btn-ghost flex-1 sm:flex-none">
-              Open Studio <span aria-hidden="true">→</span>
+              {dgettext("dashboard", "Open Studio")} <span aria-hidden="true">→</span>
             </.link>
           </div>
         </header>
@@ -192,10 +197,18 @@ defmodule ContractWeb.DashboardLive do
         <%!-- Stat row                                                    --%>
         <%!-- ---------------------------------------------------------- --%>
         <section class="grid grid-cols-1 sm:grid-cols-3 gap-4" id="dashboard-stats">
-          <.stat_card label="Active matters" value={@stats.active_matters} icon="hero-folder" />
-          <.stat_card label="Documents" value={@stats.documents} icon="hero-document-text" />
           <.stat_card
-            label="Open agent runs"
+            label={dgettext("dashboard", "Active matters")}
+            value={@stats.active_matters}
+            icon="hero-folder"
+          />
+          <.stat_card
+            label={dgettext("dashboard", "Documents")}
+            value={@stats.documents}
+            icon="hero-document-text"
+          />
+          <.stat_card
+            label={dgettext("dashboard", "Open agent runs")}
             value={@stats.open_agent_runs}
             icon="hero-cpu-chip"
           />
@@ -206,9 +219,11 @@ defmodule ContractWeb.DashboardLive do
         <%!-- ---------------------------------------------------------- --%>
         <section id="matters">
           <header class="flex items-end justify-between mb-4">
-            <h2 class="text-lg font-semibold tracking-tight">Matters</h2>
+            <h2 class="text-lg font-semibold tracking-tight">
+              {dgettext("dashboard", "Matters")}
+            </h2>
             <span :if={@matters != []} class="text-xs text-base-content/50">
-              {length(@matters)} total
+              {dgettext("dashboard", "%{count} total", count: length(@matters))}
             </span>
           </header>
 
@@ -219,22 +234,27 @@ defmodule ContractWeb.DashboardLive do
             >
               <img
                 src={~p"/images/landing/dashboard-empty.png"}
-                alt="An empty folder with a quill, signalling no matters yet."
+                alt={
+                  dgettext("dashboard", "An empty folder with a quill, signalling no matters yet.")
+                }
                 class="mx-auto w-32 sm:w-40 h-auto object-contain"
                 width="1024"
                 height="1024"
                 loading="lazy"
               />
-              <p class="font-medium mt-3">No matters yet</p>
+              <p class="font-medium mt-3">{dgettext("dashboard", "No matters yet")}</p>
               <p class="text-sm text-base-content/60 mt-1 max-w-sm mx-auto">
-                A matter holds the documents, evidence, and agent runs for a single client engagement.
+                {dgettext(
+                  "dashboard",
+                  "A matter holds the documents, evidence, and agent runs for a single client engagement."
+                )}
               </p>
               <button
                 type="button"
                 phx-click="open_new_document"
                 class="btn btn-primary mt-5"
               >
-                <.icon name="hero-plus" class="size-4" /> New Matter
+                <.icon name="hero-plus" class="size-4" /> {dgettext("dashboard", "New Matter")}
               </button>
             </div>
           <% else %>
@@ -242,10 +262,18 @@ defmodule ContractWeb.DashboardLive do
               <article :for={matter <- @matters} class="rounded-box border border-base-200 p-5 bg-base-100 hover:border-base-300 transition-colors">
                 <p class="font-semibold tracking-tight">{matter.name}</p>
                 <p class="text-sm text-base-content/60 mt-1">
-                  {matter.doc_count} document<%= if matter.doc_count != 1, do: "s" %>
+                  {dngettext(
+                    "dashboard",
+                    "%{count} document",
+                    "%{count} documents",
+                    matter.doc_count,
+                    count: matter.doc_count
+                  )}
                 </p>
                 <p class="text-xs text-base-content/50 mt-3">
-                  Last activity {format_timestamp(matter.last_activity_at)}
+                  {dgettext("dashboard", "Last activity %{ago}",
+                    ago: format_timestamp(matter.last_activity_at)
+                  )}
                 </p>
               </article>
             </div>
@@ -257,7 +285,9 @@ defmodule ContractWeb.DashboardLive do
         <%!-- ---------------------------------------------------------- --%>
         <section id="recent-documents">
           <header class="flex items-end justify-between mb-4">
-            <h2 class="text-lg font-semibold tracking-tight">Recent documents</h2>
+            <h2 class="text-lg font-semibold tracking-tight">
+              {dgettext("dashboard", "Recent documents")}
+            </h2>
           </header>
 
           <%= if @recent_documents == [] do %>
@@ -265,7 +295,7 @@ defmodule ContractWeb.DashboardLive do
               id="documents-empty"
               class="rounded-box border border-dashed border-base-300 p-8 text-center bg-base-200/30 text-sm text-base-content/60"
             >
-              No documents yet. Drag a PDF in, or start from a contract type.
+              {dgettext("dashboard", "No documents yet. Drag a PDF in, or start from a contract type.")}
             </div>
           <% else %>
             <ul id="documents-list" class="rounded-box border border-base-200 md:divide-y md:divide-base-200 bg-base-100 space-y-2 md:space-y-0 p-2 md:p-0">
@@ -285,7 +315,9 @@ defmodule ContractWeb.DashboardLive do
                 <div class="flex items-center justify-between md:justify-end gap-2 md:gap-4 pl-7 md:pl-0">
                   <span class="badge badge-ghost badge-sm font-mono">{doc.type_key}</span>
                   <span class="text-xs text-base-content/50 md:w-32 md:text-right tabular-nums">
-                    rev {doc.last_revision} · {format_timestamp(doc.last_activity_at)}
+                    {dgettext("dashboard", "rev %{n}", n: doc.last_revision)} · {format_timestamp(
+                      doc.last_activity_at
+                    )}
                   </span>
                 </div>
               </li>
@@ -298,7 +330,9 @@ defmodule ContractWeb.DashboardLive do
         <%!-- ---------------------------------------------------------- --%>
         <section id="recent-activity" class="w-full lg:max-w-2xl">
           <header class="flex items-end justify-between mb-4">
-            <h2 class="text-lg font-semibold tracking-tight">Recent activity</h2>
+            <h2 class="text-lg font-semibold tracking-tight">
+              {dgettext("dashboard", "Recent activity")}
+            </h2>
           </header>
 
           <%= if @activity == [] do %>
@@ -306,7 +340,7 @@ defmodule ContractWeb.DashboardLive do
               id="activity-empty"
               class="rounded-box border border-dashed border-base-300 p-8 text-center bg-base-200/30 text-sm text-base-content/60"
             >
-              The activity feed will populate as you and the agent make changes.
+              {dgettext("dashboard", "The activity feed will populate as you and the agent make changes.")}
             </div>
           <% else %>
             <ol id="activity-feed" class="space-y-3">
@@ -324,7 +358,11 @@ defmodule ContractWeb.DashboardLive do
                     <span class="font-medium">{actor_label(event.actor_type)}</span>
                     <span class="text-base-content/70">{action_label(event.action_kind)}</span>
                     <span class="text-base-content/50 font-mono text-xs">
-                      doc/{String.slice(event.document_id || "", 0, 6)} · rev {event.applied_revision}
+                      doc/{String.slice(event.document_id || "", 0, 6)} · {dgettext(
+                        "dashboard",
+                        "rev %{n}",
+                        n: event.applied_revision
+                      )}
                     </span>
                   </p>
                   <p :if={event.message} class="text-xs text-base-content/60 truncate mt-0.5">
@@ -353,12 +391,22 @@ defmodule ContractWeb.DashboardLive do
         <div class="modal-box max-w-2xl">
           <div class="flex items-start justify-between gap-4">
             <div>
-              <h3 class="font-semibold text-lg tracking-tight">New document</h3>
+              <h3 class="font-semibold text-lg tracking-tight">
+                {dgettext("dashboard", "New document")}
+              </h3>
               <p class="text-sm text-base-content/60">
-                Pick a contract type. Field maps and templates load from the type registry.
+                {dgettext(
+                  "dashboard",
+                  "Pick a contract type. Field maps and templates load from the type registry."
+                )}
               </p>
             </div>
-            <button type="button" phx-click="close_new_document" class="btn btn-sm btn-ghost btn-square" aria-label="Close">
+            <button
+              type="button"
+              phx-click="close_new_document"
+              class="btn btn-sm btn-ghost btn-square"
+              aria-label={dgettext("dashboard", "Close")}
+            >
               <.icon name="hero-x-mark" class="size-4" />
             </button>
           </div>
@@ -389,8 +437,13 @@ defmodule ContractWeb.DashboardLive do
             </li>
           </ul>
         </div>
-        <button type="button" phx-click="close_new_document" class="modal-backdrop" aria-label="Close modal">
-          close
+        <button
+          type="button"
+          phx-click="close_new_document"
+          class="modal-backdrop"
+          aria-label={dgettext("dashboard", "Close modal")}
+        >
+          {dgettext("dashboard", "close")}
         </button>
       </div>
     </Layouts.app>

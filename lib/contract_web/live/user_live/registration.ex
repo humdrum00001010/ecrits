@@ -11,27 +11,39 @@ defmodule ContractWeb.UserLive.Registration do
       <.auth_split>
         <:aside>
           <h2 class="text-2xl font-semibold tracking-tight leading-snug">
-            Closed beta for Korean lawyers.
+            {dgettext("auth", "Closed beta for Korean lawyers.")}
           </h2>
           <p class="text-base-content/70 mt-3 leading-relaxed">
-            Registration is by invitation. We're working closely with a small group of solo lawyers and in-house counsel to shape the agent's questions, the type system, and the citation tooling.
+            {dgettext(
+              "auth",
+              "Registration is by invitation. We're working closely with a small group of solo lawyers and in-house counsel to shape the agent's questions, the type system, and the citation tooling."
+            )}
           </p>
           <ul class="text-sm text-base-content/60 space-y-2 mt-6">
-            <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" /> Bilingual workspace, English-first.</li>
-            <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" /> 법제처 cross-checking on every Korean-law citation.</li>
-            <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" /> Your data stays in a dedicated R2 bucket. No training on it.</li>
+            <li class="flex gap-2">
+              <.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />
+              {dgettext("auth", "Bilingual workspace, English-first.")}
+            </li>
+            <li class="flex gap-2">
+              <.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />
+              {dgettext("auth", "법제처 cross-checking on every Korean-law citation.")}
+            </li>
+            <li class="flex gap-2">
+              <.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />
+              {dgettext("auth", "Your data stays in a dedicated R2 bucket. No training on it.")}
+            </li>
           </ul>
         </:aside>
 
         <:form>
           <div class="space-y-1">
             <h1 class="text-2xl font-semibold tracking-tight">
-              Register for an account
+              {dgettext("auth", "Register for an account")}
             </h1>
             <p class="text-sm text-base-content/60">
-              Already on the list?
+              {dgettext("auth", "Already on the list?")}
               <.link navigate={~p"/users/log-in"} class="font-medium text-primary hover:underline">
-                Log in
+                {dgettext("auth", "Log in")}
               </.link>
             </p>
           </div>
@@ -46,24 +58,30 @@ defmodule ContractWeb.UserLive.Registration do
             <.input
               field={@form[:email]}
               type="email"
-              label="Work email"
+              label={dgettext("auth", "Work email")}
               autocomplete="username"
               spellcheck="false"
               required
               phx-mounted={JS.focus()}
             />
-            <.button phx-disable-with="Creating account..." class="btn btn-primary w-full">
-              Create my account
+            <.button
+              phx-disable-with={dgettext("auth", "Creating account...")}
+              class="btn btn-primary w-full"
+            >
+              {dgettext("auth", "Create my account")}
             </.button>
             <p class="text-xs text-base-content/50 pt-1">
-              We'll email a confirmation link. No password yet — you can add one later in Settings.
+              {dgettext(
+                "auth",
+                "We'll email a confirmation link. No password yet — you can add one later in Settings."
+              )}
             </p>
           </.form>
 
           <p class="text-xs text-base-content/50 mt-8 text-center">
-            Need help getting in?
+            {dgettext("auth", "Need help getting in?")}
             <a href="mailto:hello@contractstudio.example" class="underline hover:text-base-content">
-              Email the team
+              {dgettext("auth", "Email the team")}
             </a>
           </p>
         </:form>
@@ -98,7 +116,11 @@ defmodule ContractWeb.UserLive.Registration do
          socket
          |> put_flash(
            :info,
-           "An email was sent to #{user.email}, please access it to confirm your account."
+           dgettext(
+             "auth",
+             "An email was sent to %{email}, please access it to confirm your account.",
+             email: user.email
+           )
          )
          |> push_navigate(to: ~p"/users/log-in")}
 

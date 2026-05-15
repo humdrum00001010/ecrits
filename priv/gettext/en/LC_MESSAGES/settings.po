@@ -1,0 +1,288 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: en\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: lib/contract_web/live/user_live/settings.ex:171
+#, elixir-autogen, elixir-format
+msgid "A link to confirm your email change has been sent to the new address."
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:46
+#: lib/contract_web/live/user_live/api_tokens.ex:98
+#: lib/contract_web/live/user_live/settings_hub.ex:64
+#: lib/contract_web/live/user_live/settings_hub.ex:137
+#, elixir-autogen, elixir-format
+msgid "API tokens"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:14
+#: lib/contract_web/live/user_live/settings_hub.ex:58
+#: lib/contract_web/live/user_live/settings_hub.ex:131
+#, elixir-autogen, elixir-format
+msgid "Account"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:70
+#: lib/contract_web/live/user_live/settings_hub.ex:143
+#, elixir-autogen, elixir-format
+msgid "Appearance"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:227
+#, elixir-autogen, elixir-format
+msgid "Cancel"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:48
+#, elixir-autogen, elixir-format
+msgid "Change Email"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:47
+#, elixir-autogen, elixir-format
+msgid "Changing..."
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:183
+#, elixir-autogen, elixir-format
+msgid "Close"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:239
+#, elixir-autogen, elixir-format
+msgid "Close modal"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:91
+#, elixir-autogen, elixir-format
+msgid "Confirm new password"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:42
+#, elixir-autogen, elixir-format
+msgid "Email"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:27
+#, elixir-autogen, elixir-format
+msgid "Email address"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:59
+#, elixir-autogen, elixir-format
+msgid "Email address, password, and login methods."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:122
+#, elixir-autogen, elixir-format
+msgid "Email change link is invalid or it has expired."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:116
+#, elixir-autogen, elixir-format
+msgid "Email changed successfully."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:104
+#, elixir-autogen, elixir-format
+msgid "Email support"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:142
+#, elixir-autogen, elixir-format
+msgid "Expires %{at}"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:230
+#, elixir-autogen, elixir-format
+msgid "Generate"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:170
+#, elixir-autogen, elixir-format
+msgid "Generate API token"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:116
+#, elixir-autogen, elixir-format
+msgid "Generate a token to authenticate MCP requests from external clients."
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:127
+#, elixir-autogen, elixir-format
+msgid "Generate token"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:77
+#, elixir-autogen, elixir-format
+msgid "Generated: <hidden> — persistence ships in a later wave."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:65
+#, elixir-autogen, elixir-format
+msgid "Issue and revoke MCP route_ref tokens."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:18
+#, elixir-autogen, elixir-format
+msgid "Manage your email address and password. Sensitive changes require a fresh login."
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:209
+#, elixir-autogen, elixir-format
+msgid "Matter"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:102
+#, elixir-autogen, elixir-format
+msgid "Need help?"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:83
+#, elixir-autogen, elixir-format
+msgid "New password"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:114
+#, elixir-autogen, elixir-format
+msgid "No API tokens yet"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:210
+#, elixir-autogen, elixir-format
+msgid "No matters yet — token will be account-scoped"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:151
+#, elixir-autogen, elixir-format
+msgid "Notifications"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:57
+#, elixir-autogen, elixir-format
+msgid "Optional — you can keep using magic links. If you set a password, both methods work."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:55
+#, elixir-autogen, elixir-format
+msgid "Password"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:52
+#, elixir-autogen, elixir-format
+msgid "Pick a category on the left, or jump in below."
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:200
+#, elixir-autogen, elixir-format
+msgid "Purpose"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:151
+#, elixir-autogen, elixir-format
+msgid "Revoke"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:101
+#, elixir-autogen, elixir-format
+msgid "Route-ref tokens grant access to Contract Studio's MCP endpoint. Tokens are signed; revoke any time by deleting."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:96
+#, elixir-autogen, elixir-format
+msgid "Save Password"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:95
+#, elixir-autogen, elixir-format
+msgid "Saving..."
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:173
+#, elixir-autogen, elixir-format
+msgid "Scoped MCP route-ref. Stored signed; copy the token once after creation."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:16
+#: lib/contract_web/live/user_live/settings_hub.ex:30
+#: lib/contract_web/live/user_live/settings_hub.ex:44
+#: lib/contract_web/live/user_live/settings_hub.ex:127
+#, elixir-autogen, elixir-format
+msgid "Settings"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:123
+#, elixir-autogen, elixir-format
+msgid "Settings navigation"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:95
+#, elixir-autogen, elixir-format
+msgid "Settings · API tokens"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:50
+#, elixir-autogen, elixir-format
+msgid "Signed in as"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:198
+#: lib/contract_web/live/user_live/settings_hub.ex:247
+#, elixir-autogen, elixir-format
+msgid "Soon"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:218
+#, elixir-autogen, elixir-format
+msgid "TTL (hours)"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:76
+#, elixir-autogen, elixir-format
+msgid "Team-scoped defaults. Coming soon."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:71
+#, elixir-autogen, elixir-format
+msgid "Theme & density. Coming soon."
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:84
+#, elixir-autogen, elixir-format
+msgid "Token revoked."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings.ex:29
+#, elixir-autogen, elixir-format
+msgid "Used for login, magic links, and audit-log attribution."
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:75
+#: lib/contract_web/live/user_live/settings_hub.ex:147
+#, elixir-autogen, elixir-format
+msgid "Workspace"
+msgstr ""
+
+#: lib/contract_web/live/user_live/settings_hub.ex:47
+#, elixir-autogen, elixir-format
+msgid "Your account"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:241
+#, elixir-autogen, elixir-format
+msgid "close"
+msgstr ""
+
+#: lib/contract_web/live/user_live/api_tokens.ex:201
+#, elixir-autogen, elixir-format
+msgid "e.g. mcp-cli, slack-bridge"
+msgstr ""

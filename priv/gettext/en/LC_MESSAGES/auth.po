@@ -1,0 +1,283 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: en\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: lib/contract_web/live/user_live/login.ex:69
+#, elixir-autogen, elixir-format
+msgid ", not real email."
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:44
+#, elixir-autogen, elixir-format
+msgid "Already on the list?"
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:119
+#, elixir-autogen, elixir-format
+msgid "An email was sent to %{email}, please access it to confirm your account."
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:25
+#, elixir-autogen, elixir-format
+msgid "Bilingual workspace, English-first."
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:14
+#, elixir-autogen, elixir-format
+msgid "Closed beta for Korean lawyers."
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:57
+#, elixir-autogen, elixir-format
+msgid "Confirm and log in only this time"
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:54
+#, elixir-autogen, elixir-format
+msgid "Confirm and stay logged in"
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:29
+#, elixir-autogen, elixir-format
+msgid "Confirm your account"
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:51
+#: lib/contract_web/live/user_live/confirmation.ex:56
+#, elixir-autogen, elixir-format
+msgid "Confirming..."
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:71
+#, elixir-autogen, elixir-format
+msgid "Create my account"
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:68
+#, elixir-autogen, elixir-format
+msgid "Creating account..."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:13
+#, elixir-autogen, elixir-format
+msgid "Drafting that asks before it edits."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:87
+#: lib/contract_web/live/user_live/login.ex:118
+#, elixir-autogen, elixir-format
+msgid "Email"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:142
+#, elixir-autogen, elixir-format
+msgid "Email support"
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:84
+#, elixir-autogen, elixir-format
+msgid "Email the team"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:176
+#, elixir-autogen, elixir-format
+msgid "If your email is in our system, you will receive instructions for logging in shortly."
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:86
+#, elixir-autogen, elixir-format
+msgid "Keep me logged in on this device"
+msgstr ""
+
+#: lib/contract_web/components/auth_components.ex:42
+#, elixir-autogen, elixir-format
+msgid "Legal-document studio for Korean lawyers"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:63
+#, elixir-autogen, elixir-format
+msgid "Local mail adapter is active."
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:77
+#: lib/contract_web/live/user_live/login.ex:39
+#: lib/contract_web/live/user_live/registration.ex:46
+#, elixir-autogen, elixir-format
+msgid "Log in"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:131
+#, elixir-autogen, elixir-format
+msgid "Log in and stay logged in"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:134
+#, elixir-autogen, elixir-format
+msgid "Log in only this time"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:94
+#, elixir-autogen, elixir-format
+msgid "Log in with email"
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:92
+#, elixir-autogen, elixir-format
+msgid "Log me in only this time"
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:74
+#: lib/contract_web/live/user_live/confirmation.ex:83
+#: lib/contract_web/live/user_live/confirmation.ex:89
+#, elixir-autogen, elixir-format
+msgid "Logging in..."
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:117
+#, elixir-autogen, elixir-format
+msgid "Magic link is invalid or it has expired."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:65
+#, elixir-autogen, elixir-format
+msgid "Magic links land in"
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:82
+#, elixir-autogen, elixir-format
+msgid "Need help getting in?"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:49
+#, elixir-autogen, elixir-format
+msgid "New here?"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:28
+#, elixir-autogen, elixir-format
+msgid "No silent rewrites. Every change is a row."
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:13
+#, elixir-autogen, elixir-format
+msgid "One last click and you're in."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:126
+#, elixir-autogen, elixir-format
+msgid "Password"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:16
+#, elixir-autogen, elixir-format
+msgid "Pick up where you left off. The agent's pending questions, your matter timeline, and every uncommitted edit are right where you parked them."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:37
+#, elixir-autogen, elixir-format
+msgid "Re-authenticate"
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:41
+#, elixir-autogen, elixir-format
+msgid "Register for an account"
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:17
+#, elixir-autogen, elixir-format
+msgid "Registration is by invitation. We're working closely with a small group of solo lawyers and in-house counsel to shape the agent's questions, the type system, and the citation tooling."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:54
+#, elixir-autogen, elixir-format
+msgid "Sign up"
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:99
+#, elixir-autogen, elixir-format
+msgid "Tip: prefer passwords? Enable one in Settings after you're in."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:140
+#, elixir-autogen, elixir-format
+msgid "Trouble signing in?"
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:16
+#, elixir-autogen, elixir-format
+msgid "We pair every account with a magic link so the cold-start path doesn't require remembering a password. You can still add one later in Settings."
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:74
+#, elixir-autogen, elixir-format
+msgid "We'll email a confirmation link. No password yet — you can add one later in Settings."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:97
+#, elixir-autogen, elixir-format
+msgid "We'll send a one-time link. No password required."
+msgstr ""
+
+#: lib/contract_web/live/user_live/confirmation.ex:27
+#, elixir-autogen, elixir-format
+msgid "Welcome back"
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:61
+#, elixir-autogen, elixir-format
+msgid "Work email"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:44
+#, elixir-autogen, elixir-format
+msgid "You need to reauthenticate to perform sensitive actions on your account."
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:33
+#, elixir-autogen, elixir-format
+msgid "Your data stays in a dedicated R2 bucket. No training on it."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:102
+#, elixir-autogen, elixir-format
+msgid "or use a password"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:67
+#, elixir-autogen, elixir-format
+msgid "the dev mailbox"
+msgstr ""
+
+#: lib/contract_web/components/auth_components.ex:61
+#, elixir-autogen, elixir-format
+msgid "© %{year} Contract Studio"
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:55
+#, elixir-autogen, elixir-format
+msgid "— Contract Studio is invite-only for the closed beta."
+msgstr ""
+
+#: lib/contract_web/live/user_live/login.ex:24
+#, elixir-autogen, elixir-format
+msgid "법제처 citations verified before they hit the page."
+msgstr ""
+
+#: lib/contract_web/live/user_live/registration.ex:29
+#, elixir-autogen, elixir-format
+msgid "법제처 cross-checking on every Korean-law citation."
+msgstr ""
+
+#: lib/contract_web/components/auth_components.ex:54
+#, elixir-autogen, elixir-format
+msgid "법제처 verification · provenance logged · no silent rewrites."
+msgstr ""

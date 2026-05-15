@@ -1,0 +1,196 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: en\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: lib/contract_web/components/layouts.ex:283
+#, elixir-autogen, elixir-format
+msgid "A legal-document studio for Korean lawyers. Built to be precise, auditable, and quiet."
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:317
+#, elixir-autogen, elixir-format
+msgid "About"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:220
+#: lib/contract_web/components/layouts.ex:380
+#, elixir-autogen, elixir-format
+msgid "Account"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:402
+#: lib/contract_web/components/layouts.ex:414
+#, elixir-autogen, elixir-format
+msgid "Attempting to reconnect"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:128
+#: lib/contract_web/components/layouts.ex:254
+#: lib/contract_web/components/layouts.ex:301
+#, elixir-autogen, elixir-format
+msgid "Changelog"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:72
+#: lib/contract_web/components/layouts.ex:212
+#, elixir-autogen, elixir-format
+msgid "Close menu"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:313
+#, elixir-autogen, elixir-format
+msgid "Company"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:320
+#, elixir-autogen, elixir-format
+msgid "Contact"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:117
+#, elixir-autogen, elixir-format
+msgid "Contract Studio home"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:453
+#, elixir-autogen, elixir-format
+msgid "Dark theme"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:137
+#: lib/contract_web/components/layouts.ex:167
+#: lib/contract_web/components/layouts.ex:226
+#, elixir-autogen, elixir-format
+msgid "Dashboard"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:126
+#: lib/contract_web/components/layouts.ex:251
+#, elixir-autogen, elixir-format
+msgid "Docs"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:296
+#, elixir-autogen, elixir-format
+msgid "Documentation"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:334
+#, elixir-autogen, elixir-format
+msgid "Language"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:339
+#, elixir-autogen, elixir-format
+msgid "Language switcher (placeholder)"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:444
+#, elixir-autogen, elixir-format
+msgid "Light theme"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:182
+#: lib/contract_web/components/layouts.ex:260
+#, elixir-autogen, elixir-format
+msgid "Log in"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:175
+#: lib/contract_web/components/layouts.ex:242
+#, elixir-autogen, elixir-format
+msgid "Log out"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:108
+#, elixir-autogen, elixir-format
+msgid "Open menu"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:363
+#, elixir-autogen, elixir-format
+msgid "Privacy"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:291
+#, elixir-autogen, elixir-format
+msgid "Product"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:185
+#: lib/contract_web/components/layouts.ex:263
+#, elixir-autogen, elixir-format
+msgid "Register"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:306
+#, elixir-autogen, elixir-format
+msgid "Security"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:327
+#, elixir-autogen, elixir-format
+msgid "Security & Privacy"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:170
+#: lib/contract_web/components/layouts.ex:232
+#, elixir-autogen, elixir-format
+msgid "Settings"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:163
+#, elixir-autogen, elixir-format
+msgid "Signed in as"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:409
+#, elixir-autogen, elixir-format
+msgid "Something went wrong!"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:323
+#: lib/contract_web/components/layouts.ex:365
+#, elixir-autogen, elixir-format
+msgid "Status"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:140
+#: lib/contract_web/components/layouts.ex:229
+#, elixir-autogen, elixir-format
+msgid "Studio"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:435
+#, elixir-autogen, elixir-format
+msgid "System theme"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:361
+#, elixir-autogen, elixir-format
+msgid "Terms"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:397
+#, elixir-autogen, elixir-format
+msgid "We can't find the internet"
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:356
+#, elixir-autogen, elixir-format
+msgid "© %{year} Contract Studio. All rights reserved."
+msgstr ""
+
+#: lib/contract_web/components/layouts.ex:349
+#, elixir-autogen, elixir-format
+msgid "한국어 UI · English fallback"
+msgstr ""

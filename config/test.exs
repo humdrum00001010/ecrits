@@ -5,6 +5,11 @@ import Config
 # Mirrored in `:dev`; explicitly `false` in `:prod`.
 config :contract, :test_auth, true
 
+# Tests assert on English msgid (source-of-truth) — override the
+# config.exs Korean default so `mix test` matches the literal English
+# strings embedded in gen.auth tests + dashboard / settings_hub tests.
+config :contract, :ui_locale, "en"
+
 # Only in tests, remove the complexity from the password hashing algorithm
 config :bcrypt_elixir, :log_rounds, 1
 

@@ -69,7 +69,7 @@ defmodule ContractWeb.Layouts do
       <div class="drawer-side z-40">
         <label
           for="mobile-nav-drawer"
-          aria-label={gettext("Close menu")}
+          aria-label={dgettext("layouts", "Close menu")}
           class="drawer-overlay"
         >
         </label>
@@ -105,7 +105,7 @@ defmodule ContractWeb.Layouts do
         <label
           for="mobile-nav-drawer"
           class="btn btn-ghost btn-sm btn-square lg:hidden"
-          aria-label="Open menu"
+          aria-label={dgettext("layouts", "Open menu")}
           aria-controls="mobile-nav-drawer"
         >
           <.icon name="hero-bars-3" class="size-5" />
@@ -114,7 +114,7 @@ defmodule ContractWeb.Layouts do
         <.link
           navigate={~p"/"}
           class="flex items-center gap-2 shrink-0"
-          aria-label="Contract Studio home"
+          aria-label={dgettext("layouts", "Contract Studio home")}
         >
           <Brand.wordmark size="base" />
         </.link>
@@ -123,16 +123,22 @@ defmodule ContractWeb.Layouts do
           :if={!signed_in?(@current_scope)}
           class="hidden lg:flex items-center gap-6 text-sm text-base-content/70"
         >
-          <a href="#docs" class="hover:text-base-content">Docs</a>
-          <a href="#changelog" class="hover:text-base-content">Changelog</a>
+          <a href="#docs" class="hover:text-base-content">{dgettext("layouts", "Docs")}</a>
+          <a href="#changelog" class="hover:text-base-content">
+            {dgettext("layouts", "Changelog")}
+          </a>
         </nav>
 
         <nav
           :if={signed_in?(@current_scope)}
           class="hidden lg:flex items-center gap-6 text-sm text-base-content/70"
         >
-          <.link navigate={~p"/dashboard"} class="hover:text-base-content">Dashboard</.link>
-          <.link navigate={~p"/studio"} class="hover:text-base-content">Studio</.link>
+          <.link navigate={~p"/dashboard"} class="hover:text-base-content">
+            {dgettext("layouts", "Dashboard")}
+          </.link>
+          <.link navigate={~p"/studio"} class="hover:text-base-content">
+            {dgettext("layouts", "Studio")}
+          </.link>
         </nav>
 
         <div class="flex-1" />
@@ -154,21 +160,29 @@ defmodule ContractWeb.Layouts do
                 class="dropdown-content menu menu-sm bg-base-100 rounded-box border border-base-200 shadow-sm mt-2 w-56 p-2"
               >
                 <li class="px-2 py-1.5 text-xs text-base-content/60">
-                  Signed in as
+                  {dgettext("layouts", "Signed in as")}
                   <div class="text-base-content/90 truncate">{@current_scope.user.email}</div>
                 </li>
-                <li><.link navigate={~p"/dashboard"}>Dashboard</.link></li>
-                <li><.link navigate={~p"/users/settings"}>Settings</.link></li>
+                <li>
+                  <.link navigate={~p"/dashboard"}>{dgettext("layouts", "Dashboard")}</.link>
+                </li>
+                <li>
+                  <.link navigate={~p"/users/settings"}>{dgettext("layouts", "Settings")}</.link>
+                </li>
                 <div class="divider my-1" />
-                <li><.link href={~p"/users/log-out"} method="delete">Log out</.link></li>
+                <li>
+                  <.link href={~p"/users/log-out"} method="delete">
+                    {dgettext("layouts", "Log out")}
+                  </.link>
+                </li>
               </ul>
             </div>
           <% else %>
             <.link navigate={~p"/users/log-in"} class="hidden sm:inline-flex btn btn-ghost btn-sm">
-              Log in
+              {dgettext("layouts", "Log in")}
             </.link>
             <.link navigate={~p"/users/register"} class="btn btn-primary btn-sm">
-              Register
+              {dgettext("layouts", "Register")}
             </.link>
           <% end %>
         </div>
@@ -195,25 +209,27 @@ defmodule ContractWeb.Layouts do
         <label
           for="mobile-nav-drawer"
           class="btn btn-ghost btn-sm btn-square"
-          aria-label="Close menu"
+          aria-label={dgettext("layouts", "Close menu")}
         >
           <.icon name="hero-x-mark" class="size-5" />
         </label>
       </div>
 
       <%= if signed_in?(@current_scope) do %>
-        <p class="text-xs uppercase tracking-wide text-base-content/50">Account</p>
+        <p class="text-xs uppercase tracking-wide text-base-content/50">
+          {dgettext("layouts", "Account")}
+        </p>
         <p class="text-sm text-base-content/80 truncate">{@current_scope.user.email}</p>
 
         <nav class="flex flex-col gap-1 text-sm">
           <.link navigate={~p"/dashboard"} class="px-3 py-2 rounded-box hover:bg-base-200">
-            Dashboard
+            {dgettext("layouts", "Dashboard")}
           </.link>
           <.link navigate={~p"/studio"} class="px-3 py-2 rounded-box hover:bg-base-200">
-            Studio
+            {dgettext("layouts", "Studio")}
           </.link>
           <.link navigate={~p"/users/settings"} class="px-3 py-2 rounded-box hover:bg-base-200">
-            Settings
+            {dgettext("layouts", "Settings")}
           </.link>
         </nav>
 
@@ -223,21 +239,28 @@ defmodule ContractWeb.Layouts do
             method="delete"
             class="btn btn-ghost btn-sm w-full justify-start"
           >
-            <.icon name="hero-arrow-right-on-rectangle" class="size-4" /> Log out
+            <.icon name="hero-arrow-right-on-rectangle" class="size-4" /> {dgettext(
+              "layouts",
+              "Log out"
+            )}
           </.link>
         </div>
       <% else %>
         <nav class="flex flex-col gap-1 text-sm">
-          <a href="/#docs" class="px-3 py-2 rounded-box hover:bg-base-200">Docs</a>
-          <a href="/#changelog" class="px-3 py-2 rounded-box hover:bg-base-200">Changelog</a>
+          <a href="/#docs" class="px-3 py-2 rounded-box hover:bg-base-200">
+            {dgettext("layouts", "Docs")}
+          </a>
+          <a href="/#changelog" class="px-3 py-2 rounded-box hover:bg-base-200">
+            {dgettext("layouts", "Changelog")}
+          </a>
         </nav>
 
         <div class="mt-auto pt-4 border-t border-base-200 flex flex-col gap-2">
           <.link navigate={~p"/users/log-in"} class="btn btn-ghost btn-sm w-full">
-            Log in
+            {dgettext("layouts", "Log in")}
           </.link>
           <.link navigate={~p"/users/register"} class="btn btn-primary btn-sm w-full">
-            Register
+            {dgettext("layouts", "Register")}
           </.link>
         </div>
       <% end %>
@@ -257,50 +280,89 @@ defmodule ContractWeb.Layouts do
         <div class="space-y-3">
           <Brand.wordmark size="base" />
           <p class="text-base-content/60 leading-relaxed">
-            A legal-document studio for Korean lawyers. Built to be precise, auditable, and quiet.
+            {dgettext(
+              "layouts",
+              "A legal-document studio for Korean lawyers. Built to be precise, auditable, and quiet."
+            )}
           </p>
         </div>
         <div>
-          <p class="font-semibold text-base-content/90 mb-3">Product</p>
+          <p class="font-semibold text-base-content/90 mb-3">
+            {dgettext("layouts", "Product")}
+          </p>
           <ul class="space-y-2 text-base-content/60">
-            <li><a href="#docs" class="hover:text-base-content">Documentation</a></li>
-            <li><a href="#changelog" class="hover:text-base-content">Changelog</a></li>
-            <li><a href="#security" class="hover:text-base-content">Security</a></li>
+            <li>
+              <a href="#docs" class="hover:text-base-content">
+                {dgettext("layouts", "Documentation")}
+              </a>
+            </li>
+            <li>
+              <a href="#changelog" class="hover:text-base-content">
+                {dgettext("layouts", "Changelog")}
+              </a>
+            </li>
+            <li>
+              <a href="#security" class="hover:text-base-content">
+                {dgettext("layouts", "Security")}
+              </a>
+            </li>
           </ul>
         </div>
         <div>
-          <p class="font-semibold text-base-content/90 mb-3">Company</p>
+          <p class="font-semibold text-base-content/90 mb-3">
+            {dgettext("layouts", "Company")}
+          </p>
           <ul class="space-y-2 text-base-content/60">
-            <li><a href="#about" class="hover:text-base-content">About</a></li>
-            <li><a href="#contact" class="hover:text-base-content">Contact</a></li>
-            <li><a href="#status" class="hover:text-base-content">Status</a></li>
-            <li><a href="#security" class="hover:text-base-content">Security &amp; Privacy</a></li>
+            <li>
+              <a href="#about" class="hover:text-base-content">{dgettext("layouts", "About")}</a>
+            </li>
+            <li>
+              <a href="#contact" class="hover:text-base-content">{dgettext("layouts", "Contact")}</a>
+            </li>
+            <li>
+              <a href="#status" class="hover:text-base-content">{dgettext("layouts", "Status")}</a>
+            </li>
+            <li>
+              <a href="#security" class="hover:text-base-content">
+                {dgettext("layouts", "Security & Privacy")}
+              </a>
+            </li>
           </ul>
         </div>
         <div>
-          <p class="font-semibold text-base-content/90 mb-3">Language</p>
-          <div class="join" role="group" aria-label="Language switcher (placeholder)">
-            <button type="button" class="btn btn-sm join-item btn-active" aria-current="true">
+          <p class="font-semibold text-base-content/90 mb-3">
+            {dgettext("layouts", "Language")}
+          </p>
+          <div
+            class="join"
+            role="group"
+            aria-label={dgettext("layouts", "Language switcher (placeholder)")}
+          >
+            <button type="button" class="btn btn-sm join-item" aria-current="false">
               EN
             </button>
-            <button type="button" class="btn btn-sm join-item gap-1">
+            <button type="button" class="btn btn-sm join-item btn-active gap-1" aria-current="true">
               <Brand.flag class="h-3 w-auto" /> KO
             </button>
           </div>
           <p class="text-xs text-base-content/50 mt-2">
-            Korean UI lands with Wave 3C2.
+            {dgettext("layouts", "한국어 UI · English fallback")}
           </p>
         </div>
       </div>
       <div class="border-t border-base-200">
         <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-base-content/50">
-          <p>© {DateTime.utc_now().year} Contract Studio. All rights reserved.</p>
           <p>
-            <a href="#terms" class="hover:text-base-content">Terms</a>
+            {dgettext("layouts", "© %{year} Contract Studio. All rights reserved.",
+              year: DateTime.utc_now().year
+            )}
+          </p>
+          <p>
+            <a href="#terms" class="hover:text-base-content">{dgettext("layouts", "Terms")}</a>
             <span class="mx-2">·</span>
-            <a href="#privacy" class="hover:text-base-content">Privacy</a>
+            <a href="#privacy" class="hover:text-base-content">{dgettext("layouts", "Privacy")}</a>
             <span class="mx-2">·</span>
-            <a href="#status" class="hover:text-base-content">Status</a>
+            <a href="#status" class="hover:text-base-content">{dgettext("layouts", "Status")}</a>
           </p>
         </div>
       </div>
@@ -315,7 +377,7 @@ defmodule ContractWeb.Layouts do
     email |> String.split("@") |> List.first()
   end
 
-  defp persona_label(_), do: "Account"
+  defp persona_label(_), do: dgettext("layouts", "Account")
 
   @doc """
   Shows the flash group with standard titles and content.
@@ -332,24 +394,24 @@ defmodule ContractWeb.Layouts do
       <.flash
         id="client-error"
         kind={:error}
-        title={gettext("We can't find the internet")}
+        title={dgettext("layouts", "We can't find the internet")}
         phx-disconnected={show(".phx-client-error #client-error") |> JS.remove_attribute("hidden")}
         phx-connected={hide("#client-error") |> JS.set_attribute({"hidden", ""})}
         hidden
       >
-        {gettext("Attempting to reconnect")}
+        {dgettext("layouts", "Attempting to reconnect")}
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
 
       <.flash
         id="server-error"
         kind={:error}
-        title={gettext("Something went wrong!")}
+        title={dgettext("layouts", "Something went wrong!")}
         phx-disconnected={show(".phx-server-error #server-error") |> JS.remove_attribute("hidden")}
         phx-connected={hide("#server-error") |> JS.set_attribute({"hidden", ""})}
         hidden
       >
-        {gettext("Attempting to reconnect")}
+        {dgettext("layouts", "Attempting to reconnect")}
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
     </div>
@@ -370,7 +432,7 @@ defmodule ContractWeb.Layouts do
         class="flex p-2 cursor-pointer w-1/3"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="system"
-        aria-label="System theme"
+        aria-label={dgettext("layouts", "System theme")}
       >
         <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
       </button>
@@ -379,7 +441,7 @@ defmodule ContractWeb.Layouts do
         class="flex p-2 cursor-pointer w-1/3"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="studio"
-        aria-label="Light theme"
+        aria-label={dgettext("layouts", "Light theme")}
       >
         <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
       </button>
@@ -388,7 +450,7 @@ defmodule ContractWeb.Layouts do
         class="flex p-2 cursor-pointer w-1/3"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="studio-dark"
-        aria-label="Dark theme"
+        aria-label={dgettext("layouts", "Dark theme")}
       >
         <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
       </button>

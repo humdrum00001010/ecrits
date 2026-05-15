@@ -1,0 +1,163 @@
+## Korean translations for the authenticated dashboard surface.
+##
+## These were drafted alongside the Wave 3C2 i18n pass. Source-of-truth
+## is the English `msgid` (legal-tech draft register); the `msgstr`
+## below is the Korean rendering shown to lawyers on sprite.
+##
+## #. TODO native-speaker review — terms anchored on:
+##   - "안건" (matter / case-file) — the canonical word for a client
+##     engagement; chosen over generic "사건" (incident).
+##   - "에이전트 작업" (agent run) — preserves the agent metaphor; a
+##     Korean lawyer reviewer may prefer "에이전트 실행" or
+##     "AI 처리". Leaving the looser "작업" as draft.
+##   - "문서" stays plain; "계약서" was considered for "Documents" but
+##     would be too narrow (a matter may hold evidence + memos too).
+msgid ""
+msgstr ""
+"Language: ko\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: lib/contract_web/live/dashboard_live.ex:265
+#, elixir-autogen, elixir-format
+msgid "%{count} document"
+msgid_plural "%{count} documents"
+msgstr[0] "문서 %{count}건"
+
+#: lib/contract_web/live/dashboard_live.ex:226
+#, elixir-autogen, elixir-format
+msgid "%{count} total"
+msgstr "총 %{count}건"
+
+#: lib/contract_web/live/dashboard_live.ex:247
+#, elixir-autogen, elixir-format
+msgid "A matter holds the documents, evidence, and agent runs for a single client engagement."
+msgstr "안건 하나에는 한 의뢰의 문서, 증거, 에이전트 작업이 모두 모입니다."
+
+#: lib/contract_web/live/dashboard_live.ex:201
+#, elixir-autogen, elixir-format
+msgid "Active matters"
+msgstr "진행 중인 안건"
+
+#. TODO native-speaker review — alt text for empty-state illustration.
+#: lib/contract_web/live/dashboard_live.ex:238
+#, elixir-autogen, elixir-format
+msgid "An empty folder with a quill, signalling no matters yet."
+msgstr "깃펜이 놓인 빈 폴더 — 아직 등록된 안건이 없음을 나타내는 그림."
+
+#: lib/contract_web/live/dashboard_live.ex:408
+#, elixir-autogen, elixir-format
+msgid "Close"
+msgstr "닫기"
+
+#: lib/contract_web/live/dashboard_live.ex:444
+#, elixir-autogen, elixir-format
+msgid "Close modal"
+msgstr "모달 닫기"
+
+#: lib/contract_web/live/dashboard_live.ex:37
+#, elixir-autogen, elixir-format
+msgid "Dashboard"
+msgstr "대시보드"
+
+#. TODO native-speaker review — "Wave 3C2" is an internal milestone
+#. tag; keep verbatim or strip in user-facing copy?
+#: lib/contract_web/live/dashboard_live.ex:62
+#, elixir-autogen, elixir-format
+msgid "Document creation for %{type_key} is queued. Persistence ships with Wave 3C2."
+msgstr "%{type_key} 문서 생성을 대기열에 넣었습니다. 저장 기능은 Wave 3C2에서 제공됩니다."
+
+#: lib/contract_web/live/dashboard_live.ex:206
+#, elixir-autogen, elixir-format
+msgid "Documents"
+msgstr "문서"
+
+#: lib/contract_web/live/dashboard_live.ex:175
+#, elixir-autogen, elixir-format
+msgid "Good day,"
+msgstr "안녕하세요,"
+
+#: lib/contract_web/live/dashboard_live.ex:274
+#, elixir-autogen, elixir-format
+msgid "Last activity %{ago}"
+msgstr "최근 활동 %{ago}"
+
+#: lib/contract_web/live/dashboard_live.ex:223
+#, elixir-autogen, elixir-format
+msgid "Matters"
+msgstr "안건"
+
+#: lib/contract_web/live/dashboard_live.ex:188
+#, elixir-autogen, elixir-format
+msgid "New Document"
+msgstr "새 문서"
+
+#: lib/contract_web/live/dashboard_live.ex:257
+#, elixir-autogen, elixir-format
+msgid "New Matter"
+msgstr "새 안건"
+
+#: lib/contract_web/live/dashboard_live.ex:395
+#, elixir-autogen, elixir-format
+msgid "New document"
+msgstr "새 문서"
+
+#: lib/contract_web/live/dashboard_live.ex:298
+#, elixir-autogen, elixir-format
+msgid "No documents yet. Drag a PDF in, or start from a contract type."
+msgstr "아직 문서가 없습니다. PDF를 끌어다 놓거나, 계약 유형에서 시작하세요."
+
+#: lib/contract_web/live/dashboard_live.ex:245
+#, elixir-autogen, elixir-format
+msgid "No matters yet"
+msgstr "아직 등록된 안건이 없습니다"
+
+#: lib/contract_web/live/dashboard_live.ex:191
+#, elixir-autogen, elixir-format
+msgid "Open Studio"
+msgstr "스튜디오 열기"
+
+#. TODO native-speaker review — "agent runs" is a coined product term.
+#. Alternatives: "에이전트 실행", "AI 처리". Draft preserves the
+#. operational "작업" framing.
+#: lib/contract_web/live/dashboard_live.ex:211
+#, elixir-autogen, elixir-format
+msgid "Open agent runs"
+msgstr "진행 중인 에이전트 작업"
+
+#: lib/contract_web/live/dashboard_live.ex:398
+#, elixir-autogen, elixir-format
+msgid "Pick a contract type. Field maps and templates load from the type registry."
+msgstr "계약 유형을 선택하세요. 필드 매핑과 템플릿은 유형 레지스트리에서 자동으로 불러옵니다."
+
+#: lib/contract_web/live/dashboard_live.ex:179
+#, elixir-autogen, elixir-format
+msgid "Pick up where you left off, or open a new matter."
+msgstr "이어서 작업하시거나, 새 안건을 시작하세요."
+
+#: lib/contract_web/live/dashboard_live.ex:334
+#, elixir-autogen, elixir-format
+msgid "Recent activity"
+msgstr "최근 활동"
+
+#: lib/contract_web/live/dashboard_live.ex:289
+#, elixir-autogen, elixir-format
+msgid "Recent documents"
+msgstr "최근 문서"
+
+#: lib/contract_web/live/dashboard_live.ex:343
+#, elixir-autogen, elixir-format
+msgid "The activity feed will populate as you and the agent make changes."
+msgstr "변경 사항이 발생하면 이곳에 활동이 누적됩니다."
+
+#: lib/contract_web/live/dashboard_live.ex:446
+#, elixir-autogen, elixir-format
+msgid "close"
+msgstr "닫기"
+
+#. TODO native-speaker review — "rev N" is a developer-style revision
+#. tag. Keeping "rev" English; "%{n}판" or "리비전 %{n}" are alternatives.
+#: lib/contract_web/live/dashboard_live.ex:318
+#: lib/contract_web/live/dashboard_live.ex:361
+#, elixir-autogen, elixir-format
+msgid "rev %{n}"
+msgstr "rev %{n}"

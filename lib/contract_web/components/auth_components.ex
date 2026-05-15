@@ -8,6 +8,7 @@ defmodule ContractWeb.AuthComponents do
   future redesign only touches one file.
   """
   use Phoenix.Component
+  use Gettext, backend: ContractWeb.Gettext
 
   import ContractWeb.CoreComponents, only: [icon: 1]
 
@@ -38,7 +39,7 @@ defmodule ContractWeb.AuthComponents do
         <div class="space-y-2">
           <Brand.wordmark size="lg" />
           <p class="text-xs text-base-content/50 tracking-wide uppercase">
-            Legal-document studio for Korean lawyers
+            {dgettext("auth", "Legal-document studio for Korean lawyers")}
           </p>
         </div>
 
@@ -49,9 +50,16 @@ defmodule ContractWeb.AuthComponents do
         <div class="space-y-2 text-xs text-base-content/50">
           <div class="flex items-center gap-2">
             <.icon name="hero-lock-closed-micro" class="size-3" />
-            <span>법제처 verification · provenance logged · no silent rewrites.</span>
+            <span>
+              {dgettext(
+                "auth",
+                "법제처 verification · provenance logged · no silent rewrites."
+              )}
+            </span>
           </div>
-          <p>© {DateTime.utc_now().year} Contract Studio</p>
+          <p>
+            {dgettext("auth", "© %{year} Contract Studio", year: DateTime.utc_now().year)}
+          </p>
         </div>
       </aside>
 

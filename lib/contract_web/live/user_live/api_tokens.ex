@@ -43,7 +43,7 @@ defmodule ContractWeb.UserLive.ApiTokens do
   def mount(_params, _session, socket) do
     socket =
       socket
-      |> assign(:page_title, "API tokens")
+      |> assign(:page_title, dgettext("settings", "API tokens"))
       |> assign(:active_item, :api_tokens)
       |> assign(:show_modal, false)
       |> assign(:tokens, list_user_tokens(socket.assigns.current_scope))
@@ -72,13 +72,16 @@ defmodule ContractWeb.UserLive.ApiTokens do
     {:noreply,
      socket
      |> assign(:show_modal, false)
-     |> put_flash(:info, "Generated: <hidden> — persistence ships in a later wave.")}
+     |> put_flash(
+       :info,
+       dgettext("settings", "Generated: <hidden> — persistence ships in a later wave.")
+     )}
   end
 
   def handle_event("revoke_token", %{"id" => _id}, socket) do
     # TODO Wave-X: delete the persisted token row. Stub for now so the
     # button is wired in the rendered HTML without crashing.
-    {:noreply, put_flash(socket, :info, "Token revoked.")}
+    {:noreply, put_flash(socket, :info, dgettext("settings", "Token revoked."))}
   end
 
   @impl true
@@ -89,13 +92,16 @@ defmodule ContractWeb.UserLive.ApiTokens do
         <section id="api-tokens-page" class="space-y-6">
           <header class="space-y-1">
             <p class="text-xs font-medium tracking-wide uppercase text-base-content/50">
-              Settings · API tokens
+              {dgettext("settings", "Settings · API tokens")}
             </p>
             <h1 class="text-2xl font-semibold tracking-tight">
-              API tokens
+              {dgettext("settings", "API tokens")}
             </h1>
             <p class="text-sm text-base-content/60">
-              Route-ref tokens grant access to Contract Studio's MCP endpoint. Tokens are signed; revoke any time by deleting.
+              {dgettext(
+                "settings",
+                "Route-ref tokens grant access to Contract Studio's MCP endpoint. Tokens are signed; revoke any time by deleting."
+              )}
             </p>
           </header>
 
@@ -105,9 +111,12 @@ defmodule ContractWeb.UserLive.ApiTokens do
               class="rounded-box border border-dashed border-base-300 p-10 text-center bg-base-200/30"
             >
               <.icon name="hero-key-mini" class="size-8 text-base-content/30 mx-auto" />
-              <p class="font-medium mt-3">No API tokens yet</p>
+              <p class="font-medium mt-3">{dgettext("settings", "No API tokens yet")}</p>
               <p class="text-sm text-base-content/60 mt-1 max-w-sm mx-auto">
-                Generate a token to authenticate MCP requests from external clients.
+                {dgettext(
+                  "settings",
+                  "Generate a token to authenticate MCP requests from external clients."
+                )}
               </p>
               <.button
                 id="generate-token-button"
@@ -115,7 +124,7 @@ defmodule ContractWeb.UserLive.ApiTokens do
                 class="mt-5"
                 phx-click="open_modal"
               >
-                <.icon name="hero-plus" class="size-4" /> Generate token
+                <.icon name="hero-plus" class="size-4" /> {dgettext("settings", "Generate token")}
               </.button>
             </div>
           <% else %>
@@ -130,7 +139,7 @@ defmodule ContractWeb.UserLive.ApiTokens do
                 <div class="flex-1 min-w-0">
                   <p class="text-sm font-medium truncate">{token.purpose}</p>
                   <p class="text-xs text-base-content/50">
-                    Expires {token.expires_at}
+                    {dgettext("settings", "Expires %{at}", at: token.expires_at)}
                   </p>
                 </div>
                 <button
@@ -139,7 +148,7 @@ defmodule ContractWeb.UserLive.ApiTokens do
                   phx-value-id={token.id}
                   class="btn btn-ghost btn-sm text-error"
                 >
-                  Revoke
+                  {dgettext("settings", "Revoke")}
                 </button>
               </li>
             </ul>
@@ -157,16 +166,21 @@ defmodule ContractWeb.UserLive.ApiTokens do
           <div class="modal-box max-w-lg">
             <div class="flex items-start justify-between gap-4">
               <div>
-                <h3 class="font-semibold text-lg tracking-tight">Generate API token</h3>
+                <h3 class="font-semibold text-lg tracking-tight">
+                  {dgettext("settings", "Generate API token")}
+                </h3>
                 <p class="text-sm text-base-content/60">
-                  Scoped MCP route-ref. Stored signed; copy the token once after creation.
+                  {dgettext(
+                    "settings",
+                    "Scoped MCP route-ref. Stored signed; copy the token once after creation."
+                  )}
                 </p>
               </div>
               <button
                 type="button"
                 phx-click="close_modal"
                 class="btn btn-sm btn-ghost btn-square"
-                aria-label="Close"
+                aria-label={dgettext("settings", "Close")}
               >
                 <.icon name="hero-x-mark" class="size-4" />
               </button>
@@ -183,8 +197,8 @@ defmodule ContractWeb.UserLive.ApiTokens do
                 name="token[purpose]"
                 value=""
                 type="text"
-                label="Purpose"
-                placeholder="e.g. mcp-cli, slack-bridge"
+                label={dgettext("settings", "Purpose")}
+                placeholder={dgettext("settings", "e.g. mcp-cli, slack-bridge")}
               />
               <%!-- TODO Wave-X: list real matters from Contract.Matters once
                    that context exists. Today @matters is [] so only the
@@ -192,8 +206,8 @@ defmodule ContractWeb.UserLive.ApiTokens do
               <.input
                 field={@form[:matter_id]}
                 type="select"
-                label="Matter"
-                prompt="No matters yet — token will be account-scoped"
+                label={dgettext("settings", "Matter")}
+                prompt={dgettext("settings", "No matters yet — token will be account-scoped")}
                 options={Enum.map(@matters, &{&1.name, &1.id})}
                 disabled={@matters == []}
               />
@@ -201,7 +215,7 @@ defmodule ContractWeb.UserLive.ApiTokens do
                 name="token[ttl_hours]"
                 value={@default_ttl_hours}
                 type="number"
-                label="TTL (hours)"
+                label={dgettext("settings", "TTL (hours)")}
                 min="1"
               />
               <div class="flex items-center justify-end gap-2 pt-2">
@@ -210,10 +224,10 @@ defmodule ContractWeb.UserLive.ApiTokens do
                   phx-click="close_modal"
                   class="btn btn-ghost btn-sm"
                 >
-                  Cancel
+                  {dgettext("settings", "Cancel")}
                 </button>
                 <button type="submit" class="btn btn-primary btn-sm">
-                  Generate
+                  {dgettext("settings", "Generate")}
                 </button>
               </div>
             </.form>
@@ -222,9 +236,9 @@ defmodule ContractWeb.UserLive.ApiTokens do
             type="button"
             phx-click="close_modal"
             class="modal-backdrop"
-            aria-label="Close modal"
+            aria-label={dgettext("settings", "Close modal")}
           >
-            close
+            {dgettext("settings", "close")}
           </button>
         </div>
       </SettingsHub.settings_layout>

@@ -1,0 +1,150 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: en\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: lib/contract_web/live/dashboard_live.ex:265
+#, elixir-autogen, elixir-format
+msgid "%{count} document"
+msgid_plural "%{count} documents"
+msgstr[0] ""
+msgstr[1] ""
+
+#: lib/contract_web/live/dashboard_live.ex:226
+#, elixir-autogen, elixir-format
+msgid "%{count} total"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:247
+#, elixir-autogen, elixir-format
+msgid "A matter holds the documents, evidence, and agent runs for a single client engagement."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:201
+#, elixir-autogen, elixir-format
+msgid "Active matters"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:238
+#, elixir-autogen, elixir-format
+msgid "An empty folder with a quill, signalling no matters yet."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:408
+#, elixir-autogen, elixir-format
+msgid "Close"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:444
+#, elixir-autogen, elixir-format
+msgid "Close modal"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:37
+#, elixir-autogen, elixir-format
+msgid "Dashboard"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:62
+#, elixir-autogen, elixir-format
+msgid "Document creation for %{type_key} is queued. Persistence ships with Wave 3C2."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:206
+#, elixir-autogen, elixir-format
+msgid "Documents"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:175
+#, elixir-autogen, elixir-format
+msgid "Good day,"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:274
+#, elixir-autogen, elixir-format
+msgid "Last activity %{ago}"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:223
+#, elixir-autogen, elixir-format
+msgid "Matters"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:188
+#, elixir-autogen, elixir-format
+msgid "New Document"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:257
+#, elixir-autogen, elixir-format
+msgid "New Matter"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:395
+#, elixir-autogen, elixir-format
+msgid "New document"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:298
+#, elixir-autogen, elixir-format
+msgid "No documents yet. Drag a PDF in, or start from a contract type."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:245
+#, elixir-autogen, elixir-format
+msgid "No matters yet"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:191
+#, elixir-autogen, elixir-format
+msgid "Open Studio"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:211
+#, elixir-autogen, elixir-format
+msgid "Open agent runs"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:398
+#, elixir-autogen, elixir-format
+msgid "Pick a contract type. Field maps and templates load from the type registry."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:179
+#, elixir-autogen, elixir-format
+msgid "Pick up where you left off, or open a new matter."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:334
+#, elixir-autogen, elixir-format
+msgid "Recent activity"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:289
+#, elixir-autogen, elixir-format
+msgid "Recent documents"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:343
+#, elixir-autogen, elixir-format
+msgid "The activity feed will populate as you and the agent make changes."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:446
+#, elixir-autogen, elixir-format
+msgid "close"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:318
+#: lib/contract_web/live/dashboard_live.ex:361
+#, elixir-autogen, elixir-format
+msgid "rev %{n}"
+msgstr ""

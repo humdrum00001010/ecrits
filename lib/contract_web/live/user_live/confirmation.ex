@@ -10,12 +10,13 @@ defmodule ContractWeb.UserLive.Confirmation do
       <.auth_split>
         <:aside>
           <h2 class="text-2xl font-semibold tracking-tight leading-snug">
-            One last click and you're in.
+            {dgettext("auth", "One last click and you're in.")}
           </h2>
           <p class="text-base-content/70 mt-3 leading-relaxed">
-            We pair every account with a magic link so the cold-start path
-            doesn't require remembering a password. You can still add one
-            later in Settings.
+            {dgettext(
+              "auth",
+              "We pair every account with a magic link so the cold-start path doesn't require remembering a password. You can still add one later in Settings."
+            )}
           </p>
         </:aside>
 
@@ -23,9 +24,9 @@ defmodule ContractWeb.UserLive.Confirmation do
           <div class="space-y-1">
             <h1 class="text-2xl font-semibold tracking-tight">
               <%= if @user.confirmed_at do %>
-                Welcome back
+                {dgettext("auth", "Welcome back")}
               <% else %>
-                Confirm your account
+                {dgettext("auth", "Confirm your account")}
               <% end %>
             </h1>
             <p class="text-sm text-base-content/60 break-all">
@@ -47,13 +48,13 @@ defmodule ContractWeb.UserLive.Confirmation do
             <.button
               name={@form[:remember_me].name}
               value="true"
-              phx-disable-with="Confirming..."
+              phx-disable-with={dgettext("auth", "Confirming...")}
               class="btn btn-primary w-full"
             >
-              Confirm and stay logged in
+              {dgettext("auth", "Confirm and stay logged in")}
             </.button>
-            <.button phx-disable-with="Confirming..." class="btn btn-ghost w-full">
-              Confirm and log in only this time
+            <.button phx-disable-with={dgettext("auth", "Confirming...")} class="btn btn-ghost w-full">
+              {dgettext("auth", "Confirm and log in only this time")}
             </.button>
           </.form>
 
@@ -69,27 +70,33 @@ defmodule ContractWeb.UserLive.Confirmation do
           >
             <input type="hidden" name={@form[:token].name} value={@form[:token].value} />
             <%= if @current_scope do %>
-              <.button phx-disable-with="Logging in..." class="btn btn-primary w-full">
-                Log in
+              <.button
+                phx-disable-with={dgettext("auth", "Logging in...")}
+                class="btn btn-primary w-full"
+              >
+                {dgettext("auth", "Log in")}
               </.button>
             <% else %>
               <.button
                 name={@form[:remember_me].name}
                 value="true"
-                phx-disable-with="Logging in..."
+                phx-disable-with={dgettext("auth", "Logging in...")}
                 class="btn btn-primary w-full"
               >
-                Keep me logged in on this device
+                {dgettext("auth", "Keep me logged in on this device")}
               </.button>
-              <.button phx-disable-with="Logging in..." class="btn btn-ghost w-full">
-                Log me in only this time
+              <.button
+                phx-disable-with={dgettext("auth", "Logging in...")}
+                class="btn btn-ghost w-full"
+              >
+                {dgettext("auth", "Log me in only this time")}
               </.button>
             <% end %>
           </.form>
 
           <p :if={!@user.confirmed_at} class="alert alert-outline mt-8 text-sm">
             <.icon name="hero-key-micro" class="size-4" />
-            Tip: prefer passwords? Enable one in Settings after you're in.
+            {dgettext("auth", "Tip: prefer passwords? Enable one in Settings after you're in.")}
           </p>
         </:form>
       </.auth_split>
@@ -107,7 +114,7 @@ defmodule ContractWeb.UserLive.Confirmation do
     else
       {:ok,
        socket
-       |> put_flash(:error, "Magic link is invalid or it has expired.")
+       |> put_flash(:error, dgettext("auth", "Magic link is invalid or it has expired."))
        |> push_navigate(to: ~p"/users/log-in")}
     end
   end

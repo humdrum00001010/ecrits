@@ -27,7 +27,7 @@ defmodule ContractWeb.UserLive.SettingsHub do
   def mount(_params, _session, socket) do
     socket =
       socket
-      |> assign(:page_title, "Settings")
+      |> assign(:page_title, dgettext("settings", "Settings"))
       |> assign(:active_item, :hub)
 
     {:ok, socket}
@@ -41,39 +41,39 @@ defmodule ContractWeb.UserLive.SettingsHub do
         <section id="settings-hub-welcome" class="space-y-6">
           <div class="space-y-1">
             <p class="text-xs font-medium tracking-wide uppercase text-base-content/50">
-              Settings
+              {dgettext("settings", "Settings")}
             </p>
             <h1 class="text-2xl font-semibold tracking-tight">
-              Your account
+              {dgettext("settings", "Your account")}
             </h1>
             <p class="text-sm text-base-content/60">
-              Signed in as
+              {dgettext("settings", "Signed in as")}
               <span class="text-base-content/90">{@current_scope.user.email}</span>.
-              Pick a category on the left, or jump in below.
+              {dgettext("settings", "Pick a category on the left, or jump in below.")}
             </p>
           </div>
 
           <div id="settings-quick-grid" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <.quick_card
-              title="Account"
-              description="Email address, password, and login methods."
+              title={dgettext("settings", "Account")}
+              description={dgettext("settings", "Email address, password, and login methods.")}
               icon="hero-user-circle"
               navigate={~p"/users/settings"}
             />
             <.quick_card
-              title="API tokens"
-              description="Issue and revoke MCP route_ref tokens."
+              title={dgettext("settings", "API tokens")}
+              description={dgettext("settings", "Issue and revoke MCP route_ref tokens.")}
               icon="hero-key"
               navigate={~p"/settings/api-tokens"}
             />
             <.quick_card_disabled
-              title="Appearance"
-              description="Theme & density. Coming soon."
+              title={dgettext("settings", "Appearance")}
+              description={dgettext("settings", "Theme & density. Coming soon.")}
               icon="hero-paint-brush"
             />
             <.quick_card_disabled
-              title="Workspace"
-              description="Team-scoped defaults. Coming soon."
+              title={dgettext("settings", "Workspace")}
+              description={dgettext("settings", "Team-scoped defaults. Coming soon.")}
               icon="hero-building-office"
             />
           </div>
@@ -118,26 +118,39 @@ defmodule ContractWeb.UserLive.SettingsHub do
   """
   def settings_sidebar(assigns) do
     ~H"""
-    <nav id="settings-sidebar" aria-label="Settings navigation" class="md:sticky md:top-20">
+    <nav
+      id="settings-sidebar"
+      aria-label={dgettext("settings", "Settings navigation")}
+      class="md:sticky md:top-20"
+    >
       <p class="text-xs font-medium tracking-wide uppercase text-base-content/50 px-3 mb-2">
-        Settings
+        {dgettext("settings", "Settings")}
       </p>
       <ul class="space-y-0.5 text-sm">
         <.sidebar_item
-          label="Account"
+          label={dgettext("settings", "Account")}
           icon="hero-user-circle-mini"
           navigate={~p"/users/settings"}
           active?={@active_item == :account}
         />
         <.sidebar_item
-          label="API tokens"
+          label={dgettext("settings", "API tokens")}
           icon="hero-key-mini"
           navigate={~p"/settings/api-tokens"}
           active?={@active_item == :api_tokens}
         />
-        <.sidebar_item_disabled label="Appearance" icon="hero-paint-brush-mini" />
-        <.sidebar_item_disabled label="Workspace" icon="hero-building-office-mini" />
-        <.sidebar_item_disabled label="Notifications" icon="hero-bell-mini" />
+        <.sidebar_item_disabled
+          label={dgettext("settings", "Appearance")}
+          icon="hero-paint-brush-mini"
+        />
+        <.sidebar_item_disabled
+          label={dgettext("settings", "Workspace")}
+          icon="hero-building-office-mini"
+        />
+        <.sidebar_item_disabled
+          label={dgettext("settings", "Notifications")}
+          icon="hero-bell-mini"
+        />
       </ul>
     </nav>
     """
@@ -182,7 +195,7 @@ defmodule ContractWeb.UserLive.SettingsHub do
         <.icon name={@icon} class="size-4 shrink-0 opacity-50" />
         <span>{@label}</span>
         <span class="ml-auto text-[0.65rem] uppercase tracking-wide text-base-content/40">
-          Soon
+          {dgettext("settings", "Soon")}
         </span>
       </div>
     </li>
@@ -231,7 +244,7 @@ defmodule ContractWeb.UserLive.SettingsHub do
           <p class="font-semibold tracking-tight text-base-content/60">
             {@title}
             <span class="ml-2 text-[0.65rem] uppercase tracking-wide text-base-content/40">
-              Soon
+              {dgettext("settings", "Soon")}
             </span>
           </p>
           <p class="text-sm text-base-content/50 mt-1">

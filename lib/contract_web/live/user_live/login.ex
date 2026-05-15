@@ -10,14 +10,23 @@ defmodule ContractWeb.UserLive.Login do
       <.auth_split>
         <:aside>
           <h2 class="text-2xl font-semibold tracking-tight leading-snug">
-            Drafting that asks before it edits.
+            {dgettext("auth", "Drafting that asks before it edits.")}
           </h2>
           <p class="text-base-content/70 mt-3 leading-relaxed">
-            Pick up where you left off. The agent's pending questions, your matter timeline, and every uncommitted edit are right where you parked them.
+            {dgettext(
+              "auth",
+              "Pick up where you left off. The agent's pending questions, your matter timeline, and every uncommitted edit are right where you parked them."
+            )}
           </p>
           <ul class="text-sm text-base-content/60 space-y-2 mt-6">
-            <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" /> 법제처 citations verified before they hit the page.</li>
-            <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" /> No silent rewrites. Every change is a row.</li>
+            <li class="flex gap-2">
+              <.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />
+              {dgettext("auth", "법제처 citations verified before they hit the page.")}
+            </li>
+            <li class="flex gap-2">
+              <.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />
+              {dgettext("auth", "No silent rewrites. Every change is a row.")}
+            </li>
           </ul>
         </:aside>
 
@@ -25,18 +34,25 @@ defmodule ContractWeb.UserLive.Login do
           <div class="space-y-1">
             <h1 class="text-2xl font-semibold tracking-tight">
               <%= if @current_scope do %>
-                Re-authenticate
+                {dgettext("auth", "Re-authenticate")}
               <% else %>
-                Log in
+                {dgettext("auth", "Log in")}
               <% end %>
             </h1>
             <p class="text-sm text-base-content/60">
               <%= if @current_scope do %>
-                You need to reauthenticate to perform sensitive actions on your account.
+                {dgettext(
+                  "auth",
+                  "You need to reauthenticate to perform sensitive actions on your account."
+                )}
               <% else %>
-                New here?
-                <.link navigate={~p"/users/register"} class="font-medium text-primary hover:underline" phx-no-format>Sign up</.link>
-                — Contract Studio is invite-only for the closed beta.
+                {dgettext("auth", "New here?")}
+                <.link
+                  navigate={~p"/users/register"}
+                  class="font-medium text-primary hover:underline"
+                  phx-no-format
+                >{dgettext("auth", "Sign up")}</.link>
+                {dgettext("auth", "— Contract Studio is invite-only for the closed beta.")}
               <% end %>
             </p>
           </div>
@@ -44,9 +60,13 @@ defmodule ContractWeb.UserLive.Login do
           <div :if={local_mail_adapter?()} class="alert alert-info mt-4">
             <.icon name="hero-information-circle" class="size-5 shrink-0" />
             <div>
-              <p class="font-medium">Local mail adapter is active.</p>
+              <p class="font-medium">{dgettext("auth", "Local mail adapter is active.")}</p>
               <p class="text-sm">
-                Magic links land in <.link href="/dev/mailbox" class="underline">the dev mailbox</.link>, not real email.
+                {dgettext("auth", "Magic links land in")}
+                <.link href="/dev/mailbox" class="underline">
+                  {dgettext("auth", "the dev mailbox")}
+                </.link>
+                {dgettext("auth", ", not real email.")}
               </p>
             </div>
           </div>
@@ -64,21 +84,23 @@ defmodule ContractWeb.UserLive.Login do
                 readonly={!!@current_scope}
                 field={f[:email]}
                 type="email"
-                label="Email"
+                label={dgettext("auth", "Email")}
                 autocomplete="username"
                 spellcheck="false"
                 required
                 phx-mounted={JS.focus()}
               />
               <.button class="btn btn-primary w-full">
-                Log in with email <span aria-hidden="true">→</span>
+                {dgettext("auth", "Log in with email")} <span aria-hidden="true">→</span>
               </.button>
               <p class="text-xs text-base-content/50">
-                We'll send a one-time link. No password required.
+                {dgettext("auth", "We'll send a one-time link. No password required.")}
               </p>
             </.form>
 
-            <div class="divider text-xs text-base-content/40">or use a password</div>
+            <div class="divider text-xs text-base-content/40">
+              {dgettext("auth", "or use a password")}
+            </div>
 
             <.form
               :let={f}
@@ -93,7 +115,7 @@ defmodule ContractWeb.UserLive.Login do
                 readonly={!!@current_scope}
                 field={f[:email]}
                 type="email"
-                label="Email"
+                label={dgettext("auth", "Email")}
                 autocomplete="username"
                 spellcheck="false"
                 required
@@ -101,23 +123,23 @@ defmodule ContractWeb.UserLive.Login do
               <.input
                 field={@form[:password]}
                 type="password"
-                label="Password"
+                label={dgettext("auth", "Password")}
                 autocomplete="current-password"
                 spellcheck="false"
               />
               <.button class="btn btn-primary w-full" name={@form[:remember_me].name} value="true">
-                Log in and stay logged in <span aria-hidden="true">→</span>
+                {dgettext("auth", "Log in and stay logged in")} <span aria-hidden="true">→</span>
               </.button>
               <.button class="btn btn-ghost w-full">
-                Log in only this time
+                {dgettext("auth", "Log in only this time")}
               </.button>
             </.form>
           </div>
 
           <p class="text-xs text-base-content/50 mt-8 text-center">
-            Trouble signing in?
+            {dgettext("auth", "Trouble signing in?")}
             <a href="mailto:support@contractstudio.example" class="underline hover:text-base-content">
-              Email support
+              {dgettext("auth", "Email support")}
             </a>
           </p>
         </:form>
@@ -151,7 +173,10 @@ defmodule ContractWeb.UserLive.Login do
     end
 
     info =
-      "If your email is in our system, you will receive instructions for logging in shortly."
+      dgettext(
+        "auth",
+        "If your email is in our system, you will receive instructions for logging in shortly."
+      )
 
     {:noreply,
      socket

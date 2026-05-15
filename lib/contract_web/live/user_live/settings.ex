@@ -11,19 +11,22 @@ defmodule ContractWeb.UserLive.Settings do
     <Layouts.app flash={@flash} current_scope={@current_scope} variant="narrow">
       <div class="space-y-1 mb-8">
         <p class="text-xs font-medium tracking-wide uppercase text-base-content/50">
-          Account
+          {dgettext("settings", "Account")}
         </p>
-        <h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
+        <h1 class="text-2xl font-semibold tracking-tight">{dgettext("settings", "Settings")}</h1>
         <p class="text-sm text-base-content/60">
-          Manage your email address and password. Sensitive changes require a fresh login.
+          {dgettext(
+            "settings",
+            "Manage your email address and password. Sensitive changes require a fresh login."
+          )}
         </p>
       </div>
 
       <section class="rounded-box border border-base-200 bg-base-100 p-6 space-y-4">
         <div>
-          <h2 class="font-semibold tracking-tight">Email address</h2>
+          <h2 class="font-semibold tracking-tight">{dgettext("settings", "Email address")}</h2>
           <p class="text-sm text-base-content/60">
-            Used for login, magic links, and audit-log attribution.
+            {dgettext("settings", "Used for login, magic links, and audit-log attribution.")}
           </p>
         </div>
         <.form
@@ -36,20 +39,25 @@ defmodule ContractWeb.UserLive.Settings do
           <.input
             field={@email_form[:email]}
             type="email"
-            label="Email"
+            label={dgettext("settings", "Email")}
             autocomplete="username"
             spellcheck="false"
             required
           />
-          <.button variant="primary" phx-disable-with="Changing...">Change Email</.button>
+          <.button variant="primary" phx-disable-with={dgettext("settings", "Changing...")}>
+            {dgettext("settings", "Change Email")}
+          </.button>
         </.form>
       </section>
 
       <section class="rounded-box border border-base-200 bg-base-100 p-6 space-y-4 mt-6">
         <div>
-          <h2 class="font-semibold tracking-tight">Password</h2>
+          <h2 class="font-semibold tracking-tight">{dgettext("settings", "Password")}</h2>
           <p class="text-sm text-base-content/60">
-            Optional — you can keep using magic links. If you set a password, both methods work.
+            {dgettext(
+              "settings",
+              "Optional — you can keep using magic links. If you set a password, both methods work."
+            )}
           </p>
         </div>
         <.form
@@ -72,7 +80,7 @@ defmodule ContractWeb.UserLive.Settings do
           <.input
             field={@password_form[:password]}
             type="password"
-            label="New password"
+            label={dgettext("settings", "New password")}
             autocomplete="new-password"
             spellcheck="false"
             required
@@ -80,20 +88,20 @@ defmodule ContractWeb.UserLive.Settings do
           <.input
             field={@password_form[:password_confirmation]}
             type="password"
-            label="Confirm new password"
+            label={dgettext("settings", "Confirm new password")}
             autocomplete="new-password"
             spellcheck="false"
           />
-          <.button variant="primary" phx-disable-with="Saving...">
-            Save Password
+          <.button variant="primary" phx-disable-with={dgettext("settings", "Saving...")}>
+            {dgettext("settings", "Save Password")}
           </.button>
         </.form>
       </section>
 
       <p class="text-xs text-base-content/50 mt-8 text-center">
-        Need help?
+        {dgettext("settings", "Need help?")}
         <a href="mailto:support@contractstudio.example" class="underline hover:text-base-content">
-          Email support
+          {dgettext("settings", "Email support")}
         </a>
       </p>
     </Layouts.app>
@@ -105,10 +113,14 @@ defmodule ContractWeb.UserLive.Settings do
     socket =
       case Accounts.update_user_email(socket.assigns.current_scope.user, token) do
         {:ok, _user} ->
-          put_flash(socket, :info, "Email changed successfully.")
+          put_flash(socket, :info, dgettext("settings", "Email changed successfully."))
 
         {:error, _} ->
-          put_flash(socket, :error, "Email change link is invalid or it has expired.")
+          put_flash(
+            socket,
+            :error,
+            dgettext("settings", "Email change link is invalid or it has expired.")
+          )
       end
 
     {:ok, push_navigate(socket, to: ~p"/users/settings")}
@@ -155,7 +167,12 @@ defmodule ContractWeb.UserLive.Settings do
           &url(~p"/users/settings/confirm-email/#{&1}")
         )
 
-        info = "A link to confirm your email change has been sent to the new address."
+        info =
+          dgettext(
+            "settings",
+            "A link to confirm your email change has been sent to the new address."
+          )
+
         {:noreply, socket |> put_flash(:info, info)}
 
       changeset ->

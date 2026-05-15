@@ -11,6 +11,7 @@ defmodule ContractWeb.Router do
     plug :protect_from_forgery
     plug :put_secure_browser_headers
     plug :fetch_current_scope_for_user
+    plug ContractWeb.Locale
   end
 
   pipeline :api do
@@ -54,7 +55,7 @@ defmodule ContractWeb.Router do
     pipe_through [:browser, :require_authenticated_user]
 
     live_session :authenticated,
-      on_mount: [{ContractWeb.UserAuth, :require_authenticated}] do
+      on_mount: [{ContractWeb.UserAuth, :require_authenticated}, ContractWeb.Locale] do
       live "/dashboard", DashboardLive
       live "/studio", StudioLive
       live "/matters/:matter_id/studio", StudioLive
@@ -112,7 +113,7 @@ defmodule ContractWeb.Router do
     pipe_through [:browser, :require_authenticated_user]
 
     live_session :require_authenticated_user,
-      on_mount: [{ContractWeb.UserAuth, :require_authenticated}] do
+      on_mount: [{ContractWeb.UserAuth, :require_authenticated}, ContractWeb.Locale] do
       live "/users/settings", UserLive.Settings, :edit
       live "/users/settings/confirm-email/:token", UserLive.Settings, :confirm_email
       live "/settings", UserLive.SettingsHub, :index
@@ -126,7 +127,7 @@ defmodule ContractWeb.Router do
     pipe_through [:browser]
 
     live_session :current_user,
-      on_mount: [{ContractWeb.UserAuth, :mount_current_scope}] do
+      on_mount: [{ContractWeb.UserAuth, :mount_current_scope}, ContractWeb.Locale] do
       live "/users/register", UserLive.Registration, :new
       live "/users/log-in", UserLive.Login, :new
       live "/users/log-in/:token", UserLive.Confirmation, :new

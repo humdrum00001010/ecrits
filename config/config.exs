@@ -47,6 +47,12 @@ config :contract,
   ecto_repos: [Contract.Repo],
   generators: [timestamp_type: :utc_datetime, binary_id: true]
 
+# Default UI locale. Korean-primary for the public-facing surface
+# (landing, dashboard, auth, settings). Tests override this back to
+# "en" in `config/test.exs` so gen.auth's generated LiveViewTests
+# continue to match English `msgid` strings (= source-of-truth).
+config :contract, :ui_locale, "ko"
+
 # Provider IO + Agent runtime. Each block reads the matching env vars at
 # runtime via `Application.fetch_env!/2`; tests override these in `config/test.exs`.
 config :contract, :upstage,
