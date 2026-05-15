@@ -119,6 +119,8 @@ defmodule ContractWeb.StudioLive do
           |> assign(:reconcile_modal_open?, false)
           |> assign(:reconcile_request, nil)
           |> assign(:migration_plan, nil)
+          |> assign(:migration_target, nil)
+          |> assign(:field_strategies, nil)
           |> assign(:last_pubsub_message_at, nil)
           |> allow_upload(:document_upload,
             accept: :any,
@@ -148,6 +150,8 @@ defmodule ContractWeb.StudioLive do
           |> assign(:reconcile_modal_open?, false)
           |> assign(:reconcile_request, nil)
           |> assign(:migration_plan, nil)
+          |> assign(:migration_target, nil)
+          |> assign(:field_strategies, nil)
           |> assign(:last_pubsub_message_at, nil)
           |> allow_upload(:document_upload,
             accept: :any,
@@ -226,28 +230,29 @@ defmodule ContractWeb.StudioLive do
       true ->
         case Contract.Conversion.plan(scope, document_id, target_type_key, []) do
           {:ok, plan} ->
-            # Seed @field_strategies from the plan's default strategy per
-            # field so the wizard's step-3 summary ("전략이 지정된 필드 수: N")
-            # is non-zero from the first paint, and so step 3's "Create
-            # variant" button is enabled without the user touching every
+            # Seed `field_strategies` from the plan's default strategy
+            # per field so step 3's summary ("전략이 지정된 필드 수: N")
+            # is non-zero from the first paint, AND so the Create
+            # variant button is enabled without the user touching every
             # dropdown. Map keys are `source_field_id`, values are the
             # strategy atom rendered as a string (matches the
-            # `set_field_strategy` event payload shape).
+            # `set_field_strategy` event payload shape). Thread the
+            # values through socket assigns so they appear in the
+            # ModalHost's render assigns each re-render — this is
+            # more deterministic than `send_update` because the
+            # parent's render IS the moment we want the component to
+            # pick the values up.
             strategies =
               (plan.field_plans || [])
               |> Map.new(fn fp ->
                 {fp.source_field_id, Atom.to_string(fp.strategy)}
               end)
 
-            send_update(ContractWeb.Live.Studio.Components.ModalHost,
-              id: "modal-host",
-              migration_target: target_type_key,
-              field_strategies: strategies
-            )
-
             socket =
               socket
               |> assign(:migration_plan, plan)
+              |> assign(:migration_target, target_type_key)
+              |> assign(:field_strategies, strategies)
               |> update(:studio_state, fn st -> %{st | migration_panel_open?: true} end)
 
             {:noreply, socket}
@@ -838,6 +843,8 @@ defmodule ContractWeb.StudioLive do
           reconcile_modal_open?={@reconcile_modal_open?}
           reconcile_request={@reconcile_request}
           migration_plan={@migration_plan}
+          migration_target={assigns[:migration_target]}
+          field_strategies={assigns[:field_strategies]}
         />
 
         <.live_component
