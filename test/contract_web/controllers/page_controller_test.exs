@@ -49,4 +49,19 @@ defmodule ContractWeb.PageControllerTest do
     assert body =~ ~s(id="mobile-nav-drawer")
     assert body =~ ~s(for="mobile-nav-drawer")
   end
+
+  test "anonymous user sees 도입 검토 CTA", %{conn: conn} do
+    conn = get(conn, ~p"/")
+    html = html_response(conn, 200)
+    assert html =~ "도입 검토"
+    refute html =~ "대시보드"
+  end
+
+  test "authenticated user sees 대시보드 CTA, not 도입 검토", %{conn: conn} do
+    user = Contract.AccountsFixtures.user_fixture()
+    conn = conn |> log_in_user(user) |> get(~p"/")
+    html = html_response(conn, 200)
+    assert html =~ "대시보드"
+    refute html =~ "도입 검토"
+  end
 end

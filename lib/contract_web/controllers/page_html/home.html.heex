@@ -42,11 +42,26 @@
             )}
           </p>
           <p class="text-base">
-            <.link navigate={~p"/users/register"} class="link link-primary underline-offset-4">
+            <.link
+              :if={!@current_scope}
+              navigate={~p"/users/register"}
+              class="link link-primary underline-offset-4"
+            >
               {dgettext("landing", "도입 검토 →")}
             </.link>
-            <span class="mx-2 text-base-content/30">·</span>
-            <.link navigate={~p"/users/log-in"} class="link link-hover text-base-content/70">
+            <.link
+              :if={@current_scope}
+              navigate={~p"/dashboard"}
+              class="link link-primary underline-offset-4"
+            >
+              {dgettext("landing", "대시보드 →")}
+            </.link>
+            <span :if={!@current_scope} class="mx-2 text-base-content/30">·</span>
+            <.link
+              :if={!@current_scope}
+              navigate={~p"/users/log-in"}
+              class="link link-hover text-base-content/70"
+            >
               {dgettext("landing", "로그인")}
             </.link>
           </p>
@@ -160,8 +175,19 @@
     <section class="border-t border-base-200 pt-6 text-sm text-base-content/80">
       <p class="leading-relaxed">
         {dgettext("landing", "초기 도입을 검토 중이신가요?")}
-        <.link navigate={~p"/users/register"} class="link link-primary underline-offset-4 ml-1">
+        <.link
+          :if={!@current_scope}
+          navigate={~p"/users/register"}
+          class="link link-primary underline-offset-4 ml-1"
+        >
           {dgettext("landing", "도입 검토 →")}
+        </.link>
+        <.link
+          :if={@current_scope}
+          navigate={~p"/dashboard"}
+          class="link link-primary underline-offset-4 ml-1"
+        >
+          {dgettext("landing", "대시보드 →")}
         </.link>
         <span class="mx-2 text-base-content/30">·</span>
         <.link href="mailto:contact@contractstudio.example" class="link link-hover">

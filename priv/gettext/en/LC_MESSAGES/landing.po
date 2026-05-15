@@ -48,6 +48,12 @@ msgstr ""
 msgid "도입 검토 →"
 msgstr ""
 
+#: lib/contract_web/controllers/page_html/home.html.heex:46
+#: lib/contract_web/controllers/page_html/home.html.heex:164
+#, elixir-autogen, elixir-format
+msgid "대시보드 →"
+msgstr "Dashboard →"
+
 #: lib/contract_web/controllers/page_html/home.html.heex:50
 #, elixir-autogen, elixir-format
 msgid "로그인"
