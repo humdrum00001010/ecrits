@@ -237,6 +237,87 @@ defmodule ContractWeb.StudioLiveTest do
     end
   end
 
+  describe "conversion wizard events (Wave 4)" do
+    setup :log_in_a_user
+
+    test "start_type_conversion with a real source document builds a plan and flips migration_panel_open?",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, matter} = Contract.Matters.create(scope, %{"name" => "wizard"})
+
+      {:ok, doc} =
+        Contract.Documents.create(scope, %{
+          "matter_id" => matter.id,
+          "title" => "src",
+          "type_key" => "nda_v1"
+        })
+
+      # Give the LV the lawyer-style perms via session.
+      conn = Plug.Conn.put_session(conn, :user_perms, ~w(read write commit revoke export type_change)a)
+
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      # Seed selected document.
+      send_state(lv, %State{
+        matter_id: matter.id,
+        selected_document_id: doc.id,
+        mode: :editing,
+        last_seen_revision: 0
+      })
+
+      _ =
+        render_hook(lv, "start_type_conversion", %{
+          "target_type_key" => "service_agreement_v1"
+        })
+
+      assert assigns(lv).studio_state.migration_panel_open? == true
+      assert %Contract.Conversion.Plan{target_type_key: "service_agreement_v1"} =
+               assigns(lv).migration_plan
+    end
+
+    test "start_type_conversion without a selected document flashes an error",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      html =
+        render_hook(lv, "start_type_conversion", %{"target_type_key" => "nda_v1"})
+
+      assert html =~ "No document selected"
+    end
+
+    test "start_type_conversion without target flashes an error", %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      # Seed selected document.
+      send_state(lv, %State{
+        selected_document_id: Ecto.UUID.generate(),
+        mode: :editing,
+        last_seen_revision: 0
+      })
+
+      html = render_hook(lv, "start_type_conversion", %{"target_type_key" => ""})
+      assert html =~ "target type"
+    end
+
+    test "create_variant without a plan flashes an error", %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+      html = render_hook(lv, "create_variant", %{})
+      assert html =~ "No active conversion plan"
+    end
+
+    test "set_field_migration_strategy without a plan flashes an error",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+      html =
+        render_hook(lv, "set_field_migration_strategy", %{
+          "source_field_id" => "party_a",
+          "strategy" => "copy_once"
+        })
+
+      assert html =~ "No active conversion plan"
+    end
+  end
+
   describe "handle_info protocol (driven through the live LV process)" do
     setup :log_in_a_user
 

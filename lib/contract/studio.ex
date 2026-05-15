@@ -250,6 +250,64 @@ defmodule Contract.Studio do
   end
 
   # ----------------------------------------------------------------------------
+  # search_documents/2
+  # ----------------------------------------------------------------------------
+
+  @doc """
+  Substring search across the scope's documents. Routes through
+  `Contract.Documents.search/3`; the resulting rows are mapped to the
+  shape the command palette expects.
+  """
+  @spec search_documents(T.ctx(), String.t()) :: [map()]
+  def search_documents(_ctx, ""), do: []
+
+  def search_documents(%Context{} = ctx, query) when is_binary(query) do
+    ctx
+    |> Contract.Documents.search(query, 20)
+    |> Enum.map(fn doc ->
+      %{
+        id: doc.id,
+        document_id: doc.id,
+        title: doc.title,
+        type_key: doc.type_key,
+        matter_id: doc.matter_id,
+        last_revision: doc.latest_revision
+      }
+    end)
+  end
+
+  def search_documents(_ctx, _query), do: []
+
+  # ----------------------------------------------------------------------------
+  # list_documents/2 — for DocumentList sidebar
+  # ----------------------------------------------------------------------------
+
+  @doc """
+  List documents for a matter, gated by ACL. Returns the shape the
+  Studio sidebar uses (`document_id, title, type_key, status,
+  last_activity_at, last_revision`).
+  """
+  @spec list_documents(T.ctx(), T.id() | nil) :: [map()]
+  def list_documents(%Context{} = ctx, matter_id) when is_binary(matter_id) do
+    ctx
+    |> Contract.Documents.list_for_matter(matter_id)
+    |> Enum.map(&document_row/1)
+  end
+
+  def list_documents(_ctx, _matter_id), do: []
+
+  defp document_row(doc) do
+    %{
+      document_id: doc.id,
+      title: doc.title,
+      type_key: doc.type_key,
+      status: doc.status,
+      last_activity_at: doc.updated_at,
+      last_revision: doc.latest_revision
+    }
+  end
+
+  # ----------------------------------------------------------------------------
   # helpers
   # ----------------------------------------------------------------------------
 

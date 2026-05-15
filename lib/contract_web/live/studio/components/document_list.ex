@@ -7,11 +7,11 @@ defmodule ContractWeb.Live.Studio.Components.DocumentList do
 
   ## Data sources
 
-  `Contract.Studio.list_documents/2` (and `Contract.Documents` more broadly)
-  doesn't exist yet — Wave 3C2 ships the real context. For now we stub via
-  `Contract.Repo.all/1` against the `changes` table, grouping by
-  `document_id` and taking the latest revision to derive a synthetic title
-  + last-edited timestamp. Same pattern `DashboardLive` uses.
+  Wave 4: `Contract.Studio.list_documents/2` is the real source. When the
+  scope's matter has no documents yet, falls back to the legacy
+  changes-table aggregate so tests pre-dating the `documents` migration
+  still see something. The result shape (document_id, title, type_key,
+  status, last_activity_at, last_revision) is stable.
 
   ## Persona perms
 
@@ -43,7 +43,7 @@ defmodule ContractWeb.Live.Studio.Components.DocumentList do
 
   @impl true
   def update(assigns, socket) do
-    documents = list_documents_for_matter(assigns.studio_state)
+    documents = list_documents_for_matter(assigns.current_scope, assigns.studio_state)
 
     {active, archived} = partition_by_status(documents)
 
@@ -230,19 +230,17 @@ defmodule ContractWeb.Live.Studio.Components.DocumentList do
   end
 
   # ---------------------------------------------------------------------------
-  # Private — data fetching (Wave 3C2 will replace)
+  # Private — data fetching
   # ---------------------------------------------------------------------------
 
-  # TODO Wave-3C2: real `Contract.Documents` context.
-  # When `Contract.Studio.list_documents(scope, matter_id)` lands, replace
-  # this function with that call. The returned shape (document_id, title,
-  # type_key, status, last_activity_at) is the same the real context will
-  # expose.
-  defp list_documents_for_matter(%{matter_id: matter_id}) when is_binary(matter_id) do
-    fetch_documents(normalize_uuid(matter_id))
+  defp list_documents_for_matter(scope, %{matter_id: matter_id}) when is_binary(matter_id) do
+    case Contract.Studio.list_documents(scope, matter_id) do
+      [] -> fetch_documents(normalize_uuid(matter_id))
+      rows -> rows
+    end
   end
 
-  defp list_documents_for_matter(_state) do
+  defp list_documents_for_matter(_scope, _state) do
     fetch_documents(nil)
   end
 

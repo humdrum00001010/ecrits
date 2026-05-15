@@ -118,6 +118,7 @@ defmodule ContractWeb.StudioLive do
           |> assign(:preview_modal_open?, false)
           |> assign(:reconcile_modal_open?, false)
           |> assign(:reconcile_request, nil)
+          |> assign(:migration_plan, nil)
           |> assign(:last_pubsub_message_at, nil)
           |> allow_upload(:document_upload,
             accept: :any,
@@ -146,6 +147,7 @@ defmodule ContractWeb.StudioLive do
           |> assign(:preview_modal_open?, false)
           |> assign(:reconcile_modal_open?, false)
           |> assign(:reconcile_request, nil)
+          |> assign(:migration_plan, nil)
           |> assign(:last_pubsub_message_at, nil)
           |> allow_upload(:document_upload,
             accept: :any,
@@ -201,6 +203,87 @@ defmodule ContractWeb.StudioLive do
   end
 
   def handle_event("noop", _params, socket), do: {:noreply, socket}
+
+  # ---------------------------------------------------------------------------
+  # Conversion wizard events (Wave 4 — Contract.Conversion)
+  # ---------------------------------------------------------------------------
+
+  def handle_event("start_type_conversion", params, socket) do
+    target_type_key =
+      Map.get(params, "target_type_key") || Map.get(params, "type_key")
+
+    scope = socket.assigns.current_scope
+    state = socket.assigns.studio_state
+    document_id = state && state.selected_document_id
+
+    cond do
+      is_nil(document_id) ->
+        {:noreply, put_flash(socket, :error, "No document selected for conversion.")}
+
+      is_nil(target_type_key) or target_type_key == "" ->
+        {:noreply, put_flash(socket, :error, "Pick a target type first.")}
+
+      true ->
+        case Contract.Conversion.plan(scope, document_id, target_type_key, []) do
+          {:ok, plan} ->
+            socket =
+              socket
+              |> assign(:migration_plan, plan)
+              |> update(:studio_state, fn st -> %{st | migration_panel_open?: true} end)
+
+            {:noreply, socket}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Could not plan conversion: #{inspect(reason)}")}
+        end
+    end
+  end
+
+  def handle_event("set_field_migration_strategy", params, socket) do
+    case socket.assigns[:migration_plan] do
+      nil ->
+        {:noreply, put_flash(socket, :error, "No active conversion plan.")}
+
+      %Contract.Conversion.Plan{} = plan ->
+        field_id = Map.get(params, "source_field_id") || Map.get(params, "field_id")
+        strategy = Map.get(params, "strategy")
+
+        case Contract.Conversion.set_field_strategy(
+               socket.assigns.current_scope,
+               plan,
+               to_string(field_id || ""),
+               strategy
+             ) do
+          {:ok, new_plan} ->
+            {:noreply, assign(socket, :migration_plan, new_plan)}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Bad strategy: #{inspect(reason)}")}
+        end
+    end
+  end
+
+  def handle_event("create_variant", _params, socket) do
+    case socket.assigns[:migration_plan] do
+      nil ->
+        {:noreply, put_flash(socket, :error, "No active conversion plan.")}
+
+      %Contract.Conversion.Plan{} = plan ->
+        case Contract.Conversion.create_variant(socket.assigns.current_scope, plan) do
+          {:ok, {%Contract.Documents.Document{} = new_doc, _change}} ->
+            socket =
+              socket
+              |> assign(:migration_plan, nil)
+              |> update(:studio_state, fn st -> %{st | migration_panel_open?: false} end)
+              |> put_flash(:info, "Created variant document #{new_doc.title}.")
+
+            {:noreply, push_navigate(socket, to: ~p"/matters/#{new_doc.matter_id}/documents/#{new_doc.id}")}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Variant creation failed: #{inspect(reason)}")}
+        end
+    end
+  end
 
   def handle_event(event, params, socket) do
     case event_to_action(event, params, socket.assigns) do
@@ -296,6 +379,10 @@ defmodule ContractWeb.StudioLive do
     build_action(assigns, :upload_document, params, document_required: false)
   end
 
+  # "create_variant" is intercepted by handle_event/3 directly (Wave 4 —
+  # the wizard fires it with the in-flight Plan held in assigns, not as
+  # an Action payload). The mapping below remains for backward compat
+  # in case a caller still routes it through the funnel.
   def event_to_action("create_variant", params, assigns) do
     build_action(assigns, :create_converted_variant, params, document_required: false)
   end
@@ -731,6 +818,7 @@ defmodule ContractWeb.StudioLive do
           projection={@projection}
           reconcile_modal_open?={@reconcile_modal_open?}
           reconcile_request={@reconcile_request}
+          migration_plan={@migration_plan}
         />
 
         <.live_component

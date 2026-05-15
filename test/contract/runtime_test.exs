@@ -191,19 +191,49 @@ defmodule Contract.RuntimeTest do
     end
   end
 
-  describe "apply/2 → conversion kinds (deferred to Wave 4)" do
-    for kind <- [:start_type_conversion, :set_field_migration_strategy, :create_converted_variant] do
-      @kind kind
+  describe "apply/2 → conversion kinds (Wave 4 — Contract.Conversion)" do
+    test ":start_type_conversion without document_id is a typed error" do
+      action = %Action{
+        kind: :start_type_conversion,
+        document_id: nil,
+        actor_type: :user,
+        payload: %{"target_type_key" => "nda_v1"}
+      }
 
-      test "#{kind} raises NotImplementedError-style message" do
-        action = %Action{
-          kind: @kind,
-          document_id: Ecto.UUID.generate(),
-          actor_type: :user
-        }
+      assert {:error, :missing_document_id} = Runtime.apply(@ctx, action)
+    end
 
-        assert_raise RuntimeError, ~r/Conversion/, fn -> Runtime.apply(@ctx, action) end
-      end
+    test ":start_type_conversion without target_type_key is a typed error" do
+      action = %Action{
+        kind: :start_type_conversion,
+        document_id: Ecto.UUID.generate(),
+        actor_type: :user,
+        payload: %{}
+      }
+
+      assert {:error, :missing_target_type_key} = Runtime.apply(@ctx, action)
+    end
+
+    test ":set_field_migration_strategy without a plan is a typed error" do
+      action = %Action{
+        kind: :set_field_migration_strategy,
+        document_id: Ecto.UUID.generate(),
+        actor_type: :user,
+        payload: %{}
+      }
+
+      assert {:error, :missing_plan} = Runtime.apply(@ctx, action)
+    end
+
+    test ":create_converted_variant without a plan is a typed error" do
+      action = %Action{
+        kind: :create_converted_variant,
+        document_id: Ecto.UUID.generate(),
+        actor_type: :user,
+        payload: %{}
+      }
+
+      assert {:error, :missing_plan} = Runtime.apply(@ctx, action)
     end
   end
 

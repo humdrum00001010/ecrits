@@ -5,9 +5,9 @@ defmodule ContractWeb.DashboardLive do
 
   ## Data sources
 
-  Matter and Document persistence are still on the Wave 3C2 roadmap, so
-  this view operates against:
-
+    * `Contract.Matters.list_for_scope/1` — visible matters for the scope.
+    * `Contract.Documents.list_recent_for_scope/2` — recent documents
+      for the scope, across all visible matters.
     * `Contract.ContractTypes.list/2` — compile-time TOML-backed type
       registry, drives the "New Document" modal.
     * `Contract.Repo.aggregate/3` on the `changes` table — gives us a
@@ -15,10 +15,6 @@ defmodule ContractWeb.DashboardLive do
       with status `:active`.
     * `Contract.Repo.all/1` on a small `changes` query — flattened into
       an activity feed.
-
-  When `Contract.Matters` and `Contract.Documents` land, this LV swaps
-  the stub-fed assigns for the real queries — the rendered shape stays
-  the same.
   """
   use ContractWeb, :live_view
 
@@ -84,40 +80,39 @@ defmodule ContractWeb.DashboardLive do
     })
   end
 
-  # TODO(Wave 3C2): when `Contract.Matters.list_for_scope/1` exists, replace
-  # this. For now we return [] — the dashboard's empty state is the truth.
-  defp list_matters(_scope), do: []
+  defp list_matters(scope) do
+    scope
+    |> Contract.Matters.list_for_scope()
+    |> Enum.map(fn m ->
+      %{
+        id: m.id,
+        name: m.name,
+        doc_count: 0,
+        last_activity_at: m.updated_at
+      }
+    end)
+  rescue
+    DBConnection.ConnectionError -> []
+    Postgrex.Error -> []
+  end
 
-  # TODO(Wave 3C2): when `Contract.Documents.list_recent_for_scope/2` exists,
-  # call it. Today we derive a fake "documents" view from the changes table
-  # by collapsing on `document_id` — enough to test the empty-vs-populated
-  # split in LiveViewTest.
-  defp list_recent_documents(_scope) do
-    from(c in Change,
-      where: not is_nil(c.document_id),
-      group_by: c.document_id,
-      select: %{
-        document_id: c.document_id,
-        last_revision: max(c.applied_revision),
-        last_activity_at: max(c.inserted_at)
-      },
-      order_by: [desc: max(c.inserted_at)],
-      limit: 8
-    )
-    |> Repo.all()
-    |> Enum.map(&decorate_document/1)
+  defp list_recent_documents(scope) do
+    scope
+    |> Contract.Documents.list_recent_for_scope(8)
+    |> Enum.map(fn d ->
+      %{
+        document_id: d.id,
+        title: d.title,
+        type_key: d.type_key,
+        last_revision: d.latest_revision,
+        last_activity_at: d.updated_at
+      }
+    end)
   rescue
     # Test envs and fresh installs may not have the table yet — degrade
     # cleanly to "no documents" rather than crashing the dashboard.
     DBConnection.ConnectionError -> []
     Postgrex.Error -> []
-  end
-
-  defp decorate_document(%{document_id: id} = row) do
-    Map.merge(row, %{
-      title: "Document " <> String.slice(id, 0, 8),
-      type_key: "nda_v1"
-    })
   end
 
   # Last 10 changes the scope can see, flattened into a feed. Activity ROWS

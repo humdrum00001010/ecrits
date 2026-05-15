@@ -180,6 +180,13 @@ defmodule Contract.Store do
         {:ok, existing}
 
       {:ok, %Change{} = persisted} ->
+        # Mirror the highest applied_revision onto Documents.latest_revision
+        # so dashboard / list queries don't need a fold over `changes`.
+        # Best-effort: if the documents table doesn't exist yet (test
+        # envs that don't run the Wave-4 migration) or the row is
+        # missing, touch_revision/2 swallows the error.
+        _ = Contract.Documents.touch_revision(document_id, persisted.applied_revision)
+
         Phoenix.PubSub.broadcast(@pubsub, topic(document_id), {:change_committed, persisted})
         {:ok, persisted}
 

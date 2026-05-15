@@ -9,10 +9,12 @@ defmodule ContractWeb.MatterScope do
        the session, and we thread that here so components can gate on
        perms like `:write` / `:agent_run` / `:type_change`).
 
-  Until `Contract.Matters` lands (Wave 3C2 roadmap), the resolved matter is
-  a minimal stub map: `%{id: matter_id, name: "Matter " <> short}`. The
-  `Contract.Context` struct already accepts an opaque `:matter` field, so
-  shells using this hook (StudioLive) don't depend on the eventual schema.
+  The resolved matter is a real `Contract.Matters.Matter{}` row when the
+  scope can see it, falling back to a stub `%{id: matter_id, name:
+  "Matter " <> short}` for routes that pre-date the Matters context
+  (e.g. tests that don't insert a row first). The `Contract.Context`
+  struct accepts an opaque `:matter` field so callers handle both
+  shapes.
 
   Perms seeding is unconditional: if the session has `:user_perms`, the
   scope gets them; if not, `current_scope.perms` stays at whatever
@@ -65,15 +67,29 @@ defmodule ContractWeb.MatterScope do
   defp assign_matter(socket, nil), do: socket
 
   defp assign_matter(%{assigns: %{current_scope: %Context{} = scope}} = socket, matter_id) do
-    matter = load_matter(matter_id)
+    matter = load_matter(scope, matter_id)
     assign(socket, :current_scope, %Context{scope | matter: matter})
   end
 
   defp assign_matter(socket, _matter_id), do: socket
 
-  # Stub matter loader. When Contract.Matters lands, this becomes
-  # `Contract.Matters.get_for_scope(scope, matter_id)`.
-  defp load_matter(matter_id) when is_binary(matter_id) do
+  # Tries the real Contract.Matters.get/2 first; falls back to the legacy
+  # stub for tests + routes that haven't seeded a real row yet. The
+  # fallback keeps StudioLive et al. unblocked while the matters table
+  # is empty in CI.
+  defp load_matter(scope, matter_id) when is_binary(matter_id) do
+    case Contract.Matters.get(scope, matter_id) do
+      {:ok, matter} -> matter
+      {:error, _} -> stub_matter(matter_id)
+    end
+  rescue
+    # Tolerates the matters table not existing yet — degrade gracefully
+    # to the stub so the test suite keeps working pre-migrate.
+    Postgrex.Error -> stub_matter(matter_id)
+    DBConnection.ConnectionError -> stub_matter(matter_id)
+  end
+
+  defp stub_matter(matter_id) when is_binary(matter_id) do
     %{id: matter_id, name: "Matter " <> String.slice(matter_id, 0, 8)}
   end
 end

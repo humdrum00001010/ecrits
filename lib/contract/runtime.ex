@@ -21,9 +21,9 @@ defmodule Contract.Runtime do
       :duplicate_document          → ensure_session → Session.commit
       :agent_change                → ensure_session → Session.commit
       :chat_message                → Contract.Agent.start
-      :start_type_conversion       → Contract.Conversion (deferred — Wave 4)
-      :set_field_migration_strategy→ Contract.Conversion (deferred — Wave 4)
-      :create_converted_variant    → Contract.Conversion (deferred — Wave 4)
+      :start_type_conversion       → Contract.Conversion.plan/4
+      :set_field_migration_strategy→ Contract.Conversion.set_field_strategy/4
+      :create_converted_variant    → Contract.Conversion.create_variant/2
       :revoke_change               → ensure_session → Session.revoke
       :resolve_revoke              → ensure_session → Session.revoke
       :request_export              → Contract.IO.export
@@ -67,7 +67,7 @@ defmodule Contract.Runtime do
   @spec revoke_kinds() :: [atom()]
   def revoke_kinds, do: @revoke_kinds
 
-  @doc "Kinds owned by Contract.Conversion (Wave 4 — currently deferred)."
+  @doc "Kinds owned by Contract.Conversion (SPEC.md §19)."
   @spec conversion_kinds() :: [atom()]
   def conversion_kinds, do: @conversion_kinds
 
@@ -117,8 +117,49 @@ defmodule Contract.Runtime do
     Contract.IO.export(ctx, action.document_id, format, [])
   end
 
-  def apply(_ctx, %Action{kind: kind}) when kind in @conversion_kinds do
-    raise "Contract.Runtime: Action.kind=#{inspect(kind)} is owned by Contract.Conversion (Wave 4 — not implemented)"
+  def apply(ctx, %Action{kind: :start_type_conversion} = action) do
+    payload = normalize_payload(action.payload)
+    target_type_key = Map.get(payload, "target_type_key") || Map.get(payload, :target_type_key)
+
+    cond do
+      is_nil(action.document_id) -> {:error, :missing_document_id}
+      is_nil(target_type_key) -> {:error, :missing_target_type_key}
+      true -> Contract.Conversion.plan(ctx, action.document_id, target_type_key, [])
+    end
+  end
+
+  def apply(ctx, %Action{kind: :set_field_migration_strategy} = action) do
+    payload = normalize_payload(action.payload)
+    plan = Map.get(payload, "plan") || Map.get(payload, :plan)
+    field_id = Map.get(payload, "source_field_id") || Map.get(payload, :source_field_id)
+    strategy = Map.get(payload, "strategy") || Map.get(payload, :strategy)
+
+    cond do
+      not match?(%Contract.Conversion.Plan{}, plan) ->
+        {:error, :missing_plan}
+
+      is_nil(field_id) ->
+        {:error, :missing_field_id}
+
+      is_nil(strategy) ->
+        {:error, :missing_strategy}
+
+      true ->
+        Contract.Conversion.set_field_strategy(ctx, plan, to_string(field_id), strategy)
+    end
+  end
+
+  def apply(ctx, %Action{kind: :create_converted_variant} = action) do
+    payload = normalize_payload(action.payload)
+    plan = Map.get(payload, "plan") || Map.get(payload, :plan)
+
+    cond do
+      match?(%Contract.Conversion.Plan{}, plan) ->
+        Contract.Conversion.create_variant(ctx, plan)
+
+      true ->
+        {:error, :missing_plan}
+    end
   end
 
   def apply(ctx, %Action{kind: kind} = action) when kind in @session_kinds do
@@ -231,4 +272,8 @@ defmodule Contract.Runtime do
       _ -> :pdf
     end
   end
+
+  defp normalize_payload(nil), do: %{}
+  defp normalize_payload(map) when is_map(map), do: map
+  defp normalize_payload(_), do: %{}
 end

@@ -53,12 +53,14 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
 
   ## Migration wizard
 
-  Wave 4 (`Contract.Conversion`) is not yet implemented. The wizard
-  renders all three steps (Plan → FieldStrategies → CreateVariant), but
-  the planner output and the per-field strategy menu render a "Wave 4
-  작업 진행 중" placeholder where the real `plan/4` output would go.
-  The step structure is the contract; subagents shipping Wave 4 wire in
-  the planner and the strategy enum without changing this surface.
+  Backed by `Contract.Conversion` (Wave 4). The parent LV is expected
+  to:
+
+    1. Pass `migration_plan` assign — a `%Contract.Conversion.Plan{}` —
+       once the user has picked a target type. While `migration_plan`
+       is `nil`, step 1 still renders the target-type dropdown.
+    2. Handle the `start_type_conversion`, `set_field_migration_strategy`,
+       and `create_variant` events that bubble out of the wizard.
   """
 
   use ContractWeb, :live_component
@@ -92,6 +94,12 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
   attr :initial_migration_step, :atom, default: nil
   attr :initial_modal_param, :string, default: nil
 
+  # Optional — parent LV passes a built `%Contract.Conversion.Plan{}`
+  # once the user has picked a target type. While `nil`, the wizard
+  # renders the target-type dropdown so the user can kick the planner
+  # off via `start_type_conversion`.
+  attr :migration_plan, :any, default: nil
+
   # --- LiveComponent callbacks -------------------------------------------
 
   @impl true
@@ -123,6 +131,7 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
       |> assign(:reconcile_modal_open?, Map.get(assigns, :reconcile_modal_open?, false))
       |> assign(:reconcile_request, Map.get(assigns, :reconcile_request))
       |> assign(:documents, Map.get(assigns, :documents, []))
+      |> assign(:migration_plan, Map.get(assigns, :migration_plan))
 
     socket =
       case Map.get(assigns, :initial_migration_step) do
@@ -656,7 +665,7 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
 
   defp render_migration_plan(assigns) do
     ~H"""
-    <section data-role="migration-step-plan">
+    <section data-role="migration-step-plan" data-step="plan">
       <p class="text-sm text-base-content/70 mb-3">
         {dgettext("studio", "Pick the target contract type. The planner will report which fields can carry over.")}
       </p>
@@ -665,8 +674,9 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
         for={%{}}
         as={:plan}
         phx-change="set_migration_target"
-        phx-submit="set_migration_target"
+        phx-submit="start_type_conversion"
         phx-target={@myself}
+        data-role="migration-target-form"
       >
         <.input
           type="select"
@@ -679,17 +689,34 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
         />
       </.form>
 
-      <%!--
-        TODO(Wave 4): wire `Contract.Conversion.plan/4` here. For now we
-        show the placeholder so subagents implementing the migration
-        runner know the structural slot exists.
-      --%>
-      <div
-        class="alert alert-info mt-3"
-        data-role="migration-plan-placeholder"
-      >
-        <span>{dgettext("studio", "Wave 4 작업 진행 중 — planner output will appear here.")}</span>
-      </div>
+      <%= if @migration_plan do %>
+        <div class="alert alert-success mt-3" data-role="migration-plan-summary">
+          <div class="text-sm space-y-1">
+            <p>
+              <span class="font-medium">{dgettext("studio", "Source type:")}</span>
+              <span class="font-mono">{@migration_plan.source_type_key || "—"}</span>
+            </p>
+            <p>
+              <span class="font-medium">{dgettext("studio", "Target type:")}</span>
+              <span class="font-mono">{@migration_plan.target_type_key}</span>
+            </p>
+            <p>
+              <span class="font-medium">{dgettext("studio", "Fields to consider:")}</span>
+              <span>{length(@migration_plan.field_plans || [])}</span>
+            </p>
+            <p :if={@migration_plan.impact && @migration_plan.impact[:compatible?] == false}
+               class="text-warning"
+               data-role="migration-incompatible-warning"
+            >
+              {dgettext("studio", "These types are not declared compatible — every field defaults to Ask user.")}
+            </p>
+          </div>
+        </div>
+      <% else %>
+        <div class="alert alert-info mt-3" data-role="migration-plan-prompt">
+          <span>{dgettext("studio", "Choose a target type then run the planner.")}</span>
+        </div>
+      <% end %>
 
       <div class="modal-action">
         <button
@@ -701,12 +728,23 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
           {dgettext("studio", "Cancel")}
         </button>
         <button
+          :if={is_nil(@migration_plan)}
+          type="button"
+          class="btn btn-secondary btn-sm"
+          phx-click="start_type_conversion"
+          phx-value-target_type_key={@migration_target}
+          disabled={is_nil(@migration_target)}
+          data-role="migration-run-planner"
+        >
+          {dgettext("studio", "Run planner")}
+        </button>
+        <button
+          :if={@migration_plan}
           type="button"
           class="btn btn-primary btn-sm"
           phx-click="select_migration_step"
           phx-value-step="fields"
           phx-target={@myself}
-          disabled={is_nil(@migration_target)}
           data-role="migration-next-fields"
         >
           {dgettext("studio", "Next: field strategies")}
@@ -717,23 +755,20 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
   end
 
   defp render_migration_fields(assigns) do
+    plans = (assigns.migration_plan && assigns.migration_plan.field_plans) || []
+    assigns = assign(assigns, :plans, plans)
+
     ~H"""
-    <section data-role="migration-step-fields">
+    <section data-role="migration-step-fields" data-step="field-strategies">
       <p class="text-sm text-base-content/70 mb-3">
         {dgettext("studio", "Choose how each source field is carried over.")}
       </p>
 
-      <%!--
-        TODO(Wave 4): the strategy planner returns the actual field
-        list. Until then we render an empty table shell so callers see
-        the contract.
-      --%>
-      <div
-        class="alert alert-info"
-        data-role="migration-fields-placeholder"
-      >
-        <span>{dgettext("studio", "Wave 4 작업 진행 중 — per-field strategy picker.")}</span>
-      </div>
+      <%= if @plans == [] do %>
+        <div class="alert alert-info" data-role="migration-fields-empty">
+          <span>{dgettext("studio", "No source fields to migrate — go back and run the planner first.")}</span>
+        </div>
+      <% end %>
 
       <table class="table table-sm mt-3" data-role="migration-fields-table">
         <thead>
@@ -743,21 +778,28 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
           </tr>
         </thead>
         <tbody>
-          <%!-- Placeholder row so the markup exists for assertions. --%>
-          <tr data-role="migration-field-row">
-            <td>—</td>
+          <tr :for={fp <- @plans}
+              data-role="migration-field-row"
+              data-source-field-id={fp.source_field_id}
+          >
+            <td>
+              <span class="font-mono text-xs">{fp.source_field_id}</span>
+              <span :if={fp.justification} class="block text-[0.65rem] text-base-content/60 mt-0.5">
+                {fp.justification}
+              </span>
+            </td>
             <td>
               <.form
                 for={%{}}
                 as={:strategy}
-                phx-change="set_field_strategy"
-                phx-target={@myself}
+                phx-change="set_field_migration_strategy"
+                data-role="migration-field-form"
               >
-                <input type="hidden" name="field_id" value="placeholder" />
+                <input type="hidden" name="source_field_id" value={fp.source_field_id} />
                 <.input
                   type="select"
                   name="strategy"
-                  value={Map.get(@field_strategies, "placeholder", "copy_once")}
+                  value={Map.get(@field_strategies, fp.source_field_id, Atom.to_string(fp.strategy))}
                   options={strategy_options()}
                 />
               </.form>
@@ -793,7 +835,7 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
 
   defp render_migration_confirm(assigns) do
     ~H"""
-    <section data-role="migration-step-confirm">
+    <section data-role="migration-step-confirm" data-step="create-variant">
       <p class="text-sm text-base-content/70 mb-3">
         {dgettext("studio", "Review and create the converted variant. This does not modify the original document.")}
       </p>
@@ -806,6 +848,10 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
         <div>
           <dt class="inline font-medium">{dgettext("studio", "Fields with explicit strategies:")}</dt>
           <dd class="inline">{map_size(@field_strategies)}</dd>
+        </div>
+        <div :if={@migration_plan}>
+          <dt class="inline font-medium">{dgettext("studio", "Field plans:")}</dt>
+          <dd class="inline">{length(@migration_plan.field_plans || [])}</dd>
         </div>
       </dl>
 

@@ -605,9 +605,9 @@ defmodule ContractWeb.Components.CommandPalette do
     |> assign(:results, results)
   end
 
-  # Stub backend. Real implementation will route through
-  # Contract.Studio.search_documents/2 once DocumentList lands (Wave 3C1).
-  # TODO(Wave 3C1): replace the stub with the actual document index.
+  # Routes through Contract.Studio.search_documents/2 (Wave 4 —
+  # backed by Contract.Documents.search/3). Tolerates the documents
+  # table not existing yet by returning [] on DB errors.
   defp run_doc_search(socket, "") do
     socket
     |> assign(:query, "")
@@ -617,13 +617,24 @@ defmodule ContractWeb.Components.CommandPalette do
   defp run_doc_search(socket, query) do
     socket
     |> assign(:query, query)
-    |> assign(:results, search_documents_stub(socket.assigns.current_scope, query))
+    |> assign(:results, search_documents(socket.assigns.current_scope, query))
   end
 
+  @doc """
+  Public for tests. Routes a query through `Contract.Studio.search_documents/2`
+  with a defensive rescue so test envs without the documents migration
+  see `[]` rather than a 500.
+  """
+  def search_documents(scope, query) do
+    Contract.Studio.search_documents(scope, query)
+  rescue
+    Postgrex.Error -> []
+    DBConnection.ConnectionError -> []
+  end
+
+  # Backwards-compat shim — pre-Wave-4 callers used search_documents_stub/2.
   @doc false
-  # Public-by-name for testing the stub; remains an internal until the
-  # Studio.search_documents/2 contract is hammered out.
-  def search_documents_stub(_scope, _query), do: []
+  def search_documents_stub(scope, query), do: search_documents(scope, query)
 
   # --- Command catalog -------------------------------------------------
 

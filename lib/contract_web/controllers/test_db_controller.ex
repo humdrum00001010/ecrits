@@ -81,7 +81,9 @@ if Application.compile_env(:contract, :test_auth, false) do
       rows =
         safe_query!(
           """
-          SELECT id::text, matter_id::text, name, type_key, inserted_at
+          SELECT id::text, matter_id::text, title, type_key,
+                 parent_document_id::text, variant_of_change_id::text,
+                 status, latest_revision, inserted_at
             FROM documents
            ORDER BY inserted_at DESC
            LIMIT 200

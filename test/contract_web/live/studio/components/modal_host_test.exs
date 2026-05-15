@@ -109,10 +109,40 @@ defmodule ContractWeb.Live.Studio.Components.ModalHostTest do
       assert html =~ ~s(data-modal="migration")
       assert html =~ ~s(data-role="migration-steps")
       assert html =~ ~s(data-role="migration-step-plan")
+      assert html =~ ~s(data-step="plan")
       assert html =~ ~s(data-role="migration-target-select")
-      assert html =~ ~s(data-role="migration-plan-placeholder")
-      # Wave 4 placeholder (Korean copy):
-      assert html =~ "Wave 4"
+      # Wave 4: planner has not run yet, so a prompt (not a summary) is rendered.
+      assert html =~ ~s(data-role="migration-plan-prompt")
+    end
+
+    test "migration_panel_open? with a Plan renders the plan summary" do
+      plan = %Contract.Conversion.Plan{
+        source_document_id: Ecto.UUID.generate(),
+        source_type_key: "nda_v1",
+        target_type_key: "service_agreement_v1",
+        strategies: Contract.Conversion.allowed_strategies(),
+        field_plans: [
+          %Contract.Conversion.FieldPlan{
+            source_field_id: "party_a",
+            target_field_id: "party_a",
+            strategy: :link_to_matter_field,
+            justification: "Party identity is matter-level fact."
+          }
+        ],
+        impact: %{compatible?: true, source_field_count: 1, target_field_count: 1}
+      }
+
+      html =
+        render_component(ModalHost,
+          id: "modal-host",
+          studio_state: %State{mode: :editing, migration_panel_open?: true},
+          current_scope: scope_for_user(),
+          migration_plan: plan
+        )
+
+      assert html =~ ~s(data-role="migration-plan-summary")
+      assert html =~ "nda_v1"
+      assert html =~ "service_agreement_v1"
     end
 
     test "reconcile_modal_open? renders the conflict diff + two buttons" do
@@ -182,7 +212,7 @@ defmodule ContractWeb.Live.Studio.Components.ModalHostTest do
   # ---------------------------------------------------------------------
 
   describe "migration wizard step progression" do
-    test "step :plan shows Next button disabled until a target is picked" do
+    test "step :plan shows the Run planner button disabled until a target is picked" do
       html =
         render_component(ModalHost,
           id: "modal-host",
@@ -190,24 +220,63 @@ defmodule ContractWeb.Live.Studio.Components.ModalHostTest do
           current_scope: scope_for_user()
         )
 
-      assert html =~ ~s(data-role="migration-next-fields")
+      assert html =~ ~s(data-role="migration-run-planner")
       # `disabled` and `data-role` can land in either order; assert
       # both attributes appear on the same opening tag.
-      assert html =~ ~r/<button[^>]*disabled[^>]*data-role="migration-next-fields"|<button[^>]*data-role="migration-next-fields"[^>]*disabled/
+      assert html =~ ~r/<button[^>]*disabled[^>]*data-role="migration-run-planner"|<button[^>]*data-role="migration-run-planner"[^>]*disabled/
     end
 
-    test "initial_migration_step=:fields renders the strategy table" do
+    test "step :plan with an existing Plan shows the Next: field strategies button" do
+      plan = %Contract.Conversion.Plan{
+        source_document_id: Ecto.UUID.generate(),
+        target_type_key: "service_agreement_v1",
+        strategies: Contract.Conversion.allowed_strategies(),
+        field_plans: [],
+        impact: %{compatible?: true}
+      }
+
       html =
         render_component(ModalHost,
           id: "modal-host",
           studio_state: %State{mode: :editing, migration_panel_open?: true},
           current_scope: scope_for_user(),
-          initial_migration_step: :fields
+          migration_plan: plan
+        )
+
+      assert html =~ ~s(data-role="migration-next-fields")
+      assert html =~ ~s(data-role="migration-plan-summary")
+    end
+
+    test "initial_migration_step=:fields renders the strategy table" do
+      plan = %Contract.Conversion.Plan{
+        source_document_id: Ecto.UUID.generate(),
+        source_type_key: "nda_v1",
+        target_type_key: "service_agreement_v1",
+        strategies: Contract.Conversion.allowed_strategies(),
+        field_plans: [
+          %Contract.Conversion.FieldPlan{
+            source_field_id: "effective_date",
+            target_field_id: "effective_date",
+            strategy: :link_to_matter_field,
+            justification: "Date is matter-level fact."
+          }
+        ],
+        impact: %{compatible?: true}
+      }
+
+      html =
+        render_component(ModalHost,
+          id: "modal-host",
+          studio_state: %State{mode: :editing, migration_panel_open?: true},
+          current_scope: scope_for_user(),
+          initial_migration_step: :fields,
+          migration_plan: plan
         )
 
       assert html =~ ~s(data-role="migration-step-fields")
       assert html =~ ~s(data-role="migration-fields-table")
       assert html =~ ~s(data-role="migration-next-confirm")
+      assert html =~ "effective_date"
       # Each strategy option shows up.
       assert html =~ "Copy once"
       assert html =~ "Link to matter field"
