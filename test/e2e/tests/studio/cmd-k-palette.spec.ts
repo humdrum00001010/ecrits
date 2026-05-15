@@ -43,6 +43,25 @@ test.describe('Scenario 6: Cmd+K palette (mobile: chat-command button)', () => {
         inserted_at: ''
       });
 
+      // Wait for the palette JS hook to bind. The root `data-role`
+      // lives on the always-mounted container so we can poll it; the
+      // modal-box gets `data-role="command-palette"` only when @open?
+      // flips. Without this wait, `Ctrl+KeyK` can fire before the LV
+      // hook attaches the keydown handler, in which case the keypress
+      // is lost and the palette never opens.
+      await page
+        .locator('[data-role="command-palette-root"]')
+        .first()
+        .waitFor({ state: 'attached', timeout: 10_000 });
+      await page.waitForFunction(
+        () => {
+          const w = window as unknown as { liveSocket?: { isConnected?: () => boolean } };
+          return Boolean(w.liveSocket && w.liveSocket.isConnected && w.liveSocket.isConnected());
+        },
+        undefined,
+        { timeout: 10_000 }
+      );
+
       if (viewport === 'desktop') {
         await page.keyboard.press('Control+KeyK');
       } else {
