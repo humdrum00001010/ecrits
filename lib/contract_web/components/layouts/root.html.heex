@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full">
+<html lang="ko" class="h-full">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -8,13 +8,28 @@
       name="description"
       content="Contract Studio — legal-document studio for Korean lawyers. An AI agent grills you before it edits; 법제처 citations are verified; no silent rewrites."
     />
-    <.live_title default="Contract Studio" suffix=" · Contract Studio">{assigns[:page_title]}</.live_title>
+    <.live_title default="Contract Studio" suffix=" · Contract Studio">
+      {assigns[:page_title]}
+    </.live_title>
     <link phx-track-static rel="stylesheet" href={~p"/assets/css/app.css"} />
     <script defer phx-track-static type="text/javascript" src={~p"/assets/js/app.js"}>
     </script>
     <script>
+      // Theme toggle — vanilla JS so it works on dead views (landing,
+      // error pages) as well as LiveViews. The button click is caught
+      // here directly; we don't rely on phx-click/JS.dispatch (which
+      // only fire after LiveSocket connects). Valid values are
+      // "studio" (light), "studio-dark" (dark), and "system" (no
+      // attribute; daisyUI uses prefers-color-scheme to pick).
+      //
+      // localStorage key is "phx:theme" (kept from the upstream
+      // Phoenix gen template for compatibility with any external
+      // tooling). Persists across reload; "storage" event keeps
+      // multiple tabs in sync.
       (() => {
+        const VALID = new Set(["studio", "studio-dark", "system"]);
         const setTheme = (theme) => {
+          if (!VALID.has(theme)) theme = "system";
           if (theme === "system") {
             localStorage.removeItem("phx:theme");
             document.documentElement.removeAttribute("data-theme");
@@ -23,11 +38,25 @@
             document.documentElement.setAttribute("data-theme", theme);
           }
         };
+        // Boot: apply persisted preference before LiveView mounts, so
+        // there's no flash of unstyled theme.
         if (!document.documentElement.hasAttribute("data-theme")) {
           setTheme(localStorage.getItem("phx:theme") || "system");
         }
+        // Delegated click handler: catches the theme-toggle buttons no
+        // matter where they live and no matter what nested element
+        // (<svg>, <path>, …) was actually clicked.
+        document.addEventListener("click", (e) => {
+          const btn = e.target.closest("[data-phx-theme]");
+          if (!btn) return;
+          setTheme(btn.dataset.phxTheme);
+        });
+        // Cross-tab sync + back-compat with the old phx:set-theme dispatch.
         window.addEventListener("storage", (e) => e.key === "phx:theme" && setTheme(e.newValue || "system"));
-        window.addEventListener("phx:set-theme", (e) => setTheme(e.target.dataset.phxTheme));
+        window.addEventListener("phx:set-theme", (e) => {
+          const t = (e.target && e.target.dataset && e.target.dataset.phxTheme) || e.detail;
+          if (t) setTheme(t);
+        });
       })();
     </script>
   </head>

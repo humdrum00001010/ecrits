@@ -176,11 +176,16 @@ defmodule Mix.Tasks.Contract.Imagegen do
     Mix.shell().info("[imagegen] start  #{entry.slug} (#{entry.size}, quality=#{entry.quality})")
     t0 = System.monotonic_time(:millisecond)
 
+    # `moderation: "low"` relaxes gpt-image-1's safety filter for editorial
+    # / diagrammatic prompts. Our prompts are austere line-art; the strict
+    # default mode false-positives on language like "contract page" or
+    # "legal document". Keep this at "low" until prompts are fully sanitized.
     body = %{
       model: @model,
       prompt: entry.prompt,
       size: entry.size,
       quality: entry.quality,
+      moderation: "low",
       n: 1
     }
 
@@ -212,9 +217,7 @@ defmodule Mix.Tasks.Contract.Imagegen do
         bytes = byte_size(png)
         dt = System.monotonic_time(:millisecond) - t0
 
-        Mix.shell().info(
-          "[imagegen] ok     #{entry.slug} → #{out} (#{bytes} bytes, #{dt}ms)"
-        )
+        Mix.shell().info("[imagegen] ok     #{entry.slug} → #{out} (#{bytes} bytes, #{dt}ms)")
 
       {:ok, %Req.Response{status: status, body: body}} ->
         Mix.raise(
@@ -222,9 +225,7 @@ defmodule Mix.Tasks.Contract.Imagegen do
         )
 
       {:error, exception} ->
-        Mix.raise(
-          "[imagegen] FAIL #{entry.slug}: transport error #{inspect(exception)}"
-        )
+        Mix.raise("[imagegen] FAIL #{entry.slug}: transport error #{inspect(exception)}")
     end
   end
 end

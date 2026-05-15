@@ -38,16 +38,17 @@ defmodule Mix.Tasks.Contract.ImagegenTest do
       end)
     end
 
-    test "covers the five committed landing assets" do
+    test "covers the committed landing assets" do
       {entries, _} = Code.eval_file(@manifest_path)
       slugs = Enum.map(entries, & &1.slug) |> MapSet.new()
 
+      # Wave 3C0-E pared the manifest down to the two assets the
+      # rewritten landing actually uses: the small accompanying hero
+      # and the dashboard empty-state. The earlier 3-feature icon set
+      # was retired with the feature-card grid.
       expected =
         MapSet.new([
           "hero",
-          "feature-grill-me",
-          "feature-citation",
-          "feature-type-conversion",
           "dashboard-empty"
         ])
 
@@ -59,7 +60,9 @@ defmodule Mix.Tasks.Contract.ImagegenTest do
     setup do
       # Create a tiny temp manifest with one entry pointing into a tmpdir,
       # so the live committed PNGs are not overwritten by this test.
-      tmp_root = Path.join(System.tmp_dir!(), "imagegen-test-#{System.unique_integer([:positive])}")
+      tmp_root =
+        Path.join(System.tmp_dir!(), "imagegen-test-#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(tmp_root)
 
       tmp_manifest = Path.join(tmp_root, "manifest.exs")
@@ -89,9 +92,7 @@ defmodule Mix.Tasks.Contract.ImagegenTest do
         Req.Test.json(conn, %{"data" => [%{"b64_json" => b64}]})
       end)
 
-      Application.put_env(:contract, :imagegen_req_options,
-        plug: {Req.Test, :imagegen}
-      )
+      Application.put_env(:contract, :imagegen_req_options, plug: {Req.Test, :imagegen})
 
       System.put_env("OPENAI_API_KEY", "test-imagegen-key")
 

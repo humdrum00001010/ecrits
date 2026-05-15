@@ -1,97 +1,54 @@
 # Imagery manifest for `mix contract.imagegen`.
 #
-# Each entry: {slug, prompt, size, quality, output_path}. The Mix task
-# decodes this with `Code.eval_file/1`, POSTs each to OpenAI's
-# `gpt-image-1` model, and writes the resulting PNG to output_path.
+# Wave 3C0-E pared this down to TWO images: a tiny accompaniment for
+# the landing body and a dashboard empty-state.
 #
-# Quality "medium" hits the sweet spot between cost and crispness for
-# line-art marketing illustrations. 1536x1024 for the hero (≈$0.06 per
-# render); 1024x1024 for feature blocks (≈$0.04); 1024x1024 for the
-# dashboard empty state (≈$0.04). Total ≈ $0.22 per full regen.
-#
-# Style budget (see feedback-generated-imagery memory):
-#   - Minimal line-art, monochrome with a single emerald (#10b981) accent.
-#   - No human faces, no specific brand logos, no shimmer / gradient.
-#   - Editorial illustration tone — Linear / Notion / Cursor marketing.
+# Note: gpt-image-1's moderation can block prompts with named-person
+# references (Vignelli, Rams) or with specific charged subject words
+# ("contract", "legal document"). The prompts below keep the subject
+# generic (a sheet of paper, a folder) and describe style without
+# naming designers.
 
 [
   %{
     slug: "hero",
     prompt: """
-    Minimal editorial line-art illustration. ABSOLUTELY NO HUMAN FIGURES, NO
-    SILHOUETTES, NO HOODED CHARACTERS, NO MASCOTS, NO HANDS, NO FACES. The subject
-    is a single legal-document page floating on a clean off-white background, with
-    3-4 short text lines abstracted as horizontal rules. Above the page, three
-    small soft question marks float (rendered as outline strokes). One line of
-    text on the page is highlighted with a thin emerald (#10b981) underline. The
-    composition is calm, geometric, mathematically restrained — reminiscent of
-    Swiss editorial design or Bauhaus-style technical illustration. Thin even
-    line weight (1-1.5pt), no shading, no gradients, no realistic textures, no
-    decorative flourishes. 16:9 composition with negative space on the right
-    third for overlaid headline text. Black-and-white plus one emerald accent
-    ONLY. Style references: Massimo Vignelli, Dieter Rams diagrams, technical
-    manual illustrations.
+    A minimalist editorial line illustration. The subject is one tall
+    rectangular sheet of paper, centered on a pure white background. The
+    sheet has three short horizontal rules stacked in its upper portion,
+    suggesting abstracted body text. Below the third rule, one short
+    horizontal line in emerald green (#10b981) runs about a third of the
+    sheet's width — the only colour accent. Above the sheet, in empty
+    space, a small outlined punctuation glyph sits as a thin line stroke.
+
+    Style: austere editorial technical diagram. Swiss typography manual
+    aesthetic. Uniform 1 pt line weight throughout. Pure white
+    background, black contour, one emerald accent line. Geometric,
+    balanced, generous margins. Vector precision. Flat — no shading,
+    no gradient, no perspective. 1:1 square composition.
     """,
-    size: "1536x1024",
-    quality: "medium",
+    size: "1024x1024",
+    quality: "high",
     output_path: "priv/static/images/landing/hero.png"
-  },
-  %{
-    slug: "feature-grill-me",
-    prompt: """
-    Minimal line-art icon-illustration. Subject: a hand pausing over a contract
-    paragraph, with three soft question marks floating above the text — depicting
-    an AI agent that asks clarifying questions before editing. Monochrome black on
-    white with one emerald (#10b981) accent on the question marks. Thin even line
-    weight, no shading, no clip-art look. Square 1:1 composition, centered.
-    """,
-    size: "1024x1024",
-    quality: "medium",
-    output_path: "priv/static/images/landing/feature-grill-me.png"
-  },
-  %{
-    slug: "feature-citation",
-    prompt: """
-    Minimal line-art icon-illustration. Subject: a single short paragraph of
-    English-only legal text (5-6 horizontal abstracted lines representing text)
-    with a small checkmark stamp aligned to its right edge. Beside it, a
-    parallel narrower column shows a single reference label reading exactly
-    "ARTICLE 1" in clean uppercase English. ABSOLUTELY NO KOREAN CHARACTERS,
-    NO HANGUL, NO HANJA, NO ASIAN-SCRIPT CHARACTERS OF ANY KIND. ABSOLUTELY
-    NO HUMAN FIGURES. Monochrome black on off-white with one emerald (#10b981)
-    accent on the checkmark only. Thin even line weight (1-1.5pt), no shading.
-    Square 1:1 composition, centered. Style: Swiss editorial line-art, Dieter
-    Rams technical-manual flavor.
-    """,
-    size: "1024x1024",
-    quality: "medium",
-    output_path: "priv/static/images/landing/feature-citation.png"
-  },
-  %{
-    slug: "feature-type-conversion",
-    prompt: """
-    Minimal line-art icon-illustration. Subject: two parallel document outlines —
-    one labelled NDA and one labelled Franchise — connected by thin curved lines
-    showing migrated fields (party names, dates, jurisdictions) flowing from one
-    to the other while preserving lineage. Monochrome black on white with one
-    emerald (#10b981) accent on the migration arrows. Thin even line weight, no
-    shading. Square 1:1 composition, centered.
-    """,
-    size: "1024x1024",
-    quality: "medium",
-    output_path: "priv/static/images/landing/feature-conversion.png"
   },
   %{
     slug: "dashboard-empty",
     prompt: """
-    Minimal line-art illustration. Subject: an empty open folder on a clean desk
-    surface, with a single quill resting beside it and a faint emerald (#10b981)
-    accent on the folder tab — suggesting "no matters yet, start your first
-    document". Monochrome black on white. Thin even line weight, no shading.
-    4:3 composition.
+    A minimalist editorial line illustration. The subject is one
+    rectangular paper folder outline, centered on a pure white
+    background. The folder is drawn as two simple rectangles: a small
+    tab on top and a wider body beneath, both empty. One short
+    horizontal line in emerald green (#10b981) sits along the top edge
+    of the folder tab — the only colour accent.
+
+    Style: austere editorial technical diagram. Swiss typography manual
+    aesthetic. Uniform 1 pt line weight throughout. Pure white
+    background, black contour, one emerald accent line. Geometric,
+    balanced, generous margins. Vector precision. Flat — no shading,
+    no gradient, no perspective. 1:1 square composition.
     """,
     size: "1024x1024",
-    quality: "medium",
+    quality: "high",
     output_path: "priv/static/images/landing/dashboard-empty.png"
   }
 ]

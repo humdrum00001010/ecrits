@@ -71,7 +71,8 @@ defmodule ContractWeb.Layouts do
           for="mobile-nav-drawer"
           aria-label={gettext("Close menu")}
           class="drawer-overlay"
-        ></label>
+        >
+        </label>
         <.mobile_nav current_scope={@current_scope} />
       </div>
     </div>
@@ -110,17 +111,26 @@ defmodule ContractWeb.Layouts do
           <.icon name="hero-bars-3" class="size-5" />
         </label>
 
-        <.link navigate={~p"/"} class="flex items-center gap-2 shrink-0" aria-label="Contract Studio home">
+        <.link
+          navigate={~p"/"}
+          class="flex items-center gap-2 shrink-0"
+          aria-label="Contract Studio home"
+        >
           <Brand.wordmark size="base" />
         </.link>
 
-        <nav :if={!signed_in?(@current_scope)} class="hidden lg:flex items-center gap-6 text-sm text-base-content/70">
-          <a href="#features" class="hover:text-base-content">Features</a>
-          <a href="#pricing" class="hover:text-base-content">Pricing</a>
+        <nav
+          :if={!signed_in?(@current_scope)}
+          class="hidden lg:flex items-center gap-6 text-sm text-base-content/70"
+        >
           <a href="#docs" class="hover:text-base-content">Docs</a>
+          <a href="#changelog" class="hover:text-base-content">Changelog</a>
         </nav>
 
-        <nav :if={signed_in?(@current_scope)} class="hidden lg:flex items-center gap-6 text-sm text-base-content/70">
+        <nav
+          :if={signed_in?(@current_scope)}
+          class="hidden lg:flex items-center gap-6 text-sm text-base-content/70"
+        >
           <.link navigate={~p"/dashboard"} class="hover:text-base-content">Dashboard</.link>
           <.link navigate={~p"/studio"} class="hover:text-base-content">Studio</.link>
         </nav>
@@ -139,7 +149,10 @@ defmodule ContractWeb.Layouts do
                 </span>
                 <.icon name="hero-chevron-down-micro" class="size-3 opacity-60" />
               </div>
-              <ul tabindex="0" class="dropdown-content menu menu-sm bg-base-100 rounded-box border border-base-200 shadow-sm mt-2 w-56 p-2">
+              <ul
+                tabindex="0"
+                class="dropdown-content menu menu-sm bg-base-100 rounded-box border border-base-200 shadow-sm mt-2 w-56 p-2"
+              >
                 <li class="px-2 py-1.5 text-xs text-base-content/60">
                   Signed in as
                   <div class="text-base-content/90 truncate">{@current_scope.user.email}</div>
@@ -151,7 +164,9 @@ defmodule ContractWeb.Layouts do
               </ul>
             </div>
           <% else %>
-            <.link navigate={~p"/users/log-in"} class="hidden sm:inline-flex btn btn-ghost btn-sm">Log in</.link>
+            <.link navigate={~p"/users/log-in"} class="hidden sm:inline-flex btn btn-ghost btn-sm">
+              Log in
+            </.link>
             <.link navigate={~p"/users/register"} class="btn btn-primary btn-sm">
               Register
             </.link>
@@ -203,15 +218,18 @@ defmodule ContractWeb.Layouts do
         </nav>
 
         <div class="mt-auto pt-4 border-t border-base-200">
-          <.link href={~p"/users/log-out"} method="delete" class="btn btn-ghost btn-sm w-full justify-start">
+          <.link
+            href={~p"/users/log-out"}
+            method="delete"
+            class="btn btn-ghost btn-sm w-full justify-start"
+          >
             <.icon name="hero-arrow-right-on-rectangle" class="size-4" /> Log out
           </.link>
         </div>
       <% else %>
         <nav class="flex flex-col gap-1 text-sm">
-          <a href="/#features" class="px-3 py-2 rounded-box hover:bg-base-200">Features</a>
-          <a href="/#pricing" class="px-3 py-2 rounded-box hover:bg-base-200">Pricing</a>
           <a href="/#docs" class="px-3 py-2 rounded-box hover:bg-base-200">Docs</a>
+          <a href="/#changelog" class="px-3 py-2 rounded-box hover:bg-base-200">Changelog</a>
         </nav>
 
         <div class="mt-auto pt-4 border-t border-base-200 flex flex-col gap-2">
@@ -245,10 +263,9 @@ defmodule ContractWeb.Layouts do
         <div>
           <p class="font-semibold text-base-content/90 mb-3">Product</p>
           <ul class="space-y-2 text-base-content/60">
-            <li><a href="#features" class="hover:text-base-content">Features</a></li>
-            <li><a href="#pricing" class="hover:text-base-content">Pricing</a></li>
             <li><a href="#docs" class="hover:text-base-content">Documentation</a></li>
             <li><a href="#changelog" class="hover:text-base-content">Changelog</a></li>
+            <li><a href="#security" class="hover:text-base-content">Security</a></li>
           </ul>
         </div>
         <div>

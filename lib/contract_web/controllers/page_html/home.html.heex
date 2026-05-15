@@ -1,261 +1,157 @@
 <Layouts.app flash={@flash} current_scope={@current_scope} variant="default">
-  <%!-- ----------------------------------------------------------------- --%>
-  <%!-- Hero                                                               --%>
-  <%!-- ----------------------------------------------------------------- --%>
-  <section class="pt-12 pb-16 sm:pt-20 sm:pb-24 lg:pt-24 lg:pb-28">
-    <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-center">
-      <div class="lg:col-span-7 space-y-5 sm:space-y-6">
-        <p class="inline-flex items-center gap-2 text-xs font-medium tracking-wide uppercase text-base-content/60">
-          <span class="inline-block h-1.5 w-1.5 rounded-full bg-primary"></span>
-          {dgettext("landing", "For solo Korean lawyers, in-house counsel, and small firms")}
-        </p>
-        <h1 class="text-3xl sm:text-4xl lg:text-4xl font-semibold tracking-tight text-balance leading-[1.05]">
-          {dgettext("landing", "Drafting that asks before it edits.")}
-        </h1>
-        <p class="text-base sm:text-lg lg:text-xl text-base-content/70 max-w-2xl leading-relaxed">
-          {dgettext("landing",
-            "Contract Studio is a legal-document studio with an AI agent that grills you for clarity, cites 법제처 with proof, and never silently rewrites your contracts."
-          )}
-        </p>
-        <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-3 pt-2">
-          <.link navigate={~p"/users/register"} class="btn btn-primary w-full sm:w-auto">
-            {dgettext("landing", "Get started")} <span aria-hidden="true" class="ml-1">→</span>
-          </.link>
-          <.link navigate={~p"/users/log-in"} class="btn btn-ghost w-full sm:w-auto">
-            {dgettext("landing", "Log in")}
-          </.link>
-          <a href="#features" class="btn btn-ghost w-full sm:w-auto text-base-content/70">
-            {dgettext("landing", "See how it works")}
-          </a>
-        </div>
-        <p class="text-sm text-base-content/50 pt-4">
-          {dgettext("landing", "Closed beta. Korean lawyers only, by invitation.")}
-        </p>
-      </div>
+  <%!--
+    Wave 3C0-E landing — structural rewrite.
 
-      <div class="lg:col-span-5">
-        <img
-          src={~p"/images/landing/hero.png"}
-          alt={dgettext("landing", "A clarifying question raised against a contract paragraph before any edit.")}
-          class="w-full h-auto rounded-box border border-base-200 bg-base-100"
-          width="1536"
-          height="1024"
-          loading="eager"
-          fetchpriority="high"
-        />
-      </div>
-    </div>
-  </section>
+    The page is deliberately dense and quiet: a label heading, a tight
+    paragraph, an inline text link into sign-up — NO button-pair hero,
+    NO 3-column feature cards, NO pricing block, NO bottom marketing
+    CTA. Reference points are westlaw.com, lexisnexis.com, the
+    Bloomberg Terminal product page, and Quip's enterprise mode —
+    NOT SaaS-marketing surfaces.
 
-  <%!-- ----------------------------------------------------------------- --%>
-  <%!-- Feature triptych                                                   --%>
-  <%!-- ----------------------------------------------------------------- --%>
-  <section id="features" class="py-16 sm:py-20 border-t border-base-200">
-    <div class="max-w-2xl mb-10 sm:mb-12">
-      <p class="text-xs font-medium tracking-wide uppercase text-primary mb-3">
-        {dgettext("landing", "What's different")}
+    Korean is primary. The page controller pins the locale to "ko" so
+    dgettext("landing", …) resolves through ko/landing.po. The English
+    msgids are the fallback if a Korean msgstr is empty.
+  --%>
+  <div class="max-w-4xl mx-auto px-6 py-10 lg:py-14">
+    <%!-- Above-fold: label + headline + paragraph + a single inline link. --%>
+    <section class="border-b border-base-200 pb-10 mb-10">
+      <p class="text-xs uppercase tracking-[0.2em] text-base-content/60 mb-4">
+        {dgettext("landing", "Contract Studio")}
       </p>
-      <h2 class="text-2xl sm:text-3xl lg:text-4xl font-semibold tracking-tight leading-tight">
-        {dgettext("landing", "Three commitments the rest of the market won't make.")}
-      </h2>
-    </div>
-
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-      <article class="rounded-box border border-base-200 p-6 space-y-4 hover:border-base-300 transition-colors">
-        <div class="aspect-square w-24 sm:w-28 bg-base-100 rounded-box overflow-hidden">
-          <img
-            src={~p"/images/landing/feature-grill-me.png"}
-            alt={dgettext("landing", "A hand pausing over a contract paragraph with three question marks above.")}
-            class="w-full h-full object-contain"
-            width="1024"
-            height="1024"
-            loading="lazy"
-          />
-        </div>
-        <h3 class="font-semibold tracking-tight">
-          {dgettext("landing", "Grill-me agent")}
-        </h3>
-        <p class="text-base-content/70 text-sm leading-relaxed">
-          {dgettext("landing",
-            "When the agent sees ambiguity, it stops and asks. No silent rewrites, no \"I assumed you meant…\". You answer; then it edits, with a question-and-answer trail attached to every change."
-          )}
-        </p>
-      </article>
-
-      <article class="rounded-box border border-base-200 p-6 space-y-4 hover:border-base-300 transition-colors">
-        <div class="aspect-square w-24 sm:w-28 bg-base-100 rounded-box overflow-hidden">
-          <img
-            src={~p"/images/landing/feature-citation.png"}
-            alt={dgettext("landing", "A contract clause stamped with a green checkmark next to a verified statute panel.")}
-            class="w-full h-full object-contain"
-            width="1024"
-            height="1024"
-            loading="lazy"
-          />
-        </div>
-        <h3 class="font-semibold tracking-tight">
-          {dgettext("landing", "법제처 citation verification")}
-        </h3>
-        <p class="text-base-content/70 text-sm leading-relaxed">
-          {dgettext("landing",
-            "Every 조문 cited is cross-checked against the 법제처 open API through 17 dedicated tools. Hallucinated citations don't make it to the page — they're flagged and the draft is held."
-          )}
-        </p>
-      </article>
-
-      <article class="rounded-box border border-base-200 p-6 space-y-4 hover:border-base-300 transition-colors">
-        <div class="aspect-square w-24 sm:w-28 bg-base-100 rounded-box overflow-hidden">
-          <img
-            src={~p"/images/landing/feature-conversion.png"}
-            alt={dgettext("landing", "Two document outlines connected by arrows showing field migration from NDA to Franchise.")}
-            class="w-full h-full object-contain"
-            width="1024"
-            height="1024"
-            loading="lazy"
-          />
-        </div>
-        <h3 class="font-semibold tracking-tight">
-          {dgettext("landing", "Type conversions, not text diffs")}
-        </h3>
-        <p class="text-base-content/70 text-sm leading-relaxed">
-          {dgettext("landing",
-            "Convert NDA → Franchise without losing your work. The contract type is a key; conversions migrate fields with full lineage, so you can always trace where a clause came from."
-          )}
-        </p>
-      </article>
-    </div>
-  </section>
-
-  <%!-- ----------------------------------------------------------------- --%>
-  <%!-- Secondary features                                                 --%>
-  <%!-- ----------------------------------------------------------------- --%>
-  <section class="py-16 sm:py-20 border-t border-base-200">
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-8 sm:gap-10">
-      <div class="space-y-4">
-        <div class="flex items-center gap-2">
-          <.icon name="hero-document-magnifying-glass" class="size-5 text-secondary" />
-          <h3 class="text-lg sm:text-xl font-semibold tracking-tight">
-            {dgettext("landing", "Hard-IR parsing, not LLM guessing")}
-          </h3>
-        </div>
-        <p class="text-base-content/70 leading-relaxed">
-          {dgettext("landing",
-            "Uploads route through Upstage Document Parse. Clause boundaries, headings, and tables come back with bounding boxes — structure the LLM doesn't have to invent. Hallucinated layout is not an option."
-          )}
-        </p>
-      </div>
-      <div class="space-y-4">
-        <div class="flex items-center gap-2">
-          <.icon name="hero-clipboard-document-list" class="size-5 text-secondary" />
-          <h3 class="text-lg sm:text-xl font-semibold tracking-tight">
-            {dgettext("landing", "Provenance, baked in")}
-          </h3>
-        </div>
-        <p class="text-base-content/70 leading-relaxed">
-          {dgettext("landing",
-            "Every change is a row. Who proposed it, which question it answers, what it touched, and how to undo it. The audit log is the source of truth — not a derived afterthought."
-          )}
-        </p>
-      </div>
-    </div>
-  </section>
-
-  <%!-- ----------------------------------------------------------------- --%>
-  <%!-- Pricing teaser                                                     --%>
-  <%!-- ----------------------------------------------------------------- --%>
-  <section id="pricing" class="py-16 sm:py-20 border-t border-base-200">
-    <div class="max-w-2xl mb-8 sm:mb-10">
-      <p class="text-xs font-medium tracking-wide uppercase text-primary mb-3">
-        {dgettext("landing", "Pricing")}
-      </p>
-      <h2 class="text-2xl sm:text-3xl lg:text-4xl font-semibold tracking-tight leading-tight">
-        {dgettext("landing", "Per-seat. No usage games.")}
-      </h2>
-      <p class="text-base-content/60 mt-3">
-        {dgettext("landing",
-          "Prices below are placeholders while we finalise the beta. Real numbers ship with the public release."
+      <h1 class="font-serif text-2xl sm:text-3xl lg:text-4xl font-medium leading-snug text-balance max-w-3xl mb-5">
+        {dgettext("landing", "검토를 묻는 초안 — 침묵하지 않는 계약서 에이전트")}
+      </h1>
+      <p class="text-sm sm:text-base text-base-content/80 leading-relaxed max-w-2xl mb-5">
+        {dgettext(
+          "landing",
+          "Contract Studio는 한국 법조인을 위한 법률 문서 스튜디오입니다. 에이전트는 편집에 앞서 모호한 지점을 질문하고, 법제처 인용을 검증하며, 변경 이력을 빠짐없이 남깁니다."
         )}
       </p>
-    </div>
-
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-      <div class="rounded-box border border-base-200 p-6 space-y-4">
-        <p class="text-xs font-medium tracking-wide uppercase text-base-content/50">
-          {dgettext("landing", "Solo")}
-        </p>
-        <p class="text-3xl font-semibold tracking-tight">
-          ₩ <span class="text-base-content/40">TBD</span>
-          <span class="text-sm font-normal text-base-content/50"> /mo</span>
-        </p>
-        <p class="text-sm text-base-content/70">
-          {dgettext("landing", "For one lawyer. Single matter workspace, unlimited documents.")}
-        </p>
-        <ul class="text-sm space-y-2 text-base-content/70">
-          <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />{dgettext("landing", "Grill-me agent")}</li>
-          <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />{dgettext("landing", "법제처 verification")}</li>
-          <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />{dgettext("landing", "Email support")}</li>
-        </ul>
-      </div>
-
-      <div class="rounded-box border-2 border-primary p-6 space-y-4 relative">
-        <span class="absolute -top-3 right-6 badge badge-primary badge-sm">
-          {dgettext("landing", "Recommended")}
-        </span>
-        <p class="text-xs font-medium tracking-wide uppercase text-base-content/50">
-          {dgettext("landing", "Firm")}
-        </p>
-        <p class="text-3xl font-semibold tracking-tight">
-          ₩ <span class="text-base-content/40">TBD</span>
-          <span class="text-sm font-normal text-base-content/50"> /seat/mo</span>
-        </p>
-        <p class="text-sm text-base-content/70">
-          {dgettext("landing", "For small firms. Shared matters, role-based access, audit export.")}
-        </p>
-        <ul class="text-sm space-y-2 text-base-content/70">
-          <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />{dgettext("landing", "Everything in Solo")}</li>
-          <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />{dgettext("landing", "Shared matter workspaces")}</li>
-          <li class="flex gap-2"><.icon name="hero-check" class="size-4 text-primary shrink-0 mt-0.5" />{dgettext("landing", "Slack / MCP ingress")}</li>
-        </ul>
-      </div>
-
-      <div class="rounded-box border border-base-200 p-6 space-y-4">
-        <p class="text-xs font-medium tracking-wide uppercase text-base-content/50">
-          {dgettext("landing", "Enterprise")}
-        </p>
-        <p class="text-3xl font-semibold tracking-tight">
-          {dgettext("landing", "Talk to us")}
-        </p>
-        <p class="text-sm text-base-content/70">
-          {dgettext("landing", "SSO, dedicated R2 bucket, on-prem 법제처 mirror, custom contract types.")}
-        </p>
-        <a href="#contact" class="btn btn-ghost btn-sm w-full">
-          {dgettext("landing", "Contact sales")}
-        </a>
-      </div>
-    </div>
-  </section>
-
-  <%!-- ----------------------------------------------------------------- --%>
-  <%!-- Final CTA                                                          --%>
-  <%!-- ----------------------------------------------------------------- --%>
-  <section class="py-16 sm:py-20 border-t border-base-200">
-    <div class="rounded-box bg-base-200/50 px-6 sm:px-12 py-12 sm:py-16 text-center max-w-3xl mx-auto">
-      <h2 class="text-xl sm:text-2xl lg:text-3xl font-semibold tracking-tight">
-        {dgettext("landing", "Draft with proof, not vibes.")}
-      </h2>
-      <p class="text-base-content/70 mt-3 max-w-xl mx-auto">
-        {dgettext("landing",
-          "Request an invitation. We'll set up your workspace, walk you through the agent, and listen carefully to what's missing."
-        )}
-      </p>
-      <div class="mt-6 flex flex-col sm:flex-row sm:flex-wrap justify-center gap-3">
-        <.link navigate={~p"/users/register"} class="btn btn-primary w-full sm:w-auto">
-          {dgettext("landing", "Request access")}
+      <p class="text-sm">
+        <.link navigate={~p"/users/register"} class="link link-primary underline-offset-4">
+          {dgettext("landing", "도입 검토 →")}
         </.link>
-        <a href="mailto:hello@contractstudio.example" class="btn btn-ghost w-full sm:w-auto">
-          {dgettext("landing", "Email the team")}
-        </a>
-      </div>
-    </div>
-  </section>
+        <span class="mx-2 text-base-content/30">·</span>
+        <.link navigate={~p"/users/log-in"} class="link link-hover text-base-content/70">
+          {dgettext("landing", "로그인")}
+        </.link>
+      </p>
+      <p class="text-xs text-base-content/50 mt-5">
+        {dgettext("landing", "비공개 베타. 초청제로 운영합니다.")}
+      </p>
+    </section>
+
+    <%!-- Commitments: definition list, hairline-separated, no cards. --%>
+    <section class="mb-10">
+      <h2 class="font-serif text-lg sm:text-xl font-medium mb-5">
+        {dgettext("landing", "확약")}
+      </h2>
+      <dl class="divide-y divide-base-200 border-y border-base-200">
+        <div class="py-4 grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-1 lg:gap-8">
+          <dt class="text-sm font-medium text-base-content">
+            {dgettext("landing", "묻는 에이전트")}
+          </dt>
+          <dd class="text-sm text-base-content/75 leading-relaxed">
+            {dgettext(
+              "landing",
+              "모호함이 발견되면 멈추고 묻습니다. 무단 재작성은 없습니다. 답이 주어진 뒤에만 편집하며, 모든 변경에는 질문과 답의 흔적이 동봉됩니다."
+            )}
+          </dd>
+        </div>
+        <div class="py-4 grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-1 lg:gap-8">
+          <dt class="text-sm font-medium text-base-content">
+            {dgettext("landing", "법제처 인용 검증")}
+          </dt>
+          <dd class="text-sm text-base-content/75 leading-relaxed">
+            {dgettext(
+              "landing",
+              "인용된 모든 조문은 법제처 공개 API를 통해 17개 도구로 교차 검증됩니다. 환각된 인용은 표시 단계 이전에 차단되며, 초안은 보류 상태로 유지됩니다."
+            )}
+          </dd>
+        </div>
+        <div class="py-4 grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-1 lg:gap-8">
+          <dt class="text-sm font-medium text-base-content">
+            {dgettext("landing", "유형 변환 — 텍스트 디프가 아닌 신규 변형")}
+          </dt>
+          <dd class="text-sm text-base-content/75 leading-relaxed">
+            {dgettext(
+              "landing",
+              "비밀유지 계약을 가맹 계약으로 변환할 때, 텍스트 차이를 비교하는 대신 필드 단위로 새 유형의 변형을 생성합니다. 모든 항목은 출처와 연결되어 추적할 수 있습니다."
+            )}
+          </dd>
+        </div>
+        <div class="py-4 grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-1 lg:gap-8">
+          <dt class="text-sm font-medium text-base-content">
+            {dgettext("landing", "Hard-IR 파싱")}
+          </dt>
+          <dd class="text-sm text-base-content/75 leading-relaxed">
+            {dgettext(
+              "landing",
+              "업로드된 문서는 Upstage Document Parse를 거칩니다. 조항 경계, 표제, 표는 좌표가 부착된 구조화된 형태로 돌아옵니다. 레이아웃 환각의 여지를 둘 수 없습니다."
+            )}
+          </dd>
+        </div>
+        <div class="py-4 grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-1 lg:gap-8">
+          <dt class="text-sm font-medium text-base-content">
+            {dgettext("landing", "출처 — 근거에 기반한 변경")}
+          </dt>
+          <dd class="text-sm text-base-content/75 leading-relaxed">
+            {dgettext(
+              "landing",
+              "모든 변경은 한 줄의 기록입니다. 누가 제안했고, 어떤 질문에 답한 결과인지, 어디를 건드렸으며 어떻게 되돌릴 수 있는지 — 감사 로그가 곧 진실의 원본입니다."
+            )}
+          </dd>
+        </div>
+      </dl>
+    </section>
+
+    <%!-- Engine — paragraph form, no cards. --%>
+    <section class="mb-10 max-w-2xl">
+      <h2 class="font-serif text-lg sm:text-xl font-medium mb-4">
+        {dgettext("landing", "구성")}
+      </h2>
+      <p class="text-sm text-base-content/80 leading-relaxed mb-4">
+        {dgettext(
+          "landing",
+          "Contract Studio의 엔진은 결정론적 변경 연산(ops), 추적 가능한 변경 이력, 그리고 법제처 인용 검증 도구 체인 위에 세워져 있습니다. 에이전트가 자유롭게 글을 쓰는 도구가 아니라, 변호사의 의사결정을 절차로 묶어주는 도구입니다."
+        )}
+      </p>
+      <p class="text-sm text-base-content/80 leading-relaxed">
+        {dgettext(
+          "landing",
+          "초안에서 검토까지 — 모든 단계가 단일 워크스페이스에서 일어나며, 모든 결정은 되돌릴 수 있는 형태로 남습니다."
+        )}
+      </p>
+    </section>
+
+    <%!-- One small image — thumbnail-sized accompaniment, not focal. --%>
+    <figure class="mb-10 max-w-sm">
+      <img
+        src={~p"/images/landing/hero.png"}
+        alt={dgettext("landing", "편집 이전에 질문이 제시된 계약 문단의 도식.")}
+        class="w-full h-auto opacity-90"
+        width="1024"
+        height="1024"
+        loading="lazy"
+      />
+      <figcaption class="text-xs text-base-content/60 mt-2 leading-relaxed">
+        {dgettext("landing", "에이전트는 편집 전에 질문합니다.")}
+      </figcaption>
+    </figure>
+
+    <%!-- Footer of the landing body — one text link, no CTA block. --%>
+    <section class="border-t border-base-200 pt-6 text-sm text-base-content/80">
+      <p class="leading-relaxed">
+        {dgettext("landing", "초기 도입을 검토 중이신가요?")}
+        <.link navigate={~p"/users/register"} class="link link-primary underline-offset-4 ml-1">
+          {dgettext("landing", "도입 검토 →")}
+        </.link>
+        <span class="mx-2 text-base-content/30">·</span>
+        <.link href="mailto:contact@contractstudio.example" class="link link-hover">
+          {dgettext("landing", "문의")}
+        </.link>
+      </p>
+    </section>
+  </div>
 </Layouts.app>

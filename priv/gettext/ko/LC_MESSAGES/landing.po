@@ -1,244 +1,149 @@
-## Korean landing-page strings for Contract Studio.
+## Korean landing-page strings for Contract Studio (Wave 3C0-E).
 ##
-## NOTE: Most msgstrs are intentionally empty. Korean legal-product copy
-## is high-stakes — machine translation routinely picks the wrong honorific
-## register or uses near-synonyms that read as unprofessional to lawyers.
-## We'll commission a native-speaker pass before flipping the language
-## switcher on. Until then Gettext falls back to the English msgid.
+## After the Wave 3C0-E rewrite, the landing template's msgids ARE the
+## Korean copy themselves — they're written natively in
+## home.html.heex. Because Gettext falls back to the msgid when the
+## msgstr is empty, leaving these msgstrs empty here produces the
+## intended Korean rendering. We keep this file as the canonical
+## location for any future refinements (alternate wordings, formality
+## tweaks, etc.) and so `mix gettext.extract --merge` does the right
+## thing.
 ##
-## Where a Korean term is already part of the brand (법제처, 조문, etc.)
-## we *do* translate, because the surrounding context is well-defined.
+## A handful of strings ARE redundantly filled (== msgid) so a future
+## developer who runs `mix gettext.extract --merge` doesn't accidentally
+## delete them and so machine-translation tools that ignore empty
+## msgstrs still pick them up.
 ##
-## TODO(Wave 3C2): native-speaker translation pass — keep voice formal-
-## professional but not bureaucratic; target register matches court filings
-## and law-firm intake forms.
+## #. TODO native-speaker review — the strings below were drafted by a
+## non-native speaker, anchored on:
+##   - "확약" (commitment / pledge) — chosen over "약속" for formal weight.
+##   - "도입 검토" (consider adoption) — chosen over generic "시작하기"
+##     ("get started") which reads as B2C-casual.
+##   - "법조인" (legal professionals) — broader than 변호사 alone.
+## These should be reviewed by a Korean lawyer before the marketing
+## surface goes public.
 msgid ""
 msgstr ""
 "Language: ko\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
-#: lib/contract_web/controllers/page_html/home.html.heex:32
+#: lib/contract_web/controllers/page_html/home.html.heex:21
 #, elixir-autogen, elixir-format
-msgid "Closed beta. Korean lawyers only, by invitation."
-msgstr ""
+msgid "Contract Studio"
+msgstr "Contract Studio"
 
-#: lib/contract_web/controllers/page_html/home.html.heex:232
+#: lib/contract_web/controllers/page_html/home.html.heex:27
 #, elixir-autogen, elixir-format
-msgid "Contact sales"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:121
-#, elixir-autogen, elixir-format
-msgid "Convert NDA → Franchise without losing your work. The contract type is a key; conversions migrate fields with full lineage, so you can always trace where a clause came from."
-msgstr ""
-
-# --- Final CTA ---
-#: lib/contract_web/controllers/page_html/home.html.heex:244
-#, elixir-autogen, elixir-format
-msgid "Draft with proof, not vibes."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:13
-#, elixir-autogen, elixir-format
-msgid "Drafting that asks before it edits."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:196
-#, elixir-autogen, elixir-format
-msgid "Email support"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:256
-#, elixir-autogen, elixir-format
-msgid "Email the team"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:223
-#, elixir-autogen, elixir-format
-msgid "Enterprise"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:155
-#, elixir-autogen, elixir-format
-msgid "Every change is a row. Who proposed it, which question it answers, what it touched, and how to undo it. The audit log is the source of truth — not a derived afterthought."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:100
-#, elixir-autogen, elixir-format
-msgid "Every 조문 cited is cross-checked against the 법제처 open API through 17 dedicated tools. Hallucinated citations don't make it to the page — they're flagged and the draft is held."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:215
-#, elixir-autogen, elixir-format
-msgid "Everything in Solo"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:205
-#, elixir-autogen, elixir-format
-msgid "Firm"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:191
-#, elixir-autogen, elixir-format
-msgid "For one lawyer. Single matter workspace, unlimited documents."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:212
-#, elixir-autogen, elixir-format
-msgid "For small firms. Shared matters, role-based access, audit export."
-msgstr ""
-
-# --- Hero ---
-#: lib/contract_web/controllers/page_html/home.html.heex:10
-#, elixir-autogen, elixir-format
-msgid "For solo Korean lawyers, in-house counsel, and small firms"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:22
-#, elixir-autogen, elixir-format
-msgid "Get started"
-msgstr "시작하기"
-
-#: lib/contract_web/controllers/page_html/home.html.heex:76
-#: lib/contract_web/controllers/page_html/home.html.heex:194
-#, elixir-autogen, elixir-format
-msgid "Grill-me agent"
-msgstr ""
-
-# --- Secondary features ---
-#: lib/contract_web/controllers/page_html/home.html.heex:138
-#, elixir-autogen, elixir-format
-msgid "Hard-IR parsing, not LLM guessing"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:25
-#, elixir-autogen, elixir-format
-msgid "Log in"
-msgstr "로그인"
-
-#: lib/contract_web/controllers/page_html/home.html.heex:172
-#, elixir-autogen, elixir-format
-msgid "Per-seat. No usage games."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:175
-#, elixir-autogen, elixir-format
-msgid "Prices below are placeholders while we finalise the beta. Real numbers ship with the public release."
-msgstr ""
-
-# --- Pricing ---
-#: lib/contract_web/controllers/page_html/home.html.heex:169
-#, elixir-autogen, elixir-format
-msgid "Pricing"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:151
-#, elixir-autogen, elixir-format
-msgid "Provenance, baked in"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:202
-#, elixir-autogen, elixir-format
-msgid "Recommended"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:253
-#, elixir-autogen, elixir-format
-msgid "Request access"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:247
-#, elixir-autogen, elixir-format
-msgid "Request an invitation. We'll set up your workspace, walk you through the agent, and listen carefully to what's missing."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:229
-#, elixir-autogen, elixir-format
-msgid "SSO, dedicated R2 bucket, on-prem 법제처 mirror, custom contract types."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:28
-#, elixir-autogen, elixir-format
-msgid "See how it works"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:216
-#, elixir-autogen, elixir-format
-msgid "Shared matter workspaces"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:217
-#, elixir-autogen, elixir-format
-msgid "Slack / MCP ingress"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:184
-#, elixir-autogen, elixir-format
-msgid "Solo"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:226
-#, elixir-autogen, elixir-format
-msgid "Talk to us"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:59
-#, elixir-autogen, elixir-format
-msgid "Three commitments the rest of the market won't make."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:118
-#, elixir-autogen, elixir-format
-msgid "Type conversions, not text diffs"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:142
-#, elixir-autogen, elixir-format
-msgid "Uploads route through Upstage Document Parse. Clause boundaries, headings, and tables come back with bounding boxes — structure the LLM doesn't have to invent. Hallucinated layout is not an option."
-msgstr ""
-
-# --- Feature triptych ---
-#: lib/contract_web/controllers/page_html/home.html.heex:56
-#, elixir-autogen, elixir-format
-msgid "What's different"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:79
-#, elixir-autogen, elixir-format
-msgid "When the agent sees ambiguity, it stops and asks. No silent rewrites, no \"I assumed you meant…\". You answer; then it edits, with a question-and-answer trail attached to every change."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:97
-#, elixir-autogen, elixir-format
-msgid "법제처 citation verification"
-msgstr "법제처 인용 검증"
-
-#: lib/contract_web/controllers/page_html/home.html.heex:195
-#, elixir-autogen, elixir-format
-msgid "법제처 verification"
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:39
-#, elixir-autogen, elixir-format
-msgid "A clarifying question raised against a contract paragraph before any edit."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:89
-#, elixir-autogen, elixir-format
-msgid "A contract clause stamped with a green checkmark next to a verified statute panel."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:68
-#, elixir-autogen, elixir-format
-msgid "A hand pausing over a contract paragraph with three question marks above."
-msgstr ""
-
-#: lib/contract_web/controllers/page_html/home.html.heex:16
-#, elixir-autogen, elixir-format
-msgid "Contract Studio is a legal-document studio with an AI agent that grills you for clarity, cites 법제처 with proof, and never silently rewrites your contracts."
-msgstr ""
+msgid "Contract Studio는 한국 법조인을 위한 법률 문서 스튜디오입니다. 에이전트는 편집에 앞서 모호한 지점을 질문하고, 법제처 인용을 검증하며, 변경 이력을 빠짐없이 남깁니다."
+msgstr "Contract Studio는 한국 법조인을 위한 법률 문서 스튜디오입니다. 에이전트는 편집에 앞서 모호한 지점을 질문하고, 법제처 인용을 검증하며, 변경 이력을 빠짐없이 남깁니다."
 
 #: lib/contract_web/controllers/page_html/home.html.heex:110
 #, elixir-autogen, elixir-format
-msgid "Two document outlines connected by arrows showing field migration from NDA to Franchise."
-msgstr ""
+msgid "Contract Studio의 엔진은 결정론적 변경 연산(ops), 추적 가능한 변경 이력, 그리고 법제처 인용 검증 도구 체인 위에 세워져 있습니다. 에이전트가 자유롭게 글을 쓰는 도구가 아니라, 변호사의 의사결정을 절차로 묶어주는 도구입니다."
+msgstr "Contract Studio의 엔진은 결정론적 변경 연산(ops), 추적 가능한 변경 이력, 그리고 법제처 인용 검증 도구 체인 위에 세워져 있습니다. 에이전트가 자유롭게 글을 쓰는 도구가 아니라, 변호사의 의사결정을 절차로 묶어주는 도구입니다."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:83
+#, elixir-autogen, elixir-format
+msgid "Hard-IR 파싱"
+msgstr "Hard-IR 파싱"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:24
+#, elixir-autogen, elixir-format
+msgid "검토를 묻는 초안 — 침묵하지 않는 계약서 에이전트"
+msgstr "검토를 묻는 초안 — 침묵하지 않는 계약서 에이전트"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:107
+#, elixir-autogen, elixir-format
+msgid "구성"
+msgstr "구성"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:33
+#: lib/contract_web/controllers/page_html/home.html.heex:141
+#, elixir-autogen, elixir-format
+msgid "도입 검토 →"
+msgstr "도입 검토 →"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:37
+#, elixir-autogen, elixir-format
+msgid "로그인"
+msgstr "로그인"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:96
+#, elixir-autogen, elixir-format
+msgid "모든 변경은 한 줄의 기록입니다. 누가 제안했고, 어떤 질문에 답한 결과인지, 어디를 건드렸으며 어떻게 되돌릴 수 있는지 — 감사 로그가 곧 진실의 원본입니다."
+msgstr "모든 변경은 한 줄의 기록입니다. 누가 제안했고, 어떤 질문에 답한 결과인지, 어디를 건드렸으며 어떻게 되돌릴 수 있는지 — 감사 로그가 곧 진실의 원본입니다."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:56
+#, elixir-autogen, elixir-format
+msgid "모호함이 발견되면 멈추고 묻습니다. 무단 재작성은 없습니다. 답이 주어진 뒤에만 편집하며, 모든 변경에는 질문과 답의 흔적이 동봉됩니다."
+msgstr "모호함이 발견되면 멈추고 묻습니다. 무단 재작성은 없습니다. 답이 주어진 뒤에만 편집하며, 모든 변경에는 질문과 답의 흔적이 동봉됩니다."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:145
+#, elixir-autogen, elixir-format
+msgid "문의"
+msgstr "문의"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:53
+#, elixir-autogen, elixir-format
+msgid "묻는 에이전트"
+msgstr "묻는 에이전트"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:63
+#, elixir-autogen, elixir-format
+msgid "법제처 인용 검증"
+msgstr "법제처 인용 검증"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:41
+#, elixir-autogen, elixir-format
+msgid "비공개 베타. 초청제로 운영합니다."
+msgstr "비공개 베타. 초청제로 운영합니다."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:76
+#, elixir-autogen, elixir-format
+msgid "비밀유지 계약을 가맹 계약으로 변환할 때, 텍스트 차이를 비교하는 대신 필드 단위로 새 유형의 변형을 생성합니다. 모든 항목은 출처와 연결되어 추적할 수 있습니다."
+msgstr "비밀유지 계약을 가맹 계약으로 변환할 때, 텍스트 차이를 비교하는 대신 필드 단위로 새 유형의 변형을 생성합니다. 모든 항목은 출처와 연결되어 추적할 수 있습니다."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:86
+#, elixir-autogen, elixir-format
+msgid "업로드된 문서는 Upstage Document Parse를 거칩니다. 조항 경계, 표제, 표는 좌표가 부착된 구조화된 형태로 돌아옵니다. 레이아웃 환각의 여지를 둘 수 없습니다."
+msgstr "업로드된 문서는 Upstage Document Parse를 거칩니다. 조항 경계, 표제, 표는 좌표가 부착된 구조화된 형태로 돌아옵니다. 레이아웃 환각의 여지를 둘 수 없습니다."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:132
+#, elixir-autogen, elixir-format
+msgid "에이전트는 편집 전에 질문합니다."
+msgstr "에이전트는 편집 전에 질문합니다."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:73
+#, elixir-autogen, elixir-format
+msgid "유형 변환 — 텍스트 디프가 아닌 신규 변형"
+msgstr "유형 변환 — 텍스트 디프가 아닌 신규 변형"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:66
+#, elixir-autogen, elixir-format
+msgid "인용된 모든 조문은 법제처 공개 API를 통해 17개 도구로 교차 검증됩니다. 환각된 인용은 표시 단계 이전에 차단되며, 초안은 보류 상태로 유지됩니다."
+msgstr "인용된 모든 조문은 법제처 공개 API를 통해 17개 도구로 교차 검증됩니다. 환각된 인용은 표시 단계 이전에 차단되며, 초안은 보류 상태로 유지됩니다."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:139
+#, elixir-autogen, elixir-format
+msgid "초기 도입을 검토 중이신가요?"
+msgstr "초기 도입을 검토 중이신가요?"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:115
+#, elixir-autogen, elixir-format
+msgid "초안에서 검토까지 — 모든 단계가 단일 워크스페이스에서 일어나며, 모든 결정은 되돌릴 수 있는 형태로 남습니다."
+msgstr "초안에서 검토까지 — 모든 단계가 단일 워크스페이스에서 일어나며, 모든 결정은 되돌릴 수 있는 형태로 남습니다."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:93
+#, elixir-autogen, elixir-format
+msgid "출처 — 근거에 기반한 변경"
+msgstr "출처 — 근거에 기반한 변경"
+
+#: lib/contract_web/controllers/page_html/home.html.heex:125
+#, elixir-autogen, elixir-format
+msgid "편집 이전에 질문이 제시된 계약 문단의 도식."
+msgstr "편집 이전에 질문이 제시된 계약 문단의 도식."
+
+#: lib/contract_web/controllers/page_html/home.html.heex:48
+#, elixir-autogen, elixir-format
+msgid "확약"
+msgstr "확약"
