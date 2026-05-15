@@ -2,13 +2,42 @@ defmodule Contract.IO.LiveTest do
   @moduledoc """
   Tagged integration tests that hit real OpenAI + real Korean Law MCP.
 
-  Excluded from the default `mix test` run (see `test/test_helper.exs`).
-  Run with `mix test --include live`. These require `OPENAI_API_KEY` and
-  `LAW_OC` env vars to be set.
+  ## Double-gate (env + tag) — to prevent accidental quota burn
+
+  These tests are excluded from the default `mix test` run via the
+  `:live`, `:live_openai`, and `:live_law_mcp` tags (see
+  `test/test_helper.exs`). They ALSO require the `LIVE_API` env flag to
+  be set to `1`, even when the caller passes `--include live`.
+
+  Without `LIVE_API=1`, each test is marked with the `:skip` tag (at
+  compile time) — so `mix test --include live` reports each test as
+  *skipped* with a clear reason instead of firing real API requests. To
+  see them, run with the env flag set:
+
+      mix test                                       # excluded (tag)
+      mix test --include live                        # skipped (no LIVE_API)
+      LIVE_API=1 mix test --include live             # real API calls
+      LIVE_API=1 mix test --only live_openai         # only the OpenAI live test
+      LIVE_API=1 mix test --only live_law_mcp        # only the Law MCP live test
+
+  Required env when actually running live:
+
+    * `OPENAI_API_KEY` — for `:live_openai`
+    * `LAW_OC` — for `:live_law_mcp` (defaults to `"openapi"`)
   """
   use ExUnit.Case, async: false
 
   @moduletag :live
+
+  # Compile-time env gate. When LIVE_API!=1 at compile time, every test
+  # in this module carries `@tag skip: "..."` and is reported as skipped
+  # by ExUnit's filter layer — no setup runs, no HTTP fires.
+  @live_api_enabled System.get_env("LIVE_API") == "1"
+  @skip_reason "Live API test skipped — set LIVE_API=1 to enable real OpenAI / Korean-Law-MCP calls"
+
+  unless @live_api_enabled do
+    @moduletag skip: @skip_reason
+  end
 
   @tag :live_openai
   test "OpenAI Responses stream emits SSE events" do

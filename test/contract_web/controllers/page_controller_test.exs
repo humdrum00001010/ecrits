@@ -36,7 +36,7 @@ defmodule ContractWeb.PageControllerTest do
     # We allow `btn btn-primary` in the top-nav (Register button) and
     # in the mobile drawer; assert there's no `btn btn-primary` inside
     # the landing body container itself.
-    [_pre, body_block] = String.split(body, ~s(<div class="max-w-4xl), parts: 2)
+    [_pre, body_block] = String.split(body, ~s(<div class="max-w-6xl), parts: 2)
     [landing_body, _post] = String.split(body_block, "</main>", parts: 2)
     refute landing_body =~ "btn btn-primary"
     refute landing_body =~ "btn-ghost"

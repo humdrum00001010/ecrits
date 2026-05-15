@@ -104,20 +104,30 @@
    - serif for landing headings (Source Serif 4 — adds editorial gravitas;
      see feedback-mature-visual-language.md "Use serif for headings on
      landing" rule)
+
+   The Hangul fallback chain matters. Inter, Source Serif 4, and Iosevka
+   have NO Hangul coverage. Without an explicit Hangul-capable face in
+   the chain, browsers can fall back to compatibility-jamo glyphs and
+   render `검` as three separate jamo (ㄱㅓㅁ). Pretendard is the
+   primary Hangul-aware face; the per-OS system Hangul fonts (Apple SD
+   Gothic Neo, Malgun Gothic, Noto Sans CJK KR) follow as backups.
 */
 @import url("https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap");
+@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css");
 
 :root {
-  --font-sans: "Inter", "Pretendard", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "Iosevka", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  --font-serif: "Source Serif 4", "Nanum Myeongjo", ui-serif, Georgia, "Times New Roman", serif;
+  --font-sans: "Inter", "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Iosevka", "JetBrains Mono", "D2Coding", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-serif: "Source Serif 4", "Nanum Myeongjo", "Apple SD Gothic Neo", "Noto Serif KR", "Noto Serif CJK KR", ui-serif, Georgia, "Times New Roman", serif;
 }
 
-/* Tailwind v4 reads font-family tokens via @theme. Register a serif
-   token so the `font-serif` utility resolves to Source Serif 4 with a
-   Korean serif fallback. */
+/* Tailwind v4 reads font-family tokens via @theme. Register sans/serif/
+   mono tokens so the `font-sans`, `font-serif`, and `font-mono`
+   utilities all resolve through the chains above (with Hangul fallback). */
 @theme {
+  --font-sans: var(--font-sans);
   --font-serif: var(--font-serif);
+  --font-mono: var(--font-mono);
 }
 
 .contract-body {
