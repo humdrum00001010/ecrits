@@ -213,6 +213,46 @@ defmodule ContractWeb.StudioLive do
   def handle_event("noop", _params, socket), do: {:noreply, socket}
 
   # ---------------------------------------------------------------------------
+  # Cmd+K palette → "Set contract type…" — intercept when no `type_key` is
+  # supplied and open the type-picker modal so the user can pick. The picker
+  # buttons then re-fire `set_contract_type` with a `type_key`, which goes
+  # through the normal `event_to_action/3` funnel.
+  # ---------------------------------------------------------------------------
+
+  def handle_event(
+        "command_palette_picked",
+        %{"kind" => "set_contract_type"} = params,
+        socket
+      ) do
+    case Map.get(params, "type_key") do
+      type_key when is_binary(type_key) and type_key != "" ->
+        # User has a type_key — dispatch as a normal set_contract_type Action.
+        case event_to_action(
+               "set_contract_type",
+               Map.put(params, "type_key", type_key),
+               socket.assigns
+             ) do
+          {:ok, %Action{} = action} -> {:noreply, dispatch(socket, action)}
+          {:error, reason} ->
+            {:noreply,
+             put_flash(socket, :error, "Could not set contract type: #{inspect(reason)}")}
+        end
+
+      _ ->
+        # No type_key → open the type-picker modal on the ModalHost. The
+        # ModalHost holds `modal_param` as local state; `send_update/2`
+        # is the standard way for the parent LV (or, in this case, a
+        # sibling component's event handler) to flip that state.
+        send_update(Components.ModalHost,
+          id: "modal-host",
+          modal_param: "type_picker"
+        )
+
+        {:noreply, socket}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Conversion wizard events (Wave 4 — Contract.Conversion)
   # ---------------------------------------------------------------------------
 
@@ -738,6 +778,17 @@ defmodule ContractWeb.StudioLive do
     else
       socket
     end
+  end
+
+  # Cmd+K palette → action commands. The palette's LiveComponent shares
+  # this LV's process; on Enter / click it `send/2`s the picked event
+  # back here so the parent's `handle_event/3` funnel can dispatch it
+  # uniformly with the mobile chat-command-button path (which uses a
+  # direct `phx-click`).
+  def handle_protocol_message({"command_palette_picked", params}, socket)
+      when is_map(params) do
+    {:noreply, socket_after_event} = handle_event("command_palette_picked", params, socket)
+    socket_after_event
   end
 
   def handle_protocol_message(_unknown, socket) do

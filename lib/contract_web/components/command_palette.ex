@@ -264,37 +264,21 @@ defmodule ContractWeb.Components.CommandPalette do
       phx-hook=".Palette"
       data-role="command-palette-root"
       data-open={to_string(@open?)}
-      data-cmdk-ready="false"
     >
       <script :type={Phoenix.LiveView.ColocatedHook} name=".Palette">
         export default {
           mounted() {
-            // The global Cmd/Ctrl+K listener is bound on `mounted()`
-            // regardless of palette visibility. The handler is a no-op
-            // until `this.el` is still in the DOM and the LiveSocket
-            // is connected — `pushEventTo` silently drops otherwise.
             this.handler = (e) => {
-              if (!this.el || !this.el.isConnected) return
               const isModKey = e.metaKey || e.ctrlKey
               if (isModKey && e.key && e.key.toLowerCase() === "k") {
                 e.preventDefault()
-                e.stopPropagation()
                 this.pushEventTo(this.el, "toggle", {})
               }
             }
-            // Capture phase so we beat any document-level keydown
-            // handlers that might call `stopPropagation` (e.g.
-            // contenteditable canvas in Studio).
-            window.addEventListener("keydown", this.handler, true)
-            // Mark the root as ready so Playwright/integration tests
-            // can wait for the binding to attach before pressing the
-            // chord. Without this, a `page.keyboard.press` issued
-            // immediately after `goto` can race the LV upgrade and the
-            // keypress is dropped (silent `pushEventTo` no-op).
-            this.el.setAttribute("data-cmdk-ready", "true")
+            window.addEventListener("keydown", this.handler)
           },
           destroyed() {
-            window.removeEventListener("keydown", this.handler, true)
+            window.removeEventListener("keydown", this.handler)
           }
         }
       </script>
@@ -545,15 +529,32 @@ defmodule ContractWeb.Components.CommandPalette do
   end
 
   defp fire(%Command{action: {:emit, kind, payload}} = _cmd, socket) do
-    # `kind` is the browser-event name we push (always
+    # `kind` is the event-name we deliver (always
     # `:command_palette_picked` today; left polymorphic for future
-    # commands). `payload` already carries `action_kind` per
-    # SPEC.md §12 routing — Studio LV (Wave 3C1) reads
-    # `payload.action_kind` to dispatch.
-    {:noreply,
-     socket
-     |> close()
-     |> push_event(Atom.to_string(kind), payload)}
+    # commands). `payload` carries `action_kind` per SPEC.md §12
+    # routing — Studio LV (Wave 3C1) reads `payload.action_kind` /
+    # `payload.kind` to dispatch.
+    #
+    # The LiveComponent runs inside the parent LV's process, so a
+    # `send/2` lands in the parent LV's `handle_info/2`. The parent
+    # then re-routes it through its `handle_event/3` funnel so the
+    # desktop palette and the mobile chat-command-button (which uses a
+    # direct `phx-click="command_palette_picked"`) take the same path.
+    #
+    # `push_event/3` was the original implementation but there is no
+    # JS hook listening for `command_palette_picked` on the client, so
+    # it was a silent no-op — that broke Cmd+K → Enter on action
+    # commands like "Set contract type…".
+    params = stringify_keys(Map.put(payload, :kind, Map.get(payload, :action_kind)))
+    send(self(), {Atom.to_string(kind), params})
+    {:noreply, close(socket)}
+  end
+
+  defp stringify_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), v}
+      {k, v} -> {k, v}
+    end)
   end
 
   defp fire(%Command{action: {:mode, :info, target}}, socket) do

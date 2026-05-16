@@ -18,13 +18,18 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
       reconcile_modal_open?               → revoke-overlap reconciliation
       modal_param == "new_document"       → create new document picker
       modal_param == "export"             → export format picker
+      modal_param == "type_picker"        → set-contract-type picker
 
-  The first five are driven from parent assigns. The last two live as
+  The first five are driven from parent assigns. The last three live as
   local component state (`:modal_param`) because the parent's
   `update_modal/3` does not map them onto `studio_state`. The parent's
-  `open_modal` event with `phx-value-modal=new_document` (or `export`)
-  is also captured here via `phx-target={@myself}` so the parent does
-  not need a new state field.
+  `open_modal` event with `phx-value-modal=new_document` (or `export` /
+  `type_picker`) is also captured here via `phx-target={@myself}` so
+  the parent does not need a new state field. The type-picker is
+  additionally opened by the global Cmd+K command palette — the parent
+  LV's `handle_event("command_palette_picked", %{"kind" =>
+  "set_contract_type"}, ...)` calls `send_update/2` with
+  `modal_param: "type_picker"` when no `type_key` is supplied.
 
   ## Event vocabulary emitted
 
@@ -195,6 +200,10 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
     {:noreply, assign(socket, :modal_param, "export")}
   end
 
+  def handle_event("open_modal", %{"modal" => "type_picker"}, socket) do
+    {:noreply, assign(socket, :modal_param, "type_picker")}
+  end
+
   def handle_event("set_modal_param", %{"value" => value}, socket) do
     {:noreply, assign(socket, :modal_param, value)}
   end
@@ -235,7 +244,7 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
   # (local state). For state-driven modals, Esc bubbles to the parent
   # LV via phx-window-keydown="close_modal" (see render_*).
   def handle_event("key", %{"key" => "Escape"}, socket) do
-    if socket.assigns.modal_param in ["new_document", "export"] do
+    if socket.assigns.modal_param in ["new_document", "export", "type_picker"] do
       {:noreply,
        socket
        |> assign(:modal_param, nil)
@@ -259,7 +268,7 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
       truthy?(state && state.upload_panel_open?) or
       truthy?(state && state.migration_panel_open?) or
       truthy?(assigns[:reconcile_modal_open?]) or
-      assigns[:modal_param] in ["new_document", "export"]
+      assigns[:modal_param] in ["new_document", "export", "type_picker"]
   end
 
   defp truthy?(true), do: true
@@ -353,6 +362,8 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
           {render_new_document_modal(assigns)}
         <% @modal_param == "export" -> %>
           {render_export_modal(assigns)}
+        <% @modal_param == "type_picker" -> %>
+          {render_type_picker(assigns)}
         <% true -> %>
           <%!-- No modal active. --%>
       <% end %>
@@ -1146,6 +1157,75 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
               data-format={format}
             >
               {format_label(format)}
+            </button>
+          </li>
+        </ul>
+      </div>
+    </div>
+    """
+  end
+
+  # Set-contract-type picker. Opened by Cmd+K → "Set contract type…" or by
+  # the mobile chat-command-button (both routes fire `command_palette_picked`
+  # with `kind=set_contract_type` and no `type_key`; the parent LV catches
+  # that case and `send_update`s `modal_param: "type_picker"` here).
+  #
+  # Each row submits the `set_contract_type` Action directly (bubbles to
+  # the parent LV) with the picked `type_key`. The list is sourced from
+  # `Contract.ContractTypes.list/0` so it stays in sync with the registry.
+  defp render_type_picker(assigns) do
+    assigns = assign(assigns, :contract_types, type_options())
+
+    ~H"""
+    <div
+      id={"#{@id}-type-picker"}
+      class="modal modal-open"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={"#{@id}-type-picker-title"}
+      data-modal="type_picker"
+      data-role="type-picker"
+    >
+      <div
+        class="modal-backdrop"
+        phx-click="set_modal_param"
+        phx-value-value=""
+        phx-target={@myself}
+        data-role="modal-backdrop"
+      />
+      <div class="modal-box max-w-md">
+        <header class="flex items-start justify-between mb-3">
+          <h2 id={"#{@id}-type-picker-title"} class="text-lg font-semibold">
+            {dgettext("studio", "Set contract type")}
+          </h2>
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost btn-circle"
+            phx-click="set_modal_param"
+            phx-value-value=""
+            phx-target={@myself}
+            aria-label={dgettext("studio", "Close")}
+            data-role="modal-close"
+          >
+            ✕
+          </button>
+        </header>
+
+        <p class="text-sm text-base-content/70 mb-3">
+          {dgettext("studio", "Pick a contract type for this document.")}
+        </p>
+
+        <ul class="menu menu-sm w-full" data-role="type-picker-list">
+          <li :for={{label, key} <- @contract_types} id={"type-picker-#{key}"}>
+            <button
+              type="button"
+              phx-click="set_contract_type"
+              phx-value-type_key={key}
+              data-type-key={key}
+              data-role="type-picker-row"
+            >
+              <span class="font-medium">{label}</span>
+              <span class="text-xs text-base-content/60">{key}</span>
             </button>
           </li>
         </ul>

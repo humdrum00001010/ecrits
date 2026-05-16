@@ -526,6 +526,89 @@ defmodule ContractWeb.StudioLiveTest do
   end
 
   # ---------------------------------------------------------------------------
+  # Cmd+K palette → "Set contract type…" → type-picker modal (bug #75).
+  # Pushing `command_palette_picked` with `kind=set_contract_type` and no
+  # `type_key` must NOT dispatch an Action (it would fail validation) — it
+  # must open the type-picker modal on the ModalHost so the user can pick.
+  # ---------------------------------------------------------------------------
+  describe "command_palette_picked → set_contract_type opens the type-picker" do
+    setup :log_in_a_user
+
+    test "without type_key, opens the type-picker modal and lists all 5 contract types",
+         %{conn: conn} do
+      conn =
+        Plug.Conn.put_session(
+          conn,
+          :user_perms,
+          ~w(read write commit revoke export type_change)a
+        )
+
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      html =
+        render_hook(lv, "command_palette_picked", %{
+          "kind" => "set_contract_type",
+          "action_kind" => "set_contract_type"
+        })
+
+      # The type-picker modal renders with the data-role the Playwright
+      # spec selects on (`[data-role="type-picker"]`).
+      assert html =~ ~s(data-role="type-picker")
+      assert html =~ ~s(data-modal="type_picker")
+      assert html =~ ~s(data-role="type-picker-list")
+
+      # All 5 contract-type keys from the ContractTypes registry render
+      # as rows. Sourcing from the registry keeps this list in sync with
+      # priv/contract_types/*.toml.
+      {:ok, specs} = Contract.ContractTypes.list()
+      assert length(specs) == 5
+
+      for %{key: key} <- specs do
+        assert html =~ ~s(data-type-key="#{key}")
+        assert html =~ ~s(phx-value-type_key="#{key}")
+      end
+    end
+
+    test "with a type_key, dispatches the set_contract_type Action (no modal)",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, matter} = Contract.Matters.create(scope, %{"name" => "palette-type"})
+
+      {:ok, doc} =
+        Contract.Documents.create(scope, %{
+          "matter_id" => matter.id,
+          "title" => "src",
+          "type_key" => "nda_v1"
+        })
+
+      conn =
+        Plug.Conn.put_session(
+          conn,
+          :user_perms,
+          ~w(read write commit revoke export type_change)a
+        )
+
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      send_state(lv, %State{
+        matter_id: matter.id,
+        selected_document_id: doc.id,
+        mode: :editing,
+        last_seen_revision: 0
+      })
+
+      html =
+        render_hook(lv, "command_palette_picked", %{
+          "kind" => "set_contract_type",
+          "type_key" => "franchise_v1"
+        })
+
+      # No type-picker modal — the Action dispatched directly.
+      refute html =~ ~s(data-role="type-picker")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # helpers
   # ---------------------------------------------------------------------------
 
