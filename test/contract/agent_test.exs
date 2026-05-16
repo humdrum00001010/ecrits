@@ -157,6 +157,123 @@ defmodule Contract.AgentTest do
       assert {:ok, ctx} = Agent.build_context(nil, action)
       assert ctx.previous_response_id == "resp_xyz"
     end
+
+    test "folds a populated Context Reservoir into the agent's input (SPEC.md §10a, §20)" do
+      reservoir = %Contract.Studio.ContextReservoir{
+        brief: %{purpose: "draft NDA", status: :drafting, user_role: "discloser"},
+        shared_fields: [
+          %{field_id: "party_a", label: "Party A", value: "Acme"},
+          %{field_id: "party_b", label: "Party B", value: "Beta"}
+        ],
+        open_questions: [
+          %{question_id: "q1", text: "Mutual or one-way?", asked_by: :agent}
+        ],
+        related_documents: [
+          %{document_id: "d1", label_ko: "초안", label_en: "draft", role: :current_draft}
+        ],
+        evidence: [
+          %{evidence_id: "e1", source: :law_mcp, summary: "민법 §391"}
+        ]
+      }
+
+      action = %Action{
+        kind: :chat_message,
+        actor_type: :user,
+        message: "tighten this",
+        payload: %{"context_reservoir" => reservoir}
+      }
+
+      assert {:ok, ctx} = Agent.build_context(nil, action)
+      [user_msg] = ctx.input
+      assert user_msg.role == "user"
+      assert user_msg.content =~ "tighten this"
+      assert user_msg.content =~ "## Context Reservoir"
+      assert user_msg.content =~ "Brief:"
+      assert user_msg.content =~ "Open questions:"
+      assert user_msg.content =~ "Mutual or one-way?"
+      assert user_msg.content =~ "Related documents:"
+      assert user_msg.content =~ "Evidence:"
+    end
+
+    test "empty reservoir leaves the input mostly unchanged — no header noise" do
+      action = %Action{
+        kind: :chat_message,
+        actor_type: :user,
+        message: "hi",
+        payload: %{"context_reservoir" => %Contract.Studio.ContextReservoir{}}
+      }
+
+      assert {:ok, ctx} = Agent.build_context(nil, action)
+      [user_msg] = ctx.input
+      assert user_msg.content == "hi"
+      refute user_msg.content =~ "Context Reservoir"
+      refute user_msg.content =~ "Brief:"
+    end
+
+    test "no reservoir on action — frame is unchanged" do
+      action = %Action{
+        kind: :chat_message,
+        actor_type: :user,
+        message: "hello",
+        payload: %{}
+      }
+
+      assert {:ok, ctx} = Agent.build_context(nil, action)
+      [user_msg] = ctx.input
+      assert user_msg.content == "hello"
+      refute user_msg.content =~ "Context Reservoir"
+    end
+  end
+
+  describe "include_context_reservoir/2" do
+    test "appends the summary to a trailing user message" do
+      frame = %{input: [%{role: "user", content: "do thing"}], system: "sys", tools: []}
+      reservoir = %Contract.Studio.ContextReservoir{
+        brief: %{purpose: "NDA"},
+        open_questions: [%{question_id: "q1", text: "mutual?"}]
+      }
+
+      assert {:ok, new_frame} = Agent.include_context_reservoir(frame, reservoir)
+      [%{content: content}] = new_frame.input
+      assert content =~ "do thing"
+      assert content =~ "## Context Reservoir"
+      assert content =~ "Brief:"
+      assert content =~ "mutual?"
+    end
+
+    test "empty reservoir is a no-op (no header)" do
+      frame = %{input: [%{role: "user", content: "ok"}], system: "sys", tools: []}
+      empty = %Contract.Studio.ContextReservoir{}
+
+      assert {:ok, ^frame} = Agent.include_context_reservoir(frame, empty)
+    end
+
+    test "long lists are truncated to N items + '…(+more)' marker" do
+      qs =
+        for i <- 1..20 do
+          %{question_id: "q#{i}", text: "question #{i}"}
+        end
+
+      reservoir = %Contract.Studio.ContextReservoir{open_questions: qs}
+      summary = Agent.summarize_reservoir(reservoir)
+
+      # Header reports the total count
+      assert summary =~ "Open questions:"
+      assert summary =~ "(20)"
+
+      # Only the first N items are rendered verbatim — late ones become "…(+N)".
+      assert summary =~ "question 1"
+      refute summary =~ "question 20"
+      assert summary =~ "…(+"
+    end
+
+    test "summary is bounded to ≤ 4000 chars even for a fat reservoir" do
+      big_brief = for k <- 1..200, into: %{}, do: {"k#{k}", String.duplicate("v", 200)}
+      reservoir = %Contract.Studio.ContextReservoir{brief: big_brief}
+      summary = Agent.summarize_reservoir(reservoir)
+
+      assert byte_size(summary) <= 4000 + String.length("…")
+    end
   end
 
   describe "system_prompt/0" do

@@ -105,6 +105,16 @@ defmodule ContractWeb.StudioLive do
       {:ok, {studio_state, projection}} ->
         _ = Studio.subscribe(scope, studio_state)
 
+        # SPEC.md §11: "if LiveView crashes or misses messages, [the
+        # reservoir] must be rebuilt from Store + ChangeLog on
+        # mount/reconnect." Best-effort — leave studio_state as-is on
+        # failure so the UI still renders.
+        studio_state =
+          case safe_refresh_reservoir(scope, studio_state) do
+            {:ok, refreshed} -> refreshed
+            _ -> studio_state
+          end
+
         breadcrumbs = build_breadcrumbs(scope, studio_state, projection)
 
         socket =
@@ -680,12 +690,14 @@ defmodule ContractWeb.StudioLive do
     |> stream_insert(:changes, change, at: 0)
     |> push_editor_last_change(change)
     |> recompute_grill_assigns()
+    |> refresh_reservoir_if_needed()
   end
 
   def handle_protocol_message({:change_revoked, %Contract.Change{} = change}, socket) do
     socket
     |> stream_insert(:changes, change, at: 0)
     |> push_event("editor:change-revoked", %{change_id: change.id})
+    |> refresh_reservoir_if_needed()
   end
 
   def handle_protocol_message({:revision_conflict, change_id, node_id}, socket) do
@@ -714,6 +726,7 @@ defmodule ContractWeb.StudioLive do
     socket
     |> update(:projection, fn proj -> Map.put(proj, :marks, marks) end)
     |> recompute_grill_assigns()
+    |> refresh_reservoir_if_needed()
   end
 
   def handle_protocol_message({:agent_stream, agent_run_id, stream_event}, socket) do
@@ -747,6 +760,7 @@ defmodule ContractWeb.StudioLive do
     end)
     |> stream_insert(:chat_messages, bubble)
     |> recompute_grill_assigns()
+    |> refresh_reservoir_if_needed()
   end
 
   def handle_protocol_message({:agent_failed, agent_run_id, reason}, socket) do
@@ -812,11 +826,16 @@ defmodule ContractWeb.StudioLive do
   end
 
   def handle_protocol_message({:import_completed, document}, socket) do
-    stream_insert(
-      socket,
-      :toasts,
-      build_toast(:info, "Import completed", import_summary(document))
-    )
+    socket
+    |> stream_insert(:toasts, build_toast(:info, "Import completed", import_summary(document)))
+    |> refresh_reservoir_if_needed()
+  end
+
+  # SPEC.md §11 — `:evidence_attached` is in the refresh-trigger set. The
+  # emitter is TBD (a later evidence-attachment workflow); for now the
+  # handler exists so the protocol is complete and the reservoir refreshes.
+  def handle_protocol_message({:evidence_attached, _evidence}, socket) do
+    refresh_reservoir_if_needed(socket)
   end
 
   def handle_protocol_message({:import_failed, import_id, reason}, socket) do
@@ -828,11 +847,9 @@ defmodule ContractWeb.StudioLive do
   end
 
   def handle_protocol_message({:export_ready, export}, socket) do
-    stream_insert(
-      socket,
-      :toasts,
-      build_toast(:info, "Export ready", export_summary(export))
-    )
+    socket
+    |> stream_insert(:toasts, build_toast(:info, "Export ready", export_summary(export)))
+    |> refresh_reservoir_if_needed()
   end
 
   def handle_protocol_message({:export_failed, export_id, reason}, socket) do
@@ -1128,6 +1145,46 @@ defmodule ContractWeb.StudioLive do
       action_kind: change.action_kind,
       node_id: node_id
     })
+  end
+
+  # Mount-side wrapper around Studio.refresh_context_reservoir/2. Swallows
+  # errors because the LV must always render.
+  defp safe_refresh_reservoir(scope, state) do
+    try do
+      Studio.refresh_context_reservoir(scope, state)
+    rescue
+      _ -> {:error, :rescued}
+    catch
+      _, _ -> {:error, :caught}
+    end
+  end
+
+  # SPEC.md §10a / §11 — refresh the Context Reservoir on protocol events
+  # listed in §11 ({:change_committed, :change_revoked, :marks_changed,
+  # :import_completed, :evidence_attached, :export_ready, :agent_completed}).
+  # Best-effort: a failure in load_context_reservoir must never break the
+  # caller's message handler.
+  defp refresh_reservoir_if_needed(socket) do
+    scope = socket.assigns[:current_scope]
+    state = socket.assigns[:studio_state]
+
+    if is_nil(scope) or is_nil(state) do
+      socket
+    else
+      try do
+        case Studio.refresh_context_reservoir(scope, state) do
+          {:ok, %Contract.Studio.State{} = new_state} ->
+            assign(socket, :studio_state, new_state)
+
+          _ ->
+            socket
+        end
+      rescue
+        _ -> socket
+      catch
+        _, _ -> socket
+      end
+    end
   end
 
   defp recompute_grill_assigns(socket) do

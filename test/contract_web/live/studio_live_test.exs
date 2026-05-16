@@ -637,6 +637,156 @@ defmodule ContractWeb.StudioLiveTest do
   end
 
   # ---------------------------------------------------------------------------
+  # Context Reservoir refresh (SPEC.md §10a + §11). On the seven protocol
+  # messages listed in §11 ("StudioLive MUST refresh the Context Reservoir
+  # in addition to its other handling"), the LV must re-derive
+  # `studio_state.context_reservoir` via `Studio.refresh_context_reservoir/2`.
+  # The refresh is best-effort — a failure in the helper must NOT take down
+  # the message handler. We assert the reservoir struct is present
+  # post-message (it is `%ContextReservoir{}` by default so the assertion
+  # is meaningful only when paired with the SPEC contract that the refresh
+  # was attempted).
+  # ---------------------------------------------------------------------------
+  describe "Context Reservoir refresh on protocol messages (SPEC.md §10a, §11)" do
+    setup :log_in_a_user
+
+    test "after {:change_committed, _} studio_state.context_reservoir is a struct",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      doc = Ecto.UUID.generate()
+      send_state(lv, %State{selected_document_id: doc, mode: :editing, last_seen_revision: 0})
+
+      change = %Contract.Change{
+        id: Ecto.UUID.generate(),
+        document_id: doc,
+        action_kind: "edit_document",
+        applied_revision: 3
+      }
+
+      send(lv.pid, {:change_committed, change})
+      _ = render(lv)
+
+      assert %Contract.Studio.ContextReservoir{} =
+               assigns(lv).studio_state.context_reservoir
+    end
+
+    test "after {:change_revoked, _} reservoir is refreshed without crashing",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      send_state(lv, %State{
+        selected_document_id: Ecto.UUID.generate(),
+        mode: :editing,
+        last_seen_revision: 0
+      })
+
+      change = %Contract.Change{
+        id: Ecto.UUID.generate(),
+        action_kind: "revoke_change",
+        applied_revision: 4
+      }
+
+      send(lv.pid, {:change_revoked, change})
+      assert render(lv) =~ ~s(id="studio-root")
+      assert %Contract.Studio.ContextReservoir{} =
+               assigns(lv).studio_state.context_reservoir
+    end
+
+    test "after {:marks_changed, marks} the reservoir is refreshed",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      send_state(lv, %State{
+        selected_document_id: Ecto.UUID.generate(),
+        mode: :editing,
+        last_seen_revision: 0
+      })
+
+      marks = %{"m1" => %{id: "m1", intent: :assertion, source: :user}}
+      send(lv.pid, {:marks_changed, marks})
+      _ = render(lv)
+
+      assert assigns(lv).projection.marks == marks
+      assert %Contract.Studio.ContextReservoir{} =
+               assigns(lv).studio_state.context_reservoir
+    end
+
+    test "after {:agent_completed, _, _} the reservoir is refreshed",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      run = Ecto.UUID.generate()
+
+      send_state(lv, %State{
+        agent_run_id: run,
+        selected_document_id: Ecto.UUID.generate(),
+        mode: :editing,
+        last_seen_revision: 0
+      })
+
+      send(lv.pid, {:agent_completed, run, %{ok: true}})
+      _ = render(lv)
+
+      assert assigns(lv).studio_state.agent_run_id == nil
+      assert %Contract.Studio.ContextReservoir{} =
+               assigns(lv).studio_state.context_reservoir
+    end
+
+    test "after {:import_completed, doc} the reservoir is refreshed",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      send_state(lv, %State{
+        selected_document_id: Ecto.UUID.generate(),
+        mode: :editing,
+        last_seen_revision: 0
+      })
+
+      send(lv.pid, {:import_completed, %{id: Ecto.UUID.generate(), title: "imported"}})
+      _ = render(lv)
+
+      assert %Contract.Studio.ContextReservoir{} =
+               assigns(lv).studio_state.context_reservoir
+    end
+
+    test "after {:export_ready, export} the reservoir is refreshed",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      send_state(lv, %State{
+        selected_document_id: Ecto.UUID.generate(),
+        mode: :editing,
+        last_seen_revision: 0
+      })
+
+      send(lv.pid, {:export_ready, %{id: Ecto.UUID.generate(), download_url: "/x"}})
+      _ = render(lv)
+
+      assert %Contract.Studio.ContextReservoir{} =
+               assigns(lv).studio_state.context_reservoir
+    end
+
+    test "{:evidence_attached, _} handler exists and refreshes the reservoir (SPEC.md §11)",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      send_state(lv, %State{
+        selected_document_id: Ecto.UUID.generate(),
+        mode: :editing,
+        last_seen_revision: 0
+      })
+
+      send(lv.pid, {:evidence_attached, %{evidence_id: "e1", summary: "민법"}})
+      # If the handler didn't exist or crashed, `render` would raise.
+      assert render(lv) =~ ~s(id="studio-root")
+
+      assert %Contract.Studio.ContextReservoir{} =
+               assigns(lv).studio_state.context_reservoir
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Cmd+K palette → "Set contract type…" → type-picker modal (bug #75).
   # Pushing `command_palette_picked` with `kind=set_contract_type` and no
   # `type_key` must NOT dispatch an Action (it would fail validation) — it

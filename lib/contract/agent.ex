@@ -17,7 +17,13 @@ defmodule Contract.Agent do
   alias Contract.Agent.Run
   alias Contract.Agent.RunServer
   alias Contract.Agent.RunSupervisor
+  alias Contract.Studio.ContextReservoir
   alias Contract.Types, as: T
+
+  # Hard cap so a fat reservoir can never blow up the prompt. SPEC.md §20
+  # says "Agent SHOULD include … Context Reservoir projection" — bounded.
+  @reservoir_max_items 8
+  @reservoir_max_chars 4000
 
   @grill_system_prompt """
   You are a legal-document agent for Contract Studio. You modify documents only via Actions.
@@ -112,6 +118,11 @@ defmodule Contract.Agent do
   @doc """
   Assembles the system prompt, conversation history, MCP tool list, and
   optional `previous_response_id` for one agent run.
+
+  When the Action carries a Context Reservoir (via `payload["context_reservoir"]`
+  or `payload[:context_reservoir]`), it is folded into the agent's input
+  frame as a bounded read-only summary — see `include_context_reservoir/2`
+  and SPEC.md §10a / §20.
   """
   @spec build_context(T.ctx(), Action.t()) :: {:ok, map()}
   def build_context(_ctx, %Action{} = action) do
@@ -124,15 +135,201 @@ defmodule Contract.Agent do
 
     tools = [Contract.IO.OpenAI.law_mcp_tool()]
 
-    context = %{
+    frame = %{
       system: @grill_system_prompt <> "\n\nCURRENT_DOCUMENT_SNAPSHOT:\n" <> Jason.encode!(snapshot),
       input: input,
       tools: tools,
       previous_response_id: action.payload["previous_response_id"]
     }
 
-    {:ok, context}
+    case extract_reservoir(action) do
+      nil ->
+        {:ok, frame}
+
+      %ContextReservoir{} = reservoir ->
+        include_context_reservoir(frame, reservoir)
+    end
   end
+
+  @doc """
+  Folds the Context Reservoir into the agent's `input` as a bounded
+  read-only summary appended to the last user message.
+
+  Per SPEC.md §20: "Agent context SHOULD include … Context Reservoir
+  projection". Per SPEC.md §10a: "The agent observes the reservoir as a
+  read-only projection. Agent mutations to context still flow through
+  Actions; the reservoir is never written to directly."
+
+  The summary is bounded by `@reservoir_max_items` per section and
+  `@reservoir_max_chars` overall. An empty reservoir leaves the frame
+  untouched (no header noise).
+  """
+  @spec include_context_reservoir(map(), ContextReservoir.t()) :: {:ok, map()}
+  def include_context_reservoir(frame, %ContextReservoir{} = reservoir) do
+    case summarize_reservoir(reservoir) do
+      "" ->
+        {:ok, frame}
+
+      summary ->
+        appended = "\n\n## Context Reservoir\n" <> summary
+        {:ok, Map.update(frame, :input, [], &append_to_input(&1, appended))}
+    end
+  end
+
+  # --- reservoir helpers ----------------------------------------------------
+
+  defp extract_reservoir(%Action{payload: payload}) when is_map(payload) do
+    case Map.get(payload, "context_reservoir") || Map.get(payload, :context_reservoir) do
+      %ContextReservoir{} = r -> r
+      _ -> nil
+    end
+  end
+
+  defp extract_reservoir(_), do: nil
+
+  @doc false
+  @spec summarize_reservoir(ContextReservoir.t()) :: String.t()
+  def summarize_reservoir(%ContextReservoir{} = r) do
+    parts =
+      [
+        format_brief_section(r.brief),
+        format_shared_fields_section(r.shared_fields),
+        format_open_questions_section(r.open_questions),
+        format_related_documents_section(r.related_documents),
+        format_sources_section(r.sources),
+        format_evidence_section(r.evidence),
+        format_readiness_section(r.readiness)
+      ]
+      |> Enum.reject(&(&1 == "" or is_nil(&1)))
+
+    parts
+    |> Enum.join("\n")
+    |> truncate_chars(@reservoir_max_chars)
+  end
+
+  defp format_brief_section(brief) when is_map(brief) and map_size(brief) > 0 do
+    pieces =
+      brief
+      |> Enum.map(fn {k, v} -> {to_string(k), v} end)
+      |> Enum.reject(fn {_k, v} -> blank?(v) end)
+      |> Enum.take(@reservoir_max_items)
+      |> Enum.map(fn {k, v} -> "#{k}: #{stringify(v)}" end)
+
+    case pieces do
+      [] -> ""
+      list -> "**Brief:** " <> Enum.join(list, " · ")
+    end
+  end
+
+  defp format_brief_section(_), do: ""
+
+  defp format_shared_fields_section(fields) when is_list(fields) and fields != [] do
+    pieces =
+      fields
+      |> Enum.take(@reservoir_max_items)
+      |> Enum.map(fn f ->
+        label = read_string(f, [:label, "label", :field_id, "field_id"]) || "field"
+        value = read_string(f, [:value, "value"]) || "—"
+        "#{label}: #{value}"
+      end)
+
+    suffix = trailing_more(length(fields))
+    "**Shared fields:** " <> Enum.join(pieces, " · ") <> suffix
+  end
+
+  defp format_shared_fields_section(_), do: ""
+
+  defp format_open_questions_section(qs) when is_list(qs) and qs != [] do
+    pieces =
+      qs
+      |> Enum.take(@reservoir_max_items)
+      |> Enum.map(fn q ->
+        text = read_string(q, [:text, "text"]) || "(no text)"
+        "- " <> text
+      end)
+
+    header = "**Open questions:** (#{length(qs)})"
+    header <> "\n" <> Enum.join(pieces, "\n") <> trailing_more(length(qs))
+  end
+
+  defp format_open_questions_section(_), do: ""
+
+  defp format_related_documents_section(docs) when is_list(docs) and docs != [] do
+    "**Related documents:** #{length(docs)} related"
+  end
+
+  defp format_related_documents_section(_), do: ""
+
+  defp format_sources_section(sources) when is_list(sources) and sources != [] do
+    "**Sources:** #{length(sources)} item(s)"
+  end
+
+  defp format_sources_section(_), do: ""
+
+  defp format_evidence_section(ev) when is_list(ev) and ev != [] do
+    "**Evidence:** #{length(ev)} item(s)"
+  end
+
+  defp format_evidence_section(_), do: ""
+
+  defp format_readiness_section(readiness) when is_map(readiness) and map_size(readiness) > 0 do
+    unresolved = Map.get(readiness, :unresolved_questions) || Map.get(readiness, "unresolved_questions")
+    warnings = Map.get(readiness, :export_warnings) || Map.get(readiness, "export_warnings")
+    bits = []
+    bits = if is_integer(unresolved), do: bits ++ ["unresolved=#{unresolved}"], else: bits
+    bits = if is_integer(warnings), do: bits ++ ["warnings=#{warnings}"], else: bits
+
+    case bits do
+      [] -> ""
+      list -> "**Readiness:** " <> Enum.join(list, " · ")
+    end
+  end
+
+  defp format_readiness_section(_), do: ""
+
+  defp trailing_more(n) when n > @reservoir_max_items, do: " …(+#{n - @reservoir_max_items})"
+  defp trailing_more(_), do: ""
+
+  defp read_string(map, keys) when is_map(map) do
+    Enum.find_value(keys, fn k ->
+      case Map.get(map, k) do
+        v when is_binary(v) and v != "" -> v
+        _ -> nil
+      end
+    end)
+  end
+
+  defp read_string(_, _), do: nil
+
+  defp stringify(v) when is_binary(v), do: v
+  defp stringify(v) when is_atom(v), do: Atom.to_string(v)
+  defp stringify(v), do: inspect(v)
+
+  defp blank?(nil), do: true
+  defp blank?(""), do: true
+  defp blank?(%{} = m), do: map_size(m) == 0
+  defp blank?([]), do: true
+  defp blank?(_), do: false
+
+  defp truncate_chars(s, max) when is_binary(s) do
+    if byte_size(s) > max, do: binary_part(s, 0, max) <> "…", else: s
+  end
+
+  defp append_to_input(input, suffix) when is_binary(input), do: input <> suffix
+
+  defp append_to_input(input, suffix) when is_list(input) do
+    case Enum.reverse(input) do
+      [%{role: "user", content: content} = last | rest] when is_binary(content) ->
+        Enum.reverse([%{last | content: content <> suffix} | rest])
+
+      _ ->
+        # No trailing user message — append a system-style user message so the
+        # reservoir still reaches the model.
+        input ++ [%{role: "user", content: String.trim_leading(suffix)}]
+    end
+  end
+
+  defp append_to_input(_, suffix), do: [%{role: "user", content: String.trim_leading(suffix)}]
 
   @doc """
   Parses the model's JSON envelope and returns an `Action(:agent_change)`.
