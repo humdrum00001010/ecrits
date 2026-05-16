@@ -223,11 +223,23 @@ defmodule ContractWeb.Components.CommandPalette do
         {:noreply, assign(socket, :selected_index, prev_idx)}
 
       "Enter" ->
-        list = filter_commands(socket.assigns.available_commands, socket.assigns.query)
+        # Prefer the form-submitted value over the stored `query` assign:
+        # `phx-debounce="50"` on the input means the `phx-change="query"`
+        # event may not have arrived yet when the user presses Enter, so
+        # `socket.assigns.query` can be stale (often `""`). The form's
+        # `phx-submit="key"` carries the live input value as `params["value"]`
+        # — use that to pick the highlighted command.
+        query =
+          case Map.get(params, "value") do
+            value when is_binary(value) and value != "" -> value
+            _ -> socket.assigns.query
+          end
+
+        list = filter_commands(socket.assigns.available_commands, query)
 
         case Enum.at(list, socket.assigns.selected_index) do
           nil -> {:noreply, socket}
-          command -> fire(command, socket)
+          command -> fire(command, assign(socket, :query, query))
         end
 
       _ ->
@@ -554,8 +566,6 @@ defmodule ContractWeb.Components.CommandPalette do
     # it was a silent no-op — that broke Cmd+K → Enter on action
     # commands like "Set contract type…".
     params = stringify_keys(Map.put(payload, :kind, Map.get(payload, :action_kind)))
-    require Logger
-    Logger.warning("PALETTE FIRE EMIT kind=#{Atom.to_string(kind)} params=#{inspect(params)} self=#{inspect(self())}")
     send(self(), {Atom.to_string(kind), params})
     {:noreply, close(socket)}
   end
