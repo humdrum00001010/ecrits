@@ -670,44 +670,37 @@ defmodule Contract.Export.HWPX do
 
   defp table_xml(node, nodes, projection, rows, cols) do
     cell_ids = Map.get(node, :children, [])
-    cell_chunks = Enum.chunk_every(cell_ids, cols, cols, [])
-
-    # Pad to exactly `rows` rows.
-    padded_rows =
-      cell_chunks
-      |> Enum.take(rows)
-      |> Kernel.++(List.duplicate([], max(0, rows - length(cell_chunks))))
 
     attrs = Map.get(node, :attrs, %{}) || %{}
     column_widths = Map.get(attrs, :column_widths) || Map.get(attrs, "column_widths") || []
     table_border = Map.get(attrs, :border_fill_id) || Map.get(attrs, "border_fill_id") || "3"
 
+    # `:row_span` / `:col_span` on a cell mark interior grid slots as spanned;
+    # the spanning cell's `<hp:cellSpan>` covers them, so no `<hp:tc>` is
+    # emitted at those positions (this is what HWPX viewers expect when
+    # reading the source's flat cell list).
+    grid = place_cells(cell_ids, nodes, rows, cols)
+
     rows_xml =
-      padded_rows
-      |> Enum.with_index()
-      |> Enum.map(fn {row_cells, row_idx} ->
-        # Pad row to `cols` cells with nil placeholders.
-        padded = row_cells ++ List.duplicate(nil, max(0, cols - length(row_cells)))
-
+      0..(rows - 1)
+      |> Enum.map(fn row_idx ->
         cells_xml =
-          padded
-          |> Enum.take(cols)
-          |> Enum.with_index()
-          |> Enum.map(fn {cell_id, col_idx} ->
-            cell_node =
-              case cell_id do
-                nil -> nil
-                id -> Map.get(nodes, id)
-              end
-
-            cell_text =
-              case cell_node do
-                nil -> ""
-                node -> collect_text(node, projection)
-              end
-
+          0..(cols - 1)
+          |> Enum.map(fn col_idx ->
             width = column_width_at(column_widths, col_idx)
-            tc_xml(cell_text, cell_node, row_idx, col_idx, width, table_border)
+
+            case Map.get(grid, {row_idx, col_idx}) do
+              {:cell, cell_id} ->
+                cell_node = Map.get(nodes, cell_id)
+                cell_text = collect_text(cell_node, projection)
+                tc_xml(cell_text, cell_node, row_idx, col_idx, width, table_border)
+
+              :spanned ->
+                ""
+
+              nil ->
+                tc_xml("", nil, row_idx, col_idx, width, table_border)
+            end
           end)
           |> Enum.join()
 
@@ -736,6 +729,56 @@ defmodule Contract.Export.HWPX do
       ~s(<hp:t/>) <>
       ~s(</hp:run>) <>
       ~s(</hp:p>)
+  end
+
+  # Build a sparse grid `%{{row, col} => {:cell, id} | :spanned}` placing
+  # each child cell either at its explicit (:row, :col) attr coordinates or
+  # at the next available row-major slot.
+  defp place_cells(cell_ids, nodes, rows, cols) do
+    {grid, _} =
+      Enum.reduce(cell_ids, {%{}, {0, 0}}, fn cid, {grid_acc, cursor} ->
+        cell_node = Map.get(nodes, cid)
+        attrs = (cell_node && (Map.get(cell_node, :attrs) || %{})) || %{}
+
+        row_span = attrs[:row_span] || attrs["row_span"] || 1
+        col_span = attrs[:col_span] || attrs["col_span"] || 1
+
+        explicit_row = attrs[:row] || attrs["row"]
+        explicit_col = attrs[:col] || attrs["col"]
+
+        {r, c} =
+          if is_integer(explicit_row) and is_integer(explicit_col) do
+            {explicit_row, explicit_col}
+          else
+            next_free_slot(grid_acc, cursor, cols)
+          end
+
+        grid_acc =
+          if r < rows and c < cols do
+            grid_acc = Map.put(grid_acc, {r, c}, {:cell, cid})
+
+            for dr <- 0..(row_span - 1), dc <- 0..(col_span - 1), dr + dc > 0, reduce: grid_acc do
+              acc -> Map.put(acc, {r + dr, c + dc}, :spanned)
+            end
+          else
+            grid_acc
+          end
+
+        new_cursor =
+          if c + col_span >= cols, do: {r + 1, 0}, else: {r, c + col_span}
+
+        {grid_acc, new_cursor}
+      end)
+
+    grid
+  end
+
+  defp next_free_slot(grid, {r, c}, cols) do
+    cond do
+      c >= cols -> next_free_slot(grid, {r + 1, 0}, cols)
+      Map.has_key?(grid, {r, c}) -> next_free_slot(grid, {r, c + 1}, cols)
+      true -> {r, c}
+    end
   end
 
   # Pick the width for the col at `col_idx` from the supplied list, or fall
