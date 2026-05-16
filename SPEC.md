@@ -1,233 +1,350 @@
-# Contract Studio SPEC.md
-
-Status: Draft v0.5 (Document-primary)  
-Primary target: Elixir / Phoenix / LiveView  
-Core model: **Action in → Change out → Store is truth → Session coordinates → Agent reasons → Studio renders**
-
----
-
 ## Revision history
-
-- 2026-05-16: Add Context Reservoir as the persistent left-side projection of contract context (brief / shared fields / open questions / related docs / sources / evidence / recent changes / readiness). All reservoir edits go through Action → Runtime → Session → Engine → Store. Reservoir is projection, not truth. Studio layout: Left = Context Reservoir, Center = Document Canvas, Right = Agent Rail.
 - 2026-05-15: Pivot from Matter-primary to Document-primary product framing. Document is now the primary user-facing object; Matter remains the internal context container. Routes reorganized to document-first; matter_id becomes optional on most Actions. UI label "Matter" → "Workspace" (or hidden). DocumentSession is the per-Document live coordinator.
+- 2026-05-16: Add Context Reservoir as the persistent left-side projection of contract context...
+- 2026-05-16 (v0.5): Substantial revision. Rename Action → Command. Move Engine → Session.Reducer (internal). REMOVE Matter entirely (Document.owner_id replaces it). Add new persistent schemas: ChatThread, SourceDocument, SourceClaim, EvidenceSnapshot, AgentRun, ToolCall, BlobRef. Replace Contract.IO with Contract.Blobs + Contract.Providers. Expand Contract.MCP to full resource+tool surface (20 tools, 16 resources). Add Lawyer packet as export format. StudioLive handle_event names switch to dotted notation ("document.edit", "chat.submit", "source_claim.confirm", ...). Context Reservoir REMOVED from this draft — left rail becomes optional outline / related-docs.
 
 ---
 
-## Required framing
+SPEC.md
 
-- User-facing primary object: Document
-- Internal context scope: Matter
-- Main UI surface: Contract Studio
-- Durable edit unit: Change
-- Soft semantic layer: Mark
-- Live coordinator: DocumentSession
+Status: Draft v0.5
+Primary stack: Elixir / Phoenix / LiveView
+Core design: Document + ChatThread + SourceDocument + Command + Change
 
-### Role definitions
+⸻
 
-**Document is the primary user-facing product object.** A Document is the contract draft/file the user is actively creating, importing, editing, converting, reviewing, revoking, exporting, and sharing with a lawyer. Examples: NDA, Service Agreement, Lease, Statement of Work, Converted NDA variant, Lawyer-review draft.
+1. Purpose
 
-**Matter is the internal context container around one contract-related situation.** A Matter is not the main UX object. It groups background context that may be shared across related documents. Matter may contain: pre-document discussion / Matter Brief, reusable party facts, source uploads, related contract variants, Slack context, law/evidence snapshots, lawyer packet context, migration lineage, related documents.
+This system is an AI-assisted contract writing and editing studio.
 
-The user should not need to understand or create a Matter manually. If a user uploads or creates a Document without an existing Matter, the backend may auto-create a hidden Matter.
+The product lets a user:
 
-The product hierarchy is: **Document → Studio → optional Matter context.** It is NOT: Matter → Documents → Studio.
+* discuss a contract with an always-open agent,
+* upload an existing source document,
+* let the agent parse and interpret that source document,
+* supervise the agent’s interpretation,
+* create or edit a working contract document,
+* revoke prior changes,
+* export a clean draft and lawyer-review packet.
 
-User-facing label policy: 워크스페이스 (Workspace) or hidden; do NOT show "사건" (Matter) in casual UI unless the audience is law-firm operators.
+The system is document-primary.
 
----
+The user is not expected to create or manage a “Matter,” “Case,” or “ContextScope” in v1.
 
-## 0. Stress Test Result
+⸻
 
-I found one design-flipping blocker:
+2. Final Product Model
 
-**If v1 requires active-active multi-region writes to the same contract document, this design is not enough.**
-
-Active-active writing would require CRDT-like semantics or a substantially different conflict model.  
-This spec therefore assumes:
-
-**Each document has exactly one write-home region at a time.**
-
-Read/render can be distributed. Writes route to the document’s home region.
-
-Under that assumption, no hard blocker remains. Dirty crashes, LiveView restarts, duplicate session processes, agent streaming, revokes, type conversion, field migration, and MCP routing are handled by the design below.
-
----
-
-## 1. Design Principle
-
-The product is built around the **Document** as the primary user-facing actor. The user creates, imports, edits, reviews, revokes, converts, exports, and shares Documents. **Matter** is an internal context container — a scope grouping facts, sources, and related documents that may be shared across Documents in the same situation. Most users never need to think about Matter; the backend may auto-create a hidden Matter when a Document is created.
-
-The system is not primarily a "matters module," "documents module," "migration module," "marks module," or "agent module."
-
-The real abstraction is:
-
-```text
-Studio
-  user-facing surface
-
-Runtime
-  routes actions
-
-Engine
-  compiles/applies actions to document state
-
+Document
+  = the contract the user edits
+ChatThread
+  = the conversation with the agent
+SourceDocument
+  = an uploaded/imported document-shaped source used as evidence/input
+SourceClaim
+  = the agent/parser’s supervised interpretation of a SourceDocument
+Command
+  = incoming intent
+Change
+  = durable reversible result
+Mark
+  = soft annotation/question/warning/explanation/link
 Session
-  transient commit coordinator
-
-Lease
-  fencing guard for duplicate sessions
-
+  = live coordinator for one active Document
 Store
-  durable truth
-
+  = durable truth
 Agent
-  semantic interpreter
+  = semantic interpreter and editor
+MCP
+  = bounded tool/resource access for agents
+Blobs
+  = S3/R2/local object storage
+Providers
+  = OpenAI, Upstage, Korea-law-MCP, export renderers
 
-Gateway
-  external ingress: MCP, Slack, route refs
+⸻
 
-IO
-  providers: Upstage, OpenAI, law MCP, export renderers
-```
+3. Non-Goals
 
-The product rule:
+v1 does not attempt to:
 
-```text
-Action in.
-Change out.
-Store is truth.
-Session is reconstructable.
-LiveView is disposable.
-Agent decides meaning.
-Backend enforces mechanics.
-```
+* provide final legal responsibility,
+* manage contract obligations after signing,
+* implement full CLM,
+* track payment/delivery/renewal execution after contract signing,
+* support active-active multi-region editing of the same document,
+* expose a user-facing “Matter” concept,
+* build a full legal ontology,
+* make Markdown the canonical document format,
+* make PDF the editable format,
+* treat generic images or random files as first-class context objects.
 
----
+Optional v1 output:
 
-## 2. Non-Negotiable Invariants
+* post-signing checklist extraction.
 
-1. A LiveView process MUST NOT own document truth.
-2. A BEAM PID MUST NOT be exposed to OpenAI, MCP, Slack, or the browser as routing authority.
-3. A Session process MAY disappear, duplicate, or become stale.
-4. Store + ChangeLog are durable truth.
-5. Only the current lease holder may commit.
-6. Every commit carries revision and idempotency semantics.
-7. PubSub is notification only.
-8. Missed PubSub messages are repaired by `sync_since`.
-9. Agent streams are UI-progress only until they emit a final Action.
-10. User/agent edits apply immediately but are revokable.
-11. Revoke appends a new Change; it never deletes history.
-12. Type selection is metadata. Type conversion is a migration workflow.
-13. Large type conversion should create a new document variant by default.
-14. Field migration moves reusable facts with lineage instead of emitting massive text diffs.
-15. Soft meaning belongs in Marks, not in a giant hard legal ontology.
+Not v1:
 
----
+* post-signing obligation management.
 
-## 3. Core Types
+⸻
 
-These are coarse aliases for specs. They do not replace Ecto schemas.
+4. UI Layout
 
-```elixir
-defmodule Contract.Types do
-  @type id :: Ecto.UUID.t()
-  @type ctx :: Contract.Context.t()
-  @type result(value) :: {:ok, value} | {:error, term()}
+The main product surface is one LiveView.
 
-  @type user_id :: id()
-  @type tenant_id :: id()
-  # matter_id is OPTIONAL / CONTEXTUAL.
-  # Document is the primary user-facing object; Matter is an internal
-  # context container. Most Actions carry only document_id. matter_id is
-  # only required for grouping, shared-field, or pre-document actions.
-  @type matter_id :: id()
-  @type document_id :: id()
-  @type artifact_id :: id()
-  @type change_id :: id()
-  @type mark_id :: id()
-  @type field_id :: id()
-  @type migration_id :: id()
-  @type agent_run_id :: id()
-  @type export_id :: id()
-  @type route_ref_token :: String.t()
+Top    = document title, contract type, metadata, export/share
+Center = working contract document
+Right  = always-open agent chat rail
+Left   = optional outline / related documents later; not required in v1
 
-  @type revision :: non_neg_integer()
-  @type contract_type_key :: String.t()
-  @type idempotency_key :: String.t()
+The chat rail renders:
 
-  @type params :: %{optional(String.t()) => term()}
-  @type attrs :: %{optional(atom() | String.t()) => term()}
-  @type opts :: keyword()
-  @type upload :: Phoenix.LiveView.UploadEntry.t()
-  @type socket :: Phoenix.LiveView.Socket.t()
-end
-```
+* normal agent/user messages,
+* tool-call progress,
+* source-document interpretation,
+* questions,
+* change summaries,
+* revoke conflicts,
+* export status,
+* legal evidence summaries.
 
----
+These are rendered as LiveView components.
 
-## 4. Routes
+They are not persisted as a Card or WorkCard abstraction.
 
-The normal product UI is LiveView-only. No browser `/api` is needed for regular user actions.
+⸻
 
-Routes are **document-first**. The Matter route is **optional and secondary**, used only for workspace/lawyer surfaces — do NOT make `/matters/:matter_id/...` the primary product path. User-facing label policy: 워크스페이스 (Workspace) or hidden; do NOT show "사건" (Matter) in casual UI unless the audience is law-firm operators.
+5. Routes
 
-```elixir
+Use LiveView for normal product behavior.
+
+No browser /api routes are needed for regular document actions.
+
 defmodule ContractWeb.Router do
   use ContractWeb, :router
-
   scope "/", ContractWeb do
     pipe_through [:browser, :authenticated]
-
-    # Primary product surface — document-first.
     live "/studio", StudioLive
     live "/documents/:document_id", StudioLive
-    live "/documents/:document_id/review", StudioLive
-
-    # Optional / secondary — internal "Workspace" (Matter) surface.
-    # User-facing label: 워크스페이스 (Workspace) or hidden; do NOT show
-    # "사건" in casual UI unless the audience is law-firm operators.
-    live "/workspaces/:matter_id", StudioLive
-
     get "/exports/:export_id/download", ExportDownloadController, :show
   end
-
   scope "/mcp", ContractWeb.MCP do
     pipe_through [:mcp]
     forward "/", MCPPlug
   end
-
   scope "/slack", ContractWeb do
     pipe_through [:slack]
-
     post "/events", SlackController, :events
     post "/actions", SlackController, :actions
     post "/commands", SlackController, :commands
   end
 end
-```
 
-`/mcp`, `/slack`, OAuth callbacks, webhooks, and export downloads are external ingress/egress.  
-The browser product flow is the Studio LiveView, opened around a Document.
+⸻
 
----
+6. Shared Types
 
-## 5. Action
+defmodule Contract.Types do
+  @type id :: Ecto.UUID.t()
+  @type ctx :: Contract.Context.t()
+  @type result(value) :: {:ok, value} | {:error, term()}
+  @type tenant_id :: id()
+  @type user_id :: id()
+  @type document_id :: id()
+  @type chat_thread_id :: id()
+  @type source_document_id :: id()
+  @type source_claim_id :: id()
+  @type change_id :: id()
+  @type mark_id :: id()
+  @type agent_run_id :: id()
+  @type tool_call_id :: id()
+  @type export_id :: id()
+  @type evidence_id :: id()
+  @type blob_ref_id :: id()
+  @type revision :: non_neg_integer()
+  @type idempotency_key :: String.t()
+  @type contract_type_key :: String.t()
+  @type route_ref_token :: String.t()
+  @type params :: map()
+  @type attrs :: map()
+  @type opts :: keyword()
+  @type upload :: Phoenix.LiveView.UploadEntry.t()
+  @type socket :: Phoenix.LiveView.Socket.t()
+end
 
-`Action` is the one intent shape.
+⸻
 
-Users, agents, Slack, MCP, import jobs, export jobs, and system jobs all normalize into Actions.
+7. Persistent Schemas
 
-Most Actions are **document-first**: rename document, update metadata, set contract type, edit content, add mark, agent change, revoke change, request export, start type conversion, create converted variant. `matter_id` is **optional / contextual** — only required when the Action is about grouping, shared fields across documents, or pre-document context (e.g. Matter Brief discussion before any Document exists). All other Actions carry `document_id` as the primary scope.
+7.1 Document
 
-```elixir
-defmodule Contract.Action do
+Document is the primary user-facing object.
+
+defmodule Contract.Document do
   use Ecto.Schema
   import Ecto.Changeset
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+  schema "documents" do
+    field :owner_id, :binary_id
+    field :title, :string
+    field :type_key, :string
+    field :metadata, :map, default: %{}
+    field :status, Ecto.Enum,
+      values: [:draft, :importing, :editing, :reviewing, :export_ready, :archived],
+      default: :draft
+    field :current_revision, :integer, default: 0
+    field :state_snapshot, :map, default: %{}
+    has_many :changes, Contract.Change
+    has_many :marks, Contract.Mark
+    has_many :source_documents, Contract.SourceDocument
+    has_many :exports, Contract.Export
+    timestamps()
+  end
+  def changeset(document, attrs)
+end
 
-  alias Contract.Types, as: T
+Document.type_key is the selected contract type.
 
+Changing type_key is metadata only.
+It does not rewrite contract content.
+
+⸻
+
+7.2 ChatThread
+
+A ChatThread is conversation.
+
+It may exist before a Document.
+
+defmodule Contract.ChatThread do
+  use Ecto.Schema
+  import Ecto.Changeset
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+  schema "chat_threads" do
+    field :document_id, :binary_id
+    field :owner_id, :binary_id
+    field :status, Ecto.Enum,
+      values: [:active, :attached, :archived],
+      default: :active
+    field :messages, {:array, :map}, default: []
+    field :metadata, :map, default: %{}
+    timestamps()
+  end
+  def changeset(thread, attrs)
+end
+
+Plain chat is not over-mystified into a separate context object.
+
+If chat produces useful structured context, that context becomes a Mark, Command, SourceClaim, or Change.
+
+⸻
+
+7.3 SourceDocument
+
+A SourceDocument is an uploaded or imported document-shaped source that needs parsing and supervised interpretation.
+
+Examples:
+
+* PDF contract,
+* HWP/HWPX source,
+* DOCX source,
+* scanned contract treated as a document,
+* government form,
+* prior draft,
+* counterparty draft.
+
+Not examples:
+
+* arbitrary image,
+* random attachment,
+* plain chat,
+* Slack text.
+
+defmodule Contract.SourceDocument do
+  use Ecto.Schema
+  import Ecto.Changeset
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+  schema "source_documents" do
+    field :document_id, :binary_id
+    field :chat_thread_id, :binary_id
+    field :blob_ref, :map
+    field :parser, :string
+    field :parser_snapshot_ref, :map
+    field :status, Ecto.Enum,
+      values: [:uploaded, :parsing, :parsed, :interpreting, :ready, :failed],
+      default: :uploaded
+    field :regions, {:array, :map}, default: []
+    field :metadata, :map, default: %{}
+    has_many :claims, Contract.SourceClaim
+    timestamps()
+  end
+  def changeset(source_document, attrs)
+end
+
+A SourceDocument is source evidence.
+It is not the working contract unless explicitly converted/imported into a Document.
+
+⸻
+
+7.4 SourceClaim
+
+A SourceClaim is a supervised interpretation of a SourceDocument.
+
+It is visible and correctable.
+
+defmodule Contract.SourceClaim do
+  use Ecto.Schema
+  import Ecto.Changeset
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+  schema "source_claims" do
+    field :source_document_id, :binary_id
+    field :document_id, :binary_id
+    field :region_ref, :map
+    field :label, :string
+    field :value, :map
+    field :confidence, Ecto.Enum,
+      values: [:low, :medium, :high, :confirmed]
+    field :status, Ecto.Enum,
+      values: [:proposed, :confirmed, :corrected, :rejected, :superseded],
+      default: :proposed
+    field :linked_ref, :map
+    field :metadata, :map, default: %{}
+    timestamps()
+  end
+  def changeset(claim, attrs)
+end
+
+Examples:
+
+"This appears to be Party A."
+"This looks like the effective date."
+"This blank likely maps to contract_amount."
+"This clause appears to be a termination clause."
+
+User can:
+
+* confirm,
+* correct,
+* reject,
+* link to working document.
+
+⸻
+
+7.5 Command
+
+Command is the only incoming intent shape.
+
+Use embedded_schema.
+
+defmodule Contract.Command do
+  use Ecto.Schema
+  import Ecto.Changeset
   @primary_key false
-
   embedded_schema do
     field :kind, Ecto.Enum,
       values: [
@@ -237,1303 +354,1126 @@ defmodule Contract.Action do
         :duplicate_document,
         :archive_document,
         :restore_document,
-
         :rename_document,
         :update_metadata,
         :set_contract_type,
-
         :edit_document,
         :add_mark,
         :update_mark,
-
+        :source_claim_confirm,
+        :source_claim_correct,
+        :source_claim_reject,
+        :source_claim_link_to_document,
+        :chat_message,
+        :agent_change,
         :start_type_conversion,
         :set_field_migration_strategy,
         :create_converted_variant,
-
-        :chat_message,
-        :agent_change,
         :revoke_change,
         :resolve_revoke,
-
         :request_export
       ]
-
-    # matter_id is OPTIONAL / CONTEXTUAL.
-    # Only required for grouping, shared-field, or pre-document Actions.
-    # All document-scoped Actions carry document_id; matter_id may be nil.
-    field :matter_id, :binary_id
     field :document_id, :binary_id
+    field :chat_thread_id, :binary_id
+    field :source_document_id, :binary_id
+    field :source_claim_id, :binary_id
     field :change_id, :binary_id
     field :agent_run_id, :binary_id
-
-    field :actor_type, Ecto.Enum, values: [:user, :agent, :lawyer, :slack, :system]
+    field :actor_type, Ecto.Enum,
+      values: [:user, :agent, :lawyer, :slack, :system]
     field :actor_id, :binary_id
-
     field :base_revision, :integer
     field :idempotency_key, :string
-
     field :payload, :map, default: %{}
     field :message, :string
   end
-
-  @spec changeset(t(), T.attrs()) :: Ecto.Changeset.t()
-  def changeset(action, attrs)
+  def changeset(command, attrs)
+  def user(user_id, kind, attrs)
+  def agent(agent_run_id, kind, attrs)
+  def system(system_actor, kind, attrs)
 end
-```
 
-Examples:
+Commands may come from:
 
-```text
-rename document       → Action(:rename_document)
-edit clause           → Action(:edit_document)
-user chat             → Action(:chat_message)
-agent edit            → Action(:agent_change)
-undo                  → Action(:revoke_change)
-convert to NDA        → Action(:start_type_conversion)
-create NDA variant    → Action(:create_converted_variant)
-```
+* LiveView events,
+* agent output,
+* MCP tools,
+* Slack actions,
+* background jobs,
+* import/export flows.
 
-Context Reservoir edits become normal Actions. Editing Party A becomes `Action(:edit_document)` or `Action(:update_metadata)`. Answering an open question becomes `Action(:add_mark)` or `Action(:update_mark)`. Changing jurisdiction becomes `Action(:update_metadata)`. Opening a related source document becomes `Action(:open_document)`. Marking evidence as relevant becomes `Action(:add_mark)`. The Context Reservoir does NOT create a separate context-mutation system.
+⸻
 
----
+7.6 Change
 
-## 6. Change
+Change is the durable reversible result of a Command.
 
-`Change` is the durable reversible result of an Action.
-
-```elixir
 defmodule Contract.Change do
   use Ecto.Schema
   import Ecto.Changeset
-
-  alias Contract.Types, as: T
-
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
-
   schema "changes" do
-    field :matter_id, :binary_id
     field :document_id, :binary_id
-    field :artifact_id, :binary_id
-
-    field :action_kind, :string
-
-    field :actor_type, Ecto.Enum, values: [:user, :agent, :lawyer, :slack, :system]
+    field :chat_thread_id, :binary_id
+    field :source_document_id, :binary_id
+    field :command_kind, :string
+    field :actor_type, Ecto.Enum,
+      values: [:user, :agent, :lawyer, :slack, :system]
     field :actor_id, :binary_id
-
     field :base_revision, :integer
     field :applied_revision, :integer
     field :idempotency_key, :string
-
     field :ops, {:array, :map}, default: []
     field :marks, {:array, :map}, default: []
     field :message, :string
-
     field :affected_refs, {:array, :map}, default: []
     field :preimage, :map
     field :inverse_ops, {:array, :map}, default: []
-
     field :status, Ecto.Enum,
       values: [:active, :revoked, :partially_revoked, :superseded],
       default: :active
-
     timestamps()
   end
-
-  @spec changeset(t(), T.attrs()) :: Ecto.Changeset.t()
   def changeset(change, attrs)
+  def active?(change)
+  def revoked?(change)
+  def touches?(change, affected_ref)
 end
-```
 
-Every meaningful mutation becomes a Change:
+Every durable mutation is a Change:
 
-```text
-title rename
+title edit
 metadata edit
-contract type selection
-paragraph edit
-agent rewrite
-field migration
-variant creation
-mark addition
+contract type edit
+document text edit
+agent edit
+source claim confirmation
+mark update
+conversion
+export request
 revoke
-```
 
----
+⸻
 
-## 7. Operation and Mark
+7.7 Mark
 
-`Operation` is mechanical.  
-`Mark` is soft meaning.
+Mark is the durable soft annotation layer.
 
-```elixir
-defmodule Contract.Operation do
+It may be renamed to Annotation, but this spec uses Mark.
+
+defmodule Contract.Mark do
   use Ecto.Schema
   import Ecto.Changeset
-
-  alias Contract.Types, as: T
-
-  @primary_key false
-
-  embedded_schema do
-    field :op, Ecto.Enum,
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+  schema "marks" do
+    field :document_id, :binary_id
+    field :chat_thread_id, :binary_id
+    field :source_document_id, :binary_id
+    field :target_type, Ecto.Enum,
       values: [
-        :create_node,
-        :delete_node,
-        :move_node,
-        :replace_content,
-        :set_field,
-        :set_attr,
-        :bind_ref,
-        :unbind_ref,
-        :create_projection,
-        :add_mark,
-        :update_mark
+        :document,
+        :node,
+        :field,
+        :change,
+        :source_document,
+        :source_claim,
+        :evidence,
+        :export,
+        :tool_call
       ]
-
-    field :target_type, Ecto.Enum,
-      values: [:artifact, :document, :node, :field, :mark, :projection]
-
     field :target_id, :binary_id
-    field :args, :map, default: %{}
-  end
-
-  @spec changeset(t(), T.attrs()) :: Ecto.Changeset.t()
-  def changeset(operation, attrs)
-end
-```
-
-```elixir
-defmodule Contract.MarkInput do
-  use Ecto.Schema
-  import Ecto.Changeset
-
-  alias Contract.Types, as: T
-
-  @primary_key false
-
-  embedded_schema do
-    field :target_type, Ecto.Enum,
-      values: [:artifact, :document, :node, :field, :change, :op, :evidence, :projection]
-
-    field :target_id, :binary_id
-    field :intent, Ecto.Enum, values: [:ask, :explain, :flag, :label, :link]
+    field :intent, Ecto.Enum,
+      values: [:ask, :explain, :flag, :label, :link]
     field :text, :string
-    field :confidence, Ecto.Enum, values: [:low, :medium, :high, :confirmed]
-    field :source, Ecto.Enum, values: [:user, :agent, :lawyer, :slack, :law_mcp, :system]
+    field :confidence, Ecto.Enum,
+      values: [:low, :medium, :high, :confirmed]
+    field :source, Ecto.Enum,
+      values: [:user, :agent, :lawyer, :slack, :law_mcp, :system]
+    field :status, Ecto.Enum,
+      values: [:active, :resolved, :superseded, :hidden],
+      default: :active
     field :data, :map, default: %{}
+    timestamps()
   end
-
-  @spec changeset(t(), T.attrs()) :: Ecto.Changeset.t()
   def changeset(mark, attrs)
 end
-```
 
-The backend MUST NOT bake a large legal ontology into hard node types.  
-The agent may attach soft marks such as:
+A Mark can represent:
 
-```text
-label: "payment clause"
-flag: "legal review suggested"
-ask: "Which payment deadline do you prefer?"
-explain: "Changed because user asked for stricter payment."
-link: evidence_id
-```
+* question,
+* explanation,
+* warning,
+* label,
+* legal evidence link,
+* lawyer note,
+* export warning,
+* agent reason.
 
----
+It does not mutate contract text.
 
-## 8. Studio
+⸻
 
-`Contract.Studio` is the product façade for the one big LiveView. It is **document-first**: `Studio.load/2` should prefer Document context (via `document_id`) over Matter context. Matter context is loaded only when needed (workspace surface, shared-field context, lawyer packet). If `params` carry both, Document wins as the primary scope.
+7.8 EvidenceSnapshot
 
-```elixir
-defmodule Contract.Studio do
-  alias Contract.Types, as: T
+Legal MCP outputs become immutable evidence snapshots.
 
-  @spec load(T.ctx(), T.params()) :: T.result(Contract.Studio.State.t())
-  def load(ctx, params)
-
-  @spec reload(T.ctx(), Contract.Studio.State.t()) :: T.result(Contract.Studio.State.t())
-  def reload(ctx, state)
-
-  @spec select_document(T.ctx(), Contract.Studio.State.t(), T.document_id()) ::
-          T.result(Contract.Studio.State.t())
-  def select_document(ctx, state, document_id)
-
-  @spec submit(T.ctx(), Contract.Studio.State.t(), Contract.Action.t()) ::
-          T.result(Contract.Studio.State.t())
-  def submit(ctx, state, action)
-
-  @spec sync(T.ctx(), Contract.Studio.State.t(), T.revision()) ::
-          T.result(Contract.Studio.State.t())
-  def sync(ctx, state, from_revision)
-
-  @spec subscribe(T.ctx(), Contract.Studio.State.t()) :: T.result(:ok)
-  def subscribe(ctx, state)
-
-  @spec load_context_reservoir(Contract.Types.ctx(), Contract.Studio.State.t()) ::
-          Contract.Types.result(Contract.Studio.ContextReservoir.t())
-  def load_context_reservoir(ctx, state)
-
-  @spec refresh_context_reservoir(Contract.Types.ctx(), Contract.Studio.State.t()) ::
-          Contract.Types.result(Contract.Studio.State.t())
-  def refresh_context_reservoir(ctx, state)
-
-  @spec submit_context_action(
-          Contract.Types.ctx(),
-          Contract.Studio.State.t(),
-          Contract.Action.t()
-        ) :: Contract.Types.result(Contract.Studio.State.t())
-  def submit_context_action(ctx, state, action)
-end
-```
-
-`Studio` handles product-level orchestration:
-
-```text
-load studio (document-first; matter context optional)
-select/create/import document
-submit action
-sync after crash/reconnect
-subscribe to document updates
-load/refresh context reservoir
-submit context-reservoir edits as Actions
-```
-
----
-
-## 9. Studio State
-
-LiveView state is not DB state.
-
-```elixir
-defmodule Contract.Studio.State do
+defmodule Contract.EvidenceSnapshot do
   use Ecto.Schema
   import Ecto.Changeset
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+  schema "evidence_snapshots" do
+    field :document_id, :binary_id
+    field :source_document_id, :binary_id
+    field :change_id, :binary_id
+    field :provider, :string
+    field :query, :string
+    field :citation, :string
+    field :payload, :map
+    field :raw_ref, :map
+    field :status, Ecto.Enum,
+      values: [:retrieved, :verified, :weak, :conflicting, :stale, :failed],
+      default: :retrieved
+    timestamps()
+  end
+  def changeset(snapshot, attrs)
+end
 
-  alias Contract.Types, as: T
+EvidenceSnapshots are immutable after creation.
 
-  @primary_key false
+⸻
 
-  embedded_schema do
-    field :matter_id, :binary_id
-    field :selected_document_id, :binary_id
-    field :selected_node_id, :binary_id
+7.9 AgentRun and ToolCall
 
-    field :last_seen_revision, :integer
-
-    field :chat_open?, :boolean, default: true
-    field :document_picker_open?, :boolean, default: false
-    field :metadata_panel_open?, :boolean, default: false
-    field :migration_panel_open?, :boolean, default: false
-    field :upload_panel_open?, :boolean, default: false
-
+defmodule Contract.AgentRun do
+  use Ecto.Schema
+  import Ecto.Changeset
+  schema "agent_runs" do
+    field :document_id, :binary_id
+    field :chat_thread_id, :binary_id
+    field :status, Ecto.Enum,
+      values: [:created, :streaming, :tool_calling, :completed, :failed, :cancelled]
+    field :provider, :string
+    field :model, :string
+    field :skill_key, :string
+    field :input_message, :string
+    field :final_message, :string
+    field :final_command, :map
+    field :started_revision, :integer
+    field :completed_revision, :integer
+    field :metadata, :map, default: %{}
+    timestamps()
+  end
+  def changeset(run, attrs)
+end
+defmodule Contract.ToolCall do
+  use Ecto.Schema
+  import Ecto.Changeset
+  schema "tool_calls" do
     field :agent_run_id, :binary_id
-
-    field :mode, Ecto.Enum,
-      values: [:no_document, :briefing, :editing, :reviewing]
-
-    embeds_one :context_reservoir, Contract.Studio.ContextReservoir
+    field :document_id, :binary_id
+    field :source_document_id, :binary_id
+    field :evidence_id, :binary_id
+    field :tool_name, :string
+    field :args, :map
+    field :result, :map
+    field :status, Ecto.Enum,
+      values: [:started, :streaming, :completed, :failed],
+      default: :started
+    timestamps()
   end
-
-  @spec changeset(t(), T.attrs()) :: Ecto.Changeset.t()
-  def changeset(state, attrs)
+  def changeset(tool_call, attrs)
 end
-```
 
-The Context Reservoir is the persistent left-side projection of contract context (see §10a). It is UI/projection state, not durable truth, so it is an embedded schema on Studio.State.
+Tool calls may be persisted for:
 
-```elixir
-defmodule Contract.Studio.ContextReservoir do
+* audit,
+* replay,
+* UI display,
+* legal evidence traceability.
+
+⸻
+
+7.10 Export
+
+defmodule Contract.Export do
   use Ecto.Schema
   import Ecto.Changeset
-
-  @primary_key false
-
-  embedded_schema do
-    field :brief, :map, default: %{}
-    field :shared_fields, {:array, :map}, default: []
-    field :open_questions, {:array, :map}, default: []
-    field :related_documents, {:array, :map}, default: []
-    field :sources, {:array, :map}, default: []
-    field :evidence, {:array, :map}, default: []
-    field :recent_changes, {:array, :map}, default: []
-    field :recent_revokes, {:array, :map}, default: []
-    field :readiness, :map, default: %{}
+  schema "exports" do
+    field :document_id, :binary_id
+    field :format, Ecto.Enum,
+      values: [:pdf, :hwpx, :docx, :markdown, :lawyer_packet]
+    field :source_revision, :integer
+    field :status, Ecto.Enum,
+      values: [:queued, :rendering, :available, :failed]
+    field :blob_ref, :map
+    field :metadata, :map, default: %{}
+    timestamps()
   end
-
-  @spec changeset(t(), map()) :: Ecto.Changeset.t()
-  def changeset(reservoir, attrs)
+  def changeset(export, attrs)
 end
-```
 
----
+⸻
 
-## 10. StudioLive
+8. Core Public Modules
 
-Disposable UI process.
+Only these are public core modules:
 
-It does not own document truth.
+ContractWeb.StudioLive
+Contract.Studio
+Contract.Session
+Contract.Store
+Contract.Agent
+Contract.MCP
+Contract.Slack
+Contract.Blobs
+Contract.Providers
 
-Studio layout:
+Internal helpers:
 
-```text
-Left   = Context Reservoir (live projection of contract context)
-Center = Current Document (Canvas — Briefing/Editor/Review)
-Right  = Agent Chat / Actions
-Top    = Document title, type, metadata
-```
+Contract.Session.Reducer
+Contract.Session.Lease
+Contract.Session.Revocation
+Contract.Studio.Import
+Contract.Studio.Export
 
-The left rail is the Context Reservoir (see §10a), not a raw document list or document picker. Documents appear in the reservoir only as contextual related documents with human labels. The center rail is the Document Canvas. The right rail is the Agent Chat / Actions.
+Schemas/data:
 
-StudioLive should open around a **Document** when possible. When mounted from `/documents/:document_id` or `/documents/:document_id/review`, the LiveView assigns that Document as the selected scope. When mounted from `/studio` (no document) or from `/workspaces/:matter_id` (workspace surface) with no selected Document, the always-open agent chat MUST ask the user whether to:
+Contract.Document
+Contract.ChatThread
+Contract.SourceDocument
+Contract.SourceClaim
+Contract.Command
+Contract.Change
+Contract.Mark
+Contract.EvidenceSnapshot
+Contract.AgentRun
+Contract.ToolCall
+Contract.Export
+Contract.BlobRef
 
-1. upload an existing contract,
-2. open a recent document,
-3. create a blank contract,
-4. draft from discussion (pre-document Matter Brief),
-5. create a variant from another document.
+⸻
 
-This 5-option prompt is the only required behavior for the no-document state; the rest of the UI surface (chat rail, recent list, upload panel) remains the same disposable LiveView projection.
+9. StudioLive Protocol
 
-```elixir
+StudioLive is the only primary UI surface.
+
+Use handle_info/2 directly. Do not hide the protocol behind vague modules.
+
 defmodule ContractWeb.StudioLive do
   use ContractWeb, :live_view
-
-  alias Contract.Types, as: T
-
-  @spec mount(T.params(), map(), T.socket()) :: {:ok, T.socket()}
+  # Boot
   def mount(params, session, socket)
-
-  @spec handle_event(String.t(), T.params(), T.socket()) :: {:noreply, T.socket()}
-  def handle_event(event, params, socket)
-
-  @spec handle_info(term(), T.socket()) :: {:noreply, T.socket()}
+  # Client events → Command
+  def handle_event("chat.submit", params, socket)
+  def handle_event("document.open", params, socket)
+  def handle_event("document.create", params, socket)
+  def handle_event("document.upload", params, socket)
+  def handle_event("document.rename", params, socket)
+  def handle_event("document.metadata.update", params, socket)
+  def handle_event("document.type.set", params, socket)
+  def handle_event("document.edit", params, socket)
+  def handle_event("document.duplicate", params, socket)
+  def handle_event("document.archive", params, socket)
+  def handle_event("document.restore", params, socket)
+  def handle_event("source_claim.confirm", params, socket)
+  def handle_event("source_claim.correct", params, socket)
+  def handle_event("source_claim.reject", params, socket)
+  def handle_event("source_claim.link_to_document", params, socket)
+  def handle_event("conversion.start", params, socket)
+  def handle_event("conversion.field_strategy.set", params, socket)
+  def handle_event("conversion.variant.create", params, socket)
+  def handle_event("change.revoke", params, socket)
+  def handle_event("revoke.resolve", params, socket)
+  def handle_event("export.request", params, socket)
+  def handle_event("ui.toggle_expand", params, socket)
+  # Document/change protocol
+  def handle_info({:document_selected, document_id, revision}, socket)
+  def handle_info({:change_committed, document_id, change}, socket)
+  def handle_info({:change_revoked, document_id, change}, socket)
+  def handle_info({:revoke_requested, document_id, request}, socket)
+  def handle_info({:change_reconciled, document_id, change}, socket)
+  # Agent/tool stream protocol
+  def handle_info({:agent_stream, agent_run_id, event}, socket)
+  def handle_info({:agent_completed, agent_run_id, result}, socket)
+  def handle_info({:agent_failed, agent_run_id, reason}, socket)
+  def handle_info({:tool_call_started, agent_run_id, tool_call}, socket)
+  def handle_info({:tool_call_delta, agent_run_id, tool_call_id, delta}, socket)
+  def handle_info({:tool_call_completed, agent_run_id, tool_call_id, result}, socket)
+  def handle_info({:tool_call_failed, agent_run_id, tool_call_id, reason}, socket)
+  # Source document protocol
+  def handle_info({:source_document_uploaded, source_document}, socket)
+  def handle_info({:source_document_parse_started, source_document_id}, socket)
+  def handle_info({:source_document_parsed, source_document}, socket)
+  def handle_info({:source_interpretation_ready, source_document_id, claims}, socket)
+  def handle_info({:source_claim_updated, claim}, socket)
+  # Evidence protocol
+  def handle_info({:evidence_created, evidence}, socket)
+  def handle_info({:evidence_attached, evidence, mark}, socket)
+  # Session recovery protocol
+  def handle_info({:session_stale, document_id}, socket)
+  def handle_info({:session_recovered, document_id, revision}, socket)
+  # Import/export protocol
+  def handle_info({:import_started, import_id}, socket)
+  def handle_info({:import_completed, document}, socket)
+  def handle_info({:import_failed, import_id, reason}, socket)
+  def handle_info({:export_started, export_id}, socket)
+  def handle_info({:export_ready, export}, socket)
+  def handle_info({:export_failed, export_id, reason}, socket)
+  # Fallback
   def handle_info(message, socket)
-
-  @spec dispatch(T.socket(), Contract.Action.t()) :: T.result(T.socket())
-  def dispatch(socket, action)
-
-  @spec sync(T.socket(), T.revision()) :: T.result(T.socket())
-  def sync(socket, from_revision)
-
-  @spec render(assigns :: map()) :: Phoenix.LiveView.Rendered.t()
-  def render(assigns)
 end
-```
 
-`handle_event/3` converts UI events into Actions.
+StudioLive invariants
 
-Examples:
+LiveView tracks selected_document_id.
+LiveView tracks last_seen_revision.
+LiveView never owns truth.
+LiveView never owns Session.
+LiveView never calls OpenAI directly.
+PubSub is notification only.
+If revision gap appears, LiveView syncs from Store.
+Agent streams/tool deltas mutate only UI.
+Only committed Change updates document projection.
 
-```text
-"rename_document"       → Action(:rename_document)
-"set_contract_type"     → Action(:set_contract_type)
-"edit_document"         → Action(:edit_document)
-"send_chat_message"     → Action(:chat_message)
-"revoke_change"         → Action(:revoke_change)
-"upload_document"       → Action(:upload_document)
-"create_variant"        → Action(:create_converted_variant)
-```
+⸻
 
-### Studio visual principle
+10. Studio
 
-The Studio should feel like:
+Studio is the product façade.
 
-```text
-Left:   what we know
-Center: what we are writing
-Right:  who helps us write
-```
-
-The Context Reservoir is the contract's memory.
-The Document Canvas is the contract's text.
-The Agent Rail is the contract's operator.
-
----
-
-## 10a. Context Reservoir
-
-StudioLive MUST include a persistent left-side Context Reservoir.
-
-The Context Reservoir is a live projection of matter/document context. It is not the primary document editor and not a raw document navigator.
-
-It SHOULD show:
-- brief / purpose
-- reusable fields
-- open questions
-- related documents
-- source snapshots
-- evidence snapshots
-- important marks
-- recent changes
-- recent revokes
-- export/readiness state
-
-The Context Reservoir MAY allow direct editing of fields, answers, metadata, and context marks.
-
-All edits from the Context Reservoir MUST become Actions and commit as Changes through Runtime, Session, Engine, and Store.
-
-The agent MAY use the Context Reservoir as part of its context frame.
-
-The Context Reservoir MUST NOT be the source of truth. Store + ChangeLog remain truth.
-
-### What the Context Reservoir should contain
-
-**Brief**
-- purpose
-- current drafting goal
-- user role
-- counterparty role
-- status
-
-**Shared fields**
-- Party A
-- Party B
-- Effective date
-- Jurisdiction
-- Project name
-- Permitted purpose
-- Signers
-
-**Open questions**
-- Is this mutual or one-way?
-- What is the confidentiality period?
-- Which jurisdiction applies?
-
-**Related documents**
-- current draft
-- uploaded source
-- converted variant
-- lawyer packet
-
-**Sources**
-- original upload
-- Upstage parse snapshot
-- imported HWPX/DOCX/PDF source
-
-**Evidence**
-- Korea-law-MCP result
-- citation verification
-- official/government comment
-- source-preserved text
-
-**Recent change context**
-- agent changed clause
-- user revoked agent edit
-- contract type changed
-- field migrated from another document
-
-**Readiness**
-- unresolved questions
-- source-modified notes
-- export warnings
-- lawyer packet status
-
-### What should not happen
-
-Do not make the left sidebar a long raw list like:
-
-    Document 5cad856e
-    Document 8a0cf5bb
-    Document 6a5c1bb0
-
-Documents may appear in the reservoir, but only as contextual related documents with useful human labels:
-
-    상호 비밀유지계약서 — current draft
-    원본 업로드 — source
-    NDA variant — generated variant
-    변호사용 패킷 — review export
-
----
-
-## 11. StudioLive Protocol Messages
-
-`handle_info/2` is the LiveView protocol surface.
-
-```text
-{:studio_loaded, studio_state}
-{:document_selected, document_id, revision}
-{:change_committed, change}
-{:change_revoked, change}
-{:revoke_requested, request}
-{:change_reconciled, change}
-{:marks_changed, marks}
-{:agent_stream, agent_run_id, stream_event}
-{:agent_completed, agent_run_id, result}
-{:agent_failed, agent_run_id, reason}
-{:session_stale, document_id}
-{:session_recovered, document_id, revision}
-{:import_completed, document}
-{:import_failed, import_id, reason}
-{:export_ready, export}
-{:export_failed, export_id, reason}
-```
-
-Rules:
-
-1. LiveView MUST track `last_seen_revision`.
-2. On any uncertainty, LiveView MUST call `Studio.sync/3`.
-3. PubSub events are advisory; Store is truth.
-4. If LiveView misses messages, `sync_since` repairs it.
-5. Agent stream messages never mutate document state.
-6. Only committed Changes mutate document projection.
-
-On the following messages, StudioLive MUST refresh the Context Reservoir in addition to its other handling:
-
-```text
-{:change_committed, change}
-{:change_revoked, change}
-{:marks_changed, marks}
-{:import_completed, document}
-{:evidence_attached, evidence}
-{:export_ready, export}
-{:agent_completed, agent_run_id, result}
-```
-
-For these, StudioLive MUST update:
-
-- document projection
-- last_seen_revision
-- context_reservoir
-- agent rail state
-
-The reservoir is a projection, so if LiveView crashes or misses messages, it must be rebuilt from Store + ChangeLog on mount/reconnect.
-
----
-
-## 12. Runtime
-
-`Runtime` routes Actions into the correct execution path. Routing is **matter-optional**: it keys off `document_id` for document-scoped Actions and only consults `matter_id` for grouping, shared-field, or pre-document Actions. A nil `matter_id` on a document-scoped Action is normal.
-
-```elixir
-defmodule Contract.Runtime do
-  alias Contract.Types, as: T
-
-  @spec load(T.ctx(), T.document_id()) :: T.result(Contract.Runtime.State.t())
-  def load(ctx, document_id)
-
-  @spec sync_since(T.ctx(), T.document_id(), T.revision()) ::
-          T.result([Contract.Change.t()])
-  def sync_since(ctx, document_id, revision)
-
-  @spec apply(T.ctx(), Contract.Action.t()) ::
-          T.result(Contract.Change.t() | Contract.Agent.Run.t() | Contract.Export.Job.t())
-  def apply(ctx, action)
-
-  @spec revoke(T.ctx(), Contract.Action.t()) ::
-          T.result(Contract.Change.t() | Contract.RevokeRequest.t())
-  def revoke(ctx, action)
-
-  @spec subscribe(T.ctx(), T.document_id()) :: T.result(:ok)
+defmodule Contract.Studio do
+  def open(ctx, params)
+  def command(ctx, command)
+  def sync(ctx, document_id, from_revision)
   def subscribe(ctx, document_id)
-
-  @spec ensure_session(T.ctx(), T.document_id()) :: T.result(pid())
-  def ensure_session(ctx, document_id)
+  def route_ref(ctx, document_or_thread, opts)
 end
-```
 
-Routing:
+Behavior:
 
-```text
-:create_document              → Engine/Store
-:upload_document              → IO import
-:rename_document              → Session/Engine/Store
-:update_metadata              → Session/Engine/Store
-:set_contract_type            → Session/Engine/Store
-:edit_document                → Session/Engine/Store
-:chat_message                 → Agent
-:agent_change                 → Session/Engine/Store
-:start_type_conversion        → Agent/Engine
-:create_converted_variant     → Engine/Store
-:request_export               → IO export
-:revoke_change                → Engine/Store
-```
+document mutation command → Session.command
+chat command → Agent.start
+source upload command → Blobs + Providers + Session.command
+export command → Providers.render_export + Blobs
 
----
+⸻
 
-## 13. Engine
+11. Session
 
-Pure mechanics.
+One live coordinator per active Document.
 
-No LiveView.  
-No OpenAI.  
-No Slack.  
-No MCP.
-
-```elixir
-defmodule Contract.Engine do
-  alias Contract.Types, as: T
-
-  @spec compile(Contract.Action.t(), Contract.Runtime.State.t()) ::
-          T.result(Contract.ChangeInput.t())
-  def compile(action, state)
-
-  @spec validate(Contract.ChangeInput.t(), Contract.Runtime.State.t()) ::
-          T.result(:ok)
-  def validate(input, state)
-
-  @spec preimage(Contract.ChangeInput.t(), Contract.Runtime.State.t()) ::
-          T.result(map())
-  def preimage(input, state)
-
-  @spec inverse(Contract.ChangeInput.t(), map()) ::
-          T.result([Contract.Operation.t()])
-  def inverse(input, preimage)
-
-  @spec apply(Contract.ChangeInput.t(), Contract.Runtime.State.t()) ::
-          T.result(Contract.Runtime.State.t())
-  def apply(input, state)
-
-  @spec affected_refs(Contract.ChangeInput.t(), Contract.Runtime.State.t()) ::
-          T.result([map()])
-  def affected_refs(input, state)
-
-  @spec build_change(Contract.Action.t(), Contract.ChangeInput.t(), Contract.Runtime.State.t()) ::
-          T.result(Contract.Change.t())
-  def build_change(action, input, state)
-end
-```
-
-The Engine compiles all hard work:
-
-```text
-rename title
-update metadata
-set contract type
-edit content
-add mark
-create variant
-field migration
-revoke
-```
-
----
-
-## 14. Session (DocumentSession)
-
-Ephemeral coordinator, **per Document**.
-
-`Contract.Session` IS the DocumentSession — one Session GenServer per Document. There is no MatterSession. The module name remains `Contract.Session` for code-path stability; the conceptual name is **DocumentSession**, and every reference below ("Session") means "the per-Document live coordinator."
-
-Reconstructable.
-
-Not truth.
-
-```elixir
 defmodule Contract.Session do
-  # DocumentSession: one per Document. No MatterSession exists.
   use GenServer
-
-  alias Contract.Types, as: T
-
-  @spec start_link(document_id: T.document_id()) :: GenServer.on_start()
-  def start_link(opts)
-
-  @spec commit(pid() | T.document_id(), Contract.Action.t()) ::
-          T.result(Contract.Change.t())
-  def commit(session_or_document_id, action)
-
-  @spec revoke(pid() | T.document_id(), Contract.Action.t()) ::
-          T.result(Contract.Change.t() | Contract.RevokeRequest.t())
-  def revoke(session_or_document_id, action)
-
-  @spec current(pid() | T.document_id()) :: T.result(Contract.Runtime.State.t())
-  def current(session_or_document_id)
-
-  @spec sync_since(pid() | T.document_id(), T.revision()) ::
-          T.result([Contract.Change.t()])
-  def sync_since(session_or_document_id, revision)
-
-  @spec heartbeat(pid()) :: T.result(:ok)
-  def heartbeat(pid)
-
-  @spec shutdown_if_stale(pid()) :: T.result(:ok)
+  def ensure(ctx, document_id)
+  def command(document_id, command)
+  def current(document_id)
+  def sync_since(document_id, revision)
+  def renew_lease(pid)
   def shutdown_if_stale(pid)
 end
-```
 
-Session starts:
+Session is reconstructable.
+Session is not truth.
 
-```text
-acquire lease
-hydrate from Store
-renew lease
-accept commits while fenced
-broadcast after commit
-stop if stale
-```
+⸻
 
----
+12. Store
 
-## 15. Lease
+Store is durable truth.
 
-Lease is the current live-writer guard.
-
-It prevents duplicated Session processes from committing.
-
-```elixir
-defmodule Contract.Lease do
-  alias Contract.Types, as: T
-
-  @spec acquire(T.document_id(), owner_ref :: String.t()) ::
-          T.result(Contract.Lease.Record.t())
-  def acquire(document_id, owner_ref)
-
-  @spec renew(T.document_id(), owner_ref :: String.t(), fencing_token :: integer()) ::
-          T.result(Contract.Lease.Record.t())
-  def renew(document_id, owner_ref, fencing_token)
-
-  @spec release(T.document_id(), owner_ref :: String.t(), fencing_token :: integer()) ::
-          T.result(:ok)
-  def release(document_id, owner_ref, fencing_token)
-
-  @spec assert_current!(T.document_id(), fencing_token :: integer()) :: :ok | no_return()
-  def assert_current!(document_id, fencing_token)
-end
-```
-
-The current Session holder is:
-
-```text
-the Session process with the current lease and fencing token
-```
-
-The durable holder is:
-
-```text
-Store + ChangeLog
-```
-
----
-
-## 16. Store
-
-Durable truth.
-
-```elixir
 defmodule Contract.Store do
-  alias Contract.Types, as: T
-
-  @spec load(T.document_id()) :: T.result(Contract.Runtime.State.t())
   def load(document_id)
-
-  @spec snapshot(T.document_id(), T.revision()) ::
-          T.result(Contract.Runtime.State.t())
-  def snapshot(document_id, revision)
-
-  @spec append(T.document_id(), Contract.Change.t(), fencing_token :: integer()) ::
-          T.result(Contract.Change.t())
   def append(document_id, change, fencing_token)
-
-  @spec changes_since(T.document_id(), T.revision()) ::
-          T.result([Contract.Change.t()])
   def changes_since(document_id, revision)
-
-  @spec latest_revision(T.document_id()) :: T.result(T.revision())
   def latest_revision(document_id)
-
-  @spec idempotency_seen?(T.document_id(), T.idempotency_key()) :: boolean()
   def idempotency_seen?(document_id, idempotency_key)
-
-  @spec previous_result(T.document_id(), T.idempotency_key()) ::
-          T.result(Contract.Change.t())
   def previous_result(document_id, idempotency_key)
-
-  @spec transaction((-> T.result(term()))) :: T.result(term())
   def transaction(fun)
 end
-```
 
-Commit order lives here.
+⸻
 
-Not in LiveView.
+13. Session Helpers
 
-Not in Agent.
+These are internal helpers.
+Do not promote them to top-level architecture.
 
-Not in Session alone.
-
----
-
-## 17. Revocation
-
-Revocation is a Change.
-
-```elixir
-defmodule Contract.Revocation do
-  alias Contract.Types, as: T
-
-  @spec revoke(T.ctx(), T.document_id(), T.change_id(), T.opts()) ::
-          T.result(Contract.Change.t() | Contract.RevokeRequest.t())
-  def revoke(ctx, document_id, change_id, opts)
-
-  @spec clean_revoke(T.ctx(), Contract.Runtime.State.t(), Contract.Change.t()) ::
-          T.result(Contract.Change.t())
-  def clean_revoke(ctx, state, change)
-
-  @spec request_reconciliation(
-          T.ctx(),
-          Contract.Runtime.State.t(),
-          Contract.Change.t(),
-          [Contract.Change.t()]
-        ) :: T.result(Contract.RevokeRequest.t())
-  def request_reconciliation(ctx, state, change, overlaps)
-
-  @spec resolve_reconciliation(
-          T.ctx(),
-          Contract.RevokeRequest.t(),
-          Contract.Action.t()
-        ) :: T.result(Contract.Change.t())
-  def resolve_reconciliation(ctx, request, action)
+defmodule Contract.Session.Reducer do
+  def compile(command, document_state)
+  def validate(input, document_state)
+  def preimage(input, document_state)
+  def inverse(input, preimage)
+  def affected_refs(input, document_state)
+  def apply(input, document_state)
+  def build_change(command, input, document_state)
 end
-```
-
-Rule:
-
-```text
-No later overlap → clean inverse.
-Later overlap → RevokeRequest.
-```
-
----
-
-## 18. Contract Type and Conversion
-
-`Document.type_key` is the selected contract type. It is **selected after creation, not at creation**: a Document can exist with `type_key = nil` (untyped draft) and the user (or agent) sets it later via `Action(:set_contract_type)`. Setting/changing the type is a **document metadata Change**.
-
-Converting type is a **document-to-document variant workflow** (see §19): default behavior for a major conversion is to create a new Document variant, not a massive in-place diff.
-
-Contract type is a key.
-
-No redundant IDs.
-
-```elixir
-defmodule Contract.ContractTypes do
-  alias Contract.Types, as: T
-
-  @spec list(T.ctx(), T.opts()) :: T.result([Contract.ContractTypes.TypeSpec.t()])
-  def list(ctx, opts)
-
-  @spec get(T.ctx(), T.contract_type_key()) ::
-          T.result(Contract.ContractTypes.TypeSpec.t())
-  def get(ctx, key)
-
-  @spec compatible?(T.contract_type_key(), T.contract_type_key()) :: boolean()
-  def compatible?(from_type, to_type)
+defmodule Contract.Session.Lease do
+  def acquire(document_id, owner_ref)
+  def renew(document_id, owner_ref, fencing_token)
+  def release(document_id, owner_ref, fencing_token)
+  def assert_current!(document_id, fencing_token)
 end
-```
-
-Changing the type dropdown:
-
-```text
-Action(:set_contract_type)
-```
-
-This changes `Document.type_key`.
-
-It does not rewrite content.
-
-Converting to another type:
-
-```text
-Action(:start_type_conversion)
-```
-
-This starts migration.
-
----
-
-## 19. Type Conversion and Field Migration
-
-Type conversion avoids massive diffs by creating a variant and migrating fields.
-
-**Field migration moves reusable values from the source Document to the target Document, optionally through Matter-level shared fields.** When two related Documents (e.g. an NDA and a Service Agreement variant) sit inside the same Matter, identity facts (party names, addresses, dates) can be linked to a Matter-level shared field so updates propagate; document-specific commercial terms are copied per-Document. Matter shared fields are an internal optimization — the user still operates on Documents.
-
-```elixir
-defmodule Contract.Conversion do
-  alias Contract.Types, as: T
-
-  @spec plan(T.ctx(), T.document_id(), T.contract_type_key(), T.opts()) ::
-          T.result(Contract.Conversion.Plan.t())
-  def plan(ctx, document_id, target_type_key, opts)
-
-  @spec propose_fields(T.ctx(), Contract.Conversion.Plan.t()) ::
-          T.result([Contract.Conversion.FieldPlan.t()])
-  def propose_fields(ctx, plan)
-
-  @spec set_field_strategy(
-          T.ctx(),
-          Contract.Conversion.Plan.t(),
-          T.field_id(),
-          strategy :: atom()
-        ) :: T.result(Contract.Conversion.FieldPlan.t())
-  def set_field_strategy(ctx, plan, source_field_id, strategy)
-
-  @spec create_variant(T.ctx(), Contract.Conversion.Plan.t()) ::
-          T.result(Contract.Change.t())
-  def create_variant(ctx, plan)
-
-  @spec adapt_in_place(
-          T.ctx(),
-          Contract.Conversion.Plan.t(),
-          Contract.Action.t()
-        ) :: T.result(Contract.Change.t())
-  def adapt_in_place(ctx, plan, agent_action)
+defmodule Contract.Session.Revocation do
+  def revoke(ctx, document_state, change_id, opts)
+  def clean_revoke(ctx, document_state, change)
+  def request_reconciliation(ctx, document_state, change, overlaps)
+  def resolve_reconciliation(ctx, request, command)
 end
-```
 
-Strategies:
+⸻
 
-```text
+14. Agent
+
+Agent performs semantic work and returns Commands.
+
+defmodule Contract.Agent do
+  def start(ctx, command)
+  def cancel(ctx, agent_run_id)
+  def run_skill(ctx, skill_key, input, opts)
+  def build_context(ctx, command)
+  def decode_command(provider_output)
+  def observe_change(agent_run_id, change)
+  def observe_revoke(agent_run_id, change)
+end
+
+Skills:
+
+:studio_router
+:document_selection
+:context_gathering
+:source_document_interpretation
+:source_claim_mapping
+:edit_document
+:type_conversion
+:field_migration
+:revoke_reconciliation
+:law_evidence
+:lawyer_packet
+
+A skill returns:
+
+Command
+
+or:
+
+no-op message
+
+It never writes Store directly.
+
+⸻
+
+15. Agent Streaming
+
+Streaming is live UI only.
+
+OpenAI stream
+→ Agent process
+→ StudioLive.handle_info({:agent_stream, ...})
+→ chat rail updates
+
+Streaming deltas do not mutate Store.
+
+Only a final decoded Command may commit as a Change.
+
+If the user edits during agent streaming:
+
+unrelated edit → continue
+same-target edit → invalidate/rebase/restart
+contract type change → rebuild context
+revoke prior agent edit → agent must observe and avoid reapplying
+stale final command → reject or rebase
+
+⸻
+
+16. MCP
+
+Contract.MCP is the external agent tool/resource layer.
+
+It must capture behavior, not just list functions.
+
+defmodule Contract.MCP do
+  def initialize(conn_or_payload)
+  def list_resources(ctx, route_ref)
+  def read_resource(ctx, route_ref, uri)
+  def list_tools(ctx, route_ref)
+  def call_tool(ctx, route_ref, tool_name, args)
+end
+
+MCP rules
+
+MCP reads expose projections.
+MCP mutations emit Commands.
+MCP tools never mutate Store directly.
+MCP route_ref carries durable IDs, not PIDs.
+MCP tools are scoped by tenant/user/document/thread permissions.
+
+RouteRef
+
+route_ref is a signed opaque token.
+
+It may include:
+
+tenant_id
+user_id
+document_id
+chat_thread_id
+agent_run_id
+base_revision
+home_region
+expires_at
+
+It must not include:
+
+BEAM pid
+fencing token
+raw secrets
+unrelated document IDs
+
+⸻
+
+MCP resources
+
+chat_thread://{id}
+chat_thread://{id}/messages
+document://{id}/state
+document://{id}/outline
+document://{id}/nodes
+document://{id}/fields
+document://{id}/changes
+document://{id}/revokes
+document://{id}/marks
+source_document://{id}
+source_document://{id}/regions
+source_document://{id}/claims
+source_document://{id}/links
+tool_call://{id}
+evidence://{id}
+evidence://{id}/raw
+evidence://{id}/citation
+evidence://{id}/links
+export://{id}/readiness
+
+⸻
+
+MCP tools
+
+document.open
+document.read
+document.search
+document.submit_command
+document.revoke_change
+source_document.read
+source_document.search_regions
+source_document.propose_claims
+source_document.confirm_claim
+source_document.correct_claim
+source_document.reject_claim
+source_document.link_claim_to_document
+law.search
+law.get_text
+law.search_precedents
+law.verify_citation
+evidence.attach_mark
+collab.ask_user
+collab.fetch_slack_context
+
+MCP tool behavior
+
+document.submit_command:
+
+validates route_ref
+normalizes args into Command
+calls Studio.command
+returns committed Change or error
+
+source_document.propose_claims:
+
+reads SourceDocument
+runs agent/source interpretation
+creates SourceClaims
+returns proposed claims
+
+law.search:
+
+calls legal provider
+creates immutable EvidenceSnapshot
+returns evidence_id + summary
+
+evidence.attach_mark:
+
+normalizes into Command(:add_mark)
+commits through Session/Store
+
+⸻
+
+17. Legal MCP / Evidence Protocol
+
+Legal MCP is an evidence provider, not a document editor.
+
+The system may use Korea-law-MCP or another legal MCP to:
+
+* search laws,
+* retrieve law text,
+* search precedents,
+* verify citations.
+
+Legal MCP results that affect the product must be persisted as immutable EvidenceSnapshots.
+
+Required flow:
+
+agent asks legal question
+→ MCP/legal provider tool call
+→ EvidenceSnapshot persisted
+→ Mark(:link or :flag) attached to document/source/change
+→ optional agent edit Command
+→ Change committed through Session/Store
+
+Forbidden flow:
+
+legal MCP result → direct contract mutation
+
+Legal claim rule
+
+If the agent claims legal support, it should attach an EvidenceSnapshot.
+
+If no evidence exists, the claim must be marked as:
+
+uncited
+uncertain
+needs lawyer review
+
+Lawyer packet
+
+Lawyer packet should include:
+
+* relevant EvidenceSnapshots,
+* citation verification status,
+* evidence-linked Marks,
+* unresolved legal uncertainty flags,
+* source claims used in drafting,
+* changes made because of legal evidence.
+
+⸻
+
+18. SourceDocument Flow
+
+User uploads source document
+→ Blobs.put_upload
+→ SourceDocument created
+→ Providers.parse_document, usually Upstage
+→ parser snapshot saved
+→ regions extracted
+→ agent proposes SourceClaims
+→ chat rail renders source interpretation component
+→ user confirms/corrects/rejects claims
+→ confirmed claims may link to working Document
+
+The source interpretation UI lives in the chat rail as expandable/collapsible components.
+
+No separate persistent Card schema.
+
+⸻
+
+19. Blobs
+
+Blobs is object storage only.
+
+It handles S3/R2/MinIO/local storage.
+
+defmodule Contract.Blobs do
+  def put(ctx, binary, opts)
+  def put_upload(ctx, upload, opts)
+  def get(ctx, blob_ref)
+  def signed_url(ctx, blob_ref, opts)
+  def delete(ctx, blob_ref)
+end
+
+Blob usage:
+
+uploaded source file
+parser payload
+exported PDF/HWPX/DOCX/Markdown
+law evidence raw payload if large
+
+⸻
+
+20. Providers
+
+Providers is external API calls only.
+
+defmodule Contract.Providers do
+  def parse_document(ctx, blob_ref, opts)
+  def stream_agent(ctx, request, handler, opts)
+  def search_law(ctx, query, opts)
+  def get_law_text(ctx, law_ref, opts)
+  def search_precedents(ctx, query, opts)
+  def verify_citation(ctx, citation, opts)
+  def render_export(ctx, document_state, format, opts)
+end
+
+Provider mapping:
+
+parse_document → Upstage
+stream_agent → OpenAI
+search_law / verify_citation → Korea-law-MCP or legal provider
+render_export → PDF/HWPX/DOCX/Markdown renderers
+
+⸻
+
+21. Provider Pipeline
+
+Upload/import
+
+Upload
+→ Blob
+→ SourceDocument
+→ Upstage parse
+→ parser snapshot
+→ source regions
+→ source claims
+→ user supervision
+→ optional working Document creation/edit
+
+OpenAI is not the hard layout parser.
+
+OpenAI is used for:
+
+* target finding,
+* dialog,
+* source claim proposal,
+* semantic labels,
+* agent edits,
+* conversion planning,
+* field migration proposal,
+* legal evidence explanation,
+* lawyer packet summarization.
+
+⸻
+
+22. Export Path
+
+Exports are projections from current Document state.
+
+Supported exports:
+
+pdf
+hwpx
+docx
+markdown
+lawyer_packet
+
+PDF
+
+Final/frozen/read-only style export.
+
+HWPX/DOCX
+
+Editable fallback exports.
+
+The canonical truth remains the Document state and ChangeLog.
+
+Offline-edited HWPX/DOCX files are treated as new SourceDocuments if re-imported.
+
+Do not promise perfect round-trip.
+
+Markdown
+
+Semantic auxiliary export.
+
+Useful for:
+
+* clause text,
+* review memo,
+* agent-readable summary,
+* lawyer packet text section.
+
+Not primary legal-document export.
+
+Lawyer packet
+
+The lawyer packet should include:
+
+* clean draft,
+* document title/type/metadata,
+* source documents used,
+* confirmed/corrected/rejected source claims,
+* relevant changes,
+* revokes,
+* unresolved questions,
+* relevant Marks,
+* EvidenceSnapshots,
+* citation verification status,
+* export timestamp,
+* document revision.
+
+Export flow
+
+Command(:request_export)
+→ Studio.command
+→ Providers.render_export
+→ Blobs.put
+→ Export persisted
+→ StudioLive.handle_info({:export_ready, export})
+
+⸻
+
+23. Contract Type and Conversion
+
+Document.type_key is selected contract type.
+
+Changing type_key is metadata only.
+
+It commits a small Change and does not rewrite document content.
+
+If the user wants conversion:
+
+Command(:start_type_conversion)
+
+Default strategy for major conversion:
+
+create new Document variant
+
+Do not produce massive in-place diffs by default.
+
+Field migration strategies
+
 copy_once
-link_to_matter_field
+link_to_document_field
 derive
 reference_only
 ignore
 ask_user
-```
 
-Default:
+Conversion should show a summary:
 
-```text
-identity facts → link/copy
-document-specific commercial terms → copy or reference
-ambiguous fields → ask_user
-irrelevant fields → ignore/reference
-```
+Carried over:
+- parties
+- effective date
+- jurisdiction
+Derived:
+- service purpose → NDA permitted purpose
+Not carried:
+- payment terms
+- service deliverables
+Needs answer:
+- mutual or one-way NDA?
+- confidentiality duration?
 
----
+⸻
 
-## 20. Agent
+24. Revocation
 
-Semantic interpreter.
+Edits apply immediately but are revokable.
 
-Agent resolves targets.
+A revoke is another Change.
 
-Backend validates returned IDs.
+Clean revoke
 
-```elixir
-defmodule Contract.Agent do
-  alias Contract.Types, as: T
+If no later Change touched the same affected refs:
 
-  @spec start(T.ctx(), Contract.Action.t()) ::
-          T.result(Contract.Agent.Run.t())
-  def start(ctx, action)
+apply inverse_ops
+commit revoke Change
 
-  @spec cancel(T.ctx(), T.agent_run_id()) ::
-          T.result(Contract.Agent.Run.t())
-  def cancel(ctx, run_id)
+Overlap revoke
 
-  @spec observe_change(T.agent_run_id(), Contract.Change.t()) ::
-          T.result(:ok)
-  def observe_change(run_id, change)
+If later overlapping Changes exist:
 
-  @spec observe_revoke(T.agent_run_id(), Contract.Change.t()) ::
-          T.result(:ok)
-  def observe_revoke(run_id, revoke_change)
+create RevokeRequest
+show reconciliation UI
+agent may help reconcile
+user can accept/edit resolution
 
-  @spec build_context(T.ctx(), Contract.Action.t()) ::
-          T.result(map())
-  def build_context(ctx, action)
+The system must never delete Change history.
 
-  @spec decode_action(map()) ::
-          T.result(Contract.Action.t())
-  def decode_action(provider_output)
-end
-```
+⸻
 
-Agent output is not a special `PatchBundle`.
+25. Change Boundaries
 
-It returns an Action, usually:
+Do not create a Change for every keystroke.
 
-```text
-Action(:agent_change)
-```
+Recommended boundaries:
 
-The payload contains:
+title edit → blur/debounce
+metadata edit → field save
+field edit → blur/enter
+paragraph edit → save/blur
+agent edit → one coherent target/purpose
+source claim confirmation → one Change
+revoke → one Change
+export request → one Change or Export record
 
-```text
-ops
-marks
-message
-```
+⸻
 
-Agent context SHOULD include:
+26. Session / Store / Fault Tolerance
 
-```text
-- current document state
-- current selected node, if any
-- recent changes
-- recent revokes
-- marks
-- active questions
-- Context Reservoir projection
-- available related documents
-- source/evidence summaries
-```
+Session coordinates active document writes.
 
-The Context Reservoir is folded into the agent's context frame via:
+Store is truth.
 
-```elixir
-@spec include_context_reservoir(map(), Contract.Studio.ContextReservoir.t()) ::
-        Contract.Types.result(map())
-def include_context_reservoir(frame, reservoir)
-```
+Session may crash, duplicate, or become stale.
 
-The agent observes the reservoir as a read-only projection. Agent mutations to context still flow through Actions; the reservoir is never written to directly.
+Only the current lease holder can commit.
 
----
+Session lease
 
-## 21. Gateway
+Lease/fencing is an internal guard.
 
-External ingress.
+Session acquires lease
+Session renews lease
+Store verifies fencing token on append
+stale Session cannot commit
 
-```elixir
-defmodule Contract.Gateway do
-  alias Contract.Types, as: T
+Heartbeat is only lease renewal.
 
-  @spec issue_route_ref(T.ctx(), map()) :: T.result(T.route_ref_token())
-  def issue_route_ref(ctx, attrs)
+It is not product logic.
 
-  @spec verify_route_ref(T.ctx(), T.route_ref_token()) ::
-          T.result(Contract.RouteRef.t())
-  def verify_route_ref(ctx, token)
+LiveView crash
 
-  @spec mcp_tool(T.ctx(), tool_name :: String.t(), args :: map()) ::
-          T.result(map())
-  def mcp_tool(ctx, tool_name, args)
+LiveView dies
+Session may continue
+Agent may continue
+Store remains truth
+LiveView remounts
+loads current state
+syncs from revision
 
-  @spec slack_event(map()) :: T.result(:ok)
-  def slack_event(payload)
+Session crash
 
-  @spec slack_action(map()) :: T.result(:ok)
-  def slack_action(payload)
+Session dies
+Store remains truth
+new Session reconstructs from Store
 
-  @spec slack_command(map()) :: T.result(:ok)
-  def slack_command(payload)
-end
-```
+⸻
+
+27. UI Components
 
-Route refs carry durable IDs.
+Components are UI-only.
 
-They do not carry PIDs.
+No domain schema.
 
----
+Examples:
 
-## 22. IO
+ChatRail
+ToolCallBlock
+SourceInterpretationBlock
+SourceClaimBlock
+QuestionBlock
+ChangeBlock
+RevokeBlock
+ExportStatusBlock
+DocumentCanvas
+TopBar
 
-Provider and export adapters.
+Expand/collapse is LiveView UI state:
 
-```elixir
-defmodule Contract.IO do
-  alias Contract.Types, as: T
+socket.assigns.expanded
 
-  # matter_id is optional here. If nil, the backend may auto-create a
-  # hidden Matter to host the resulting Document. The user is not asked
-  # to pick a Matter on upload.
-  @spec import_upload(T.ctx(), T.matter_id() | nil, T.upload()) ::
-          T.result(Contract.Action.t())
-  def import_upload(ctx, matter_id, upload)
+No Card, WorkCard, or ChatCard domain object.
 
-  @spec parse_source(T.ctx(), source_ref :: String.t(), opts :: T.opts()) ::
-          T.result(map())
-  def parse_source(ctx, source_ref, opts)
+⸻
 
-  @spec search_law(T.ctx(), query :: String.t(), opts :: T.opts()) ::
-          T.result(map())
-  def search_law(ctx, query, opts)
+28. Final Reduced Flow
 
-  @spec verify_citation(T.ctx(), citation :: String.t(), opts :: T.opts()) ::
-          T.result(map())
-  def verify_citation(ctx, citation, opts)
+User edit
 
-  @spec export(T.ctx(), T.document_id(), format :: atom(), opts :: T.opts()) ::
-          T.result(Contract.Export.t())
-  def export(ctx, document_id, format, opts)
-end
-```
+StudioLive.handle_event("document.edit")
+→ Command(:edit_document)
+→ Studio.command
+→ Session.command
+→ Session.Reducer
+→ Store.append(Change)
+→ StudioLive.handle_info({:change_committed, ...})
 
----
+Chat
 
-## 23. Provider Pipeline
+StudioLive.handle_event("chat.submit")
+→ Command(:chat_message)
+→ Studio.command
+→ Agent.start
+→ agent streams to chat rail
+→ agent returns Command(:agent_change)
+→ Studio.command
+→ Session.command
+→ Store.append(Change)
 
-Imported document:
+Upload source document
 
-```text
-Upload
-→ SourceSnapshot
-→ Upstage parse
-→ ParserSnapshot
-→ Engine normalizes hard IR
-→ Document selected in Studio
-→ Agent adds soft marks as needed
-→ User/agent edits through Actions
-```
+StudioLive.handle_event("document.upload")
+→ Command(:upload_document)
+→ Studio.command
+→ Blobs.put_upload
+→ Providers.parse_document
+→ SourceDocument + SourceClaims
+→ StudioLive source-document messages
+→ chat rail renders interpretation components
 
-OpenAI is not the hard parser.
+Confirm source interpretation
 
-OpenAI is used for:
+source_claim.confirm
+→ Command(:source_claim_confirm)
+→ Studio.command
+→ Session.command
+→ Store.append(Change)
 
-```text
-target finding
-dialog
-semantic marks
-agent edits
-conversion planning
-field migration proposal
-law/evidence explanation
-```
+Legal evidence
 
----
+agent requests law evidence
+→ MCP law.search
+→ Providers.search_law
+→ EvidenceSnapshot persisted
+→ Mark attached
+→ optional agent edit Command
+→ Change committed
 
-## 24. Agent Streaming
+Revoke
 
-Streaming is live UI only.
+change.revoke
+→ Command(:revoke_change)
+→ Studio.command
+→ Session.command
+→ clean inverse or RevokeRequest
+→ Store.append(Change)
 
-```text
-OpenAI stream
-→ Agent
-→ StudioLive handle_info({:agent_stream, ...})
-→ chat rail updates
-```
+Export
 
-Document mutation happens only when the agent returns an Action and Runtime commits it as a Change.
+export.request
+→ Command(:request_export)
+→ Providers.render_export
+→ Blobs.put
+→ Export persisted
+→ export_ready signal
 
----
+⸻
 
-## 25. LiveView ↔ Session Protocol
+29. Known Design-Flipping Blocker
 
-Mount with document:
+This design assumes:
 
-```text
-Studio.load
-Runtime.ensure_session
-Runtime.load
-Runtime.subscribe
-assign state/revision
-```
-
-User event:
-
-```text
-handle_event
-→ Action
-→ Studio.submit
-→ Runtime.apply
-→ Session.commit
-→ Engine
-→ Store.append
-→ PubSub
-```
-
-Receive event:
-
-```text
-handle_info({:change_committed, change})
-→ update projection
-→ advance last_seen_revision
-```
-
-Reconnect:
-
-```text
-Studio.load
-Runtime.load
-Runtime.sync_since if needed
-Runtime.subscribe
-```
-
----
-
-## 26. Final Abstraction
-
-The final abstraction is:
-
-```text
-ContractWeb.StudioLive
-  disposable UI
-
-Contract.Studio
-  product façade
-
-Contract.Action
-  one intent shape
-
-Contract.Runtime
-  routes actions
-
-Contract.Engine
-  compiles/applies mechanics
-
-Contract.Session
-  reconstructable coordinator
-
-Contract.Lease
-  current writer fencing
-
-Contract.Store
-  durable truth
-
-Contract.Change
-  reversible durable edit
-
-Contract.Mark
-  soft meaning
-
-Contract.Conversion
-  type conversion + field migration
-
-Contract.Agent
-  semantic interpreter
-
-Contract.Gateway
-  MCP/Slack/route_ref ingress
-
-Contract.IO
-  provider/import/export adapters
-```
-
-Everything else is implementation detail, data shape, or UI component.
-
-The system can be summarized as:
-
-```text
-User or agent submits Action.
-Runtime routes Action.
-Session coordinates if active.
-Engine compiles and applies.
-Store appends Change.
-LiveView renders Change.
-Agent observes Changes and Revokes.
-Conversion creates variants instead of massive diffs.
-```
-
----
-
-## 27. Final Hard Assumption
-
-This spec assumes:
-
-```text
 one write-home region per document
-```
 
-If the product later requires active-active collaborative writes across regions for the same document, the design must be revisited. That is the only blocker found that flips the architecture.
+If active-active multi-region writing to the same document is required, this design must be revisited.
 
----
+That would likely require CRDT/OT-style conflict semantics or a different replication model.
 
-## 28. Closing Principle
+⸻
 
-The Context Reservoir MUST help the user understand and correct the contract context without turning the UI into a file manager or metadata editor.
+30. Final Summary
 
-It is a projection of durable state, not the durable state itself.
-
-Document remains primary. Matter remains contextual. Agent uses the reservoir. Store remains truth.
-
-> Document is the product.
-> Context Reservoir is the memory.
-> Matter is context.
-> Studio is the surface.
-> Session is per Document.
-> Action in, Change out.
-> Store is truth.
+Document is the product.
+ChatThread is conversation.
+SourceDocument is parsed source evidence.
+SourceClaim is supervised interpretation.
+Command is intent.
+Change is durable work.
+Mark is soft meaning.
+EvidenceSnapshot is immutable legal evidence.
+Session coordinates.
+Store is truth.
+Agent reasons.
+MCP exposes bounded tools.
+Blobs store files.
+Providers call external APIs.
+StudioLive renders everything live.
