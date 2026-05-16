@@ -70,10 +70,10 @@ test.describe('Scenario 3: overlap revoke + reconcile', () => {
               document_id: docId,
               ops: [
                 {
-                  op: 'replace_field',
-                  path: ['fields', 'effective_date'],
-                  from: null,
-                  to: v
+                  op: 'replace_content',
+                  target_type: 'node',
+                  target_id: 'node-effective-date',
+                  args: { content: v }
                 }
               ]
             });
