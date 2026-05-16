@@ -1,8 +1,37 @@
 # Contract Studio SPEC.md
 
-Status: Draft v0.4  
+Status: Draft v0.5 (Document-primary)  
 Primary target: Elixir / Phoenix / LiveView  
 Core model: **Action in → Change out → Store is truth → Session coordinates → Agent reasons → Studio renders**
+
+---
+
+## Revision history
+
+- 2026-05-15: Pivot from Matter-primary to Document-primary product framing. Document is now the primary user-facing object; Matter remains the internal context container. Routes reorganized to document-first; matter_id becomes optional on most Actions. UI label "Matter" → "Workspace" (or hidden). DocumentSession is the per-Document live coordinator.
+
+---
+
+## Required framing
+
+- User-facing primary object: Document
+- Internal context scope: Matter
+- Main UI surface: Contract Studio
+- Durable edit unit: Change
+- Soft semantic layer: Mark
+- Live coordinator: DocumentSession
+
+### Role definitions
+
+**Document is the primary user-facing product object.** A Document is the contract draft/file the user is actively creating, importing, editing, converting, reviewing, revoking, exporting, and sharing with a lawyer. Examples: NDA, Service Agreement, Lease, Statement of Work, Converted NDA variant, Lawyer-review draft.
+
+**Matter is the internal context container around one contract-related situation.** A Matter is not the main UX object. It groups background context that may be shared across related documents. Matter may contain: pre-document discussion / Matter Brief, reusable party facts, source uploads, related contract variants, Slack context, law/evidence snapshots, lawyer packet context, migration lineage, related documents.
+
+The user should not need to understand or create a Matter manually. If a user uploads or creates a Document without an existing Matter, the backend may auto-create a hidden Matter.
+
+The product hierarchy is: **Document → Studio → optional Matter context.** It is NOT: Matter → Documents → Studio.
+
+User-facing label policy: 워크스페이스 (Workspace) or hidden; do NOT show "사건" (Matter) in casual UI unless the audience is law-firm operators.
 
 ---
 
@@ -25,7 +54,9 @@ Under that assumption, no hard blocker remains. Dirty crashes, LiveView restarts
 
 ## 1. Design Principle
 
-The system is not primarily a “documents module,” “migration module,” “marks module,” or “agent module.”
+The product is built around the **Document** as the primary user-facing actor. The user creates, imports, edits, reviews, revokes, converts, exports, and shares Documents. **Matter** is an internal context container — a scope grouping facts, sources, and related documents that may be shared across Documents in the same situation. Most users never need to think about Matter; the backend may auto-create a hidden Matter when a Document is created.
+
+The system is not primarily a "matters module," "documents module," "migration module," "marks module," or "agent module."
 
 The real abstraction is:
 
@@ -104,6 +135,10 @@ defmodule Contract.Types do
 
   @type user_id :: id()
   @type tenant_id :: id()
+  # matter_id is OPTIONAL / CONTEXTUAL.
+  # Document is the primary user-facing object; Matter is an internal
+  # context container. Most Actions carry only document_id. matter_id is
+  # only required for grouping, shared-field, or pre-document actions.
   @type matter_id :: id()
   @type document_id :: id()
   @type artifact_id :: id()
@@ -133,6 +168,8 @@ end
 
 The normal product UI is LiveView-only. No browser `/api` is needed for regular user actions.
 
+Routes are **document-first**. The Matter route is **optional and secondary**, used only for workspace/lawyer surfaces — do NOT make `/matters/:matter_id/...` the primary product path. User-facing label policy: 워크스페이스 (Workspace) or hidden; do NOT show "사건" (Matter) in casual UI unless the audience is law-firm operators.
+
 ```elixir
 defmodule ContractWeb.Router do
   use ContractWeb, :router
@@ -140,9 +177,15 @@ defmodule ContractWeb.Router do
   scope "/", ContractWeb do
     pipe_through [:browser, :authenticated]
 
+    # Primary product surface — document-first.
     live "/studio", StudioLive
-    live "/matters/:matter_id/studio", StudioLive
-    live "/matters/:matter_id/documents/:document_id", StudioLive
+    live "/documents/:document_id", StudioLive
+    live "/documents/:document_id/review", StudioLive
+
+    # Optional / secondary — internal "Workspace" (Matter) surface.
+    # User-facing label: 워크스페이스 (Workspace) or hidden; do NOT show
+    # "사건" in casual UI unless the audience is law-firm operators.
+    live "/workspaces/:matter_id", StudioLive
 
     get "/exports/:export_id/download", ExportDownloadController, :show
   end
@@ -163,7 +206,7 @@ end
 ```
 
 `/mcp`, `/slack`, OAuth callbacks, webhooks, and export downloads are external ingress/egress.  
-The browser product flow is the Studio LiveView.
+The browser product flow is the Studio LiveView, opened around a Document.
 
 ---
 
@@ -172,6 +215,8 @@ The browser product flow is the Studio LiveView.
 `Action` is the one intent shape.
 
 Users, agents, Slack, MCP, import jobs, export jobs, and system jobs all normalize into Actions.
+
+Most Actions are **document-first**: rename document, update metadata, set contract type, edit content, add mark, agent change, revoke change, request export, start type conversion, create converted variant. `matter_id` is **optional / contextual** — only required when the Action is about grouping, shared fields across documents, or pre-document context (e.g. Matter Brief discussion before any Document exists). All other Actions carry `document_id` as the primary scope.
 
 ```elixir
 defmodule Contract.Action do
@@ -212,6 +257,9 @@ defmodule Contract.Action do
         :request_export
       ]
 
+    # matter_id is OPTIONAL / CONTEXTUAL.
+    # Only required for grouping, shared-field, or pre-document Actions.
+    # All document-scoped Actions carry document_id; matter_id may be nil.
     field :matter_id, :binary_id
     field :document_id, :binary_id
     field :change_id, :binary_id
@@ -393,7 +441,7 @@ link: evidence_id
 
 ## 8. Studio
 
-`Contract.Studio` is the product façade for the one big LiveView.
+`Contract.Studio` is the product façade for the one big LiveView. It is **document-first**: `Studio.load/2` should prefer Document context (via `document_id`) over Matter context. Matter context is loaded only when needed (workspace surface, shared-field context, lawyer packet). If `params` carry both, Document wins as the primary scope.
 
 ```elixir
 defmodule Contract.Studio do
@@ -425,7 +473,7 @@ end
 `Studio` handles product-level orchestration:
 
 ```text
-load studio
+load studio (document-first; matter context optional)
 select/create/import document
 submit action
 sync after crash/reconnect
@@ -478,6 +526,16 @@ end
 Disposable UI process.
 
 It does not own document truth.
+
+StudioLive should open around a **Document** when possible. When mounted from `/documents/:document_id` or `/documents/:document_id/review`, the LiveView assigns that Document as the selected scope. When mounted from `/studio` (no document) or from `/workspaces/:matter_id` (workspace surface) with no selected Document, the always-open agent chat MUST ask the user whether to:
+
+1. upload an existing contract,
+2. open a recent document,
+3. create a blank contract,
+4. draft from discussion (pre-document Matter Brief),
+5. create a variant from another document.
+
+This 5-option prompt is the only required behavior for the no-document state; the rest of the UI surface (chat rail, recent list, upload panel) remains the same disposable LiveView projection.
 
 ```elixir
 defmodule ContractWeb.StudioLive do
@@ -557,7 +615,7 @@ Rules:
 
 ## 12. Runtime
 
-`Runtime` routes Actions into the correct execution path.
+`Runtime` routes Actions into the correct execution path. Routing is **matter-optional**: it keys off `document_id` for document-scoped Actions and only consults `matter_id` for grouping, shared-field, or pre-document Actions. A nil `matter_id` on a document-scoped Action is normal.
 
 ```elixir
 defmodule Contract.Runtime do
@@ -663,9 +721,11 @@ revoke
 
 ---
 
-## 14. Session
+## 14. Session (DocumentSession)
 
-Ephemeral coordinator.
+Ephemeral coordinator, **per Document**.
+
+`Contract.Session` IS the DocumentSession — one Session GenServer per Document. There is no MatterSession. The module name remains `Contract.Session` for code-path stability; the conceptual name is **DocumentSession**, and every reference below ("Session") means "the per-Document live coordinator."
 
 Reconstructable.
 
@@ -673,6 +733,7 @@ Not truth.
 
 ```elixir
 defmodule Contract.Session do
+  # DocumentSession: one per Document. No MatterSession exists.
   use GenServer
 
   alias Contract.Types, as: T
@@ -849,6 +910,10 @@ Later overlap → RevokeRequest.
 
 ## 18. Contract Type and Conversion
 
+`Document.type_key` is the selected contract type. It is **selected after creation, not at creation**: a Document can exist with `type_key = nil` (untyped draft) and the user (or agent) sets it later via `Action(:set_contract_type)`. Setting/changing the type is a **document metadata Change**.
+
+Converting type is a **document-to-document variant workflow** (see §19): default behavior for a major conversion is to create a new Document variant, not a massive in-place diff.
+
 Contract type is a key.
 
 No redundant IDs.
@@ -892,6 +957,8 @@ This starts migration.
 ## 19. Type Conversion and Field Migration
 
 Type conversion avoids massive diffs by creating a variant and migrating fields.
+
+**Field migration moves reusable values from the source Document to the target Document, optionally through Matter-level shared fields.** When two related Documents (e.g. an NDA and a Service Agreement variant) sit inside the same Matter, identity facts (party names, addresses, dates) can be linked to a Matter-level shared field so updates propagate; document-specific commercial terms are copied per-Document. Matter shared fields are an internal optimization — the user still operates on Documents.
 
 ```elixir
 defmodule Contract.Conversion do
@@ -1048,7 +1115,10 @@ Provider and export adapters.
 defmodule Contract.IO do
   alias Contract.Types, as: T
 
-  @spec import_upload(T.ctx(), T.matter_id(), T.upload()) ::
+  # matter_id is optional here. If nil, the backend may auto-create a
+  # hidden Matter to host the resulting Document. The user is not asked
+  # to pick a Matter on upload.
+  @spec import_upload(T.ctx(), T.matter_id() | nil, T.upload()) ::
           T.result(Contract.Action.t())
   def import_upload(ctx, matter_id, upload)
 
@@ -1236,3 +1306,14 @@ one write-home region per document
 ```
 
 If the product later requires active-active collaborative writes across regions for the same document, the design must be revisited. That is the only blocker found that flips the architecture.
+
+---
+
+## 28. Closing Principle
+
+> Document is the product.
+> Matter is context.
+> Studio is the surface.
+> Session is per Document.
+> Action in, Change out.
+> Store is truth.
