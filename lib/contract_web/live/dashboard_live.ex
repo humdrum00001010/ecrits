@@ -1,18 +1,22 @@
 defmodule ContractWeb.DashboardLive do
   @moduledoc """
-  Authenticated home for Contract Studio. Shows a stat row, the matters
-  the scope can see, recent documents, and an activity feed.
+  Authenticated home for Contract Studio. Shows a greeting, a Resume link
+  to the most-recent document, the matters the scope can see, recent
+  documents, and an activity feed.
+
+  Per the 2026-05-15 product directive ("a lawyer is not a programmer"),
+  the dashboard no longer counts things — counts add noise without value
+  for the legal persona. The old stat row (active matters / documents /
+  open agent runs) was removed.
 
   ## Data sources
 
     * `Contract.Matters.list_for_scope/1` — visible matters for the scope.
     * `Contract.Documents.list_recent_for_scope/2` — recent documents
-      for the scope, across all visible matters.
+      for the scope, across all visible matters. The head of this list
+      drives the "Resume" affordance in the greeting area.
     * `Contract.ContractTypes.list/2` — compile-time TOML-backed type
       registry, drives the "New Document" modal.
-    * `Contract.Repo.aggregate/3` on the `changes` table — gives us a
-      cheap "Open agent runs" count by tallying agent-actor changes
-      with status `:active`.
     * `Contract.Repo.all/1` on a small `changes` query — flattened into
       an activity feed.
   """
@@ -126,19 +130,25 @@ defmodule ContractWeb.DashboardLive do
     recent_documents = list_recent_documents(socket.assigns.current_scope)
     ftc_templates = list_ftc_templates()
     activity = list_activity(socket.assigns.current_scope)
-    open_agent_runs = count_open_agent_runs()
 
     socket
     |> assign(:matters, matters)
     |> assign(:recent_documents, recent_documents)
+    |> assign(:resume_document, most_recent_document(recent_documents))
     |> assign(:ftc_templates, ftc_templates)
     |> assign(:activity, activity)
-    |> assign(:stats, %{
-      active_matters: length(matters),
-      documents: length(recent_documents),
-      open_agent_runs: open_agent_runs
-    })
   end
+
+  # `list_recent_for_scope/2` returns documents newest-first, so the head
+  # of the list (if any) is the lawyer's "resume" target. We guard
+  # against `:template` documents (FTC seeds in the special system matter)
+  # so the Resume link never points the user back into a template.
+  defp most_recent_document([]), do: nil
+
+  defp most_recent_document([%{status: :template} | rest]),
+    do: most_recent_document(rest)
+
+  defp most_recent_document([doc | _]), do: doc
 
   # System-owned `:template` documents seeded by `Contract.Workers.FtcSeedJob`
   # (Wave 5). They live in the special "FTC 표준약관" matter owned by the
@@ -259,21 +269,6 @@ defmodule ContractWeb.DashboardLive do
     Postgrex.Error -> []
   end
 
-  defp count_open_agent_runs do
-    from(c in Change,
-      where: c.actor_type == :agent and c.status == :active,
-      select: count(c.id)
-    )
-    |> Repo.one()
-    |> case do
-      n when is_integer(n) -> n
-      _ -> 0
-    end
-  rescue
-    DBConnection.ConnectionError -> 0
-    Postgrex.Error -> 0
-  end
-
   @impl true
   def render(assigns) do
     ~H"""
@@ -292,7 +287,7 @@ defmodule ContractWeb.DashboardLive do
               <span class="text-primary">{persona_first_name(@current_scope)}</span>.
             </h1>
             <p class="text-base-content/60 mt-1">
-              {dgettext("dashboard", "Pick up where you left off, or open a new matter.")}
+              {dgettext("dashboard", "Pick up where you left off, or start a new document.")}
             </p>
           </div>
           <div class="flex flex-wrap gap-2">
@@ -310,24 +305,42 @@ defmodule ContractWeb.DashboardLive do
         </header>
 
         <%!-- ---------------------------------------------------------- --%>
-        <%!-- Stat row                                                    --%>
+        <%!-- Resume affordance                                           --%>
+        <%!--                                                              --%>
+        <%!-- Replaces the old stat row (active matters / documents /     --%>
+        <%!-- open agent runs). A lawyer doesn't care about counts —      --%>
+        <%!-- they care about getting back to the document they were      --%>
+        <%!-- working on. When there's no recent document the slot is     --%>
+        <%!-- not rendered at all; the Documents section's empty state    --%>
+        <%!-- already covers that case.                                   --%>
         <%!-- ---------------------------------------------------------- --%>
-        <section class="grid grid-cols-1 sm:grid-cols-3 gap-4" id="dashboard-stats">
-          <.stat_card
-            label={dgettext("dashboard", "Active matters")}
-            value={@stats.active_matters}
-            icon="hero-folder"
-          />
-          <.stat_card
-            label={dgettext("dashboard", "Documents")}
-            value={@stats.documents}
-            icon="hero-document-text"
-          />
-          <.stat_card
-            label={dgettext("dashboard", "Open agent runs")}
-            value={@stats.open_agent_runs}
-            icon="hero-cpu-chip"
-          />
+        <section
+          :if={@resume_document}
+          id="dashboard-resume"
+          class="rounded-box border border-base-200 bg-base-100 px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
+        >
+          <div class="min-w-0">
+            <p class="text-xs font-medium tracking-wide uppercase text-base-content/50">
+              {dgettext("dashboard", "Resume your most recent document")}
+            </p>
+            <.link
+              navigate={
+                ~p"/matters/#{@resume_document.matter_id || "_"}/documents/#{@resume_document.document_id}"
+              }
+              class="text-base font-medium hover:underline truncate block mt-1"
+              data-role="dashboard-resume-link"
+            >
+              {@resume_document.title}
+            </.link>
+          </div>
+          <.link
+            navigate={
+              ~p"/matters/#{@resume_document.matter_id || "_"}/documents/#{@resume_document.document_id}"
+            }
+            class="text-sm text-base-content/60 hover:text-base-content shrink-0"
+          >
+            {dgettext("dashboard", "Open")} <span aria-hidden="true">→</span>
+          </.link>
         </section>
 
         <%!-- ---------------------------------------------------------- --%>
@@ -700,22 +713,6 @@ defmodule ContractWeb.DashboardLive do
   # ---------------------------------------------------------------------------
   # Small render helpers
   # ---------------------------------------------------------------------------
-
-  attr :label, :string, required: true
-  attr :value, :integer, required: true
-  attr :icon, :string, required: true
-
-  defp stat_card(assigns) do
-    ~H"""
-    <div class="rounded-box border border-base-200 p-5 bg-base-100">
-      <div class="flex items-center gap-2 text-base-content/60 text-sm">
-        <.icon name={@icon} class="size-4" />
-        <span>{@label}</span>
-      </div>
-      <p class="text-3xl font-semibold tracking-tight mt-2 tabular-nums">{@value}</p>
-    </div>
-    """
-  end
 
   defp persona_first_name(%{user: %{email: email}}) when is_binary(email) do
     email |> String.split("@") |> List.first()

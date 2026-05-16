@@ -17,13 +17,32 @@ defmodule ContractWeb.DashboardLiveTest do
   describe "dashboard chrome" do
     setup :log_in_a_user
 
-    test "renders the welcome heading + the three stat cards", %{conn: conn} do
+    # 2026-05-15 directive: a lawyer is not a programmer — counts add
+    # noise without value. The dashboard renders only the greeting +
+    # subtitle now; the stat row is gone.
+    test "renders the welcome heading + subtitle, with no stat cards", %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/dashboard")
 
       assert html =~ "Good day"
-      assert html =~ "Active matters"
-      assert html =~ "Documents"
-      assert html =~ "Open agent runs"
+
+      # The stat row container is gone.
+      refute html =~ ~s(id="dashboard-stats")
+      # And none of the old stat labels appear as standalone stat-card
+      # text. We intentionally do NOT refute "Documents" / "Active matters"
+      # here — those words still occur as table-column headers and as
+      # the matters/recent-documents section titles. The structural
+      # `id="dashboard-stats"` refute above is the load-bearing assert.
+      refute html =~ "Open agent runs"
+    end
+
+    test "renders the new subtitle (no 'new matter' wording)", %{conn: conn} do
+      # Tests run under `:ui_locale, "en"` (config/test.exs). The new
+      # subtitle drops "open a new matter" in favour of "start a new
+      # document" since Matter is now hidden from the lawyer.
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      assert html =~ "Pick up where you left off, or start a new document."
+      refute html =~ "Pick up where you left off, or open a new matter."
     end
 
     test "shows the persona dropdown with the user's email in the navbar",
@@ -31,6 +50,73 @@ defmodule ContractWeb.DashboardLiveTest do
       {:ok, _lv, html} = live(conn, ~p"/dashboard")
       assert html =~ user.email
       assert html =~ "Log out"
+    end
+  end
+
+  # 2026-05-15: the stat row was replaced with a "Resume your most-recent
+  # document" affordance. When the scope has a recent document the link
+  # renders; when it doesn't, the slot is skipped entirely (the Documents
+  # section's empty state already covers the no-docs case).
+  describe "resume affordance" do
+    setup :log_in_a_user
+
+    test "does NOT render the Resume slot when there is no recent document",
+         %{conn: conn} do
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      refute html =~ ~s(id="dashboard-resume")
+      refute html =~ ~s(data-role="dashboard-resume-link")
+    end
+
+    test "renders the Resume link to the most-recent document when one exists",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, matter} = Contract.Matters.create(scope, %{"name" => "Acme v Smith"})
+
+      {:ok, _older} =
+        Contract.Documents.create(scope, %{
+          "matter_id" => matter.id,
+          "title" => "Older draft",
+          "type_key" => "nda_v1"
+        })
+
+      {:ok, latest} =
+        Contract.Documents.create(scope, %{
+          "matter_id" => matter.id,
+          "title" => "Latest draft",
+          "type_key" => "nda_v1"
+        })
+
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      assert html =~ ~s(id="dashboard-resume")
+      assert html =~ ~s(data-role="dashboard-resume-link")
+      # Title of the most-recent document is in the link.
+      assert html =~ "Latest draft"
+      # And it points at the document URL.
+      assert html =~ "/matters/#{matter.id}/documents/#{latest.id}"
+    end
+
+    test "renders the Resume label (English source-of-truth)",
+         %{conn: conn, user: user} do
+      # `:ui_locale, "en"` is pinned in config/test.exs. We assert on the
+      # English msgid (source-of-truth); the Korean translation is
+      # exercised structurally by the .po file diff alone — flipping the
+      # locale in an async test would leak the env to concurrent tests
+      # in other modules (auth tests broke before this was reworked).
+      scope = Contract.Context.for_user(user)
+      {:ok, matter} = Contract.Matters.create(scope, %{"name" => "Acme v Smith"})
+
+      {:ok, _doc} =
+        Contract.Documents.create(scope, %{
+          "matter_id" => matter.id,
+          "title" => "재개할 문서",
+          "type_key" => "nda_v1"
+        })
+
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      assert html =~ "Resume your most recent document"
     end
   end
 
@@ -255,9 +341,9 @@ defmodule ContractWeb.DashboardLiveTest do
       assert html =~ "first commit on A"
       assert html =~ "rename"
 
-      # Stat row.
-      assert html =~ "Documents"
-      assert html =~ "Active matters"
+      # The stat row is gone (2026-05-15 directive).
+      refute html =~ ~s(id="dashboard-stats")
+      refute html =~ "Open agent runs"
     end
   end
 

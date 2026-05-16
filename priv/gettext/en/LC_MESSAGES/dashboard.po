@@ -11,201 +11,221 @@ msgstr ""
 "Language: en\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
-#: lib/contract_web/live/dashboard_live.ex:285
+#: lib/contract_web/live/dashboard_live.ex:342
 #, elixir-autogen, elixir-format
 msgid "%{count} total"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:306
+#: lib/contract_web/live/dashboard_live.ex:363
 #, elixir-autogen, elixir-format
 msgid "A matter holds the documents, evidence, and agent runs for a single client engagement."
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:260
-#, elixir-autogen, elixir-format
-msgid "Active matters"
-msgstr ""
-
-#: lib/contract_web/live/dashboard_live.ex:297
+#: lib/contract_web/live/dashboard_live.ex:354
 #, elixir-autogen, elixir-format
 msgid "An empty folder with a quill, signalling no matters yet."
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:575
+#: lib/contract_web/live/dashboard_live.ex:642
 #, elixir-autogen, elixir-format
 msgid "Close"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:611
+#: lib/contract_web/live/dashboard_live.ex:685
 #, elixir-autogen, elixir-format
 msgid "Close modal"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:34
+#: lib/contract_web/live/dashboard_live.ex:38
 #, elixir-autogen, elixir-format
 msgid "Dashboard"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:59
-#, elixir-autogen, elixir-format
-msgid "Document creation for %{type_key} is queued. Persistence ships with Wave 3C2."
-msgstr ""
-
-#: lib/contract_web/live/dashboard_live.ex:265
-#: lib/contract_web/live/dashboard_live.ex:334
+#: lib/contract_web/live/dashboard_live.ex:391
 #, elixir-autogen, elixir-format
 msgid "Documents"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:234
+#: lib/contract_web/live/dashboard_live.ex:273
 #, elixir-autogen, elixir-format
 msgid "Good day,"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:282
+#: lib/contract_web/live/dashboard_live.ex:339
 #, elixir-autogen, elixir-format
 msgid "Matters"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:247
+#: lib/contract_web/live/dashboard_live.ex:286
 #, elixir-autogen, elixir-format
 msgid "New Document"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:316
+#: lib/contract_web/live/dashboard_live.ex:373
 #, elixir-autogen, elixir-format
 msgid "New Matter"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:562
+#: lib/contract_web/live/dashboard_live.ex:629
 #, elixir-autogen, elixir-format
 msgid "New document"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:390
+#: lib/contract_web/live/dashboard_live.ex:447
 #, elixir-autogen, elixir-format
 msgid "No documents yet. Drag a PDF in, or start from a contract type."
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:304
+#: lib/contract_web/live/dashboard_live.ex:361
 #, elixir-autogen, elixir-format
 msgid "No matters yet"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:250
+#: lib/contract_web/live/dashboard_live.ex:289
 #, elixir-autogen, elixir-format
 msgid "Open Studio"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:270
+#: lib/contract_web/live/dashboard_live.ex:277
 #, elixir-autogen, elixir-format
-msgid "Open agent runs"
+msgid "Pick up where you left off, or start a new document."
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:565
+#: lib/contract_web/live/dashboard_live.ex:311
 #, elixir-autogen, elixir-format
-msgid "Pick a contract type. Field maps and templates load from the type registry."
+msgid "Resume your most recent document"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:238
+#: lib/contract_web/live/dashboard_live.ex:329
 #, elixir-autogen, elixir-format
-msgid "Pick up where you left off, or open a new matter."
+msgid "Open"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:501
+#: lib/contract_web/live/dashboard_live.ex:562
 #, elixir-autogen, elixir-format
 msgid "Recent activity"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:381
+#: lib/contract_web/live/dashboard_live.ex:438
 #, elixir-autogen, elixir-format
 msgid "Recent documents"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:510
+#: lib/contract_web/live/dashboard_live.ex:571
 #, elixir-autogen, elixir-format
 msgid "The activity feed will populate as you and the agent make changes."
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:613
+#: lib/contract_web/live/dashboard_live.ex:687
 #, elixir-autogen, elixir-format
 msgid "close"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:447
-#: lib/contract_web/live/dashboard_live.ex:528
+#: lib/contract_web/live/dashboard_live.ex:506
+#: lib/contract_web/live/dashboard_live.ex:589
 #, elixir-autogen, elixir-format
 msgid "rev %{n}"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:467
+#: lib/contract_web/live/dashboard_live.ex:526
 #, elixir-autogen, elixir-format
 msgid "%{count} templates"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:707
+#: lib/contract_web/live/dashboard_live.ex:765
 #, elixir-autogen, elixir-format
 msgid "Active"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:700
-#: lib/contract_web/live/dashboard_live.ex:708
+#: lib/contract_web/live/dashboard_live.ex:758
+#: lib/contract_web/live/dashboard_live.ex:766
 #, elixir-autogen, elixir-format
 msgid "Archived"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:464
+#: lib/contract_web/live/dashboard_live.ex:523
 #, elixir-autogen, elixir-format
 msgid "FTC standard contracts"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:488
+#: lib/contract_web/live/dashboard_live.ex:549
 #, elixir-autogen, elixir-format
 msgid "FTC template"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:699
+#: lib/contract_web/live/dashboard_live.ex:757
 #, elixir-autogen, elixir-format
 msgid "In progress"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:337
+#: lib/contract_web/live/dashboard_live.ex:394
 #, elixir-autogen, elixir-format
 msgid "Last activity"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:406
+#: lib/contract_web/live/dashboard_live.ex:463
 #, elixir-autogen, elixir-format
 msgid "Last revision"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:403
+#: lib/contract_web/live/dashboard_live.ex:460
 #, elixir-autogen, elixir-format
 msgid "Matter"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:331
+#: lib/contract_web/live/dashboard_live.ex:388
 #, elixir-autogen, elixir-format
 msgid "Name"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:332
-#: lib/contract_web/live/dashboard_live.ex:400
+#: lib/contract_web/live/dashboard_live.ex:389
+#: lib/contract_web/live/dashboard_live.ex:457
 #, elixir-autogen, elixir-format
 msgid "Status"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:709
+#: lib/contract_web/live/dashboard_live.ex:767
 #, elixir-autogen, elixir-format
 msgid "Template"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:397
+#: lib/contract_web/live/dashboard_live.ex:454
+#: lib/contract_web/live/dashboard_live.ex:659
 #, elixir-autogen, elixir-format
 msgid "Title"
 msgstr ""
 
-#: lib/contract_web/live/dashboard_live.ex:398
+#: lib/contract_web/live/dashboard_live.ex:455
 #, elixir-autogen, elixir-format
 msgid "Type"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:673
+#, elixir-autogen, elixir-format
+msgid "Cancel"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:88
+#, elixir-autogen, elixir-format
+msgid "Could not create the document. Pick a matter first."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:676
+#, elixir-autogen, elixir-format
+msgid "Create"
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:632
+#, elixir-autogen, elixir-format
+msgid "Give it a title. The contract type is set later."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:77
+#, elixir-autogen, elixir-format
+msgid "New document created. Pick a contract type with Cmd+K, or let the agent suggest one."
+msgstr ""
+
+#: lib/contract_web/live/dashboard_live.ex:664
+#, elixir-autogen, elixir-format
+msgid "Type is set later by you or the agent."
 msgstr ""
