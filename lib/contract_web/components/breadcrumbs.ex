@@ -131,9 +131,12 @@ defmodule ContractWeb.Components.Breadcrumbs do
   end
 
   defp studio_trail(%{name: matter_name, id: matter_id} = _matter, %{title: doc_title}) do
+    # Document-pivot (SPEC.md §4): the matter crumb links to the
+    # workspace surface (`/workspaces/:matter_id`), not the legacy
+    # `/matters/:matter_id`. The current crumb is the Document title.
     [
       %{label: "Dashboard", navigate: "/dashboard", current?: false},
-      %{label: matter_name, navigate: "/matters/#{matter_id}", current?: false},
+      %{label: matter_name, navigate: "/workspaces/#{matter_id}", current?: false},
       %{label: doc_title, navigate: nil, current?: true}
     ]
   end

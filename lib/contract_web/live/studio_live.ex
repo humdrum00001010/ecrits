@@ -360,7 +360,7 @@ defmodule ContractWeb.StudioLive do
               |> update(:studio_state, fn st -> %{st | migration_panel_open?: false} end)
               |> put_flash(:info, "Created variant document #{new_doc.title}.")
 
-            {:noreply, push_navigate(socket, to: ~p"/matters/#{new_doc.matter_id}/documents/#{new_doc.id}")}
+            {:noreply, push_navigate(socket, to: ~p"/documents/#{new_doc.id}")}
 
           {:error, reason} ->
             {:noreply, put_flash(socket, :error, "Variant creation failed: #{inspect(reason)}")}

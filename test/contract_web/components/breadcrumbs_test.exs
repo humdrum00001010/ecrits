@@ -138,7 +138,7 @@ defmodule ContractWeb.Components.BreadcrumbsTest do
       assert Breadcrumbs.build(scope(), page: :studio, matter: matter, document: document) ==
                [
                  %{label: "Dashboard", navigate: "/dashboard", current?: false},
-                 %{label: "Acme/NewCo merger", navigate: "/matters/m_42", current?: false},
+                 %{label: "Acme/NewCo merger", navigate: "/workspaces/m_42", current?: false},
                  %{label: "Term Sheet v3", navigate: nil, current?: true}
                ]
     end

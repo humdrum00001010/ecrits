@@ -389,7 +389,7 @@ defmodule ContractWeb.DashboardLive do
                   >
                     <td>
                       <.link
-                        navigate={~p"/matters/#{matter.id}/studio"}
+                        navigate={~p"/workspaces/#{matter.id}"}
                         class="font-medium hover:underline"
                       >
                         {matter.name}
@@ -458,9 +458,7 @@ defmodule ContractWeb.DashboardLive do
                   >
                     <td class="min-w-0">
                       <.link
-                        navigate={
-                          ~p"/matters/#{doc.matter_id || "_"}/documents/#{doc.document_id}"
-                        }
+                        navigate={~p"/documents/#{doc.document_id}"}
                         class="font-medium hover:underline"
                       >
                         {doc.title}
@@ -482,7 +480,7 @@ defmodule ContractWeb.DashboardLive do
                     <td class="hidden sm:table-cell text-sm text-base-content/70">
                       <.link
                         :if={doc.matter_id}
-                        navigate={~p"/matters/#{doc.matter_id}/studio"}
+                        navigate={~p"/workspaces/#{doc.matter_id}"}
                         class="hover:underline"
                       >
                         {doc.matter_name || "—"}
@@ -522,7 +520,7 @@ defmodule ContractWeb.DashboardLive do
               <div class="flex items-center gap-3 min-w-0 md:flex-1">
                 <.icon name="hero-document-duplicate" class="size-4 text-primary/70 shrink-0" />
                 <.link
-                  navigate={~p"/matters/_/documents/#{tpl.document_id}"}
+                  navigate={~p"/documents/#{tpl.document_id}"}
                   class="text-sm font-medium hover:underline truncate block"
                 >
                   {tpl.title}

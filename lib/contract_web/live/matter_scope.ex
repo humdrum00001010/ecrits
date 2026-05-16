@@ -30,8 +30,22 @@ defmodule ContractWeb.MatterScope do
   @doc """
   on_mount callback: seeds perms from the session and attaches matter
   (if matter_id present) onto `current_scope`.
+
+  Document-pivot (SPEC.md §4): routes are now document-first. When
+  `:document_id` is present in params, this hook resolves it through
+  `Contract.Documents.get/2`, derives the matter from
+  `document.matter_id`, and threads both `current_scope.matter` and
+  `assigns.current_document_id` so downstream components have a single
+  source of truth. The `:matter_id` branch is retained for the
+  `/workspaces/:matter_id` (and legacy `/matters/...`) routes.
   """
   def on_mount(:assign_scope, params, session, socket) do
+    document_id =
+      case params do
+        %{"document_id" => id} when is_binary(id) and id != "" -> id
+        _ -> nil
+      end
+
     matter_id =
       case params do
         %{"matter_id" => id} when is_binary(id) and id != "" -> id
@@ -41,7 +55,8 @@ defmodule ContractWeb.MatterScope do
     socket =
       socket
       |> assign_perms(session)
-      |> assign_matter(matter_id)
+      |> assign_current_document(document_id)
+      |> assign_matter_from_document(document_id, matter_id)
 
     {:cont, socket}
   end
@@ -63,6 +78,49 @@ defmodule ContractWeb.MatterScope do
   end
 
   defp session_perms(_), do: nil
+
+  # Stash the document_id on the LV's assigns so downstream components
+  # (canvas, chat-rail, breadcrumbs) read a single key rather than
+  # cracking the path. Stays nil for /studio and /workspaces/:matter_id.
+  defp assign_current_document(socket, nil),
+    do: assign(socket, :current_document_id, nil)
+
+  defp assign_current_document(socket, document_id) when is_binary(document_id),
+    do: assign(socket, :current_document_id, document_id)
+
+  # When a document_id was supplied, resolve it through Documents.get/2
+  # and use its matter_id. Fall back to the explicit matter_id branch
+  # (or nil) if the document can't be loaded — that keeps the LV alive
+  # on tests / unseeded environments and lets Studio.load surface the
+  # real error.
+  defp assign_matter_from_document(socket, nil, matter_id),
+    do: assign_matter(socket, matter_id)
+
+  defp assign_matter_from_document(
+         %{assigns: %{current_scope: %Context{} = scope}} = socket,
+         document_id,
+         fallback_matter_id
+       )
+       when is_binary(document_id) do
+    case load_document(scope, document_id) do
+      {:ok, %{matter_id: matter_id}} when is_binary(matter_id) ->
+        assign_matter(socket, matter_id)
+
+      _ ->
+        assign_matter(socket, fallback_matter_id)
+    end
+  end
+
+  defp assign_matter_from_document(socket, _document_id, matter_id),
+    do: assign_matter(socket, matter_id)
+
+  defp load_document(scope, document_id) do
+    Contract.Documents.get(scope, document_id)
+  rescue
+    # Documents table not migrated yet — degrade gracefully.
+    Postgrex.Error -> {:error, :unavailable}
+    DBConnection.ConnectionError -> {:error, :unavailable}
+  end
 
   defp assign_matter(socket, nil), do: socket
 

@@ -74,10 +74,26 @@ defmodule ContractWeb.Router do
         {ContractWeb.MatterScope, :assign_scope}
       ] do
       live "/dashboard", DashboardLive
+
+      # Primary product surface — document-first (SPEC.md §4, 2026-05-15
+      # Document-pivot). The Document is the user-facing object; the
+      # workspace/matter is internal context.
       live "/studio", StudioLive
+      live "/documents/:document_id", StudioLive
+      live "/documents/:document_id/review", StudioLive
+
+      # Optional secondary — internal Workspace surface. User-facing label
+      # is 워크스페이스 (Workspace) or hidden; do NOT show "사건" (Matter)
+      # in casual UI unless the audience is law-firm operators.
+      live "/workspaces/:matter_id", StudioLive
       live "/matters/:matter_id/studio", StudioLive
-      live "/matters/:matter_id/documents/:document_id", StudioLive
     end
+
+    # Backwards-compat: legacy `/matters/:matter_id/documents/:document_id`
+    # now redirects to `/documents/:document_id` (SPEC.md §4).
+    get "/matters/:matter_id/documents/:document_id",
+        LegacyRedirectController,
+        :matter_document
   end
 
   # Inbound MCP server (SPEC.md §4, §21). Streamable HTTP transport: accepts

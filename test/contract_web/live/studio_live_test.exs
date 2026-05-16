@@ -44,6 +44,89 @@ defmodule ContractWeb.StudioLiveTest do
       assert :sys.get_state(lv.pid).socket.assigns.current_scope.matter.id == matter_id
     end
 
+    # ---------------------------------------------------------------
+    # Document-pivot (SPEC.md §4, 2026-05-15). The product surface is
+    # now document-first: `/documents/:document_id` is the canonical
+    # URL, `/workspaces/:matter_id` is the optional secondary, and
+    # `/studio` (no params) lands on the no-document agent prompt.
+    # The legacy `/matters/:matter_id/documents/:document_id` URL
+    # must 301 to the new path so bookmarks / Slack unfurls stay live.
+    # ---------------------------------------------------------------
+
+    test "mounts at /documents/:document_id and resolves matter from the document",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, matter} = Contract.Matters.create(scope, %{"name" => "doc-pivot-mount"})
+
+      {:ok, doc} =
+        Contract.Documents.create(scope, %{
+          "matter_id" => matter.id,
+          "title" => "doc-pivot-mount-doc",
+          "type_key" => "nda_v1"
+        })
+
+      {:ok, lv, _html} = live(conn, ~p"/documents/#{doc.id}")
+
+      assigns = :sys.get_state(lv.pid).socket.assigns
+      # Document-pivot: MatterScope resolved the document, derived the
+      # matter from `document.matter_id`, and threaded both into
+      # `current_scope` + `assigns.current_document_id`.
+      assert assigns.current_document_id == doc.id
+      assert assigns.current_scope.matter.id == matter.id
+      assert assigns.studio_state.selected_document_id == doc.id
+    end
+
+    test "mounts at /documents/:document_id/review (review subroute) the same way",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, matter} = Contract.Matters.create(scope, %{"name" => "doc-pivot-review"})
+
+      {:ok, doc} =
+        Contract.Documents.create(scope, %{
+          "matter_id" => matter.id,
+          "title" => "doc-pivot-review-doc",
+          "type_key" => "nda_v1"
+        })
+
+      {:ok, lv, _html} = live(conn, ~p"/documents/#{doc.id}/review")
+
+      assigns = :sys.get_state(lv.pid).socket.assigns
+      assert assigns.current_document_id == doc.id
+      assert assigns.current_scope.matter.id == matter.id
+      assert assigns.studio_state.selected_document_id == doc.id
+    end
+
+    test "mounts at /workspaces/:matter_id with the matter assigned and no document",
+         %{conn: conn} do
+      matter_id = Ecto.UUID.generate()
+      {:ok, lv, _html} = live(conn, ~p"/workspaces/#{matter_id}")
+
+      assigns = :sys.get_state(lv.pid).socket.assigns
+      assert assigns.current_scope.matter.id == matter_id
+      assert assigns.current_document_id == nil
+      assert assigns.studio_state.selected_document_id == nil
+    end
+
+    test "mounts at /studio (no params) with nil matter, nil document",
+         %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      assigns = :sys.get_state(lv.pid).socket.assigns
+      assert assigns.current_scope.matter == nil
+      assert assigns.current_document_id == nil
+      assert assigns.studio_state.selected_document_id == nil
+    end
+
+    test "legacy /matters/:matter_id/documents/:document_id redirects to /documents/:document_id",
+         %{conn: conn} do
+      matter_id = Ecto.UUID.generate()
+      document_id = Ecto.UUID.generate()
+
+      conn = get(conn, ~p"/matters/#{matter_id}/documents/#{document_id}")
+
+      assert redirected_to(conn, 301) == ~p"/documents/#{document_id}"
+    end
+
     test "MatterScope threads :user_perms from session onto current_scope.perms (lawyer-style) and renders + 새 문서 link",
          %{conn: conn} do
       # Persona sign-in (TestAuthController) writes :user_perms into the
