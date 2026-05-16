@@ -8,6 +8,7 @@ Core model: **Action in → Change out → Store is truth → Session coordinate
 
 ## Revision history
 
+- 2026-05-16: Add Context Reservoir as the persistent left-side projection of contract context (brief / shared fields / open questions / related docs / sources / evidence / recent changes / readiness). All reservoir edits go through Action → Runtime → Session → Engine → Store. Reservoir is projection, not truth. Studio layout: Left = Context Reservoir, Center = Document Canvas, Right = Agent Rail.
 - 2026-05-15: Pivot from Matter-primary to Document-primary product framing. Document is now the primary user-facing object; Matter remains the internal context container. Routes reorganized to document-first; matter_id becomes optional on most Actions. UI label "Matter" → "Workspace" (or hidden). DocumentSession is the per-Document live coordinator.
 
 ---
@@ -292,6 +293,8 @@ convert to NDA        → Action(:start_type_conversion)
 create NDA variant    → Action(:create_converted_variant)
 ```
 
+Context Reservoir edits become normal Actions. Editing Party A becomes `Action(:edit_document)` or `Action(:update_metadata)`. Answering an open question becomes `Action(:add_mark)` or `Action(:update_mark)`. Changing jurisdiction becomes `Action(:update_metadata)`. Opening a related source document becomes `Action(:open_document)`. Marking evidence as relevant becomes `Action(:add_mark)`. The Context Reservoir does NOT create a separate context-mutation system.
+
 ---
 
 ## 6. Change
@@ -467,6 +470,21 @@ defmodule Contract.Studio do
 
   @spec subscribe(T.ctx(), Contract.Studio.State.t()) :: T.result(:ok)
   def subscribe(ctx, state)
+
+  @spec load_context_reservoir(Contract.Types.ctx(), Contract.Studio.State.t()) ::
+          Contract.Types.result(Contract.Studio.ContextReservoir.t())
+  def load_context_reservoir(ctx, state)
+
+  @spec refresh_context_reservoir(Contract.Types.ctx(), Contract.Studio.State.t()) ::
+          Contract.Types.result(Contract.Studio.State.t())
+  def refresh_context_reservoir(ctx, state)
+
+  @spec submit_context_action(
+          Contract.Types.ctx(),
+          Contract.Studio.State.t(),
+          Contract.Action.t()
+        ) :: Contract.Types.result(Contract.Studio.State.t())
+  def submit_context_action(ctx, state, action)
 end
 ```
 
@@ -478,6 +496,8 @@ select/create/import document
 submit action
 sync after crash/reconnect
 subscribe to document updates
+load/refresh context reservoir
+submit context-reservoir edits as Actions
 ```
 
 ---
@@ -512,10 +532,38 @@ defmodule Contract.Studio.State do
 
     field :mode, Ecto.Enum,
       values: [:no_document, :briefing, :editing, :reviewing]
+
+    embeds_one :context_reservoir, Contract.Studio.ContextReservoir
   end
 
   @spec changeset(t(), T.attrs()) :: Ecto.Changeset.t()
   def changeset(state, attrs)
+end
+```
+
+The Context Reservoir is the persistent left-side projection of contract context (see §10a). It is UI/projection state, not durable truth, so it is an embedded schema on Studio.State.
+
+```elixir
+defmodule Contract.Studio.ContextReservoir do
+  use Ecto.Schema
+  import Ecto.Changeset
+
+  @primary_key false
+
+  embedded_schema do
+    field :brief, :map, default: %{}
+    field :shared_fields, {:array, :map}, default: []
+    field :open_questions, {:array, :map}, default: []
+    field :related_documents, {:array, :map}, default: []
+    field :sources, {:array, :map}, default: []
+    field :evidence, {:array, :map}, default: []
+    field :recent_changes, {:array, :map}, default: []
+    field :recent_revokes, {:array, :map}, default: []
+    field :readiness, :map, default: %{}
+  end
+
+  @spec changeset(t(), map()) :: Ecto.Changeset.t()
+  def changeset(reservoir, attrs)
 end
 ```
 
@@ -526,6 +574,17 @@ end
 Disposable UI process.
 
 It does not own document truth.
+
+Studio layout:
+
+```text
+Left   = Context Reservoir (live projection of contract context)
+Center = Current Document (Canvas — Briefing/Editor/Review)
+Right  = Agent Chat / Actions
+Top    = Document title, type, metadata
+```
+
+The left rail is the Context Reservoir (see §10a), not a raw document list or document picker. Documents appear in the reservoir only as contextual related documents with human labels. The center rail is the Document Canvas. The right rail is the Agent Chat / Actions.
 
 StudioLive should open around a **Document** when possible. When mounted from `/documents/:document_id` or `/documents/:document_id/review`, the LiveView assigns that Document as the selected scope. When mounted from `/studio` (no document) or from `/workspaces/:matter_id` (workspace surface) with no selected Document, the always-open agent chat MUST ask the user whether to:
 
@@ -577,6 +636,115 @@ Examples:
 "create_variant"        → Action(:create_converted_variant)
 ```
 
+### Studio visual principle
+
+The Studio should feel like:
+
+```text
+Left:   what we know
+Center: what we are writing
+Right:  who helps us write
+```
+
+The Context Reservoir is the contract's memory.
+The Document Canvas is the contract's text.
+The Agent Rail is the contract's operator.
+
+---
+
+## 10a. Context Reservoir
+
+StudioLive MUST include a persistent left-side Context Reservoir.
+
+The Context Reservoir is a live projection of matter/document context. It is not the primary document editor and not a raw document navigator.
+
+It SHOULD show:
+- brief / purpose
+- reusable fields
+- open questions
+- related documents
+- source snapshots
+- evidence snapshots
+- important marks
+- recent changes
+- recent revokes
+- export/readiness state
+
+The Context Reservoir MAY allow direct editing of fields, answers, metadata, and context marks.
+
+All edits from the Context Reservoir MUST become Actions and commit as Changes through Runtime, Session, Engine, and Store.
+
+The agent MAY use the Context Reservoir as part of its context frame.
+
+The Context Reservoir MUST NOT be the source of truth. Store + ChangeLog remain truth.
+
+### What the Context Reservoir should contain
+
+**Brief**
+- purpose
+- current drafting goal
+- user role
+- counterparty role
+- status
+
+**Shared fields**
+- Party A
+- Party B
+- Effective date
+- Jurisdiction
+- Project name
+- Permitted purpose
+- Signers
+
+**Open questions**
+- Is this mutual or one-way?
+- What is the confidentiality period?
+- Which jurisdiction applies?
+
+**Related documents**
+- current draft
+- uploaded source
+- converted variant
+- lawyer packet
+
+**Sources**
+- original upload
+- Upstage parse snapshot
+- imported HWPX/DOCX/PDF source
+
+**Evidence**
+- Korea-law-MCP result
+- citation verification
+- official/government comment
+- source-preserved text
+
+**Recent change context**
+- agent changed clause
+- user revoked agent edit
+- contract type changed
+- field migrated from another document
+
+**Readiness**
+- unresolved questions
+- source-modified notes
+- export warnings
+- lawyer packet status
+
+### What should not happen
+
+Do not make the left sidebar a long raw list like:
+
+    Document 5cad856e
+    Document 8a0cf5bb
+    Document 6a5c1bb0
+
+Documents may appear in the reservoir, but only as contextual related documents with useful human labels:
+
+    상호 비밀유지계약서 — current draft
+    원본 업로드 — source
+    NDA variant — generated variant
+    변호사용 패킷 — review export
+
 ---
 
 ## 11. StudioLive Protocol Messages
@@ -610,6 +778,27 @@ Rules:
 4. If LiveView misses messages, `sync_since` repairs it.
 5. Agent stream messages never mutate document state.
 6. Only committed Changes mutate document projection.
+
+On the following messages, StudioLive MUST refresh the Context Reservoir in addition to its other handling:
+
+```text
+{:change_committed, change}
+{:change_revoked, change}
+{:marks_changed, marks}
+{:import_completed, document}
+{:evidence_attached, evidence}
+{:export_ready, export}
+{:agent_completed, agent_run_id, result}
+```
+
+For these, StudioLive MUST update:
+
+- document projection
+- last_seen_revision
+- context_reservoir
+- agent rail state
+
+The reservoir is a projection, so if LiveView crashes or misses messages, it must be rebuilt from Store + ChangeLog on mount/reconnect.
 
 ---
 
@@ -1069,6 +1258,30 @@ marks
 message
 ```
 
+Agent context SHOULD include:
+
+```text
+- current document state
+- current selected node, if any
+- recent changes
+- recent revokes
+- marks
+- active questions
+- Context Reservoir projection
+- available related documents
+- source/evidence summaries
+```
+
+The Context Reservoir is folded into the agent's context frame via:
+
+```elixir
+@spec include_context_reservoir(map(), Contract.Studio.ContextReservoir.t()) ::
+        Contract.Types.result(map())
+def include_context_reservoir(frame, reservoir)
+```
+
+The agent observes the reservoir as a read-only projection. Agent mutations to context still flow through Actions; the reservoir is never written to directly.
+
 ---
 
 ## 21. Gateway
@@ -1311,7 +1524,14 @@ If the product later requires active-active collaborative writes across regions 
 
 ## 28. Closing Principle
 
+The Context Reservoir MUST help the user understand and correct the contract context without turning the UI into a file manager or metadata editor.
+
+It is a projection of durable state, not the durable state itself.
+
+Document remains primary. Matter remains contextual. Agent uses the reservoir. Store remains truth.
+
 > Document is the product.
+> Context Reservoir is the memory.
 > Matter is context.
 > Studio is the surface.
 > Session is per Document.
