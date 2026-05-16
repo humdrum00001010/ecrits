@@ -110,13 +110,35 @@ defmodule ContractWeb.DashboardLive do
   end
 
   defp list_matters(scope) do
-    scope
-    |> Contract.Matters.list_for_scope()
-    |> Enum.map(fn m ->
+    matters =
+      scope
+      |> Contract.Matters.list_for_scope()
+
+    # One cheap aggregate query to get document counts per matter, rather
+    # than N+1 queries from a card-grid.
+    doc_counts =
+      case matters do
+        [] ->
+          %{}
+
+        list ->
+          ids = Enum.map(list, & &1.id)
+
+          from(d in Document,
+            where: d.matter_id in ^ids,
+            group_by: d.matter_id,
+            select: {d.matter_id, count(d.id)}
+          )
+          |> Repo.all()
+          |> Map.new()
+      end
+
+    Enum.map(matters, fn m ->
       %{
         id: m.id,
         name: m.name,
-        doc_count: 0,
+        status: m.status,
+        doc_count: Map.get(doc_counts, m.id, 0),
         last_activity_at: m.updated_at
       }
     end)
@@ -126,13 +148,26 @@ defmodule ContractWeb.DashboardLive do
   end
 
   defp list_recent_documents(scope) do
+    # Wave 4.6: matters_by_id is used by the table to render the "Matter"
+    # column — we batch-load the matter rows the scope can see and stitch
+    # them in, rather than N+1.
+    matters_by_id =
+      scope
+      |> Contract.Matters.list_for_scope()
+      |> Map.new(fn m -> {m.id, m} end)
+
     scope
     |> Contract.Documents.list_recent_for_scope(8)
     |> Enum.map(fn d ->
+      matter = Map.get(matters_by_id, d.matter_id)
+
       %{
         document_id: d.id,
+        matter_id: d.matter_id,
+        matter_name: matter && matter.name,
         title: d.title,
         type_key: d.type_key,
+        status: d.status,
         last_revision: d.latest_revision,
         last_activity_at: d.updated_at
       }
@@ -282,24 +317,57 @@ defmodule ContractWeb.DashboardLive do
               </button>
             </div>
           <% else %>
-            <div id="matters-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              <article :for={matter <- @matters} class="rounded-box border border-base-200 p-5 bg-base-100 hover:border-base-300 transition-colors">
-                <p class="font-semibold tracking-tight">{matter.name}</p>
-                <p class="text-sm text-base-content/60 mt-1">
-                  {dngettext(
-                    "dashboard",
-                    "%{count} document",
-                    "%{count} documents",
-                    matter.doc_count,
-                    count: matter.doc_count
-                  )}
-                </p>
-                <p class="text-xs text-base-content/50 mt-3">
-                  {dgettext("dashboard", "Last activity %{ago}",
-                    ago: format_timestamp(matter.last_activity_at)
-                  )}
-                </p>
-              </article>
+            <%!--
+              Hairline table per mature-visual-language: no zebra-stripes,
+              no shadows, just border-base-200 separators. On <sm we hide
+              the Documents column to keep Name + Status + Last activity
+              readable on narrow screens — Tailwind's `hidden sm:table-cell`
+              pattern keeps the markup as a single semantic table.
+            --%>
+            <div class="overflow-x-auto rounded-box border border-base-200 bg-base-100">
+              <table id="matters-table" class="table table-sm">
+                <thead class="text-xs uppercase tracking-wide text-base-content/60">
+                  <tr class="border-b border-base-200">
+                    <th class="font-medium">{dgettext("dashboard", "Name")}</th>
+                    <th class="font-medium">{dgettext("dashboard", "Status")}</th>
+                    <th class="hidden sm:table-cell font-medium text-right">
+                      {dgettext("dashboard", "Documents")}
+                    </th>
+                    <th class="font-medium text-right">
+                      {dgettext("dashboard", "Last activity")}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    :for={matter <- @matters}
+                    class="border-b border-base-200 last:border-b-0 hover:bg-base-200/30"
+                  >
+                    <td>
+                      <.link
+                        navigate={~p"/matters/#{matter.id}/studio"}
+                        class="font-medium hover:underline"
+                      >
+                        {matter.name}
+                      </.link>
+                    </td>
+                    <td>
+                      <span class={[
+                        "badge badge-sm",
+                        matter_status_badge_class(matter.status)
+                      ]}>
+                        {matter_status_label(matter.status)}
+                      </span>
+                    </td>
+                    <td class="hidden sm:table-cell text-right tabular-nums text-base-content/70">
+                      {matter.doc_count}
+                    </td>
+                    <td class="text-right tabular-nums text-xs text-base-content/60">
+                      {format_timestamp(matter.last_activity_at)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           <% end %>
         </section>
@@ -322,30 +390,68 @@ defmodule ContractWeb.DashboardLive do
               {dgettext("dashboard", "No documents yet. Drag a PDF in, or start from a contract type.")}
             </div>
           <% else %>
-            <ul id="documents-list" class="rounded-box border border-base-200 md:divide-y md:divide-base-200 bg-base-100 space-y-2 md:space-y-0 p-2 md:p-0">
-              <li
-                :for={doc <- @recent_documents}
-                class="rounded-box md:rounded-none border border-base-200 md:border-0 bg-base-100 px-4 py-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-4 hover:bg-base-200/30"
-              >
-                <div class="flex items-center gap-3 min-w-0 md:flex-1">
-                  <.icon name="hero-document-text" class="size-4 text-base-content/40 shrink-0" />
-                  <.link
-                    navigate={~p"/matters/_/documents/#{doc.document_id}"}
-                    class="text-sm font-medium hover:underline truncate block"
+            <div class="overflow-x-auto rounded-box border border-base-200 bg-base-100">
+              <table id="documents-list" class="table table-sm">
+                <thead class="text-xs uppercase tracking-wide text-base-content/60">
+                  <tr class="border-b border-base-200">
+                    <th class="font-medium">{dgettext("dashboard", "Title")}</th>
+                    <th class="font-medium">{dgettext("dashboard", "Type")}</th>
+                    <th class="hidden sm:table-cell font-medium">
+                      {dgettext("dashboard", "Status")}
+                    </th>
+                    <th class="hidden sm:table-cell font-medium">
+                      {dgettext("dashboard", "Matter")}
+                    </th>
+                    <th class="font-medium text-right">
+                      {dgettext("dashboard", "Last revision")}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    :for={doc <- @recent_documents}
+                    class="border-b border-base-200 last:border-b-0 hover:bg-base-200/30"
                   >
-                    {doc.title}
-                  </.link>
-                </div>
-                <div class="flex items-center justify-between md:justify-end gap-2 md:gap-4 pl-7 md:pl-0">
-                  <span class="badge badge-ghost badge-sm font-mono">{doc.type_key}</span>
-                  <span class="text-xs text-base-content/50 md:w-32 md:text-right tabular-nums">
-                    {dgettext("dashboard", "rev %{n}", n: doc.last_revision)} · {format_timestamp(
-                      doc.last_activity_at
-                    )}
-                  </span>
-                </div>
-              </li>
-            </ul>
+                    <td class="min-w-0">
+                      <.link
+                        navigate={
+                          ~p"/matters/#{doc.matter_id || "_"}/documents/#{doc.document_id}"
+                        }
+                        class="font-medium hover:underline"
+                      >
+                        {doc.title}
+                      </.link>
+                    </td>
+                    <td>
+                      <span class="badge badge-ghost badge-sm font-mono">{doc.type_key}</span>
+                    </td>
+                    <td class="hidden sm:table-cell">
+                      <span class={[
+                        "badge badge-sm",
+                        document_status_badge_class(doc.status)
+                      ]}>
+                        {document_status_label(doc.status)}
+                      </span>
+                    </td>
+                    <td class="hidden sm:table-cell text-sm text-base-content/70">
+                      <.link
+                        :if={doc.matter_id}
+                        navigate={~p"/matters/#{doc.matter_id}/studio"}
+                        class="hover:underline"
+                      >
+                        {doc.matter_name || "—"}
+                      </.link>
+                      <span :if={!doc.matter_id}>—</span>
+                    </td>
+                    <td class="text-right text-xs text-base-content/60 tabular-nums">
+                      {dgettext("dashboard", "rev %{n}", n: doc.last_revision)} · {format_timestamp(
+                        doc.last_activity_at
+                      )}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           <% end %>
         </section>
 
@@ -585,4 +691,26 @@ defmodule ContractWeb.DashboardLive do
     kind
     |> String.replace("_", " ")
   end
+
+  # ---------------------------------------------------------------------------
+  # Status badges (Wave 4.6: dashboard tables)
+  # ---------------------------------------------------------------------------
+
+  defp matter_status_label(:active), do: dgettext("dashboard", "In progress")
+  defp matter_status_label(:archived), do: dgettext("dashboard", "Archived")
+  defp matter_status_label(other), do: to_string(other)
+
+  defp matter_status_badge_class(:active), do: "badge-ghost"
+  defp matter_status_badge_class(:archived), do: "badge-ghost opacity-60"
+  defp matter_status_badge_class(_), do: "badge-ghost"
+
+  defp document_status_label(:active), do: dgettext("dashboard", "Active")
+  defp document_status_label(:archived), do: dgettext("dashboard", "Archived")
+  defp document_status_label(:template), do: dgettext("dashboard", "Template")
+  defp document_status_label(other), do: to_string(other)
+
+  defp document_status_badge_class(:active), do: "badge-ghost"
+  defp document_status_badge_class(:archived), do: "badge-ghost opacity-60"
+  defp document_status_badge_class(:template), do: "badge-ghost"
+  defp document_status_badge_class(_), do: "badge-ghost"
 end

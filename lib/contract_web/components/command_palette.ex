@@ -554,6 +554,8 @@ defmodule ContractWeb.Components.CommandPalette do
     # it was a silent no-op — that broke Cmd+K → Enter on action
     # commands like "Set contract type…".
     params = stringify_keys(Map.put(payload, :kind, Map.get(payload, :action_kind)))
+    require Logger
+    Logger.warning("PALETTE FIRE EMIT kind=#{Atom.to_string(kind)} params=#{inspect(params)} self=#{inspect(self())}")
     send(self(), {Atom.to_string(kind), params})
     {:noreply, close(socket)}
   end

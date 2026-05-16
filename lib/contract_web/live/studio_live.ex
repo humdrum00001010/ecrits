@@ -794,6 +794,8 @@ defmodule ContractWeb.StudioLive do
   # direct `phx-click`).
   def handle_protocol_message({"command_palette_picked", params}, socket)
       when is_map(params) do
+    require Logger
+    Logger.warning("STUDIO RECV PALETTE PICK: params=#{inspect(params)}")
     {:noreply, socket_after_event} = handle_event("command_palette_picked", params, socket)
     socket_after_event
   end

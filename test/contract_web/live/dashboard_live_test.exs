@@ -171,6 +171,118 @@ defmodule ContractWeb.DashboardLiveTest do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # Wave 4.6: dashboard renders Matters + Recent documents as hairline tables.
+  #
+  # These tests pin the structural shape (`<table>` not `<.card>` divs) so a
+  # future refactor can't silently regress us back to a card-grid. Per the
+  # mature-visual-language memory, legal users scan tables, not bento boxes.
+  # ---------------------------------------------------------------------------
+  describe "matters table (populated state)" do
+    setup :log_in_a_user
+
+    test "renders a <table> (not a card-grid) when matters exist",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, _matter} = Contract.Matters.create(scope, %{"name" => "Acme v Smith"})
+
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      # New table-based markup.
+      assert html =~ ~s(id="matters-table")
+      assert html =~ "<table"
+      # Old card-grid markup must not reappear.
+      refute html =~ ~s(id="matters-grid")
+    end
+
+    test "renders the expected column headers + a row per matter",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, _m1} = Contract.Matters.create(scope, %{"name" => "Acme v Smith"})
+      {:ok, _m2} = Contract.Matters.create(scope, %{"name" => "Doe Estate"})
+
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      # Column headers (via dgettext). Some headers span multiple lines
+      # in the .heex source (long class strings), so we match on the
+      # header label alone — the surrounding <th> markup is exercised
+      # by the structural `<table` / `matters-table` checks above.
+      assert html =~ "Name"
+      assert html =~ "Status"
+      assert html =~ "Documents"
+      assert html =~ "Last activity"
+
+      # Both matter names render as table-cell content.
+      assert html =~ "Acme v Smith"
+      assert html =~ "Doe Estate"
+
+      # Matter status badge — default is :active → "In progress".
+      assert html =~ "In progress"
+    end
+
+    test "populated state still renders the empty illustration when there are no matters",
+         %{conn: conn} do
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      # The illustration empty-state survives untouched.
+      assert html =~ ~s(id="matters-empty")
+      assert html =~ "No matters yet"
+      # And the table is NOT rendered.
+      refute html =~ ~s(id="matters-table")
+    end
+
+    test "the matters table uses hairline borders + responsive column hiding",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, _m} = Contract.Matters.create(scope, %{"name" => "Acme v Smith"})
+
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      # Structural mobile-responsive hint: at least the Documents column
+      # is hidden on <sm. We can't run a real viewport here (that's
+      # Playwright's job per feedback-responsive-scope.md) — just pin that
+      # the class is present somewhere in the table markup.
+      assert html =~ "hidden sm:table-cell"
+      # Hairline-borders, no zebra-stripes: the wrapper carries
+      # `border-base-200`, never `table-zebra`.
+      assert html =~ "border-base-200"
+      refute html =~ "table-zebra"
+    end
+  end
+
+  describe "recent documents table (populated state)" do
+    setup :log_in_a_user
+
+    test "renders a <table> with Title / Type / Status / Matter / Last revision columns",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, matter} = Contract.Matters.create(scope, %{"name" => "Acme v Smith"})
+
+      {:ok, _doc} =
+        Contract.Documents.create(scope, %{
+          "matter_id" => matter.id,
+          "title" => "Engagement letter",
+          "type_key" => "nda_v1"
+        })
+
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      # Table shell.
+      assert html =~ ~s(id="documents-list")
+      assert html =~ "<table"
+
+      # Column headers (label-only match — see matters table test for rationale).
+      assert html =~ "Title"
+      assert html =~ "Type"
+      assert html =~ "Matter"
+      assert html =~ "Last revision"
+
+      # Document title + matter name both render in the row.
+      assert html =~ "Engagement letter"
+      assert html =~ "Acme v Smith"
+    end
+  end
+
   defp log_in_a_user(%{conn: conn}) do
     user = user_fixture()
     %{conn: log_in_user(conn, user), user: user}
