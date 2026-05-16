@@ -1054,7 +1054,19 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
     """
   end
 
+  # Per SPEC.md §18 the contract type is set AFTER creation via
+  # `Action(:set_contract_type)` — by the user via Cmd+K or by the
+  # agent once it has read enough context. The new-document modal
+  # therefore renders ONLY the title input (required) and a read-only
+  # matter label. A `matter_id` hidden input + the implicit current
+  # scope drive the create; `type_key` is intentionally omitted so the
+  # action lands with `type_key: nil`.
   defp render_new_document_modal(assigns) do
+    matter = assigns.current_scope && Map.get(assigns.current_scope, :matter)
+    matter_id = matter && Map.get(matter, :id)
+    matter_name = matter && Map.get(matter, :name)
+    assigns = assigns |> assign(:matter_id, matter_id) |> assign(:matter_name, matter_name)
+
     ~H"""
     <div
       id={"#{@id}-new-document"}
@@ -1096,24 +1108,50 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
           data-role="new-document-form"
         >
           <%!-- Routed through command_palette_picked so the parent's
-                event_to_action funnel can build the right Action kind. --%>
+                event_to_action funnel can build the right Action kind.
+                No `type_key` field — SPEC.md §18 sets it later. --%>
           <input type="hidden" name="kind" value="create_document" />
+          <input :if={@matter_id} type="hidden" name="matter_id" value={@matter_id} />
 
-          <.input
-            type="select"
-            name="type_key"
-            value={nil}
-            label={dgettext("studio", "Contract type")}
-            options={type_options()}
-            prompt={dgettext("studio", "Choose a type…")}
-          />
+          <%!-- Matter is implicit from the current scope; show as a
+                read-only label so the user knows which matter the new
+                document will live in. --%>
+          <div class="form-control mb-2" data-role="new-document-matter">
+            <label class="label py-1">
+              <span class="label-text text-sm">{dgettext("studio", "Matter")}</span>
+            </label>
+            <p class="text-sm text-base-content/70" data-role="new-document-matter-name">
+              {@matter_name || dgettext("studio", "—")}
+            </p>
+          </div>
 
           <.input
             type="text"
             name="title"
             value=""
-            label={dgettext("studio", "Initial title")}
+            label={dgettext("studio", "Title")}
+            required
           />
+
+          <p class="text-xs text-base-content/60 mt-1" data-role="new-document-type-hint">
+            {dgettext("studio", "Type is set later by you or the agent.")}
+          </p>
+
+          <%!-- Affordance to switch to the upload modal for users who
+                already have a PDF/HWPX/HWP file. The parent's
+                update_modal/3 maps `upload` onto
+                studio_state.upload_panel_open?. --%>
+          <div class="mt-3">
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs"
+              phx-click="open_modal"
+              phx-value-modal="upload"
+              data-role="new-document-upload-link"
+            >
+              {dgettext("studio", "Upload from PDF/HWPX/HWP…")}
+            </button>
+          </div>
 
           <div class="modal-action">
             <button

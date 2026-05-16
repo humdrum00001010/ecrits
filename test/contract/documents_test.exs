@@ -76,6 +76,32 @@ defmodule Contract.DocumentsTest do
                  "type_key" => "nda_v1"
                })
     end
+
+    # SPEC.md §18: contract type is set AFTER creation. The create
+    # path must accept `type_key: nil` so the document can be opened,
+    # read, and then typed via `Action(:set_contract_type)` later.
+    test "accepts nil :type_key — untyped document is valid" do
+      s = scope()
+      m = setup_matter(s)
+
+      assert {:ok, %Document{type_key: nil, title: "T"}} =
+               Documents.create(s, %{
+                 "matter_id" => m.id,
+                 "title" => "T",
+                 "type_key" => nil
+               })
+    end
+
+    test "accepts missing :type_key — defaults to nil" do
+      s = scope()
+      m = setup_matter(s)
+
+      assert {:ok, %Document{type_key: nil, title: "T"}} =
+               Documents.create(s, %{
+                 "matter_id" => m.id,
+                 "title" => "T"
+               })
+    end
   end
 
   describe "list_for_matter/2 + list_recent_for_scope/2" do
@@ -149,6 +175,20 @@ defmodule Contract.DocumentsTest do
       d = create_doc(s, m, type_key: "nda_v1")
       assert {:ok, %Document{type_key: "service_agreement_v1"}} =
                Documents.set_type(s, d.id, "service_agreement_v1")
+    end
+
+    # SPEC.md §18: this is the canonical flow — create a doc untyped,
+    # then call `Action(:set_contract_type)` (which ultimately routes
+    # to `Documents.set_type/3`) to fill in the key.
+    test "set_type promotes an untyped document to a typed one" do
+      s = scope()
+      m = setup_matter(s)
+
+      {:ok, %Document{type_key: nil} = d} =
+        Documents.create(s, %{"matter_id" => m.id, "title" => "Untyped"})
+
+      assert {:ok, %Document{type_key: "nda_v1"}} =
+               Documents.set_type(s, d.id, "nda_v1")
     end
   end
 

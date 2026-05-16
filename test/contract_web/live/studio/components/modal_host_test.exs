@@ -186,15 +186,12 @@ defmodule ContractWeb.Live.Studio.Components.ModalHostTest do
       assert html =~ ~s(name="kind" value="create_document")
     end
 
-    # Wave 5: subagent fix — the new-document select used to label
-    # options with raw `name_en`. Pin the locale-aware label format
-    # ("name_ko · key vversion" in :ko) so future copy changes don't
-    # silently regress.
-    test "new-document modal labels select options with the localized name in :ko locale" do
-      previous = Gettext.get_locale(ContractWeb.Gettext)
-      Gettext.put_locale(ContractWeb.Gettext, "ko")
-      on_exit(fn -> Gettext.put_locale(ContractWeb.Gettext, previous) end)
-
+    # SPEC.md §18 — subagent fix `feat/no-type-at-create`:
+    # The new-document modal no longer renders a contract-type
+    # `<select>`. Type is set later via `Action(:set_contract_type)`
+    # by the user (Cmd+K) or by the agent. This test pins the new
+    # shape: a title input + a read-only matter label, no type list.
+    test "new-document modal renders title input + matter label, NOT a type select" do
       html =
         render_component(ModalHost,
           id: "modal-host",
@@ -203,8 +200,53 @@ defmodule ContractWeb.Live.Studio.Components.ModalHostTest do
           initial_modal_param: "new_document"
         )
 
-      {:ok, nda} = Contract.ContractTypes.get(nil, "nda_v1")
-      assert html =~ "#{nda.name_ko} · nda_v1 v#{nda.version}"
+      # Form shell still routes through command_palette_picked, so
+      # the parent's event_to_action funnel can build an Action.
+      assert html =~ ~s(data-role="new-document-form")
+      assert html =~ ~s(phx-submit="command_palette_picked")
+      assert html =~ ~s(name="kind" value="create_document")
+
+      # Title input is present and required.
+      assert html =~ ~s(name="title")
+      assert html =~ "required"
+
+      # Read-only matter label sourced from the current scope.
+      assert html =~ ~s(data-role="new-document-matter")
+      assert html =~ ~s(data-role="new-document-matter-name")
+      assert html =~ "Matter A"
+
+      # Hint copy lives below the title input.
+      assert html =~ ~s(data-role="new-document-type-hint")
+
+      # The old type `<select>` MUST be gone — neither the field nor
+      # the prompt option that gated submission.
+      refute html =~ ~s(name="type_key")
+      refute html =~ "Choose a type"
+
+      # No contract-type keys leak into the modal (would mean we are
+      # still rendering the option list).
+      refute html =~ ~s(value="nda_v1")
+      refute html =~ ~s(value="franchise_v1")
+    end
+
+    # Submitting the new-document form does NOT include a `type_key`
+    # — the resulting Action lands with `type_key: nil` so
+    # `Action(:set_contract_type)` can fill it in later.
+    test "new-document form has no type_key field — submission omits it" do
+      html =
+        render_component(ModalHost,
+          id: "modal-host",
+          studio_state: %State{mode: :no_document},
+          current_scope: scope_for_user(),
+          initial_modal_param: "new_document"
+        )
+
+      # No type_key input of any kind (hidden, select, text).
+      refute html =~ ~r/name="type_key"/
+
+      # The only hidden inputs are `kind` and `matter_id`.
+      assert html =~ ~s(<input type="hidden" name="kind" value="create_document">)
+      assert html =~ ~s(<input type="hidden" name="matter_id")
     end
 
     # Wave 5: type-picker modal also localizes the headline label.

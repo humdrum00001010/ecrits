@@ -50,6 +50,17 @@ defmodule Contract.Agent do
   @spec system_prompt() :: String.t()
   def system_prompt, do: @grill_system_prompt
 
+  # TODO(SPEC.md §18): agent auto-set type_key from marks.
+  #
+  # When an agent run completes for an untyped document (Document.type_key
+  # == nil) and the output contains a label mark
+  # (`%{intent: :label, source: :agent, data: %{suggested_type_key: key}}`),
+  # this module should automatically emit an `Action(:set_contract_type)`
+  # with that key so the user does not have to ratify the obvious. The
+  # current fix only stops gating the create flow on type selection; the
+  # auto-set is a follow-up that depends on the agent emitting
+  # well-formed label marks first.
+
   # --- public API -------------------------------------------------------
 
   @spec start(T.ctx(), Action.t()) :: {:ok, Run.t()} | {:error, term()}

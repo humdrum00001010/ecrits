@@ -141,8 +141,19 @@ defmodule Contract.ContractTypes do
   string key, the key itself is returned so callers can render
   "something" rather than an error. This keeps stale `type_key`
   references (e.g. from a deleted TOML spec) from crashing the UI.
+
+  `nil` (per SPEC.md §18 — a document may be untyped on creation,
+  awaiting `Action(:set_contract_type)`) renders as a locale-aware
+  placeholder: "유형 미지정" in Korean, "Untyped" in English.
   """
-  @spec display_name(TypeSpec.t() | String.t()) :: String.t()
+  @spec display_name(TypeSpec.t() | String.t() | nil) :: String.t()
+  def display_name(nil) do
+    case Gettext.get_locale(ContractWeb.Gettext) do
+      "ko" -> "유형 미지정"
+      _ -> "Untyped"
+    end
+  end
+
   def display_name(%TypeSpec{name_ko: ko, name_en: en}) do
     case Gettext.get_locale(ContractWeb.Gettext) do
       "ko" -> pick(ko, en)

@@ -76,7 +76,7 @@ defmodule Contract.Studio do
         state = %State{
           matter_id: matter_id,
           selected_document_id: document_id,
-          mode: derive_mode(document_id),
+          mode: derive_mode(document_id, proj),
           last_seen_revision: rev
         }
 
@@ -142,7 +142,7 @@ defmodule Contract.Studio do
           | selected_document_id: document_id,
             selected_node_id: nil,
             last_seen_revision: rev,
-            mode: derive_mode(document_id),
+            mode: derive_mode(document_id, proj),
             agent_run_id: nil
         }
 
@@ -325,7 +325,27 @@ defmodule Contract.Studio do
   # If none, briefing. If the last change was an edit/revoke, editing.
   # If the most recent activity is a review-style action, reviewing.
   # No DB? Fall back to :briefing.
-  defp derive_mode(document_id) when is_binary(document_id) do
+  #
+  # SPEC.md §18: untyped documents (no `type_key`) start in `:briefing`
+  # regardless of change history — the agent's first job is to
+  # understand the document well enough to suggest a contract type.
+  # Once `Action(:set_contract_type)` has filled the key in, the normal
+  # change-history rules take over.
+  defp derive_mode(document_id, projection)
+       when is_binary(document_id) and is_map(projection) do
+    case Map.get(projection, :type_key) do
+      nil -> :briefing
+      _typed -> derive_mode_from_history(document_id)
+    end
+  end
+
+  defp derive_mode(document_id, _projection) when is_binary(document_id) do
+    derive_mode_from_history(document_id)
+  end
+
+  defp derive_mode(_, _), do: :no_document
+
+  defp derive_mode_from_history(document_id) do
     case Store.changes_since(document_id, 0) do
       {:ok, []} ->
         :briefing
@@ -357,8 +377,6 @@ defmodule Contract.Studio do
     DBConnection.ConnectionError -> :briefing
     Postgrex.Error -> :briefing
   end
-
-  defp derive_mode(_), do: :no_document
 
   defp empty_projection, do: Runtime.State.empty_projection()
 end

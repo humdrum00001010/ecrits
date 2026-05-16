@@ -3,8 +3,16 @@ defmodule Contract.Documents.Document do
   Ecto schema for a Document.
 
   A Document is the unit a Studio user edits. It belongs to a Matter
-  (the ACL boundary) and references a contract type from
+  (the ACL boundary) and may reference a contract type from
   `Contract.ContractTypes` via `type_key`.
+
+  ## Untyped documents (SPEC.md §18)
+
+  `type_key` is nullable: per SPEC.md §18 the contract type is set
+  AFTER the document is created — either by the user via Cmd+K or by
+  the agent once it has read enough of the document. A freshly-created
+  document therefore has `type_key: nil`; `Action(:set_contract_type)`
+  fills it in later.
 
   ## Variants
 
@@ -51,7 +59,8 @@ defmodule Contract.Documents.Document do
   @doc """
   Changeset for inserting or updating a document.
 
-  `:matter_id`, `:title`, and `:type_key` are required on insert.
+  `:matter_id` and `:title` are required on insert. `:type_key` is
+  optional — SPEC.md §18 sets it later via `Action(:set_contract_type)`.
   """
   @spec changeset(t(), map()) :: Ecto.Changeset.t()
   def changeset(document, attrs) do
@@ -66,7 +75,7 @@ defmodule Contract.Documents.Document do
       :latest_revision,
       :metadata
     ])
-    |> validate_required([:matter_id, :title, :type_key])
+    |> validate_required([:matter_id, :title])
     |> validate_length(:title, min: 1, max: 300)
   end
 end

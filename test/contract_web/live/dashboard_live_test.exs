@@ -56,10 +56,10 @@ defmodule ContractWeb.DashboardLiveTest do
     end
   end
 
-  describe "new-document modal" do
+  describe "new-document modal (SPEC.md §18 — type set later)" do
     setup :log_in_a_user
 
-    test "opens the modal and shows contract-type options", %{conn: conn} do
+    test "opens the modal with a title input — no contract-type picker", %{conn: conn} do
       {:ok, lv, _html} = live(conn, ~p"/dashboard")
 
       refute render(lv) =~ ~s(id="new-document-modal")
@@ -70,9 +70,17 @@ defmodule ContractWeb.DashboardLiveTest do
         |> render_click()
 
       assert html =~ ~s(id="new-document-modal")
-      assert html =~ "nda_v1"
-      assert html =~ "franchise_v1"
-      assert html =~ "service_agreement_v1"
+      # Title input is the only required field; no type list anymore.
+      assert html =~ ~s(data-role="new-document-form")
+      assert html =~ ~s(name="title")
+      # Hint copy is shipped.
+      assert html =~ ~s(data-role="new-document-type-hint")
+
+      # The old contract-type picker must NOT render — no type-key
+      # buttons, no `id="contract-type-list"`, and no raw type keys.
+      refute html =~ ~s(id="contract-type-list")
+      refute html =~ ~s(phx-click="pick_type")
+      refute html =~ ~s(phx-value-type_key="nda_v1")
     end
 
     test "closing the modal hides it again", %{conn: conn} do
@@ -84,37 +92,32 @@ defmodule ContractWeb.DashboardLiveTest do
       refute render(lv) =~ ~s(id="new-document-modal")
     end
 
-    test "picking a type closes the modal and flashes a TODO note", %{conn: conn} do
+    # Submitting a title creates an untyped document and flashes the
+    # "set type via Cmd+K or agent" prompt. This is the headline
+    # behaviour of the subagent fix.
+    test "submitting a title creates an untyped document", %{conn: conn, user: user} do
+      # The dashboard's fallback path needs at least one matter the
+      # scope can see; seed one before opening the modal.
+      scope = Contract.Context.for_user(user)
+      {:ok, _matter} = Contract.Matters.create(scope, %{"name" => "Acme v Smith"})
+
       {:ok, lv, _html} = live(conn, ~p"/dashboard")
       lv |> element("button", "New Document") |> render_click()
 
       html =
         lv
-        |> element(~s(button[phx-value-type_key="nda_v1"]))
-        |> render_click()
+        |> form(~s(form[data-role="new-document-form"]), %{"title" => "Quick draft"})
+        |> render_submit()
 
       refute html =~ ~s(id="new-document-modal")
-      assert html =~ "Document creation for nda_v1 is queued"
-    end
+      # Flash mentions Cmd+K / agent so the user knows where the type
+      # is now set.
+      assert html =~ "Cmd+K" or html =~ "agent"
 
-    # Wave 5: locale-aware headlines in the new-document modal.
-    test "renders Korean contract-type headlines under :ko locale", %{conn: conn} do
-      previous = Application.get_env(:contract, :ui_locale, "en")
-      Application.put_env(:contract, :ui_locale, "ko")
-      on_exit(fn -> Application.put_env(:contract, :ui_locale, previous) end)
-
-      {:ok, lv, _html} = live(conn, ~p"/dashboard")
-      # Under :ko the button label is "새 문서". Trigger the event
-      # directly so the test is locale-agnostic.
-      html = render_click(lv, "open_new_document", %{})
-
-      {:ok, nda} = Contract.ContractTypes.get(nil, "nda_v1")
-      {:ok, franchise} = Contract.ContractTypes.get(nil, "franchise_v1")
-      assert html =~ nda.name_ko
-      assert html =~ franchise.name_ko
-      # Raw English-only label should not appear as the headline
-      # `<p class="font-medium">` slot anymore.
-      refute html =~ ~s(<p class="font-medium">#{nda.name_en}</p>)
+      # And a document was actually persisted, untyped.
+      [doc] = Contract.Documents.list_recent_for_scope(scope, 5)
+      assert doc.title == "Quick draft"
+      assert doc.type_key == nil
     end
   end
 
@@ -300,6 +303,31 @@ defmodule ContractWeb.DashboardLiveTest do
       # Document title + matter name both render in the row.
       assert html =~ "Engagement letter"
       assert html =~ "Acme v Smith"
+    end
+
+    # SPEC.md §18 — `feat/no-type-at-create`: when a document is
+    # created untyped (type_key: nil), the Type column renders the
+    # locale-aware "유형 미지정" placeholder so the row still
+    # parses at a glance.
+    test "renders 유형 미지정 placeholder for untyped documents under :ko locale",
+         %{conn: conn, user: user} do
+      previous = Application.get_env(:contract, :ui_locale, "en")
+      Application.put_env(:contract, :ui_locale, "ko")
+      on_exit(fn -> Application.put_env(:contract, :ui_locale, previous) end)
+
+      scope = Contract.Context.for_user(user)
+      {:ok, matter} = Contract.Matters.create(scope, %{"name" => "Acme v Smith"})
+
+      {:ok, _doc} =
+        Contract.Documents.create(scope, %{
+          "matter_id" => matter.id,
+          "title" => "Untyped draft"
+        })
+
+      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+
+      assert html =~ "Untyped draft"
+      assert html =~ "유형 미지정"
     end
 
     # Wave 5: the subagent fix — the Type column used to render the raw

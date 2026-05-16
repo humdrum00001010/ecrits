@@ -226,6 +226,21 @@ defmodule Contract.ContractTypesTest do
       assert ContractTypes.display_name(spec) == "Fallback EN"
     end
 
+    # SPEC.md §18: documents can be created untyped (type_key: nil) and
+    # only get a key once the user (Cmd+K) or the agent fills one in
+    # via `Action(:set_contract_type)`. The UI must still parse at a
+    # glance, so `display_name/1` of nil returns a locale-aware
+    # placeholder — "유형 미지정" in :ko, "Untyped" in :en.
+    test "display_name(nil) returns 유형 미지정 under :ko locale" do
+      Gettext.put_locale(ContractWeb.Gettext, "ko")
+      assert ContractTypes.display_name(nil) == "유형 미지정"
+    end
+
+    test "display_name(nil) returns Untyped under :en locale" do
+      Gettext.put_locale(ContractWeb.Gettext, "en")
+      assert ContractTypes.display_name(nil) == "Untyped"
+    end
+
     test "falls back to name_ko when name_en is empty in :en locale" do
       # Defensive — `name_en` is @enforce_keys so this is a synthetic
       # struct, but the helper should still survive an empty string.

@@ -107,10 +107,17 @@ defmodule Contract.Documents do
   @doc """
   Create a document in a matter the scope owns or shares.
 
-  `attrs` must include `:matter_id`, `:title`, `:type_key`. The ACL gate
-  on the matter is enforced before the insert.
+  `attrs` must include `:matter_id` and `:title`. `:type_key` is
+  optional per SPEC.md §18: a freshly-created document may be untyped,
+  with `Action(:set_contract_type)` filling it in later (by the user
+  via Cmd+K or by the agent once it understands the document). The ACL
+  gate on the matter is enforced before the insert.
   """
-  @spec create(Context.t(), map()) ::
+  @spec create(Context.t(), %{
+          required(:matter_id) => binary,
+          optional(:title) => binary,
+          optional(:type_key) => binary | nil
+        }) ::
           {:ok, Document.t()} | {:error, Ecto.Changeset.t() | :forbidden | :not_found}
   def create(%Context{} = scope, attrs) when is_map(attrs) do
     attrs = stringify_keys(attrs)

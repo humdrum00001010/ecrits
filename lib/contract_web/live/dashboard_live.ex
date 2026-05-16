@@ -48,21 +48,65 @@ defmodule ContractWeb.DashboardLive do
     {:noreply, assign(socket, :show_new_doc_modal, false)}
   end
 
-  def handle_event("pick_type", %{"type_key" => type_key}, socket) do
-    # TODO(Wave 3C2): wire up to Contract.Documents.create_from_type/3 once
-    # the persistence module lands. For now, just acknowledge and close.
-    {:noreply,
-     socket
-     |> assign(:show_new_doc_modal, false)
-     |> put_flash(
-       :info,
-       dgettext(
-         "dashboard",
-         "Document creation for %{type_key} is queued. Persistence ships with Wave 3C2.",
-         type_key: type_key
-       )
-     )}
+  # Per SPEC.md §18 a document is created untyped (`type_key: nil`); the
+  # type is set later via `Action(:set_contract_type)` by the user (Cmd+K)
+  # or the agent. The dashboard's "New document" affordance therefore
+  # only collects a title and the implicit matter; the type picker is
+  # gone.
+  def handle_event("create_new_document", %{"title" => title} = params, socket)
+      when is_binary(title) do
+    scope = socket.assigns.current_scope
+    matter_id = params["matter_id"]
+
+    attrs =
+      %{"title" => title}
+      |> maybe_put("matter_id", matter_id)
+
+    case create_untyped_document(scope, attrs) do
+      {:ok, _doc} ->
+        {:noreply,
+         socket
+         |> assign(:show_new_doc_modal, false)
+         |> load_data()
+         |> put_flash(
+           :info,
+           dgettext(
+             "dashboard",
+             "New document created. Pick a contract type with Cmd+K, or let the agent suggest one."
+           )
+         )}
+
+      {:error, _reason} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :error,
+           dgettext("dashboard", "Could not create the document. Pick a matter first.")
+         )}
+    end
   end
+
+  defp create_untyped_document(scope, %{"matter_id" => matter_id} = attrs)
+       when is_binary(matter_id) do
+    Contract.Documents.create(scope, attrs)
+  end
+
+  # No matter_id supplied — fall back to the most recently-touched
+  # matter visible to the scope. Pure UX nicety; the user can still
+  # change matter from Studio once the document is open.
+  defp create_untyped_document(scope, attrs) do
+    case Contract.Matters.list_for_scope(scope) do
+      [%{id: id} | _] ->
+        Contract.Documents.create(scope, Map.put(attrs, "matter_id", id))
+
+      _ ->
+        {:error, :no_matter}
+    end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, ""), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp load_data(socket) do
     matters = list_matters(socket.assigns.current_scope)
@@ -550,7 +594,13 @@ defmodule ContractWeb.DashboardLive do
       </div>
 
       <%!-- ------------------------------------------------------------- --%>
-      <%!-- New Document modal                                             --%>
+      <%!-- New Document modal — title-only per SPEC.md §18                --%>
+      <%!--                                                                 --%>
+      <%!-- The type picker is gone. Contract type is a key set AFTER       --%>
+      <%!-- creation via `Action(:set_contract_type)` — by the user via     --%>
+      <%!-- Cmd+K or by the agent once it understands the document          --%>
+      <%!-- context. The modal collects only what we cannot infer:          --%>
+      <%!-- a title.                                                        --%>
       <%!-- ------------------------------------------------------------- --%>
       <div
         :if={@show_new_doc_modal}
@@ -559,7 +609,7 @@ defmodule ContractWeb.DashboardLive do
         phx-window-keydown="close_new_document"
         phx-key="escape"
       >
-        <div class="modal-box max-w-2xl">
+        <div class="modal-box max-w-md">
           <div class="flex items-start justify-between gap-4">
             <div>
               <h3 class="font-semibold text-lg tracking-tight">
@@ -568,7 +618,7 @@ defmodule ContractWeb.DashboardLive do
               <p class="text-sm text-base-content/60">
                 {dgettext(
                   "dashboard",
-                  "Pick a contract type. Field maps and templates load from the type registry."
+                  "Give it a title. The contract type is set later."
                 )}
               </p>
             </div>
@@ -581,32 +631,39 @@ defmodule ContractWeb.DashboardLive do
               <.icon name="hero-x-mark" class="size-4" />
             </button>
           </div>
-          <ul id="contract-type-list" class="mt-5 space-y-2">
-            <%!--
-              Wave 3C0-B: @contract_types is now a list of
-              %Contract.ContractTypes.TypeSpec{} structs loaded from
-              priv/contract_types/*.toml at compile time. Wave 5 fix:
-              the headline now uses `display_name/1` so Korean users
-              see `name_ko` rather than the raw English label. The
-              `{key} · v{version}` line stays for power users; notes
-              fall through `notes_en` for now (Wave 6 will localize).
-            --%>
-            <li :for={type <- @contract_types}>
+
+          <.form
+            for={%{}}
+            as={:new_document}
+            phx-submit="create_new_document"
+            class="mt-5 space-y-3"
+            data-role="new-document-form"
+          >
+            <.input
+              type="text"
+              name="title"
+              value=""
+              label={dgettext("dashboard", "Title")}
+              required
+            />
+
+            <p class="text-xs text-base-content/60" data-role="new-document-type-hint">
+              {dgettext("dashboard", "Type is set later by you or the agent.")}
+            </p>
+
+            <div class="flex justify-end gap-2 pt-2">
               <button
                 type="button"
-                phx-click="pick_type"
-                phx-value-type_key={type.key}
-                class="w-full text-left rounded-box border border-base-200 p-4 hover:border-primary hover:bg-base-200/40 transition-colors"
+                class="btn btn-ghost btn-sm"
+                phx-click="close_new_document"
               >
-                <div class="flex items-baseline justify-between gap-3">
-                  <p class="font-medium">{Contract.ContractTypes.display_name(type)}</p>
-                  <span class="badge badge-ghost badge-sm font-mono">{type.key}</span>
-                </div>
-                <p class="text-sm text-base-content/60 mt-1">{type.notes_en}</p>
-                <p class="text-xs text-base-content/40 mt-1 font-mono">{type.key} · v{type.version}</p>
+                {dgettext("dashboard", "Cancel")}
               </button>
-            </li>
-          </ul>
+              <button type="submit" class="btn btn-primary btn-sm">
+                {dgettext("dashboard", "Create")}
+              </button>
+            </div>
+          </.form>
         </div>
         <button
           type="button"
