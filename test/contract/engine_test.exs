@@ -846,6 +846,176 @@ defmodule Contract.EngineTest do
   end
 
   # ============================================================================
+  # IR-richness (task #37): set_attr on table/cell rich attrs.
+  # ============================================================================
+
+  describe "set_attr — IR-richness table/cell attrs" do
+    test "set_attr :column_widths on a table writes through to attrs.column_widths" do
+      table_id = uuid(110)
+
+      proj =
+        Runtime.State.empty_projection()
+        |> Map.put(:nodes, %{table_id => %{id: table_id, kind: :table, attrs: %{}}})
+
+      state = new_state(projection: proj)
+
+      a =
+        action(:edit_document,
+          payload: %{
+            "ops" => [
+              %{
+                "op" => "set_attr",
+                "target_type" => "node",
+                "target_id" => table_id,
+                "args" => %{"key" => :column_widths, "value" => [2000, 4000, 6000]}
+              }
+            ]
+          }
+        )
+
+      {_input, new_state} = run_pipeline(a, state)
+      assert new_state.projection.nodes[table_id].attrs.column_widths == [2000, 4000, 6000]
+    end
+
+    test "set_attr :border_fill_id on a cell writes through to attrs.border_fill_id" do
+      cell_id = uuid(111)
+
+      proj =
+        Runtime.State.empty_projection()
+        |> Map.put(:nodes, %{cell_id => %{id: cell_id, kind: :cell, attrs: %{}}})
+
+      state = new_state(projection: proj)
+
+      a =
+        action(:edit_document,
+          payload: %{
+            "ops" => [
+              %{
+                "op" => "set_attr",
+                "target_type" => "node",
+                "target_id" => cell_id,
+                "args" => %{"key" => :border_fill_id, "value" => "9"}
+              }
+            ]
+          }
+        )
+
+      {_input, new_state} = run_pipeline(a, state)
+      assert new_state.projection.nodes[cell_id].attrs.border_fill_id == "9"
+    end
+
+    test "set_attr rejects :column_widths whose value is not a list of positive ints" do
+      table_id = uuid(112)
+
+      proj =
+        Runtime.State.empty_projection()
+        |> Map.put(:nodes, %{table_id => %{id: table_id, kind: :table, attrs: %{}}})
+
+      state = new_state(projection: proj)
+
+      a =
+        action(:edit_document,
+          payload: %{
+            "ops" => [
+              %{
+                "op" => "set_attr",
+                "target_type" => "node",
+                "target_id" => table_id,
+                "args" => %{"key" => :column_widths, "value" => [100, -1, 200]}
+              }
+            ]
+          }
+        )
+
+      {:ok, input} = Engine.compile(a, state)
+
+      assert {:error, {:invalid_attr_value, _}} = Engine.validate(input, state)
+    end
+
+    test "set_attr rejects :vertical_alignment that isn't :top/:center/:bottom" do
+      cell_id = uuid(113)
+
+      proj =
+        Runtime.State.empty_projection()
+        |> Map.put(:nodes, %{cell_id => %{id: cell_id, kind: :cell, attrs: %{}}})
+
+      state = new_state(projection: proj)
+
+      a =
+        action(:edit_document,
+          payload: %{
+            "ops" => [
+              %{
+                "op" => "set_attr",
+                "target_type" => "node",
+                "target_id" => cell_id,
+                "args" => %{"key" => :vertical_alignment, "value" => :diagonal}
+              }
+            ]
+          }
+        )
+
+      {:ok, input} = Engine.compile(a, state)
+      assert {:error, {:invalid_attr_value, _}} = Engine.validate(input, state)
+    end
+
+    test "set_attr is additive: existing kinds (paragraph) still accept arbitrary attr keys" do
+      # Guarantee that we did not tighten validation for non-table/non-cell kinds.
+      para_id = uuid(114)
+
+      proj =
+        Runtime.State.empty_projection()
+        |> Map.put(:nodes, %{para_id => %{id: para_id, kind: :paragraph, attrs: %{}}})
+
+      state = new_state(projection: proj)
+
+      a =
+        action(:edit_document,
+          payload: %{
+            "ops" => [
+              %{
+                "op" => "set_attr",
+                "target_type" => "node",
+                "target_id" => para_id,
+                "args" => %{"key" => :anything_goes, "value" => "yes"}
+              }
+            ]
+          }
+        )
+
+      {_input, new_state} = run_pipeline(a, state)
+      assert new_state.projection.nodes[para_id].attrs.anything_goes == "yes"
+    end
+
+    test "set_attr on a cell padding key writes through" do
+      cell_id = uuid(115)
+
+      proj =
+        Runtime.State.empty_projection()
+        |> Map.put(:nodes, %{cell_id => %{id: cell_id, kind: :cell, attrs: %{}}})
+
+      state = new_state(projection: proj)
+
+      a =
+        action(:edit_document,
+          payload: %{
+            "ops" => [
+              %{
+                "op" => "set_attr",
+                "target_type" => "node",
+                "target_id" => cell_id,
+                "args" => %{"key" => :padding_top, "value" => 250}
+              }
+            ]
+          }
+        )
+
+      {_input, new_state} = run_pipeline(a, state)
+      assert new_state.projection.nodes[cell_id].attrs.padding_top == 250
+    end
+  end
+
+  # ============================================================================
   # Property-based tests
   # ============================================================================
 
@@ -908,6 +1078,44 @@ defmodule Contract.EngineTest do
 
         assert {:error, {:revision_conflict, expected: ^state_rev, got: ^action_rev}} =
                  Engine.validate(input, state)
+      end
+    end
+
+    property "set_attr on a table's :column_widths round-trips through inverse" do
+      check all(
+              widths <- list_of(integer(100..10_000), min_length: 1, max_length: 5)
+            ) do
+        table_id = uuid(200)
+
+        proj =
+          Runtime.State.empty_projection()
+          |> Map.put(:nodes, %{
+            table_id => %{id: table_id, kind: :table, attrs: %{column_widths: [9999]}}
+          })
+
+        state = new_state(projection: proj)
+
+        a =
+          action(:edit_document,
+            payload: %{
+              "ops" => [
+                %{
+                  "op" => "set_attr",
+                  "target_type" => "node",
+                  "target_id" => table_id,
+                  "args" => %{"key" => :column_widths, "value" => widths}
+                }
+              ]
+            }
+          )
+
+        {input, new_state} = run_pipeline(a, state)
+
+        assert new_state.projection.nodes[table_id].attrs.column_widths == widths
+
+        inverse_input = %ChangeInput{input | ops: input.inverse_ops}
+        {:ok, restored} = Engine.apply(inverse_input, new_state)
+        assert restored.projection.nodes[table_id].attrs.column_widths == [9999]
       end
     end
 

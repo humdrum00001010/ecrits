@@ -678,6 +678,10 @@ defmodule Contract.Export.HWPX do
       |> Enum.take(rows)
       |> Kernel.++(List.duplicate([], max(0, rows - length(cell_chunks))))
 
+    attrs = Map.get(node, :attrs, %{}) || %{}
+    column_widths = Map.get(attrs, :column_widths) || Map.get(attrs, "column_widths") || []
+    table_border = Map.get(attrs, :border_fill_id) || Map.get(attrs, "border_fill_id") || "3"
+
     rows_xml =
       padded_rows
       |> Enum.with_index()
@@ -690,19 +694,20 @@ defmodule Contract.Export.HWPX do
           |> Enum.take(cols)
           |> Enum.with_index()
           |> Enum.map(fn {cell_id, col_idx} ->
-            cell_text =
+            cell_node =
               case cell_id do
-                nil ->
-                  ""
-
-                id ->
-                  case Map.fetch(nodes, id) do
-                    {:ok, c} -> collect_text(c, projection)
-                    :error -> ""
-                  end
+                nil -> nil
+                id -> Map.get(nodes, id)
               end
 
-            tc_xml(cell_text, row_idx, col_idx)
+            cell_text =
+              case cell_node do
+                nil -> ""
+                node -> collect_text(node, projection)
+              end
+
+            width = column_width_at(column_widths, col_idx)
+            tc_xml(cell_text, cell_node, row_idx, col_idx, width, table_border)
           end)
           |> Enum.join()
 
@@ -714,7 +719,7 @@ defmodule Contract.Export.HWPX do
       ~s(<hp:tbl id="0" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM") <>
         ~s( textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL") <>
         ~s( repeatHeader="1" rowCnt="#{rows}" colCnt="#{cols}" cellSpacing="0") <>
-        ~s( borderFillIDRef="3" noAdjust="0">) <>
+        ~s( borderFillIDRef="#{table_border}" noAdjust="0">) <>
         ~s(<hp:sz width="40000" widthRelTo="ABSOLUTE" height="5000" heightRelTo="ABSOLUTE" protect="0"/>) <>
         ~s(<hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="1" allowOverlap="0") <>
         ~s( holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP") <>
@@ -733,19 +738,61 @@ defmodule Contract.Export.HWPX do
       ~s(</hp:p>)
   end
 
-  defp tc_xml(text, row_idx, col_idx) do
+  # Pick the width for the col at `col_idx` from the supplied list, or fall
+  # back to the legacy default of 6000 HWP units (~60 mm) when absent.
+  defp column_width_at([], _idx), do: 6000
+
+  defp column_width_at(widths, idx) when is_list(widths) do
+    case Enum.at(widths, idx) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> 6000
+    end
+  end
+
+  defp tc_xml(text, cell_node, row_idx, col_idx, width, table_border) do
+    cell_attrs = (cell_node && (Map.get(cell_node, :attrs) || %{})) || %{}
+
+    border_fill =
+      Map.get(cell_attrs, :border_fill_id) || Map.get(cell_attrs, "border_fill_id") ||
+        table_border
+
+    row_span = Map.get(cell_attrs, :row_span) || Map.get(cell_attrs, "row_span") || 1
+    col_span = Map.get(cell_attrs, :col_span) || Map.get(cell_attrs, "col_span") || 1
+
+    vert_align =
+      case Map.get(cell_attrs, :vertical_alignment) || Map.get(cell_attrs, "vertical_alignment") do
+        :top -> "TOP"
+        :center -> "CENTER"
+        :bottom -> "BOTTOM"
+        "top" -> "TOP"
+        "center" -> "CENTER"
+        "bottom" -> "BOTTOM"
+        _ -> "CENTER"
+      end
+
+    pad_left =
+      Map.get(cell_attrs, :padding_left) || Map.get(cell_attrs, "padding_left") || 510
+
+    pad_right =
+      Map.get(cell_attrs, :padding_right) || Map.get(cell_attrs, "padding_right") || 510
+
+    pad_top = Map.get(cell_attrs, :padding_top) || Map.get(cell_attrs, "padding_top") || 141
+
+    pad_bottom =
+      Map.get(cell_attrs, :padding_bottom) || Map.get(cell_attrs, "padding_bottom") || 141
+
     inner_para = paragraph(text, @body_para, @body_char)
 
-    ~s(<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="3">) <>
-      ~s(<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER") <>
+    ~s(<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="#{border_fill}">) <>
+      ~s(<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="#{vert_align}") <>
       ~s( linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0") <>
       ~s( hasTextRef="0" hasNumRef="0">) <>
       inner_para <>
       ~s(</hp:subList>) <>
       ~s(<hp:cellAddr colAddr="#{col_idx}" rowAddr="#{row_idx}"/>) <>
-      ~s(<hp:cellSpan colSpan="1" rowSpan="1"/>) <>
-      ~s(<hp:cellSz width="6000" height="2500"/>) <>
-      ~s(<hp:cellMargin left="510" right="510" top="141" bottom="141"/>) <>
+      ~s(<hp:cellSpan colSpan="#{col_span}" rowSpan="#{row_span}"/>) <>
+      ~s(<hp:cellSz width="#{width}" height="2500"/>) <>
+      ~s(<hp:cellMargin left="#{pad_left}" right="#{pad_right}" top="#{pad_top}" bottom="#{pad_bottom}"/>) <>
       ~s(</hp:tc>)
   end
 

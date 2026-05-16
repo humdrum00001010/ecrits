@@ -568,4 +568,166 @@ defmodule Contract.Export.HWPXTest do
     assert {:error, {:unsupported_format, :totally_made_up}} =
              Contract.Export.Renderer.render(empty_state(), :totally_made_up, [])
   end
+
+  # --------------------------------------------------------------------------
+  # 19. Every <hp:p> has a paired <hp:linesegarray>
+  # --------------------------------------------------------------------------
+
+  test "every <hp:p> emits a <hp:linesegarray> (count parity)" do
+    # Mix paragraphs, a heading, and a table — all kinds that produce <hp:p>.
+    cell_ids = for i <- 1..4, do: "c#{i}"
+
+    cells =
+      cell_ids
+      |> Enum.with_index(1)
+      |> Enum.map(fn {id, idx} ->
+        %{id: id, kind: :cell, content: "C#{idx}"}
+      end)
+
+    table = %{id: "T", kind: :table, attrs: %{rows: 2, cols: 2}, children: cell_ids}
+
+    nodes = [
+      %{id: "h", kind: :heading, content: "Heading", attrs: %{level: 1}},
+      %{id: "p1", kind: :paragraph, content: "Para A"},
+      %{id: "p2", kind: :paragraph, content: "Para B"},
+      table | cells
+    ]
+
+    nodes_map = Map.new(nodes, fn n -> {n.id, n} end)
+
+    state = %State{
+      document_id: "doc-0000-0000-0000-000000000006",
+      revision: 0,
+      projection: %{
+        State.empty_projection()
+        | nodes: nodes_map,
+          node_order: ["h", "p1", "p2", "T"]
+      }
+    }
+
+    {:ok, bin} = HWPX.render(state)
+    section = unzip_body(bin, "Contents/section0.xml")
+
+    p_count = section |> String.split("<hp:p ") |> length() |> Kernel.-(1)
+    lsa_count = section |> String.split("<hp:linesegarray>") |> length() |> Kernel.-(1)
+
+    assert p_count > 0
+    assert p_count == lsa_count,
+           "expected #{p_count} <hp:linesegarray>, got #{lsa_count}"
+  end
+
+  # --------------------------------------------------------------------------
+  # 20. Default lineseg carries spec-mandated textpos=0 + vertsize=1000
+  # --------------------------------------------------------------------------
+
+  # --------------------------------------------------------------------------
+  # IR-richness (task #37): table column_widths + per-cell border_fill_id.
+  # --------------------------------------------------------------------------
+
+  test "table column_widths flow through to <hp:cellSz width=...> in order" do
+    cell_ids = for i <- 1..3, do: "c#{i}"
+
+    cells =
+      cell_ids
+      |> Enum.with_index(1)
+      |> Enum.map(fn {id, idx} -> %{id: id, kind: :cell, content: "C#{idx}"} end)
+
+    table = %{
+      id: "T",
+      kind: :table,
+      attrs: %{rows: 1, cols: 3, column_widths: [2000, 3500, 5000]},
+      children: cell_ids
+    }
+
+    nodes_map = Map.new([table | cells], fn n -> {n.id, n} end)
+
+    state = %State{
+      document_id: "doc-0000-0000-0000-000000000010",
+      revision: 0,
+      projection: %{State.empty_projection() | nodes: nodes_map, node_order: ["T"]}
+    }
+
+    {:ok, bin} = HWPX.render(state)
+    section = unzip_body(bin, "Contents/section0.xml")
+
+    # Each width is emitted as a <hp:cellSz width="..."/> attribute.
+    assert section =~ ~s(<hp:cellSz width="2000")
+    assert section =~ ~s(<hp:cellSz width="3500")
+    assert section =~ ~s(<hp:cellSz width="5000")
+    # And the legacy default 6000 must not appear (it would mean we ignored the override).
+    refute section =~ ~s(<hp:cellSz width="6000")
+  end
+
+  test "per-cell border_fill_id overrides the table-level default in <hp:tc>" do
+    cells = [
+      %{id: "c1", kind: :cell, content: "default"},
+      %{id: "c2", kind: :cell, content: "custom", attrs: %{border_fill_id: "9"}}
+    ]
+
+    table = %{
+      id: "T2",
+      kind: :table,
+      attrs: %{rows: 1, cols: 2, border_fill_id: "4"},
+      children: ["c1", "c2"]
+    }
+
+    nodes_map = Map.new([table | cells], fn n -> {n.id, n} end)
+
+    state = %State{
+      document_id: "doc-0000-0000-0000-000000000011",
+      revision: 0,
+      projection: %{State.empty_projection() | nodes: nodes_map, node_order: ["T2"]}
+    }
+
+    {:ok, bin} = HWPX.render(state)
+    section = unzip_body(bin, "Contents/section0.xml")
+
+    # Table-level borderFillIDRef should be the table attr value.
+    assert section =~ ~s(<hp:tbl id="0" )
+    assert section =~ ~s(borderFillIDRef="4")
+    # The second cell should carry borderFillIDRef="9" (its override).
+    assert section =~ ~s(<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="9">)
+  end
+
+  test "cell row_span/col_span flow through to <hp:cellSpan>" do
+    cells = [
+      %{id: "c1", kind: :cell, content: "spanning", attrs: %{row_span: 2, col_span: 3}}
+    ]
+
+    table = %{
+      id: "T3",
+      kind: :table,
+      attrs: %{rows: 1, cols: 1},
+      children: ["c1"]
+    }
+
+    nodes_map = Map.new([table | cells], fn n -> {n.id, n} end)
+
+    state = %State{
+      document_id: "doc-0000-0000-0000-000000000012",
+      revision: 0,
+      projection: %{State.empty_projection() | nodes: nodes_map, node_order: ["T3"]}
+    }
+
+    {:ok, bin} = HWPX.render(state)
+    section = unzip_body(bin, "Contents/section0.xml")
+
+    assert section =~ ~s(<hp:cellSpan colSpan="3" rowSpan="2"/>)
+  end
+
+  test "default <hp:lineseg> carries textpos=0 + vertsize=1000 + flags=393216" do
+    nodes = [%{id: "p1", kind: :paragraph, content: "anything"}]
+    state = state_with_nodes(nodes)
+    {:ok, bin} = HWPX.render(state)
+    section = unzip_body(bin, "Contents/section0.xml")
+
+    assert section =~ ~s(<hp:linesegarray>)
+    assert section =~ ~s(textpos="0")
+    assert section =~ ~s(vertsize="1000")
+    assert section =~ ~s(textheight="1000")
+    assert section =~ ~s(baseline="850")
+    assert section =~ ~s(flags="393216")
+    # And the wrapping element actually closes:
+    assert section =~ ~s(</hp:linesegarray>)
+  end
 end

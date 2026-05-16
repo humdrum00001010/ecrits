@@ -148,6 +148,14 @@ defmodule Contract.IO.Upstage do
     kind = map_category(category)
     content_map = Map.get(elem, "content", %{})
 
+    base_attrs = %{
+      "page" => Map.get(elem, "page"),
+      "coordinates" => Map.get(elem, "coordinates"),
+      "category" => category
+    }
+
+    attrs = Map.merge(base_attrs, table_attrs(kind, elem))
+
     %{
       "id" => to_node_id(elem),
       "kind" => kind,
@@ -156,13 +164,106 @@ defmodule Contract.IO.Upstage do
         "html" => Map.get(content_map, "html"),
         "markdown" => Map.get(content_map, "markdown")
       },
-      "attrs" => %{
-        "page" => Map.get(elem, "page"),
-        "coordinates" => Map.get(elem, "coordinates"),
-        "category" => category
-      }
+      "attrs" => attrs
     }
   end
+
+  # IR-richness (task #37): derive HWPX-grade column widths from Upstage's cell
+  # bounding boxes when the element is a table. Upstage returns a `cells` list
+  # with per-cell `coordinates` (normalized 0..1 polygon corners) and/or an
+  # explicit `column_widths` array. We honor an explicit array first; otherwise
+  # we derive widths from cell bboxes in the first row.
+  defp table_attrs(:table, elem) do
+    widths = derive_column_widths(elem)
+
+    base =
+      if widths == [], do: %{}, else: %{"column_widths" => widths}
+
+    base
+    |> maybe_put_str("border_fill_id", Map.get(elem, "border_fill_id"))
+    |> maybe_put_int("header_row_count", Map.get(elem, "header_row_count"))
+    |> maybe_put_int("footer_row_count", Map.get(elem, "footer_row_count"))
+  end
+
+  defp table_attrs(_kind, _elem), do: %{}
+
+  defp derive_column_widths(elem) do
+    cond do
+      is_list(Map.get(elem, "column_widths")) ->
+        elem
+        |> Map.get("column_widths")
+        |> Enum.filter(&(is_integer(&1) and &1 > 0))
+
+      is_list(Map.get(elem, "cells")) ->
+        derive_widths_from_cells(Map.get(elem, "cells"), Map.get(elem, "coordinates"))
+
+      true ->
+        []
+    end
+  end
+
+  # Cells are expected to look like:
+  #   %{"row" => r, "col" => c, "coordinates" => [%{"x" => _, "y" => _}, ...]}
+  # We take only first-row cells, sort by col, and compute width per column.
+  # The table bbox (`elem.coordinates`) is the [0,1]-normalized polygon for the
+  # whole table; cells' coordinates use the same normalization. We scale to
+  # HWP units (1/100 mm) using the table's pixel width if present, otherwise
+  # we map directly to a default page width of ~16 cm (16000 HWP units).
+  defp derive_widths_from_cells(cells, table_coords) do
+    first_row =
+      cells
+      |> Enum.filter(fn c -> Map.get(c, "row", 0) == 0 end)
+      |> Enum.sort_by(&Map.get(&1, "col", 0))
+
+    case first_row do
+      [] ->
+        []
+
+      cells_in_row ->
+        table_span = bbox_x_span(table_coords) || 1.0
+        page_width_hwp = 16_000
+
+        Enum.map(cells_in_row, fn c ->
+          span = bbox_x_span(Map.get(c, "coordinates")) || 0.0
+          width = trunc(span / table_span * page_width_hwp)
+          max(width, 1)
+        end)
+    end
+  end
+
+  defp bbox_x_span(nil), do: nil
+  defp bbox_x_span([]), do: nil
+
+  defp bbox_x_span(coords) when is_list(coords) do
+    xs =
+      coords
+      |> Enum.map(fn pt ->
+        cond do
+          is_map(pt) -> Map.get(pt, "x") || Map.get(pt, :x)
+          true -> nil
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.filter(&is_number/1)
+
+    case xs do
+      [] -> nil
+      list -> Enum.max(list) - Enum.min(list)
+    end
+  end
+
+  defp bbox_x_span(_), do: nil
+
+  defp maybe_put_str(map, _key, nil), do: map
+  defp maybe_put_str(map, key, value) when is_binary(value), do: Map.put(map, key, value)
+  defp maybe_put_str(map, _key, _other), do: map
+
+  defp maybe_put_int(map, _key, nil), do: map
+
+  defp maybe_put_int(map, key, value) when is_integer(value) and value >= 0,
+    do: Map.put(map, key, value)
+
+  defp maybe_put_int(map, _key, _other), do: map
 
   defp to_node_id(%{"id" => id}) when is_integer(id), do: "node:#{id}"
   defp to_node_id(%{"id" => id}) when is_binary(id), do: id

@@ -183,8 +183,16 @@ defmodule Contract.Engine do
     end
   end
 
+  defp validate_op_shape(%Operation{op: :set_attr} = op, idx, state) do
+    with :ok <-
+           (if needs_target?(op), do: check_target_exists(op, idx, state), else: :ok),
+         :ok <- check_set_attr_node_kind(op, idx, state) do
+      :ok
+    end
+  end
+
   defp validate_op_shape(%Operation{op: kind} = op, idx, state)
-       when kind in [:delete_node, :move_node, :set_field, :set_attr, :bind_ref, :unbind_ref] do
+       when kind in [:delete_node, :move_node, :set_field, :bind_ref, :unbind_ref] do
     if needs_target?(op) do
       check_target_exists(op, idx, state)
     else
@@ -193,6 +201,97 @@ defmodule Contract.Engine do
   end
 
   defp validate_op_shape(_op, _idx, _state), do: :ok
+
+  # IR-richness (task #37): structural validation of the table/cell attr keys.
+  # Additive — only rejects when a *known* key is present with the wrong shape;
+  # unknown keys and absent keys are always allowed.
+  defp check_set_attr_node_kind(%Operation{target_type: :node, target_id: id, args: args}, idx, state)
+       when not is_nil(id) do
+    args = normalize_args(args)
+    key = Map.get(args, :key)
+    value = Map.get(args, :value)
+    node = Map.get(state.projection.nodes, id, %{})
+    kind = Map.get(node, :kind)
+
+    cond do
+      kind == :table and key in Runtime.State.table_attr_keys() ->
+        validate_table_attr(key, value, idx)
+
+      kind == :cell and key in Runtime.State.cell_attr_keys() ->
+        validate_cell_attr(key, value, idx)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp check_set_attr_node_kind(_op, _idx, _state), do: :ok
+
+  defp validate_table_attr(:column_widths, value, idx) do
+    if is_list(value) and Enum.all?(value, &(is_integer(&1) and &1 > 0)) do
+      :ok
+    else
+      {:error, {:invalid_attr_value, index: idx, key: :column_widths, reason: :not_pos_int_list}}
+    end
+  end
+
+  defp validate_table_attr(:border_fill_id, nil, _idx), do: :ok
+
+  defp validate_table_attr(:border_fill_id, value, idx) do
+    if is_binary(value) do
+      :ok
+    else
+      {:error, {:invalid_attr_value, index: idx, key: :border_fill_id, reason: :not_string}}
+    end
+  end
+
+  defp validate_table_attr(key, value, idx)
+       when key in [:header_row_count, :footer_row_count, :rows, :cols] do
+    if is_integer(value) and value >= 0 do
+      :ok
+    else
+      {:error, {:invalid_attr_value, index: idx, key: key, reason: :not_non_neg_int}}
+    end
+  end
+
+  defp validate_table_attr(_key, _value, _idx), do: :ok
+
+  defp validate_cell_attr(key, value, idx) when key in [:row_span, :col_span] do
+    if is_integer(value) and value >= 1 do
+      :ok
+    else
+      {:error, {:invalid_attr_value, index: idx, key: key, reason: :not_pos_int}}
+    end
+  end
+
+  defp validate_cell_attr(:border_fill_id, nil, _idx), do: :ok
+
+  defp validate_cell_attr(:border_fill_id, value, idx) do
+    if is_binary(value) do
+      :ok
+    else
+      {:error, {:invalid_attr_value, index: idx, key: :border_fill_id, reason: :not_string}}
+    end
+  end
+
+  defp validate_cell_attr(:vertical_alignment, value, idx) do
+    if value in [:top, :center, :bottom] do
+      :ok
+    else
+      {:error, {:invalid_attr_value, index: idx, key: :vertical_alignment, reason: :not_enum}}
+    end
+  end
+
+  defp validate_cell_attr(key, value, idx)
+       when key in [:padding_top, :padding_right, :padding_bottom, :padding_left] do
+    if is_integer(value) and value >= 0 do
+      :ok
+    else
+      {:error, {:invalid_attr_value, index: idx, key: key, reason: :not_non_neg_int}}
+    end
+  end
+
+  defp validate_cell_attr(_key, _value, _idx), do: :ok
 
   defp needs_target?(%Operation{target_id: nil}), do: false
   defp needs_target?(%Operation{}), do: true

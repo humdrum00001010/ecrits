@@ -30,6 +30,31 @@ defmodule Contract.Runtime.State do
   Authors and agents are free to use additional kinds as soft labels; the
   Engine treats node kinds as opaque atoms. Any "is this a clause?" semantics
   belong in marks, not in node kinds.
+
+  ## Table + cell IR-richness attrs (task #37)
+
+  To preserve HWPX-grade fidelity through ingest → projection → export, the
+  `:table` and `:cell` node kinds carry the following optional `attrs` keys.
+  All are additive — readers that don't know about them ignore them; writers
+  that don't set them fall back to defaults.
+
+  ### `:table` attrs
+
+    * `:column_widths` — `[pos_integer]`, HWP units (1/100 mm) per column.
+    * `:border_fill_id` — `String.t() | nil`, default borderFillID for cells.
+    * `:header_row_count` — `non_neg_integer`, default `0`.
+    * `:footer_row_count` — `non_neg_integer`, default `0`.
+    * `:rows`, `:cols` — existing dimension hints (unchanged).
+
+  ### `:cell` attrs
+
+    * `:row_span` — `pos_integer`, default `1`.
+    * `:col_span` — `pos_integer`, default `1`.
+    * `:border_fill_id` — `String.t() | nil`, per-cell override of the
+      table-level borderFillID.
+    * `:vertical_alignment` — `:top | :center | :bottom`, default `:top`.
+    * `:padding_top`, `:padding_right`, `:padding_bottom`, `:padding_left` —
+      `non_neg_integer`, HWP units (1/100 mm), default `0`.
   """
 
   alias Contract.Types, as: T
@@ -110,4 +135,42 @@ defmodule Contract.Runtime.State do
   """
   @spec empty_projection() :: projection_t()
   def empty_projection, do: @empty_projection
+
+  # ----------------------------------------------------------------------------
+  # IR-richness helpers (task #37): allowed attr keys per node kind.
+  # ----------------------------------------------------------------------------
+
+  @table_attr_keys [
+    :column_widths,
+    :border_fill_id,
+    :header_row_count,
+    :footer_row_count,
+    :rows,
+    :cols
+  ]
+
+  @cell_attr_keys [
+    :row_span,
+    :col_span,
+    :border_fill_id,
+    :vertical_alignment,
+    :padding_top,
+    :padding_right,
+    :padding_bottom,
+    :padding_left
+  ]
+
+  @doc """
+  Allowed attr keys for `:table` nodes (HWPX-grade metadata). Used by
+  `Contract.Engine` `:set_attr` validation. Additive — extra keys are not
+  rejected, but these are the canonical names.
+  """
+  @spec table_attr_keys() :: [atom()]
+  def table_attr_keys, do: @table_attr_keys
+
+  @doc """
+  Allowed attr keys for `:cell` nodes (HWPX-grade metadata).
+  """
+  @spec cell_attr_keys() :: [atom()]
+  def cell_attr_keys, do: @cell_attr_keys
 end

@@ -198,6 +198,108 @@ defmodule Contract.IO.UpstageTest do
     end
   end
 
+  # --------------------------------------------------------------------------
+  # IR-richness (task #37): table column_widths derived from cell bboxes.
+  # --------------------------------------------------------------------------
+
+  describe "normalize_elements/1 — table IR-richness" do
+    test "honors an explicit numeric column_widths array on a table element" do
+      elements = [
+        %{
+          "id" => 7,
+          "category" => "table",
+          "content" => %{"html" => "<table/>"},
+          "column_widths" => [1500, 3000, 4500]
+        }
+      ]
+
+      [node] = Upstage.normalize_elements(elements)
+      assert node["kind"] == :table
+      assert node["attrs"]["column_widths"] == [1500, 3000, 4500]
+    end
+
+    test "derives column_widths from 3-column cell bboxes in the first row" do
+      # Three columns occupying x in [0..0.2], [0.2..0.6], [0.6..1.0] — so the
+      # widths should be roughly proportional to 0.2, 0.4, 0.4.
+      cells = [
+        %{
+          "row" => 0,
+          "col" => 0,
+          "coordinates" => [
+            %{"x" => 0.0, "y" => 0.0},
+            %{"x" => 0.2, "y" => 0.0},
+            %{"x" => 0.2, "y" => 0.1},
+            %{"x" => 0.0, "y" => 0.1}
+          ]
+        },
+        %{
+          "row" => 0,
+          "col" => 1,
+          "coordinates" => [
+            %{"x" => 0.2, "y" => 0.0},
+            %{"x" => 0.6, "y" => 0.0},
+            %{"x" => 0.6, "y" => 0.1},
+            %{"x" => 0.2, "y" => 0.1}
+          ]
+        },
+        %{
+          "row" => 0,
+          "col" => 2,
+          "coordinates" => [
+            %{"x" => 0.6, "y" => 0.0},
+            %{"x" => 1.0, "y" => 0.0},
+            %{"x" => 1.0, "y" => 0.1},
+            %{"x" => 0.6, "y" => 0.1}
+          ]
+        }
+      ]
+
+      elements = [
+        %{
+          "id" => 1,
+          "category" => "table",
+          "content" => %{"html" => "<table/>"},
+          "coordinates" => [
+            %{"x" => 0.0, "y" => 0.0},
+            %{"x" => 1.0, "y" => 0.0},
+            %{"x" => 1.0, "y" => 0.1},
+            %{"x" => 0.0, "y" => 0.1}
+          ],
+          "cells" => cells
+        }
+      ]
+
+      [node] = Upstage.normalize_elements(elements)
+      widths = node["attrs"]["column_widths"]
+      assert is_list(widths)
+      assert length(widths) == 3
+      [w1, w2, w3] = widths
+      # All positive HWP units.
+      assert w1 > 0 and w2 > 0 and w3 > 0
+      # Total is roughly the assumed page width (~16000), within rounding.
+      assert w1 + w2 + w3 in 15_995..16_005
+      # Middle and last columns are wider than the first (0.4 vs 0.2 ratios).
+      assert w2 > w1
+      assert w3 > w1
+    end
+
+    test "tables without bbox info still produce a valid node (no column_widths key)" do
+      elements = [%{"id" => 2, "category" => "table", "content" => %{"text" => "x"}}]
+      [node] = Upstage.normalize_elements(elements)
+      assert node["kind"] == :table
+      refute Map.has_key?(node["attrs"], "column_widths")
+    end
+
+    test "non-table elements never gain a column_widths attr" do
+      elements = [
+        %{"id" => 3, "category" => "paragraph", "content" => %{"text" => "ok"}}
+      ]
+
+      [node] = Upstage.normalize_elements(elements)
+      refute Map.has_key?(node["attrs"], "column_widths")
+    end
+  end
+
   defp write_tempfile(contents) do
     path = Path.join(System.tmp_dir!(), "upstage-test-#{System.unique_integer([:positive])}")
     File.write!(path, contents)
