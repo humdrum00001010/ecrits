@@ -280,6 +280,11 @@ defmodule Contract.Workers.FtcSeedJob do
   # ----------------------------------------------------------------------------
 
   defp emit_initial_change(%Document{} = doc, nodes, actor_id) do
+    node_order =
+      nodes
+      |> Enum.map(fn n -> Map.get(n, "id") || Map.get(n, :id) end)
+      |> Enum.reject(&is_nil/1)
+
     action = %Action{
       kind: :create_document,
       matter_id: doc.matter_id,
@@ -292,6 +297,7 @@ defmodule Contract.Workers.FtcSeedJob do
         "title" => doc.title,
         "type_key" => doc.type_key,
         "nodes" => nodes,
+        "node_order" => node_order,
         "source" => "ftc"
       },
       message: "FTC template seed"

@@ -730,7 +730,6 @@ defmodule Contract.Export.HWPX do
       tbl <>
       ~s(<hp:t/>) <>
       ~s(</hp:run>) <>
-      lineseg_array_xml() <>
       ~s(</hp:p>)
   end
 
@@ -762,7 +761,6 @@ defmodule Contract.Export.HWPX do
       safe <>
       ~s(</hp:t>) <>
       ~s(</hp:run>) <>
-      lineseg_array_xml() <>
       ~s(</hp:p>)
   end
 
@@ -778,20 +776,7 @@ defmodule Contract.Export.HWPX do
       safe <>
       ~s(</hp:t>) <>
       ~s(</hp:run>) <>
-      lineseg_array_xml() <>
       ~s(</hp:p>)
-  end
-
-  # Default <hp:linesegarray> emitted on every <hp:p>. Hancom Office regenerates
-  # linesegs on open, but emitting a sane default avoids the strict-viewer
-  # "document modified" prompt. Values are HWP units (1/100 mm) and flags
-  # 393216 = "first line" + "needs reflow". textpos="0" anchors at the start of
-  # the paragraph. Fully static — does not introduce non-determinism.
-  defp lineseg_array_xml do
-    ~s(<hp:linesegarray>) <>
-      ~s(<hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000") <>
-      ~s( baseline="850" spacing="600" horzpos="0" horzsize="42520" flags="393216"/>) <>
-      ~s(</hp:linesegarray>)
   end
 
   defp sec_pr_xml do

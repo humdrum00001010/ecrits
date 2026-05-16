@@ -312,6 +312,7 @@ defmodule Contract.Engine do
   defp read_attr(:document, _id, :title, state), do: state.projection.title
   defp read_attr(:document, _id, :type_key, state), do: state.projection.type_key
   defp read_attr(:document, _id, :metadata, state), do: state.projection.metadata
+  defp read_attr(:document, _id, :node_order, state), do: state.projection.node_order
   defp read_attr(:document, _id, :status, state), do: Map.get(state.projection.metadata, :status)
 
   defp read_attr(:document, _id, key, state) do
@@ -561,6 +562,9 @@ defmodule Contract.Engine do
       :metadata when is_map(value) ->
         Map.put(projection, :metadata, value)
 
+      :node_order when is_list(value) ->
+        Map.put(projection, :node_order, value)
+
       _ when is_atom(key) ->
         Map.update!(projection, :metadata, &Map.put(&1, key, value))
 
@@ -752,15 +756,48 @@ defmodule Contract.Engine do
     payload = normalize_payload(action.payload)
     title = Map.get(payload, :title)
     type_key = Map.get(payload, :type_key)
+    nodes = Map.get(payload, :nodes) || []
+    node_order = Map.get(payload, :node_order) || []
 
-    op = %Operation{
+    document_op = %Operation{
       op: :create_node,
       target_type: :document,
       target_id: action.document_id,
       args: %{title: title, type_key: type_key, kind: :document}
     }
 
-    {[op], [], %{title: title, type_key: type_key}}
+    node_ops =
+      nodes
+      |> List.wrap()
+      |> Enum.map(&node_payload_to_op/1)
+
+    order_ops =
+      case node_order do
+        [] ->
+          []
+
+        list when is_list(list) ->
+          [
+            %Operation{
+              op: :set_attr,
+              target_type: :document,
+              target_id: action.document_id,
+              args: %{key: :node_order, value: list}
+            }
+          ]
+
+        _ ->
+          []
+      end
+
+    ops = [document_op | node_ops] ++ order_ops
+
+    {ops, [],
+     %{
+       title: title,
+       type_key: type_key,
+       node_count: length(node_ops)
+     }}
   end
 
   defp build_ops_and_marks(%Action{kind: :archive_document} = action, _state) do
@@ -900,6 +937,57 @@ defmodule Contract.Engine do
     raise ArgumentError,
           "Contract.Engine: unhandled Action.kind=#{inspect(kind)} in build_ops_and_marks/2"
   end
+
+  # ----------------------------------------------------------------------------
+  # node payload → :create_node op helpers (used by :create_document)
+  # ----------------------------------------------------------------------------
+
+  # Convert a payload-shaped node (string- or atom-keyed) into a :create_node
+  # Operation targeting the projection's nodes map.
+  defp node_payload_to_op(%Operation{} = op), do: op
+
+  defp node_payload_to_op(node) when is_map(node) do
+    node = Map.new(node, fn {k, v} -> {atomize(k), v} end)
+
+    target_id =
+      case Map.get(node, :id) do
+        id when is_binary(id) and id != "" -> id
+        _ -> Ecto.UUID.generate()
+      end
+
+    kind = node |> Map.get(:kind) |> atomize_kind()
+    content = Map.get(node, :content)
+    attrs = Map.get(node, :attrs) || %{}
+    parent_id = Map.get(node, :parent_id)
+    position = Map.get(node, :position)
+
+    args =
+      %{kind: kind}
+      |> maybe_put(:content, content)
+      |> maybe_put(:attrs, attrs)
+      |> maybe_put(:parent_id, parent_id)
+      |> maybe_put(:position, position)
+
+    %Operation{
+      op: :create_node,
+      target_type: :node,
+      target_id: target_id,
+      args: args
+    }
+  end
+
+  defp atomize_kind(nil), do: :paragraph
+  defp atomize_kind(k) when is_atom(k), do: k
+
+  defp atomize_kind(k) when is_binary(k) do
+    try do
+      String.to_existing_atom(k)
+    rescue
+      ArgumentError -> String.to_atom(k)
+    end
+  end
+
+  defp atomize_kind(_), do: :paragraph
 
   # ----------------------------------------------------------------------------
   # payload coercion

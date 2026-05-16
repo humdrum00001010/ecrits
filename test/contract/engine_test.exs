@@ -75,6 +75,188 @@ defmodule Contract.EngineTest do
     end
   end
 
+  describe "compile/2 — create_document with nodes (Wave 7 materialization)" do
+    test "compiles to 1 doc op + N create_node ops + 1 node_order set_attr op" do
+      state = new_state()
+
+      a =
+        action(:create_document,
+          document_id: uuid(10),
+          payload: %{
+            "title" => "NDA",
+            "type_key" => "nda_v1",
+            "nodes" => [
+              %{"id" => "n1", "kind" => "paragraph", "content" => "Hello world"},
+              %{"id" => "n2", "kind" => "heading", "content" => "Article 1"}
+            ],
+            "node_order" => ["n2", "n1"]
+          }
+        )
+
+      {:ok, input} = Engine.compile(a, state)
+
+      # 1 document create_node + 2 node create_nodes + 1 node_order set_attr
+      assert length(input.ops) == 4
+      [doc_op, n1_op, n2_op, order_op] = input.ops
+
+      assert doc_op.op == :create_node and doc_op.target_type == :document
+      assert n1_op.op == :create_node and n1_op.target_type == :node
+      assert n1_op.target_id == "n1"
+      assert n1_op.args.kind == :paragraph
+      assert n2_op.op == :create_node and n2_op.target_type == :node
+      assert n2_op.args.kind == :heading
+      assert order_op.op == :set_attr
+      assert order_op.args.key == :node_order
+      assert order_op.args.value == ["n2", "n1"]
+    end
+
+    test "apply materializes nodes into projection.nodes map" do
+      state = new_state()
+
+      a =
+        action(:create_document,
+          document_id: uuid(10),
+          payload: %{
+            "title" => "NDA",
+            "type_key" => "nda_v1",
+            "nodes" => [
+              %{"id" => "n1", "kind" => "paragraph", "content" => "Hello"},
+              %{"id" => "n2", "kind" => "heading", "content" => "Title"}
+            ]
+          }
+        )
+
+      {_input, new_state} = run_pipeline(a, state)
+
+      assert Map.has_key?(new_state.projection.nodes, "n1")
+      assert Map.has_key?(new_state.projection.nodes, "n2")
+      assert new_state.projection.nodes["n1"].kind == :paragraph
+      assert new_state.projection.nodes["n1"].content == "Hello"
+      assert new_state.projection.nodes["n2"].kind == :heading
+      # Title + type_key still set on the projection.
+      assert new_state.projection.title == "NDA"
+      assert new_state.projection.type_key == "nda_v1"
+    end
+
+    test "apply preserves node_order from payload" do
+      state = new_state()
+
+      a =
+        action(:create_document,
+          document_id: uuid(10),
+          payload: %{
+            "title" => "NDA",
+            "type_key" => "nda_v1",
+            "nodes" => [
+              %{"id" => "n1", "kind" => "paragraph", "content" => "A"},
+              %{"id" => "n2", "kind" => "paragraph", "content" => "B"}
+            ],
+            "node_order" => ["n2", "n1"]
+          }
+        )
+
+      {_input, new_state} = run_pipeline(a, state)
+      assert new_state.projection.node_order == ["n2", "n1"]
+    end
+
+    test "empty nodes list produces only the document-level op" do
+      state = new_state()
+
+      a =
+        action(:create_document,
+          document_id: uuid(10),
+          payload: %{"title" => "NDA", "type_key" => "nda_v1", "nodes" => []}
+        )
+
+      {:ok, input} = Engine.compile(a, state)
+      assert length(input.ops) == 1
+      [op] = input.ops
+      assert op.op == :create_node and op.target_type == :document
+    end
+
+    test "inverse of create_document with nodes produces :delete_node ops" do
+      state = new_state()
+
+      a =
+        action(:create_document,
+          document_id: uuid(10),
+          payload: %{
+            "title" => "NDA",
+            "type_key" => "nda_v1",
+            "nodes" => [
+              %{"id" => "n1", "kind" => "paragraph", "content" => "Hello"},
+              %{"id" => "n2", "kind" => "heading", "content" => "Title"}
+            ],
+            "node_order" => ["n1", "n2"]
+          }
+        )
+
+      {input, new_state} = run_pipeline(a, state)
+
+      # inverse_ops should include a :delete_node for each :create_node.
+      delete_node_ops =
+        Enum.filter(input.inverse_ops, fn op ->
+          op.op == :delete_node and op.target_type == :node
+        end)
+
+      assert length(delete_node_ops) == 2
+
+      # Applying the inverse removes the node entries from the projection.
+      inverse_input = %ChangeInput{input | ops: input.inverse_ops}
+      {:ok, restored} = Engine.apply(inverse_input, new_state)
+      assert restored.projection.nodes == %{}
+      assert restored.projection.node_order == []
+    end
+
+    test "UTF-8 Korean content survives compile + apply" do
+      state = new_state()
+      korean = "이 계약은 갑과 을 사이에 체결된다."
+
+      a =
+        action(:create_document,
+          document_id: uuid(10),
+          payload: %{
+            "title" => "표준계약서",
+            "type_key" => "franchise_v1",
+            "nodes" => [
+              %{"id" => "n1", "kind" => "paragraph", "content" => korean}
+            ]
+          }
+        )
+
+      {_input, new_state} = run_pipeline(a, state)
+      assert new_state.projection.title == "표준계약서"
+      assert new_state.projection.nodes["n1"].content == korean
+    end
+
+    test "preimage captures the pre-create node_order for the inverse" do
+      proj = Map.put(Runtime.State.empty_projection(), :node_order, ["preexisting"])
+      state = new_state(projection: proj)
+
+      a =
+        action(:create_document,
+          document_id: uuid(10),
+          payload: %{
+            "title" => "NDA",
+            "type_key" => "nda_v1",
+            "nodes" => [%{"id" => "n1", "kind" => "paragraph", "content" => "x"}],
+            "node_order" => ["n1"]
+          }
+        )
+
+      {:ok, input} = Engine.compile(a, state)
+      {:ok, pre} = Engine.preimage(input, state)
+
+      # The set_attr :node_order op is the last op; its preimage captures
+      # the pre-mutation node_order list.
+      order_op_idx = length(input.ops) - 1
+      order_pre = Map.get(pre, {order_op_idx, uuid(10)})
+      assert order_pre.op == :set_attr
+      assert order_pre.key == :node_order
+      assert order_pre.value == ["preexisting"]
+    end
+  end
+
   describe "compile/2 — rename_document" do
     test "produces a set_attr title op" do
       state = new_state()

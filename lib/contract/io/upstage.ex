@@ -29,6 +29,7 @@ defmodule Contract.IO.Upstage do
          {:ok, _r2} <- upload_source(matter_id, artifact_id, info),
          {:ok, parsed} <- parse(info.path, []) do
       nodes = normalize_elements(parsed.elements)
+      node_order = Enum.map(nodes, & &1["id"])
 
       action = %Contract.Action{
         kind: :create_document,
@@ -41,6 +42,7 @@ defmodule Contract.IO.Upstage do
           "mime_type" => info.mime_type,
           "byte_size" => info.byte_size,
           "nodes" => nodes,
+          "node_order" => node_order,
           "source" => %{
             "kind" => "r2",
             "key" => source_key(matter_id, artifact_id, info),
