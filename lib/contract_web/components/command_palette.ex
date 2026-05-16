@@ -264,6 +264,7 @@ defmodule ContractWeb.Components.CommandPalette do
       phx-hook=".Palette"
       data-role="command-palette-root"
       data-open={to_string(@open?)}
+      data-cmdk-ready="false"
     >
       <script :type={Phoenix.LiveView.ColocatedHook} name=".Palette">
         export default {
@@ -275,10 +276,17 @@ defmodule ContractWeb.Components.CommandPalette do
                 this.pushEventTo(this.el, "toggle", {})
               }
             }
-            window.addEventListener("keydown", this.handler)
+            // Capture phase so no nested Studio component can swallow
+            // the chord before us. The palette is global to the page.
+            window.addEventListener("keydown", this.handler, true)
+            // Signal to Playwright (and humans) that the keydown
+            // listener is bound and Cmd+K is hot. The spec gates the
+            // chord press on this attribute flipping to "true".
+            this.el.setAttribute("data-cmdk-ready", "true")
           },
           destroyed() {
-            window.removeEventListener("keydown", this.handler)
+            window.removeEventListener("keydown", this.handler, true)
+            this.el.setAttribute("data-cmdk-ready", "false")
           }
         }
       </script>
