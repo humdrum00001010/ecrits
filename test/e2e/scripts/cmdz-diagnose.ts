@@ -175,47 +175,42 @@ async function run(): Promise<void> {
   console.log(`[4] hookRoot=${JSON.stringify(hookRoot)}`);
 
   // If the editor isn't mounted (briefing/empty mode), warm-edit the
-  // doc to land a change row that flips derive_mode_from_history to
-  // `:editing`, then reload so the LV re-mounts with the new mode.
+  // doc to land changes that flip derive_mode to `:editing`, then
+  // reload so the LV re-mounts with the new mode. `derive_mode`
+  // gates first on `projection.type_key` (nil → briefing regardless of
+  // history), so we MUST push `set_contract_type` here — a plain
+  // `edit_document` alone leaves type_key nil and mode stays briefing.
+  // Then we also push a `:create_node` op so the projection's
+  // `node_order` ends up non-empty.
+  const FIRST_NODE_ID = 'cmdz-diag-node-1';
   if (!canvasMeta.editorPresent) {
     console.log('[3c] editor NOT mounted — running warm-edit + reload sequence');
-    await page.evaluate((docId) => {
-      interface LVOwner {
-        pushHookEvent: (
-          el: Element,
-          ctx: unknown,
-          event: string,
-          payload: Record<string, unknown>
-        ) => unknown;
-      }
-      interface LVWindow {
-        liveSocket?: { owner?: (el: Element) => LVOwner };
-      }
-      const lv = (window as unknown as LVWindow).liveSocket;
-      const root = document.querySelector('[data-phx-main]');
-      if (!root) throw new Error('no LV root for warm-edit');
-      const view = lv?.owner?.(root);
-      view?.pushHookEvent(root, null, 'edit_document', {
-        document_id: docId,
-        ops: [
-          {
-            op: 'replace_content',
-            target_type: 'node',
-            target_id: 'cmdz-warm-node',
-            args: { content: 'warm edit so derive_mode flips to :editing' }
-          }
-        ]
-      });
-    }, doc.id);
+    await pushHookEvent(page, 'set_contract_type', {
+      document_id: doc.id,
+      type_key: 'nda_v1'
+    });
+    await pushHookEvent(page, 'edit_document', {
+      document_id: doc.id,
+      ops: [
+        {
+          op: 'create_node',
+          target_type: 'node',
+          target_id: FIRST_NODE_ID,
+          args: { kind: 'paragraph', content: 'warm-up paragraph' }
+        }
+      ]
+    });
 
-    // Wait for the warm change to land before reloading.
     const warm = await pollChanges(
       page,
       doc.id,
-      (rows) => rows.length >= 1,
-      { timeoutMs: 5_000 }
+      (rows) => rows.length >= 2,
+      { timeoutMs: 8_000 }
     );
-    console.log(`[3d] warm-change landed: ${warm.found}, rows=${warm.rows.length}`);
+    console.log(`[3d] warm changes landed: ${warm.found}, rows=${warm.rows.length}`);
+    console.log(
+      `[3d-rows] ${JSON.stringify(warm.rows.map((r) => ({ kind: r.action_kind })))}`
+    );
 
     await page.reload({ waitUntil: 'networkidle' });
     const remountedMeta = await page.evaluate(() => {
@@ -323,46 +318,29 @@ async function run(): Promise<void> {
     const el = document.querySelector('[data-node-id]') as HTMLElement | null;
     return el?.dataset.nodeId ?? null;
   });
-  console.log(`[5a] firstNodeId=${firstNodeId}`);
+  console.log(`[5a] firstNodeId(DOM)=${firstNodeId}`);
 
-  if (!firstNodeId) {
-    console.log('[FATAL] no editable nodes — projection empty?');
-    const html = await page.locator('[data-stub="canvas-editor"]').innerHTML().catch(() => '');
-    console.log(`[FATAL] canvas html (first 400): ${html.slice(0, 400)}`);
-    await browser.close();
-    process.exit(1);
-  }
+  // Use the warm-up node id (we know it exists in the projection after
+  // phase 1). Fall back to the DOM-discovered id if for any reason the
+  // warm-up didn't run.
+  const editTargetId = firstNodeId ?? FIRST_NODE_ID;
+  console.log(`[5b] editTargetId=${editTargetId}`);
 
-  await page.evaluate((nodeId) => {
-    interface LVOwner {
-      pushHookEvent: (
-        el: Element,
-        ctx: unknown,
-        event: string,
-        payload: Record<string, unknown>
-      ) => unknown;
-    }
-    interface LVWindow {
-      liveSocket?: { owner?: (el: Element) => LVOwner };
-    }
-    const lv = (window as unknown as LVWindow).liveSocket;
-    const root = document.querySelector('[data-phx-main]');
-    if (!root) throw new Error('no LV root');
-    const view = lv?.owner?.(root);
-    if (!view) throw new Error('no LV owner');
-    view.pushHookEvent(root, null, 'edit_document', {
-      ops: [
-        {
-          op: 'replace_content',
-          target_type: 'node',
-          target_id: nodeId,
-          args: { content: 'diagnostic edit ' + Date.now() }
-        }
-      ]
-    });
+  await pushHookEvent(page, 'edit_document', {
+    document_id: doc.id,
+    ops: [
+      {
+        op: 'replace_content',
+        target_type: 'node',
+        target_id: editTargetId,
+        args: { content: 'diagnostic edit ' + Date.now() }
+      }
+    ]
+  });
+  await page.evaluate(() => {
     // eslint-disable-next-line no-console
     console.log('[cmdz-diag] pushed edit_document via pushHookEvent');
-  }, firstNodeId);
+  });
 
   // 6. Wait for the edit change to land.
   const editLanded = await pollChanges(page, doc.id, (rows) =>
@@ -492,6 +470,35 @@ async function run(): Promise<void> {
     process.exit(2);
   }
   console.log('[RESULT] PASS — revoke_change landed');
+}
+
+async function pushHookEvent(
+  page: import('@playwright/test').Page,
+  event: string,
+  payload: Record<string, unknown>
+): Promise<void> {
+  await page.evaluate(
+    ({ event, payload }) => {
+      interface LVOwner {
+        pushHookEvent: (
+          el: Element,
+          ctx: unknown,
+          event: string,
+          payload: Record<string, unknown>
+        ) => unknown;
+      }
+      interface LVWindow {
+        liveSocket?: { owner?: (el: Element) => LVOwner };
+      }
+      const lv = (window as unknown as LVWindow).liveSocket;
+      const root = document.querySelector('[data-phx-main]');
+      if (!root) throw new Error('no LV root');
+      const view = lv?.owner?.(root);
+      if (!view) throw new Error('no LV owner');
+      view.pushHookEvent(root, null, event, payload);
+    },
+    { event, payload }
+  );
 }
 
 async function pollChanges(

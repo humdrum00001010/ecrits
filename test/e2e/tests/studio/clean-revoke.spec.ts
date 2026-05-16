@@ -45,6 +45,25 @@ test.describe('Scenario 2: clean revoke', () => {
       page,
       request
     }, testInfo) => {
+      // Hook console + pageerror so flaky failures leave a trail in the
+      // playwright reporter output.
+      page.on('console', (m) => {
+        const t = m.text();
+        if (
+          t.includes('[Editable]') ||
+          t.includes('Cmd+Z') ||
+          t.includes('pushHookEvent') ||
+          t.includes('Studio')
+        ) {
+          // eslint-disable-next-line no-console
+          console.log(`[browser:${m.type()}] ${t}`);
+        }
+      });
+      page.on('pageerror', (err) => {
+        // eslint-disable-next-line no-console
+        console.log(`[browser:pageerror] ${err.message}`);
+      });
+
       await resetE2EState(request);
       await signInAs(page, 'lawyer');
 
@@ -69,6 +88,23 @@ test.describe('Scenario 2: clean revoke', () => {
         inserted_at: ''
       });
 
+      // Wait for the LV to actually be connected — `page.goto` returns
+      // when the HTML lands, but `pushHookEvent` requires `liveSocket`
+      // to be live AND the view's `joinPending` to have cleared.
+      // Without this barrier the first phase-1 push fails with
+      // "unable to push hook event. LiveView not connected".
+      await waitForLiveSocket(page);
+
+      // The Studio LV swaps to a chat-first mobile layout below 1024px
+      // (StudioLive.handle_event/"viewport_change") and does NOT render
+      // the Canvas.Editor in that branch — Cmd+Z is desktop-only by
+      // architecture. Force the LV into the desktop branch so the hook
+      // actually mounts; the [mobile] iteration of this scenario still
+      // exercises the Cmd+Z keyboard pipeline, just against the same
+      // desktop layout. The mobile-specific responsive rendering is
+      // covered elsewhere.
+      await pushHookEvent(page, 'viewport_change', { w: 1440 });
+
       const edited = await page.evaluate(() => {
         const hook = (window as unknown as { liveSocket?: { execJS?: unknown } }).liveSocket;
         return Boolean(hook);
@@ -81,12 +117,20 @@ test.describe('Scenario 2: clean revoke', () => {
       // Phase 1: flip derive_mode to `:editing` by landing
       // `set_contract_type` (populates projection.type_key) and a
       // `create_node` op (populates node_order so the Editor has
-      // something to render). Both ride the same `pushHookEvent`
-      // funnel — see the wrapper below.
+      // something to render). Push and wait one at a time — the LV's
+      // Session GenServer serialises commits, and the test pollUntil
+      // only sees the second row after the first has been committed
+      // through Store.append.
       await pushHookEvent(page, 'set_contract_type', {
         document_id: document.id,
         type_key: 'nda_v1'
       });
+      await pollUntil(
+        () => getChanges(request, document.id),
+        (rows) => rows.some((r) => r.action_kind === 'set_contract_type'),
+        { timeoutMs: 10_000, label: 'set_contract_type appears' }
+      );
+
       await pushHookEvent(page, 'edit_document', {
         document_id: document.id,
         ops: [
@@ -101,14 +145,10 @@ test.describe('Scenario 2: clean revoke', () => {
           }
         ]
       });
-
-      // Wait for both warm-up changes to land before we reload — the
-      // change-history branch of `derive_mode` only kicks in once the
-      // ChangeLog has at least one row for this document.
       await pollUntil(
         () => getChanges(request, document.id),
         (rows) => rows.length >= 2,
-        { timeoutMs: 10_000, label: 'warm-up changes appear' }
+        { timeoutMs: 10_000, label: 'create_node edit appears' }
       );
 
       // Re-mount the LV so `Studio.load` re-derives `mode` from the
@@ -117,6 +157,10 @@ test.describe('Scenario 2: clean revoke', () => {
       // that proves the Editable hook is now installed and listening
       // for Cmd+Z.
       await page.reload({ waitUntil: 'networkidle' });
+      await waitForLiveSocket(page);
+      // Re-pin the LV's viewport to desktop on the mobile project — see
+      // the rationale on the first `viewport_change` push above.
+      await pushHookEvent(page, 'viewport_change', { w: 1440 });
       await page.waitForSelector('[data-stub="canvas-editor"]', { timeout: 10_000 });
 
       // Capture baseline change-count AFTER the warm-up so we can wait
@@ -221,31 +265,64 @@ test.describe('Scenario 2: clean revoke', () => {
  * gateway. Wrapped so the spec's two-phase setup doesn't repeat the
  * `liveSocket.owner(root)` dance four times.
  */
+async function waitForLiveSocket(
+  page: import('@playwright/test').Page
+): Promise<void> {
+  await page.waitForSelector('[data-phx-main]', { timeout: 10_000 });
+  await page.waitForFunction(
+    () => {
+      interface LVWindow {
+        liveSocket?: { isConnected?: () => boolean };
+      }
+      const lv = (window as unknown as LVWindow).liveSocket;
+      return Boolean(lv && lv.isConnected && lv.isConnected());
+    },
+    { timeout: 10_000 }
+  );
+  // Mirror the working pattern in `wave-4-wizard-screenshots.ts` — even
+  // after `isConnected()` returns true, the LV's `joinPending` doesn't
+  // clear for a tick or two. Skipping this sleep produces sporadic
+  // `LiveView not connected` errors from `pushHookEvent`.
+  await page.waitForTimeout(800);
+}
+
 async function pushHookEvent(
   page: import('@playwright/test').Page,
   event: string,
   payload: Record<string, unknown>
 ): Promise<void> {
-  await page.evaluate(
+  const result = await page.evaluate(
     ({ event, payload }) => {
-      interface LVOwner {
-        pushHookEvent: (
-          el: Element,
-          ctx: unknown,
-          event: string,
-          payload: Record<string, unknown>
-        ) => unknown;
+      try {
+        interface LVView {
+          pushHookEvent: (
+            el: Element | null,
+            ctx: unknown,
+            event: string,
+            payload: Record<string, unknown>
+          ) => Promise<{ reply: unknown; ref: unknown }>;
+        }
+        interface LVWindow {
+          liveSocket?: { getViewByEl?: (el: Element) => LVView | null };
+        }
+        const lv = (window as unknown as LVWindow).liveSocket;
+        const root = document.querySelector('[data-phx-main]');
+        if (!root) return { ok: false, error: 'no-root' };
+        const view = lv?.getViewByEl?.(root);
+        if (!view) return { ok: false, error: 'no-view' };
+        // pushHookEvent returns a Promise; we don't await it from page
+        // context because the result is settled async via the WebSocket.
+        // Just confirm the call dispatched without throwing.
+        void view.pushHookEvent(root, null, event, payload);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String(e) };
       }
-      interface LVWindow {
-        liveSocket?: { owner?: (el: Element) => LVOwner };
-      }
-      const lv = (window as unknown as LVWindow).liveSocket;
-      const root = document.querySelector('[data-phx-main]');
-      if (!root) throw new Error('Studio LV root not mounted');
-      const view = lv?.owner?.(root);
-      if (!view) throw new Error('Studio LV owner not resolvable');
-      view.pushHookEvent(root, null, event, payload);
     },
     { event, payload }
   );
+  if (!result.ok) {
+    // eslint-disable-next-line no-console
+    console.log(`[Studio] pushHookEvent ${event} failed: ${result.error}`);
+  }
 }
