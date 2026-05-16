@@ -17,7 +17,13 @@ defmodule Contract.Agent do
   alias Contract.Agent.Run
   alias Contract.Agent.RunServer
   alias Contract.Agent.RunSupervisor
+  alias Contract.Studio.ContextReservoir
   alias Contract.Types, as: T
+
+  # Hard cap so a fat reservoir can never blow up the prompt. SPEC.md §20
+  # says "Agent SHOULD include … Context Reservoir projection" — bounded.
+  @reservoir_max_items 8
+  @reservoir_max_chars 4000
 
   @grill_system_prompt """
   You are a legal-document agent for Contract Studio. You modify documents only via Actions.
@@ -112,6 +118,11 @@ defmodule Contract.Agent do
   @doc """
   Assembles the system prompt, conversation history, MCP tool list, and
   optional `previous_response_id` for one agent run.
+
+  When the Action carries a Context Reservoir (via `payload["context_reservoir"]`
+  or `payload[:context_reservoir]`), it is folded into the agent's input
+  frame as a bounded read-only summary — see `include_context_reservoir/2`
+  and SPEC.md §10a / §20.
   """
   @spec build_context(T.ctx(), Command.t()) :: {:ok, map()}
   def build_context(_ctx, %Command{} = action) do
@@ -240,6 +251,85 @@ defmodule Contract.Agent do
     header = "**Open questions:** (#{length(qs)})"
     header <> "\n" <> Enum.join(pieces, "\n") <> trailing_more(length(qs))
   end
+
+  defp format_open_questions_section(_), do: ""
+
+  defp format_related_documents_section(docs) when is_list(docs) and docs != [] do
+    "**Related documents:** #{length(docs)} related"
+  end
+
+  defp format_related_documents_section(_), do: ""
+
+  defp format_sources_section(sources) when is_list(sources) and sources != [] do
+    "**Sources:** #{length(sources)} item(s)"
+  end
+
+  defp format_sources_section(_), do: ""
+
+  defp format_evidence_section(ev) when is_list(ev) and ev != [] do
+    "**Evidence:** #{length(ev)} item(s)"
+  end
+
+  defp format_evidence_section(_), do: ""
+
+  defp format_readiness_section(readiness) when is_map(readiness) and map_size(readiness) > 0 do
+    unresolved = Map.get(readiness, :unresolved_questions) || Map.get(readiness, "unresolved_questions")
+    warnings = Map.get(readiness, :export_warnings) || Map.get(readiness, "export_warnings")
+    bits = []
+    bits = if is_integer(unresolved), do: bits ++ ["unresolved=#{unresolved}"], else: bits
+    bits = if is_integer(warnings), do: bits ++ ["warnings=#{warnings}"], else: bits
+
+    case bits do
+      [] -> ""
+      list -> "**Readiness:** " <> Enum.join(list, " · ")
+    end
+  end
+
+  defp format_readiness_section(_), do: ""
+
+  defp trailing_more(n) when n > @reservoir_max_items, do: " …(+#{n - @reservoir_max_items})"
+  defp trailing_more(_), do: ""
+
+  defp read_string(map, keys) when is_map(map) do
+    Enum.find_value(keys, fn k ->
+      case Map.get(map, k) do
+        v when is_binary(v) and v != "" -> v
+        _ -> nil
+      end
+    end)
+  end
+
+  defp read_string(_, _), do: nil
+
+  defp stringify(v) when is_binary(v), do: v
+  defp stringify(v) when is_atom(v), do: Atom.to_string(v)
+  defp stringify(v), do: inspect(v)
+
+  defp blank?(nil), do: true
+  defp blank?(""), do: true
+  defp blank?(%{} = m), do: map_size(m) == 0
+  defp blank?([]), do: true
+  defp blank?(_), do: false
+
+  defp truncate_chars(s, max) when is_binary(s) do
+    if byte_size(s) > max, do: binary_part(s, 0, max) <> "…", else: s
+  end
+
+  defp append_to_input(input, suffix) when is_binary(input), do: input <> suffix
+
+  defp append_to_input(input, suffix) when is_list(input) do
+    case Enum.reverse(input) do
+      [%{role: "user", content: content} = last | rest] when is_binary(content) ->
+        Enum.reverse([%{last | content: content <> suffix} | rest])
+
+      _ ->
+        # No trailing user message — append a system-style user message so the
+        # reservoir still reaches the model.
+        input ++ [%{role: "user", content: String.trim_leading(suffix)}]
+    end
+  end
+
+  defp append_to_input(_, suffix), do: [%{role: "user", content: String.trim_leading(suffix)}]
 
   @doc """
   Parses the model's JSON envelope and returns an `Action(:agent_change)`.
