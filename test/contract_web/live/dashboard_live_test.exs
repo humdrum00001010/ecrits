@@ -93,8 +93,8 @@ defmodule ContractWeb.DashboardLiveTest do
       assert html =~ ~s(data-role="dashboard-resume-link")
       # Title of the most-recent document is in the link.
       assert html =~ "Latest draft"
-      # And it points at the document URL.
-      assert html =~ "/matters/#{matter.id}/documents/#{latest.id}"
+      # And it points at the document URL (pivot-B document-first routes).
+      assert html =~ "/documents/#{latest.id}"
     end
 
     test "renders the Resume label (English source-of-truth)",

@@ -324,9 +324,7 @@ defmodule ContractWeb.DashboardLive do
               {dgettext("dashboard", "Resume your most recent document")}
             </p>
             <.link
-              navigate={
-                ~p"/matters/#{@resume_document.matter_id || "_"}/documents/#{@resume_document.document_id}"
-              }
+              navigate={~p"/documents/#{@resume_document.document_id}"}
               class="text-base font-medium hover:underline truncate block mt-1"
               data-role="dashboard-resume-link"
             >
@@ -334,9 +332,7 @@ defmodule ContractWeb.DashboardLive do
             </.link>
           </div>
           <.link
-            navigate={
-              ~p"/matters/#{@resume_document.matter_id || "_"}/documents/#{@resume_document.document_id}"
-            }
+            navigate={~p"/documents/#{@resume_document.document_id}"}
             class="text-sm text-base-content/60 hover:text-base-content shrink-0"
           >
             {dgettext("dashboard", "Open")} <span aria-hidden="true">→</span>
