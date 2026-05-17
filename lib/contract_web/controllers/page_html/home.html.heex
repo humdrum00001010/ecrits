@@ -36,10 +36,27 @@
   </main>
 
   <footer class="landing-footer" aria-label="시작하기">
-    <p class="landing-footer__cta">
-      준비가 되었다면 <.link navigate={~p"/dashboard"}>대시보드를 여세요 →</.link>
-    </p>
-    <p class="landing-footer__meta">Contract Studio · 비공개 베타</p>
+    <div class="landing-footer__primary">
+      <p class="landing-footer__cta">
+        준비가 되었다면 <.link navigate={~p"/dashboard"}>대시보드를 여세요 →</.link>
+      </p>
+      <p class="landing-footer__meta">Contract Studio · 비공개 베타 · 2026</p>
+    </div>
+
+    <div class="landing-footer__contacts" aria-label="문의">
+      <p class="landing-footer__contacts-label">문의</p>
+      <ul class="landing-footer__contacts-list">
+        <li>
+          <a href="mailto:hello@contract.studio">hello@contract.studio</a>
+        </li>
+        <li>
+          <.link navigate={~p"/users/log-in"}>로그인</.link>
+        </li>
+        <li>
+          <.link navigate={~p"/users/register"}>회원가입</.link>
+        </li>
+      </ul>
+    </div>
   </footer>
 </.app_shell>
 <Layouts.flash_group flash={@flash} />

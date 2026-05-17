@@ -336,12 +336,10 @@ body {
 .project-context-panel,
 .agent-questions-panel,
 .change-history-panel {
-  display: grid;
-  grid-template-columns: 36px 1fr;
-  align-items: baseline;
-  column-gap: 16px;
-  row-gap: 4px;
-  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 22px 26px;
   border: 1px solid var(--cs-line);
   border-radius: var(--cs-radius-md);
   background: var(--cs-surface);
@@ -349,47 +347,61 @@ body {
 }
 
 .panel-kicker {
-  grid-row: 1 / span 2;
-  margin: 0;
+  margin: 0 0 14px;
   color: var(--cs-subtle);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
 }
 
 .landing-dossier h2 {
-  margin: 0;
+  margin: 0 0 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--cs-line);
   color: var(--cs-ink);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
-  letter-spacing: 0;
+  letter-spacing: -0.005em;
 }
 
 .landing-dossier p:not(.panel-kicker) {
   margin: 0;
   color: var(--cs-muted);
   font-size: 13px;
-  line-height: 1.55;
+  line-height: 1.6;
 }
 
 .landing-footer {
   max-width: 1200px;
   margin: 0 auto;
   padding: 56px 28px 64px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 20px 32px;
-  align-items: baseline;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 28px 64px;
+  align-items: start;
   border-top: 1px solid var(--cs-line);
 }
 
+@media (max-width: 640px) {
+  .landing-footer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.landing-footer__primary {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 540px;
+}
+
 .landing-footer__cta {
+  margin: 0;
   color: var(--cs-ink);
   font-size: 15px;
   font-weight: 600;
   line-height: 1.4;
-  max-width: 540px;
 }
 
 .landing-footer__cta a {
@@ -403,9 +415,47 @@ body {
 }
 
 .landing-footer__meta {
+  margin: 0;
   color: var(--cs-subtle);
   font-size: 12px;
   letter-spacing: 0;
+}
+
+.landing-footer__contacts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 180px;
+}
+
+.landing-footer__contacts-label {
+  margin: 0;
+  color: var(--cs-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.landing-footer__contacts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.landing-footer__contacts-list a {
+  color: var(--cs-ink);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.landing-footer__contacts-list a:hover {
+  color: var(--cs-green);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .dashboard-page {
