@@ -122,9 +122,15 @@ defmodule Contract.Agent do
     snapshot = fetch_snapshot(action.document_id)
     history = fetch_history(ctx, action)
 
+    # OpenAI's Responses API requires the word "json" in input messages
+    # when text.format.type is "json_object". Append a small reminder
+    # to the current user message so even a fresh conversation passes.
+    current_user_content =
+      (action.message || "") <> "\n\n(Respond in JSON only, per the schema in instructions.)"
+
     input =
       Enum.map(history, fn msg -> %{role: msg.role, content: msg.content} end) ++
-        [%{role: "user", content: action.message || ""}]
+        [%{role: "user", content: current_user_content}]
 
     tools = [Contract.IO.OpenAI.law_mcp_tool()]
 

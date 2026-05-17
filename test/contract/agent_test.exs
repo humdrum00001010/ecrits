@@ -159,7 +159,10 @@ defmodule Contract.AgentTest do
       assert is_list(ctx.input)
       [user_msg] = ctx.input
       assert user_msg.role == "user"
-      assert user_msg.content == "hello"
+      # Current user message has the JSON-format reminder appended
+      # (required by OpenAI Responses API when text.format is json_object).
+      assert user_msg.content =~ "hello"
+      assert user_msg.content =~ "JSON"
 
       labels =
         ctx.tools
@@ -210,11 +213,16 @@ defmodule Contract.AgentTest do
 
       assert {:ok, frame} = Agent.build_context(ctx, action)
 
+      # History is preserved verbatim; only the current user turn has the
+       # JSON-format reminder appended (OpenAI Responses API requirement).
       assert [
                %{role: "user", content: "We need a SaaS distribution agreement."},
                %{role: "assistant", content: "What territory should it cover?"},
-               %{role: "user", content: "South Korea only."}
+               %{role: "user", content: current_content}
              ] = frame.input
+
+      assert current_content =~ "South Korea only."
+      assert current_content =~ "JSON"
     end
 
     test "no reservoir on action — frame is unchanged" do
@@ -227,7 +235,10 @@ defmodule Contract.AgentTest do
 
       assert {:ok, ctx} = Agent.build_context(nil, action)
       [user_msg] = ctx.input
-      assert user_msg.content == "hello"
+      # User message has the JSON-format reminder appended (required by
+      # OpenAI Responses API when text.format is json_object).
+      assert user_msg.content =~ "hello"
+      assert user_msg.content =~ "JSON"
       refute user_msg.content =~ "Context Reservoir"
     end
   end
