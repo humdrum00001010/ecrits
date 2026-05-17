@@ -6,6 +6,11 @@
 @source "../js";
 @source "../../lib/contract_web";
 
+/* Design v31 token namespace (additive — DaisyUI studio theme below is
+   unchanged; --cs-* tokens are scoped for the landing/dashboard/studio
+   refresh wave). See DESIGN.md §2. */
+@import "./tokens.css";
+
 /* A Tailwind plugin that makes "hero-#{ICON}" classes available.
    The heroicons installation itself is managed by your mix.exs */
 @plugin "../vendor/heroicons";

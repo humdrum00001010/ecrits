@@ -1,0 +1,38 @@
+/* Design v31 tokens — derived from DESIGN.md §2.
+   Imported by app.css. Use these via var(--cs-*) in component CSS. */
+
+:root {
+  --cs-bg: #FAFAF7;
+  --cs-surface: #FFFFFF;
+  --cs-surface-soft: #F6F4EE;
+  --cs-ink: #171717;
+  --cs-muted: #6B7280;
+  --cs-line: #E5E7EB;
+  --cs-line-strong: #D1D5DB;
+  --cs-green: #1E5B3A;
+  --cs-green-2: #2F7C58;
+  --cs-blue: #2F6FEB;
+  --cs-amber: #AA7B31;
+  --cs-red: #B45342;
+  --cs-radius-sm: 6px;
+  --cs-radius-md: 9px;
+  --cs-radius-lg: 14px;
+  --cs-shadow-card: 0 8px 24px rgba(17, 24, 39, 0.08);
+  --cs-shadow-popover: 0 18px 44px rgba(17, 24, 39, 0.12);
+}
+
+/* Editor body — the binding Pretendard / Apple SD Gothic Neo Hangul
+   fallback chain already lives in app.css :root --font-sans, so we
+   only register the class here. */
+.cs-editor-body {
+  font-family: var(--font-sans);
+}
+
+/* AI-applied change marker — subtle underline only, no label,
+   per DESIGN.md §5 prohibitions. */
+.ai-applied-change {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: var(--cs-green-2);
+  text-underline-offset: 4px;
+}

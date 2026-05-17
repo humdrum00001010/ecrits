@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" font-family="Inter, system-ui, sans-serif">
+  <rect width="1440" height="900" fill="#FAFAF7"/>
+  <!-- shell nav -->
+  <line x1="0" y1="72" x2="1440" y2="72" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="120" y="46" font-size="15" font-weight="600" fill="#171717">Contract Studio</text>
+  <rect x="1230" y="22" width="120" height="32" fill="none" stroke="#1E5B3A" stroke-width="1"/>
+  <text x="1290" y="43" font-size="13" fill="#1E5B3A" text-anchor="middle">대시보드 열기</text>
+  <!-- left hero -->
+  <text x="120" y="232" font-size="44" font-weight="600" fill="#171717">프로젝트의 맥락을</text>
+  <text x="120" y="288" font-size="44" font-weight="600" fill="#171717">계약 조항으로</text>
+  <text x="120" y="344" font-size="44" font-weight="600" fill="#171717">구체화합니다.</text>
+  <text x="120" y="402" font-size="16" fill="#6B7280">StudioLive가 프로젝트의 맥락을 받아</text>
+  <text x="120" y="426" font-size="16" fill="#6B7280">필요한 결정을 묻고, 답변을 계약 조항으로</text>
+  <text x="120" y="450" font-size="16" fill="#6B7280">반영합니다. 변경은 이력에 남습니다.</text>
+  <rect x="120" y="496" width="180" height="48" fill="#1E5B3A"/>
+  <text x="210" y="526" font-size="15" fill="#FFFFFF" text-anchor="middle">대시보드 열기</text>
+  <text x="328" y="526" font-size="15" fill="#171717">작동 방식 보기 →</text>
+  <!-- right column: three stacked blocks -->
+  <rect x="800" y="180" width="520" height="180" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="824" y="212" font-size="12" fill="#6B7280" letter-spacing="1">01</text>
+  <text x="824" y="248" font-size="20" font-weight="600" fill="#171717">프로젝트 브리프</text>
+  <line x1="824" y1="272" x2="1296" y2="272" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="824" y="304" font-size="14" fill="#6B7280">계약 상대방, 거래 구조, 위험 수용도를</text>
+  <text x="824" y="324" font-size="14" fill="#6B7280">자연어로 정리합니다.</text>
+  <rect x="800" y="380" width="520" height="180" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="824" y="412" font-size="12" fill="#6B7280" letter-spacing="1">02</text>
+  <text x="824" y="448" font-size="20" font-weight="600" fill="#171717">StudioLive가 먼저 묻는 질문</text>
+  <line x1="824" y1="472" x2="1296" y2="472" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="824" y="504" font-size="14" fill="#6B7280">에이전트가 빠진 결정을 식별하고</text>
+  <text x="824" y="524" font-size="14" fill="#6B7280">맥락에 맞게 한 번에 하나씩 묻습니다.</text>
+  <rect x="800" y="580" width="520" height="180" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="824" y="612" font-size="12" fill="#6B7280" letter-spacing="1">03</text>
+  <text x="824" y="648" font-size="20" font-weight="600" fill="#171717">조항과 변경 이력으로 남김</text>
+  <line x1="824" y1="672" x2="1296" y2="672" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="824" y="704" font-size="14" fill="#6B7280">답변은 수정 범위에 연결되어 조항으로</text>
+  <text x="824" y="724" font-size="14" fill="#6B7280">반영되고, 변경 이력으로 보존됩니다.</text>
+  <!-- footer hairline -->
+  <line x1="0" y1="852" x2="1440" y2="852" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="120" y="880" font-size="12" fill="#6B7280">Contract Studio · 2026</text>
+</svg>

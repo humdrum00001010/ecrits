@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" font-family="Inter, system-ui, sans-serif">
+  <rect width="1440" height="900" fill="#FAFAF7"/>
+  <!-- shell nav -->
+  <line x1="0" y1="72" x2="1440" y2="72" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="120" y="46" font-size="15" font-weight="600" fill="#171717">Contract Studio</text>
+  <text x="280" y="46" font-size="14" font-weight="600" fill="#171717">대시보드</text>
+  <line x1="280" y1="56" x2="338" y2="56" stroke="#1E5B3A" stroke-width="2"/>
+  <!-- faded dashboard backdrop -->
+  <text x="120" y="156" font-size="32" font-weight="600" fill="#D1D5DB">최근 문서</text>
+  <rect x="1054" y="128" width="120" height="40" fill="none" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="1114" y="154" font-size="14" fill="#D1D5DB" text-anchor="middle">새 문서</text>
+  <!-- the trigger button, faded since the popover is open -->
+  <rect x="1186" y="128" width="178" height="40" fill="none" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="1275" y="154" font-size="14" fill="#9CA3AF" text-anchor="middle">계약서 업로드  ⌄</text>
+  <!-- popover, anchored under the trigger -->
+  <!-- shadow approximation: stacked translucent rects -->
+  <rect x="984" y="184" width="380" height="172" fill="#171717" opacity="0.04"/>
+  <rect x="985" y="183" width="380" height="172" fill="#171717" opacity="0.06"/>
+  <rect x="985" y="182" width="380" height="172" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1"/>
+  <!-- caret pointing up to the trigger -->
+  <polygon points="1265,182 1273,170 1281,182" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1"/>
+  <line x1="1266" y1="183" x2="1280" y2="183" stroke="#FFFFFF" stroke-width="2"/>
+  <!-- popover content -->
+  <text x="1006" y="216" font-size="13" font-weight="600" fill="#171717">파일에서 가져오기</text>
+  <line x1="1006" y1="232" x2="1344" y2="232" stroke="#E5E7EB" stroke-width="1"/>
+  <text x="1006" y="262" font-size="14" fill="#171717">기존 계약서 파일을 StudioLive로</text>
+  <text x="1006" y="282" font-size="14" fill="#171717">가져옵니다.</text>
+  <text x="1006" y="324" font-size="12" fill="#6B7280">PDF, DOCX, HWP 지원 · StudioLive에서 열립니다.</text>
+  <!-- hairline ground reference - faded dashboard tabs underneath -->
+  <line x1="120" y1="232" x2="1320" y2="232" stroke="#F3F0E8" stroke-width="1"/>
+  <text x="120" y="220" font-size="14" fill="#D1D5DB">모든 문서</text>
+  <text x="220" y="220" font-size="14" fill="#D1D5DB">즐겨찾기</text>
+</svg>
