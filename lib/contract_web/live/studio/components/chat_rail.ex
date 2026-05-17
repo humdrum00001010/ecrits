@@ -239,12 +239,9 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             <div
               :if={is_nil(msg_operation(msg))}
               class={[
-                "rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words",
-                msg_role(msg) == "user" && "bg-primary text-primary-content",
-                msg_role(msg) == "agent" && msg_transient?(msg) == "true" &&
-                  "bg-base-200 text-base-content/70 italic",
-                msg_role(msg) == "agent" && msg_transient?(msg) == "false" &&
-                  "bg-base-200 text-base-content"
+                "chat-message whitespace-pre-wrap break-words",
+                msg_role(msg) == "user" && "chat-message--user",
+                msg_role(msg) == "agent" && msg_transient?(msg) == "true" && "italic opacity-70"
               ]}
             >
               {msg_body(msg)}
