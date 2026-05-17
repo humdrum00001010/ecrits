@@ -256,17 +256,32 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ ~s(data-role="chat-no-doc-welcome")
       refute html =~ ~s(data-role="chat-welcome")
 
-      # The 4 option labels (upload removed — that affordance lives on the
-      # dashboard, not in the chat per #19).
+      # The 4 option labels (upload removed from the welcome chips per #19 —
+      # the upload affordance now lives in the chat composer footer, not
+      # in the no-doc welcome list).
       refute html =~ "기존 계약서 업로드"
       assert html =~ "최근 문서 열기"
       assert html =~ "빈 계약서 만들기"
       assert html =~ "논의에서 시작"
       assert html =~ "다른 문서에서 변형 만들기"
 
-      # Each chip emits agent_option_picked with the right key.
+      # Each chip emits agent_option_picked with the right key. Upload is
+      # still NOT a no-doc welcome chip — scope the refute to the welcome
+      # options container so it does not collide with the composer footer
+      # upload button (which also fires agent_option_picked key="upload").
       assert html =~ ~s(phx-click="agent_option_picked")
-      refute html =~ ~s(phx-value-key="upload")
+
+      no_doc_options =
+        Regex.run(
+          ~r/data-role="chat-no-doc-options".*?<\/div>/s,
+          html
+        )
+        |> case do
+          [matched] -> matched
+          _ -> ""
+        end
+
+      refute no_doc_options =~ ~s(phx-value-key="upload")
       assert html =~ ~s(phx-value-key="recent")
       assert html =~ ~s(phx-value-key="blank")
       assert html =~ ~s(phx-value-key="draft_from_discussion")

@@ -842,20 +842,49 @@ body {
 }
 
 .chat-message {
-  max-width: 92%;
-  padding: 10px 12px;
-  border: 1px solid var(--cs-line);
+  max-width: 85%;
+  padding: 8px 11px;
   border-radius: var(--cs-radius-sm);
   background: var(--cs-surface-soft);
   color: var(--cs-ink);
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 12.5px;
+  line-height: 1.5;
 }
 
 .chat-message--user {
   align-self: flex-end;
-  background: #eef4ff;
-  border-color: rgba(47, 111, 235, 0.22);
+  background: var(--cs-surface-soft);
+  border-left: 2px solid var(--cs-blue);
+}
+
+.composer-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: 1px solid var(--cs-line);
+  border-radius: var(--cs-radius-sm);
+  background: var(--cs-surface);
+  color: var(--cs-ink);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.composer-btn:hover {
+  border-color: var(--cs-line-strong);
+  background: var(--cs-surface-soft);
+}
+
+.composer-btn--primary {
+  background: var(--cs-blue, #2f6feb);
+  border-color: var(--cs-blue, #2f6feb);
+  color: #fff;
+}
+
+.composer-btn--primary:hover {
+  background: var(--cs-blue, #2f6feb);
+  border-color: var(--cs-blue, #2f6feb);
+  filter: brightness(0.95);
 }
 
 .tool-trace {

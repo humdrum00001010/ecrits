@@ -257,7 +257,11 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
         </div>
       </div>
 
-      <%!-- Input footer --%>
+      <%!-- Input footer — three controls in a horizontal row:
+           [upload] [input] [send]. Identical on desktop and mobile. The
+           upload button reuses the existing `agent_option_picked` flow
+           (key="upload") which the parent StudioLive handles by opening
+           the upload modal. --%>
       <form
         id={"#{@id}-form"}
         phx-hook=".ChatInput"
@@ -270,6 +274,17 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
         autocomplete="off"
       >
         <div class="flex items-end gap-2">
+          <button
+            id={"#{@id}-upload"}
+            type="button"
+            data-role="chat-upload"
+            phx-click="agent_option_picked"
+            phx-value-key="upload"
+            class="composer-btn shrink-0"
+            aria-label={dgettext("studio", "파일 업로드")}
+          >
+            <.icon name="hero-arrow-up-tray" class="size-4" />
+          </button>
           <label for={"#{@id}-textarea"} class="sr-only">
             {dgettext("studio", "메시지")}
           </label>
@@ -291,15 +306,12 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             type="button"
             data-role="chat-send"
             data-action="send"
-            class="btn btn-primary btn-sm shrink-0"
+            class="composer-btn composer-btn--primary shrink-0"
             aria-label={dgettext("studio", "보내기")}
           >
-            {dgettext("studio", "보내기")}
+            <.icon name="hero-paper-airplane" class="size-4" />
           </button>
         </div>
-        <p class="mt-1 text-[10px] text-base-content/40 px-1">
-          {dgettext("studio", "Enter로 전송 · Shift+Enter로 줄바꿈")}
-        </p>
       </form>
 
       <script :type={Phoenix.LiveView.ColocatedHook} name=".ChatInput">
