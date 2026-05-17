@@ -20,6 +20,68 @@ defmodule ContractWeb.StudioLiveDocumentFirstTest do
     assert :sys.get_state(lv.pid).socket.assigns.studio_state.selected_document_id == doc.id
   end
 
+  test "authenticated v33 studio route mounts the same owner-scoped document", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, doc} = Documents.create(scope, %{title: "Studio v33 draft", type_key: "nda_v1"})
+
+    {:ok, lv, html} = live(conn, ~p"/studio/#{doc.id}")
+
+    assert html =~ ~s(class="studio-live)
+    assert html =~ "Studio v33 draft"
+    assert :sys.get_state(lv.pid).socket.assigns.studio_state.selected_document_id == doc.id
+  end
+
+  test "v33 studio document surface uses natural labels and no technical body tags", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, doc} = Documents.create(scope, %{title: "용역계약서", type_key: "nda_v1"})
+
+    {:ok, lv, _html} = live(conn, ~p"/studio/#{doc.id}")
+    html = lv |> element(".studio-document") |> render()
+
+    assert has_element?(lv, ".studio-document__bar")
+    # The "수정 가능한 자리" pre-aggregated nav was removed in #34 —
+    # editability is now communicated by inline coloring + input-like
+    # UI in the document body itself, not by an upfront chip rail.
+    refute has_element?(lv, ".open-slots")
+    visible_text = visible_text(html)
+    refute visible_text =~ "ledger"
+    refute visible_text =~ "AI 수정"
+    refute visible_text =~ "IR"
+    refute visible_text =~ "patch"
+    refute visible_text =~ "tool call"
+    refute visible_text =~ "Tool call"
+    refute visible_text =~ "font selector"
+  end
+
+  test "tool protocol messages render as compact v33 trace rows by default", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, _doc} = Documents.create(scope, %{title: "Trace draft", type_key: "nda_v1"})
+    {:ok, lv, _html} = live(conn, ~p"/studio")
+
+    send(
+      lv.pid,
+      {:tool_call_completed, "agent-run-1", "tool-1",
+       %{raw_name: "contract_ir.patch.apply", summary: "제8조 1항 · 84ms"}}
+    )
+
+    html = render(lv)
+
+    assert html =~ ~s(id="tool-trace-tool-agent-run-1-tool-1")
+    assert html =~ ~s(data-role="tool-trace")
+    assert html =~ ~s(data-status="completed")
+    assert html =~ ~s(class="tool-trace)
+    assert html =~ "답변을 수정 범위에 연결함"
+    assert html =~ "제8조 1항"
+    refute html =~ "contract_ir.patch.apply"
+    refute html =~ "Tool call"
+  end
+
   test "document route does not mount a document owned by a different user", %{conn: conn} do
     other_user = Contract.AccountsFixtures.user_fixture()
     other_scope = Context.for_user(other_user)
@@ -47,5 +109,12 @@ defmodule ContractWeb.StudioLiveDocumentFirstTest do
     assert command.document_id == doc_id
     assert command.chat_thread_id == nil
     refute Map.has_key?(Map.from_struct(command), :matter_id)
+  end
+
+  defp visible_text(html) do
+    html
+    |> String.replace(~r/<script[\s\S]*?<\/script>/, "")
+    |> String.replace(~r/<!--[\s\S]*?-->/, "")
+    |> String.replace(~r/<[^>]+>/, " ")
   end
 end

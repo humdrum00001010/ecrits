@@ -808,7 +808,6 @@ defmodule ContractWeb.StudioLive do
              "toggle_preview",
              "open_modal",
              "close_modal",
-             "set_active_slot",
              "set_node_focus",
              "viewport_change"
            ] do
@@ -1441,28 +1440,6 @@ defmodule ContractWeb.StudioLive do
                 </div>
               </header>
 
-              <nav
-                :if={open_slots(@projection) != []}
-                class="open-slots"
-                aria-label={dgettext("studio", "수정 가능한 자리")}
-              >
-                <span class="open-slots__label">
-                  {dgettext("studio", "수정 가능한 자리")}
-                </span>
-                <button
-                  :for={slot <- open_slots(@projection)}
-                  type="button"
-                  phx-click="set_active_slot"
-                  phx-value-slot-id={slot.id}
-                  class={[
-                    "slot-chip",
-                    slot.active? && "is-active"
-                  ]}
-                >
-                  {slot.label}
-                </button>
-              </nav>
-
               <article class="contract-projection cs-document-text relative min-h-0 flex-1">
                 <div class="relative h-full min-h-0">
                   <.live_component
@@ -1582,30 +1559,6 @@ defmodule ContractWeb.StudioLive do
   defp document_status_dot_modifier(%{status: "review"}), do: "status-dot--review"
   defp document_status_dot_modifier(%{status: "archived"}), do: "status-dot--archived"
   defp document_status_dot_modifier(_), do: "status-dot--draft"
-
-  defp open_slots(%{open_slots: slots}) when is_list(slots) and slots != [] do
-    Enum.map(slots, &open_slot/1)
-  end
-
-  defp open_slots(_projection), do: []
-
-  defp open_slot(%{id: id, label: label} = slot) when is_binary(id) and is_binary(label) do
-    %{id: id, label: label, active?: Map.get(slot, :active?, false)}
-  end
-
-  defp open_slot(%{"id" => id, "label" => label} = slot)
-       when is_binary(id) and is_binary(label) do
-    %{id: id, label: label, active?: Map.get(slot, "active?", false)}
-  end
-
-  defp open_slot(slot) when is_map(slot) do
-    %{
-      id:
-        to_string(Map.get(slot, :id) || Map.get(slot, "id") || System.unique_integer([:positive])),
-      label: to_string(Map.get(slot, :label) || Map.get(slot, "label") || ""),
-      active?: false
-    }
-  end
 
   defp canvas_module(:briefing), do: Components.Canvas.Briefing
   defp canvas_module(:editing), do: Components.Canvas.Editor
