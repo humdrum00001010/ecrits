@@ -1369,14 +1369,6 @@ defmodule ContractWeb.StudioLive do
         />
 
         <.live_component
-          module={Components.ChatCommandButton}
-          id="chat-command-button"
-          current_scope={@current_scope}
-          studio_state={@studio_state}
-          viewport={@viewport}
-        />
-
-        <.live_component
           :if={@preview_modal_open?}
           module={Components.PreviewOverlay}
           id="preview-overlay"
