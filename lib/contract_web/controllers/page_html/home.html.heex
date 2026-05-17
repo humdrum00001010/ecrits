@@ -16,22 +16,50 @@
       </div>
     </section>
 
-    <section id="how" class="landing-dossier" aria-label="프로젝트 맥락 정리">
-      <article class="project-context-panel">
-        <p class="panel-kicker">01</p>
-        <h2>프로젝트 맥락</h2>
-        <p>계약 상대방, 거래 구조, 일정, 위험 수용도를 한 곳에 정리합니다.</p>
-      </article>
-      <article class="agent-questions-panel">
-        <p class="panel-kicker">02</p>
-        <h2>중요 질문</h2>
-        <p>계약서를 쓰기 전에 빠진 결정을 찾아 맥락에 맞게 묻습니다.</p>
-      </article>
-      <article class="change-history-panel">
-        <p class="panel-kicker">03</p>
-        <h2>조항과 변경 이력</h2>
-        <p>답변은 수정 범위에 연결되어 조항으로 반영되고 변경 이력으로 남습니다.</p>
-      </article>
+    <section id="how" class="landing-preview" aria-label="StudioLive 미리보기">
+      <div class="landing-preview__frame">
+        <header class="landing-preview__bar">
+          <span class="landing-preview__title">용역계약서</span>
+          <span class="landing-preview__status">
+            <span class="status-dot status-dot--review" aria-hidden="true"></span>검토 중
+          </span>
+          <span class="landing-preview__saved">저장됨</span>
+        </header>
+
+        <article class="landing-preview__doc">
+          <p class="landing-preview__clause">
+            <span class="landing-preview__clause-num">제3조 (대금)</span>
+            본 계약의 대금은 <span class="landing-preview__slot landing-preview__slot--active">12,000,000원</span>으로 한다.
+          </p>
+          <p class="landing-preview__clause">
+            <span class="landing-preview__clause-num">제4조 (지급 기한)</span>
+            대금은 <span class="landing-preview__slot">계약 체결일로부터 30일 이내</span>에 지급한다.
+          </p>
+          <p class="landing-preview__clause">
+            <span class="landing-preview__clause-num">제8조 (특약)</span>
+            <span class="ai-applied-change">최근 변경: 위약금 한도 8% → 5%</span>로 한다.
+          </p>
+        </article>
+
+        <aside class="landing-preview__rail" aria-label="StudioLive 대화">
+          <p class="landing-preview__rail-meta">에이전트</p>
+          <p class="landing-preview__rail-q">
+            대금 지급 기한을 30일로 두는 이유가 있나요?
+          </p>
+          <p class="landing-preview__rail-a">
+            세금계산서 발행 주기에 맞췄습니다.
+          </p>
+          <p class="landing-preview__rail-trace">
+            › 답변을 수정 범위에 연결함 <span>제4조 · 84ms</span>
+          </p>
+        </aside>
+      </div>
+
+      <ul class="landing-preview__legend" aria-label="구성 요소">
+        <li><span class="landing-preview__legend-dot landing-preview__legend-dot--slot"></span>수정 가능한 자리</li>
+        <li><span class="landing-preview__legend-dot landing-preview__legend-dot--change"></span>반영된 변경</li>
+        <li><span class="landing-preview__legend-dot landing-preview__legend-dot--rail"></span>대화 · 변경 이력</li>
+      </ul>
     </section>
   </main>
 
