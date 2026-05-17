@@ -2,16 +2,39 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Empty do
   @moduledoc """
   Canvas empty state — shown when `@studio_state.mode == :no_document`.
 
-  Owned by Wave 3C1 / canvas-empty. Renders a centered illustration with
-  a heading and subtitle, plus two inline action links:
+  Per the 2026-05-17 owner directive, the dashboard's `새 문서` button is no
+  longer a doc-creation trigger; it routes the user here, and this empty
+  state hosts the full four-option onboarding surface called for by
+  SPEC.md §4.2 (Center Document Canvas — empty state) and §4.4 (Chat Rail
+  When No Document Exists):
 
-    * "+ 새 문서" → emits `open_modal` (modal: `new_document`)
-    * "PDF 가져오기" → emits `open_modal` (modal: `upload`)
+    * `계약서 업로드`           — inline dropzone (NOT a modal)
+    * `빈 문서로 시작`          — fires `agent_option_picked` key=blank,
+                                  which routes through StudioLive to a
+                                  `:create_document` Command
+    * `최근 문서 열기`          — fires `agent_option_picked` key=recent,
+                                  opening the document-picker modal
+    * `에이전트와 먼저 상의하기` — JS.focus the chat-rail composer textarea
 
-  Persona gating: a `:viewer` (whose perms list does NOT include `:write`)
-  sees the illustration + copy but neither action link. Every other persona
-  sees both. Both events bubble up to `ContractWeb.StudioLive`, which maps
-  `open_modal` to a `:local` UI action.
+  ## Upload pipeline
+
+  The inline form fires `phx-submit="document.upload"` and
+  `phx-change="document.upload.validate"`. Both events are owned by the
+  parent `ContractWeb.StudioLive`, which already routes them through:
+
+      `document.upload` → `event_to_command/3` → %Command{kind: :upload_document}
+                       → `Studio.command/2` → `Runtime.apply/2`
+                       → `Contract.SourceDocuments.create_from_upload/3`
+                       → `Blobs.put_upload → SourceDocument → SourceClaim`
+
+  The `:document_upload` LiveView upload-config struct is created in
+  `StudioLive.mount/3` and passed down via the `document_upload` attr.
+
+  ## Persona gating
+
+  A `:viewer` (whose perms list does NOT include `:write`) sees the
+  illustration + copy but none of the action buttons or the dropzone.
+  Every other persona sees the full surface.
   """
 
   use ContractWeb, :live_component
@@ -20,6 +43,7 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Empty do
   attr :studio_state, :map, required: true
   attr :projection, :map, required: true
   attr :current_scope, :map, required: true
+  attr :document_upload, :any, default: nil
 
   @impl true
   def render(assigns) do
@@ -51,28 +75,92 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Empty do
 
         <div
           :if={@can_write?}
-          class="mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm"
+          class="mt-6 flex flex-col gap-3"
           data-role="canvas-empty-actions"
         >
-          <button
-            type="button"
-            phx-click="open_modal"
-            phx-value-modal="new_document"
-            class="link link-primary link-hover font-medium"
-            data-role="canvas-empty-new-document"
+          <%!-- ------------------------------------------------------------ --%>
+          <%!-- 계약서 업로드 — inline dropzone, NOT a modal. The form fires --%>
+          <%!-- the existing document.upload / document.upload.validate     --%>
+          <%!-- events on the parent StudioLive, which routes them through  --%>
+          <%!-- the :upload_document Command → real Blobs/SourceDocuments    --%>
+          <%!-- pipeline.                                                    --%>
+          <%!-- ------------------------------------------------------------ --%>
+          <.form
+            :let={_f}
+            for={%{}}
+            as={:upload}
+            id={"#{@id}-upload-form"}
+            phx-submit="document.upload"
+            phx-change="document.upload.validate"
+            data-role="canvas-empty-upload-form"
+            class="text-left"
           >
-            {dgettext("studio", "+ 새 문서")}
-          </button>
-          <span class="text-base-content/30" aria-hidden="true">·</span>
-          <button
-            type="button"
-            phx-click="open_modal"
-            phx-value-modal="upload"
-            class="link link-primary link-hover font-medium"
-            data-role="canvas-empty-upload"
-          >
-            {dgettext("studio", "PDF 가져오기")}
-          </button>
+            <label
+              :if={@document_upload}
+              for={@document_upload.ref}
+              class="studio-empty-upload__dropzone"
+              data-role="canvas-empty-upload-dropzone"
+            >
+              <.live_file_input
+                upload={@document_upload}
+                class="sr-only"
+                data-role="canvas-empty-upload-input"
+              />
+              <span class="studio-empty-upload__dropzone-text">
+                {dgettext("studio", "계약서 업로드")}
+              </span>
+              <span class="studio-empty-upload__dropzone-hint">
+                {dgettext("studio", "PDF · DOCX · HWP · HWPX")}
+              </span>
+            </label>
+
+            <ul
+              :if={@document_upload && @document_upload.entries != []}
+              class="studio-empty-upload__entries"
+            >
+              <li
+                :for={entry <- @document_upload.entries}
+                class="studio-empty-upload__entry"
+              >
+                <span class="studio-empty-upload__entry-name">{entry.client_name}</span>
+                <span class="studio-empty-upload__entry-progress">{entry.progress}%</span>
+              </li>
+            </ul>
+          </.form>
+
+          <%!-- ------------------------------------------------------------ --%>
+          <%!-- 빈 문서로 시작 / 최근 문서 열기 / 에이전트와 먼저 상의하기   --%>
+          <%!-- ------------------------------------------------------------ --%>
+          <div class="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm">
+            <button
+              type="button"
+              phx-click="agent_option_picked"
+              phx-value-key="blank"
+              class="link link-primary link-hover font-medium"
+              data-role="canvas-empty-new-document"
+            >
+              {dgettext("studio", "빈 문서로 시작")}
+            </button>
+            <span class="text-base-content/30" aria-hidden="true">·</span>
+            <button
+              type="button"
+              phx-click="agent_option_picked"
+              phx-value-key="recent"
+              class="link link-primary link-hover font-medium"
+              data-role="canvas-empty-recent"
+            >
+              {dgettext("studio", "최근 문서 열기")}
+            </button>
+            <span class="text-base-content/30" aria-hidden="true">·</span>
+            <button
+              type="button"
+              phx-click={JS.focus(to: "#chat-rail-textarea")}
+              class="link link-primary link-hover font-medium"
+              data-role="canvas-empty-discuss"
+            >
+              {dgettext("studio", "에이전트와 먼저 상의하기")}
+            </button>
+          </div>
         </div>
       </div>
     </div>

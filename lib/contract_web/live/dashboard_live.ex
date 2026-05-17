@@ -5,40 +5,34 @@ defmodule ContractWeb.DashboardLive do
 
   Per DESIGN.md §4 (v31, 2026-05-17):
 
-    * Top row is a Google-Docs-style title row: `최근 문서` H1 + right-aligned
-      action buttons (`새 문서` primary + `계약서 업로드 ⌄` secondary).
-    * `계약서 업로드` opens a popover anchored under the trigger — NOT a modal.
+    * Top row is a Google-Docs-style title row: `모든 문서` H1 + right-aligned
+      action button (`새 문서` primary).
+    * `새 문서` navigates to `/studio`. Document creation, upload, and
+      recent-document selection live inside Studio's empty-state surface
+      (`Canvas.Empty`) per the 2026-05-17 owner directive.
     * Card information is: thumbnail / title / status dot + label / 수정일 /
       overflow menu. No `다음 질문`, no agent activity feed.
     * Tabs: `모든 문서` (active) / `즐겨찾기`.
-    * `계약서 업로드` must NOT live in the global navbar.
+    * The contract-upload affordance must NOT live on this surface OR in
+      the global navbar — it lives inside `/studio` (Canvas.Empty +
+      ChatRail no-document chips).
 
   ## Data sources
 
-    * `Contract.Documents.list_recent_for_scope/2` — recent owner-scoped
-      documents.
-    * `Contract.SourceDocuments.create_from_upload/3` — wiring target for the
-      upload popover (see `consume_uploaded_entries/3` event handler).
+    * `Contract.Documents.list_all_for_scope/2` — all owner-scoped
+      non-archived documents, ordered by `updated_at DESC`. The dashboard
+      surfaces the full library, not a "recent N" slice.
   """
   use ContractWeb, :live_view
 
   alias Contract.Documents
-
-  @recent_documents_limit 20
 
   @impl true
   def mount(_params, _session, socket) do
     socket =
       socket
       |> assign(:page_title, dgettext("dashboard", "Dashboard"))
-      |> assign(:upload_menu_open?, false)
       |> assign(:active_tab, :all)
-      |> allow_upload(:contract_file,
-        accept: ~w(.pdf .docx .hwp .hwpx),
-        max_entries: 1,
-        max_file_size: 50_000_000,
-        auto_upload: true
-      )
       |> load_documents()
 
     {:ok, socket}
@@ -49,83 +43,8 @@ defmodule ContractWeb.DashboardLive do
   # ---------------------------------------------------------------------------
 
   @impl true
-  def handle_event("toggle_upload_menu", _params, socket) do
-    {:noreply, update(socket, :upload_menu_open?, &(!&1))}
-  end
-
-  def handle_event("close_upload_menu", _params, socket) do
-    {:noreply, assign(socket, :upload_menu_open?, false)}
-  end
-
   def handle_event("new_document", _params, socket) do
-    scope = socket.assigns.current_scope
-
-    # SPEC.md §18: documents are created untyped — the contract type is set
-    # afterwards by the user (Cmd+K) or the agent. The dashboard's "new"
-    # action gives the doc a default title so we never block the lawyer on
-    # naming. The title can be edited later in Studio.
-    case Documents.create(scope, %{"title" => default_new_title()}) do
-      {:ok, doc} ->
-        {:noreply, push_navigate(socket, to: ~p"/documents/#{doc.id}")}
-
-      {:error, _reason} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           dgettext("dashboard", "Could not create the document.")
-         )}
-    end
-  end
-
-  def handle_event("validate_upload", _params, socket) do
-    {:noreply, socket}
-  end
-
-  # auto_upload: the LiveView upload framework calls this when the file has
-  # been streamed up. We consume the entry, hand it to the source-document
-  # pipeline, then navigate the lawyer into Studio for the resulting doc.
-  def handle_event("save_upload", _params, socket) do
-    scope = socket.assigns.current_scope
-
-    uploaded =
-      consume_uploaded_entries(socket, :contract_file, fn %{path: path}, entry ->
-        # TODO(post-merge): wire to a single SourceDocuments.import_contract/3
-        # helper that creates the Document + SourceDocument in one transaction.
-        # For now we mint an untyped Document (so the lawyer always lands on a
-        # real doc) and stash the upload metadata on it; the actual blob /
-        # parsing pipeline can be hooked up next.
-        attrs = %{
-          "title" => entry.client_name || default_new_title(),
-          "metadata" => %{
-            "import_source" => "dashboard_upload",
-            "upload_filename" => entry.client_name,
-            "upload_size" => entry.client_size,
-            "upload_mime" => entry.client_type,
-            "upload_path_hint" => Path.basename(path)
-          }
-        }
-
-        case Documents.create(scope, attrs) do
-          {:ok, doc} -> {:ok, doc}
-          {:error, reason} -> {:postpone, {:error, reason}}
-        end
-      end)
-
-    case uploaded do
-      [%{id: doc_id}] ->
-        {:noreply,
-         socket
-         |> assign(:upload_menu_open?, false)
-         |> push_navigate(to: ~p"/documents/#{doc_id}")}
-
-      _ ->
-        {:noreply, socket}
-    end
-  end
-
-  def handle_event("cancel_upload", %{"ref" => ref}, socket) do
-    {:noreply, cancel_upload(socket, :contract_file, ref)}
+    {:noreply, push_navigate(socket, to: ~p"/studio")}
   end
 
   def handle_event("switch_tab", %{"tab" => tab}, socket) when tab in ~w(all favorites) do
@@ -137,14 +56,15 @@ defmodule ContractWeb.DashboardLive do
   # ---------------------------------------------------------------------------
 
   defp load_documents(socket) do
-    docs = list_recent_documents(socket.assigns.current_scope)
+    docs = list_all_documents(socket.assigns.current_scope)
     assign(socket, :documents, docs)
   end
 
-  defp list_recent_documents(scope) do
+  defp list_all_documents(scope) do
     scope
-    |> Documents.list_recent_for_scope(limit: @recent_documents_limit)
+    |> Documents.list_all_for_scope()
     |> Enum.reject(&(&1.status == :template))
+    |> Enum.reject(&(&1.status == :archived))
     |> Enum.map(fn d ->
       %{
         document_id: d.id,
@@ -159,8 +79,6 @@ defmodule ContractWeb.DashboardLive do
     Postgrex.Error -> []
   end
 
-  defp default_new_title, do: dgettext("dashboard", "제목 없는 문서")
-
   # ---------------------------------------------------------------------------
   # Render
   # ---------------------------------------------------------------------------
@@ -171,12 +89,13 @@ defmodule ContractWeb.DashboardLive do
     <Layouts.app flash={@flash} current_scope={@current_scope} variant="default">
       <main class="dashboard-v31 py-10">
         <%!-- ------------------------------------------------------------ --%>
-        <%!-- Title row — H1 + right-aligned action buttons                --%>
-        <%!-- The popover lives inside the secondary button's wrapper so   --%>
-        <%!-- click-away closes it. NOT a modal.                            --%>
+        <%!-- Title row — H1 + right-aligned primary action.                --%>
+        <%!-- `새 문서` navigates to /studio (the empty-state surface where  --%>
+        <%!-- upload / blank / recent / agent-discussion all live). No      --%>
+        <%!-- modal, no popover, no doc creation on this surface.           --%>
         <%!-- ------------------------------------------------------------ --%>
         <header class="dashboard-v31__top">
-          <h1 class="dashboard-v31__title">{dgettext("dashboard", "최근 문서")}</h1>
+          <h1 class="dashboard-v31__title">{dgettext("dashboard", "모든 문서")}</h1>
 
           <div class="dashboard-v31__actions">
             <button
@@ -187,22 +106,6 @@ defmodule ContractWeb.DashboardLive do
             >
               {dgettext("dashboard", "새 문서")}
             </button>
-
-            <div class="dashboard-v31__upload-wrap" phx-click-away="close_upload_menu">
-              <button
-                type="button"
-                phx-click="toggle_upload_menu"
-                class="dashboard-v31__btn dashboard-v31__btn--secondary"
-                aria-haspopup="true"
-                aria-expanded={to_string(@upload_menu_open?)}
-                data-role="dashboard-upload-trigger"
-              >
-                {dgettext("dashboard", "계약서 업로드")}
-                <span aria-hidden="true" class="dashboard-v31__caret">⌄</span>
-              </button>
-
-              <.contract_upload_menu :if={@upload_menu_open?} upload={@uploads.contract_file} />
-            </div>
           </div>
         </header>
 
@@ -258,7 +161,7 @@ defmodule ContractWeb.DashboardLive do
             >
               {dgettext(
                 "dashboard",
-                "아직 문서가 없습니다. ‘새 문서’로 시작하거나 ‘계약서 업로드’로 가져오세요."
+                "아직 문서가 없습니다. ‘새 문서’로 시작하세요."
               )}
             </section>
           <% true -> %>
@@ -314,71 +217,6 @@ defmodule ContractWeb.DashboardLive do
         </div>
       </.link>
     </article>
-    """
-  end
-
-  @doc """
-  Renders the contract-upload popover anchored under the secondary action
-  button. Per DESIGN.md §4 it is a popover, not a modal.
-  """
-  attr :upload, :any, required: true
-
-  def contract_upload_menu(assigns) do
-    ~H"""
-    <div
-      class="upload-menu-v31"
-      role="dialog"
-      aria-label={dgettext("dashboard", "계약서 업로드")}
-      data-role="upload-menu"
-    >
-      <header class="upload-menu-v31__header">
-        <strong>{dgettext("dashboard", "파일에서 가져오기")}</strong>
-      </header>
-      <div class="upload-menu-v31__body">
-        <p class="upload-menu-v31__lead">
-          {dgettext("dashboard", "기존 계약서 파일을 StudioLive로 가져옵니다.")}
-        </p>
-        <p class="upload-menu-v31__caption">
-          {dgettext(
-            "dashboard",
-            "PDF, DOCX, HWP 지원 · StudioLive에서 열립니다."
-          )}
-        </p>
-
-        <form
-          id="contract-upload-form"
-          phx-change="validate_upload"
-          phx-submit="save_upload"
-          class="upload-menu-v31__form"
-        >
-          <label class="upload-menu-v31__dropzone" for={@upload.ref}>
-            <.live_file_input upload={@upload} class="sr-only" />
-            <span class="upload-menu-v31__dropzone-text">
-              {dgettext("dashboard", "파일을 선택하거나 끌어다 놓으세요")}
-            </span>
-            <span class="upload-menu-v31__dropzone-hint">
-              {dgettext("dashboard", "PDF · DOCX · HWP")}
-            </span>
-          </label>
-
-          <ul :if={@upload.entries != []} class="upload-menu-v31__entries">
-            <li :for={entry <- @upload.entries} class="upload-menu-v31__entry">
-              <span class="upload-menu-v31__entry-name">{entry.client_name}</span>
-              <span class="upload-menu-v31__entry-progress">{entry.progress}%</span>
-              <button
-                type="button"
-                phx-click="cancel_upload"
-                phx-value-ref={entry.ref}
-                class="upload-menu-v31__entry-cancel"
-                aria-label={dgettext("dashboard", "업로드 취소")}
-              >
-                ✕
-              </button>
-            </li>
-          </ul>
-        </form>
-      </div>
-    </div>
     """
   end
 

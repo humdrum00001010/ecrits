@@ -1372,7 +1372,11 @@ defmodule ContractWeb.StudioLive do
               {document_header_title(@projection, @studio_state)}
             </h1>
           </div>
-          <.link navigate={~p"/dashboard"} class="btn btn-sm btn-ghost shrink-0">
+          <.link
+            :if={@viewport != :mobile}
+            navigate={~p"/dashboard"}
+            class="btn btn-sm btn-ghost shrink-0"
+          >
             <.icon name="hero-arrow-left" class="size-4" />
             {dgettext("studio", "Dashboard")}
           </.link>
@@ -1400,6 +1404,7 @@ defmodule ContractWeb.StudioLive do
               studio_state={@studio_state}
               projection={@projection}
               current_scope={@current_scope}
+              document_upload={@uploads.document_upload}
             />
             <.live_component
               module={Components.MarksLayer}

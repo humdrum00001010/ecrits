@@ -105,7 +105,7 @@ defmodule ContractWeb.StudioLiveTest do
       assert assigns.studio_state.selected_document_id == nil
     end
 
-    test "DocumentScope threads :user_perms from session onto current_scope.perms (lawyer-style) and renders + 새 문서 link",
+    test "DocumentScope threads :user_perms from session onto current_scope.perms (lawyer-style) and unlocks Canvas.Empty actions",
          %{conn: conn} do
       # Persona sign-in (TestAuthController) writes :user_perms into the
       # session. Simulate that here — the lawyer-shaped perm set must
@@ -116,8 +116,12 @@ defmodule ContractWeb.StudioLiveTest do
       {:ok, lv, html} = live(conn, ~p"/studio")
 
       assert :sys.get_state(lv.pid).socket.assigns.current_scope.perms == lawyer_perms
-      assert html =~ "+ 새 문서"
-      assert html =~ "PDF 가져오기"
+      # Per 2026-05-17 owner directive, the empty state hosts the four
+      # onboarding affordances: upload + blank + recent + discuss.
+      assert html =~ "빈 문서로 시작"
+      assert html =~ "계약서 업로드"
+      assert html =~ "최근 문서 열기"
+      assert html =~ "에이전트와 먼저 상의하기"
     end
 
     test "without :user_perms in session, current_scope.perms is nil and Canvas.Empty actions are hidden",
@@ -125,8 +129,9 @@ defmodule ContractWeb.StudioLiveTest do
       {:ok, lv, html} = live(conn, ~p"/studio")
 
       assert :sys.get_state(lv.pid).socket.assigns.current_scope.perms == nil
-      refute html =~ "+ 새 문서"
-      refute html =~ "PDF 가져오기"
+      refute html =~ "빈 문서로 시작"
+      refute html =~ ~s(data-role="canvas-empty-upload-form")
+      refute html =~ "에이전트와 먼저 상의하기"
     end
 
     test "mounts the modal-host and toast-queue components", %{conn: conn} do

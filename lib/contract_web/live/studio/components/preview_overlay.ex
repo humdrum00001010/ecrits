@@ -128,7 +128,7 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
     ~H"""
     <div
       id={@id}
-      class="fixed inset-0 z-40 bg-base-100 flex flex-col"
+      class="preview-overlay fixed inset-0 z-40 flex flex-col"
       phx-hook=".PreviewOverlay"
       phx-target={@myself}
       role="dialog"
@@ -136,7 +136,7 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
       aria-label={dgettext("studio", "Document preview")}
       data-role="preview-overlay"
       data-viewport={Atom.to_string(@viewport)}
-      style="padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);"
+      style="background-color: var(--cs-bg, #FAFAF7); padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);"
     >
       <script :type={Phoenix.LiveView.ColocatedHook} name=".PreviewOverlay">
         export default {
@@ -217,16 +217,22 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
         }
       </script>
 
-      <%!-- Top bar: matter title, close, tabs --%>
-      <header class="flex items-center justify-between gap-3 border-b border-base-200 px-4 py-3">
-        <h2 class="text-base font-serif font-semibold truncate flex-1 min-w-0">
+      <%!-- Thin top strip: document title (truncated) + close button. --%>
+      <header
+        class="preview-overlay__strip flex items-center justify-between gap-3 px-4 py-2 shrink-0"
+        style="background-color: var(--cs-bg, #FAFAF7); border-bottom: 1px solid var(--cs-line, #E5E7EB);"
+      >
+        <h2
+          class="truncate flex-1 min-w-0 text-sm"
+          style="font-family: var(--font-serif, 'Source Serif 4', serif); color: var(--cs-ink, #171717);"
+        >
           {document_title(@projection)}
         </h2>
 
         <button
           type="button"
           phx-click="toggle_preview"
-          class="btn btn-ghost btn-sm btn-circle"
+          class="inline-flex size-8 items-center justify-center rounded-full text-base-content/70 hover:bg-base-200"
           aria-label={dgettext("studio", "Close preview")}
           data-role="preview-close"
         >
@@ -235,7 +241,8 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
       </header>
 
       <nav
-        class="flex border-b border-base-200 px-2 gap-1"
+        class="flex px-4 gap-1 shrink-0"
+        style="background-color: var(--cs-bg, #FAFAF7); border-bottom: 1px solid var(--cs-line, #E5E7EB);"
         role="tablist"
         aria-label={dgettext("studio", "Preview tabs")}
       >
@@ -256,19 +263,27 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
         />
       </nav>
 
+      <%!-- Scroll container — light grey backdrop hosting the centered
+           paper page. --%>
       <section
-        class="flex-1 min-h-0 overflow-y-auto px-4 py-4"
+        class="preview-overlay__scroll flex-1 min-h-0 overflow-y-auto"
         role="tabpanel"
         data-role={"preview-panel-#{@tab}"}
+        data-viewport={Atom.to_string(@viewport)}
       >
-        <%= case @tab do %>
-          <% :body -> %>
-            {render_body(assigns)}
-          <% :marks -> %>
-            {render_marks(assigns)}
-          <% :changes -> %>
-            {render_changes(assigns)}
-        <% end %>
+        <div class={[
+          "preview-overlay__paper mx-auto bg-white",
+          @viewport == :mobile && "preview-overlay__paper--mobile"
+        ]}>
+          <%= case @tab do %>
+            <% :body -> %>
+              {render_body(assigns)}
+            <% :marks -> %>
+              {render_marks(assigns)}
+            <% :changes -> %>
+              {render_changes(assigns)}
+          <% end %>
+        </div>
       </section>
     </div>
     """
@@ -286,8 +301,8 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
       role="tab"
       aria-selected={to_string(@tab == @active)}
       class={[
-        "px-3 py-2 text-sm border-b-2 -mb-px transition-colors",
-        @tab == @active && "border-primary text-primary font-medium",
+        "px-3 py-2 text-xs border-b-2 -mb-px transition-colors",
+        @tab == @active && "border-base-content text-base-content font-medium",
         @tab != @active && "border-transparent text-base-content/60 hover:text-base-content"
       ]}
       phx-click={JS.push("switch_tab", value: %{tab: Atom.to_string(@tab)}, target: @target)}
@@ -320,11 +335,11 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
 
     ~H"""
     <article
-      class="prose prose-sm max-w-none font-serif leading-relaxed"
+      class="preview-overlay__body"
       data-role="preview-body"
     >
       <%= if @ordered_nodes == [] do %>
-        <p class="text-base-content/50 italic">
+        <p class="preview-overlay__empty">
           {dgettext("studio", "No document selected.")}
         </p>
       <% else %>
@@ -342,32 +357,52 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
 
     case level do
       1 ->
-        ~H|<h1 id={"node-#{@id}"} class="text-2xl font-bold mt-4 mb-2">{@text}</h1>|
+        ~H|<h1 id={"node-#{@id}"} class="preview-overlay__h1">{@text}</h1>|
 
       2 ->
-        ~H|<h2 id={"node-#{@id}"} class="text-xl font-semibold mt-4 mb-2">{@text}</h2>|
+        ~H|<h2 id={"node-#{@id}"} class="preview-overlay__h2">{@text}</h2>|
 
       _ ->
-        ~H|<h3 id={"node-#{@id}"} class="text-lg font-semibold mt-3 mb-2">{@text}</h3>|
+        ~H|<h3 id={"node-#{@id}"} class="preview-overlay__h3">{@text}</h3>|
     end
   end
 
   defp render_node(%{kind: :paragraph} = node) do
     assigns = %{text: node[:content] || "", id: node[:id]}
 
-    ~H|<p id={"node-#{@id}"} class="my-2 whitespace-pre-wrap">{@text}</p>|
+    ~H|<p id={"node-#{@id}"} class="preview-overlay__p">{@text}</p>|
   end
 
   defp render_node(%{kind: :list_item} = node) do
-    assigns = %{text: node[:content] || "", id: node[:id]}
+    ordered? = get_in(node, [:attrs, :ordered]) == true
+    assigns = %{text: node[:content] || "", id: node[:id], ordered?: ordered?}
 
-    ~H|<li id={"node-#{@id}"} class="ml-4 list-disc">{@text}</li>|
+    if ordered? do
+      ~H|<ol class="preview-overlay__ol"><li id={"node-#{@id}"}>{@text}</li></ol>|
+    else
+      ~H|<ul class="preview-overlay__ul"><li id={"node-#{@id}"}>{@text}</li></ul>|
+    end
   end
 
   defp render_node(%{kind: :list} = node) do
     assigns = %{text: node[:content] || "", id: node[:id]}
 
-    ~H|<ul id={"node-#{@id}"} class="my-2">{@text}</ul>|
+    ~H|<ul id={"node-#{@id}"} class="preview-overlay__ul">{@text}</ul>|
+  end
+
+  defp render_node(%{kind: :table} = node) do
+    rows = get_in(node, [:attrs, :rows]) || []
+    assigns = %{rows: rows, id: node[:id]}
+
+    ~H"""
+    <table id={"node-#{@id}"} class="preview-overlay__table">
+      <tbody>
+        <tr :for={row <- @rows}>
+          <td :for={cell <- row}>{cell}</td>
+        </tr>
+      </tbody>
+    </table>
+    """
   end
 
   defp render_node(%{} = node) do
@@ -379,7 +414,7 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
       kind: Atom.to_string(node[:kind] || :unknown)
     }
 
-    ~H|<div id={"node-#{@id}"} class="my-2" data-node-kind={@kind}>{@text}</div>|
+    ~H|<div id={"node-#{@id}"} class="preview-overlay__p" data-node-kind={@kind}>{@text}</div>|
   end
 
   # --- Marks tab: grouped by node, click-to-jump -----------------------------

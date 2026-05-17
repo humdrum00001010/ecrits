@@ -62,6 +62,41 @@ defmodule Contract.Documents do
   end
 
   # ----------------------------------------------------------------------------
+  # list_all_for_scope/2
+  # ----------------------------------------------------------------------------
+
+  @doc """
+  List ALL documents visible to the scope (i.e. owned by `ctx.user`),
+  ordered by `updated_at DESC`. Unlike `list_recent_for_scope/2`, no
+  document is dropped for being old — the dashboard surface wants the
+  full library, not a "recent" slice (2026-05-17 owner directive).
+
+  Accepts an optional keyword list with `:limit`. Defaults to a very
+  high cap (10_000) so callers that pass no limit still get the full
+  set without blowing memory in pathological cases.
+  """
+  @default_all_limit 10_000
+
+  @spec list_all_for_scope(Context.t(), keyword()) :: [Document.t()]
+  def list_all_for_scope(scope, opts \\ [])
+
+  def list_all_for_scope(%Context{user: nil}, _opts), do: []
+
+  def list_all_for_scope(%Context{user: %{id: user_id}}, opts) when is_list(opts) do
+    limit = Keyword.get(opts, :limit, @default_all_limit)
+
+    from(d in Document,
+      where: d.owner_id == ^user_id,
+      order_by: [desc: d.updated_at],
+      limit: ^limit
+    )
+    |> Repo.all()
+  rescue
+    DBConnection.ConnectionError -> []
+    Postgrex.Error -> []
+  end
+
+  # ----------------------------------------------------------------------------
   # get/2
   # ----------------------------------------------------------------------------
 

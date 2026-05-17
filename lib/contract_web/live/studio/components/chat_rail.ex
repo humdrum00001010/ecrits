@@ -69,8 +69,8 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
       data-stub="chat-rail"
       class={[
         "flex flex-col bg-base-100 min-h-0",
-        not @mobile? && "w-[360px] border-l border-base-200",
-        @mobile? && "w-full h-[100dvh]"
+        not @mobile? && "shrink-0 w-[360px] border-l border-base-200",
+        @mobile? && "w-full flex-1 h-full"
       ]}
     >
       <%!-- Header --%>
@@ -78,6 +78,18 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
         "flex items-center gap-2 px-4 py-3 border-b border-base-200 shrink-0",
         @mobile? && "py-2"
       ]}>
+        <button
+          :if={@mobile?}
+          type="button"
+          phx-click="toggle_preview"
+          data-role="chat-rail-open-document"
+          class="inline-flex items-center gap-1 rounded-md border border-base-300 px-2 py-1 text-xs text-base-content/80 hover:bg-base-200"
+          aria-label={dgettext("studio", "문서 보기")}
+        >
+          <.icon name="hero-document-text" class="size-4" />
+          {dgettext("studio", "문서")}
+        </button>
+
         <h2 :if={not @mobile?} class="font-medium text-sm text-base-content/80">
           {dgettext("studio", "에이전트")}
         </h2>
@@ -284,6 +296,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             />
           </div>
           <button
+            id={"#{@id}-send"}
             type="button"
             data-role="chat-send"
             data-action="send"
@@ -302,60 +315,85 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
         export default {
           mounted() {
             this.form = this.el
-            this.textarea = this.form.querySelector('[data-role="chat-textarea"]')
-            this.sendButton = this.form.querySelector('[data-role="chat-send"]')
+
+            // Resolve the live textarea each call — morphdom may swap the node
+            // across patches, so a cached ref can go stale.
+            const textarea = () => this.form.querySelector('[data-role="chat-textarea"]')
 
             this.send = (e) => {
               if (e) e.preventDefault()
-              if (!this.textarea) return
-              const value = this.textarea.value
+              const ta = textarea()
+              if (!ta) return
+              const value = ta.value
               if (!value || !value.trim()) return
+              // chat.submit is handled by the parent StudioLive — pushEvent
+              // from a LiveComponent-hosted hook still routes to the root LV.
               this.pushEvent("chat.submit", { message: value })
-              this.textarea.value = ""
+              ta.value = ""
               this.autosize()
               // Keep focus on the textarea so the mobile keyboard never hides.
-              this.textarea.focus({ preventScroll: true })
+              ta.focus({ preventScroll: true })
             }
 
             this.autosize = () => {
-              if (!this.textarea) return
-              if (this.textarea.dataset.autosize !== "true") return
-              this.textarea.style.height = "auto"
-              const next = Math.min(this.textarea.scrollHeight, 128)
-              this.textarea.style.height = next + "px"
+              const ta = textarea()
+              if (!ta) return
+              if (ta.dataset.autosize !== "true") return
+              ta.style.height = "auto"
+              const next = Math.min(ta.scrollHeight, 128)
+              ta.style.height = next + "px"
             }
 
-            this.onKeydown = (e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+            // Event delegation on the stable <form> node. This is robust
+            // against morphdom replacing the button or textarea subtree —
+            // listeners on direct refs would silently break after a patch.
+            this.onFormKeydown = (e) => {
+              if (e.target.matches('[data-role="chat-textarea"]')
+                  && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
                 this.send(e)
               }
             }
 
-            this.onInput = () => this.autosize()
-            this.onClick = (e) => this.send(e)
-            this.onSubmit = (e) => this.send(e)
+            this.onFormInput = (e) => {
+              if (e.target.matches('[data-role="chat-textarea"]')) this.autosize()
+            }
 
-            if (this.textarea) {
-              this.textarea.addEventListener("keydown", this.onKeydown)
-              this.textarea.addEventListener("input", this.onInput)
-              this.autosize()
+            // Mobile (iOS Safari) regression fix: tapping the send button
+            // fires `blur` on the textarea, which dismisses the keyboard.
+            // With `h-[100dvh]` the layout reflows mid-tap and the `click`
+            // never lands. Calling preventDefault() on pointerdown/mousedown
+            // for the send button stops the focus shift, so the textarea
+            // stays focused, the keyboard stays open, no reflow happens,
+            // and the subsequent `click` fires cleanly.
+            this.onFormPointerDown = (e) => {
+              const btn = e.target.closest('[data-role="chat-send"]')
+              if (btn && this.form.contains(btn)) e.preventDefault()
             }
-            if (this.sendButton) {
-              this.sendButton.addEventListener("click", this.onClick)
+
+            this.onFormClick = (e) => {
+              const btn = e.target.closest('[data-role="chat-send"]')
+              if (btn && this.form.contains(btn)) this.send(e)
             }
-            this.form.addEventListener("submit", this.onSubmit)
+
+            this.onFormSubmit = (e) => this.send(e)
+
+            this.form.addEventListener("keydown", this.onFormKeydown)
+            this.form.addEventListener("input", this.onFormInput)
+            this.form.addEventListener("pointerdown", this.onFormPointerDown)
+            this.form.addEventListener("mousedown", this.onFormPointerDown)
+            this.form.addEventListener("click", this.onFormClick)
+            this.form.addEventListener("submit", this.onFormSubmit)
+
+            this.autosize()
           },
           destroyed() {
-            if (this.textarea) {
-              this.textarea.removeEventListener("keydown", this.onKeydown)
-              this.textarea.removeEventListener("input", this.onInput)
-            }
-            if (this.sendButton) {
-              this.sendButton.removeEventListener("click", this.onClick)
-            }
-            if (this.form) {
-              this.form.removeEventListener("submit", this.onSubmit)
-            }
+            if (!this.form) return
+            this.form.removeEventListener("keydown", this.onFormKeydown)
+            this.form.removeEventListener("input", this.onFormInput)
+            this.form.removeEventListener("pointerdown", this.onFormPointerDown)
+            this.form.removeEventListener("mousedown", this.onFormPointerDown)
+            this.form.removeEventListener("click", this.onFormClick)
+            this.form.removeEventListener("submit", this.onFormSubmit)
           }
         }
       </script>

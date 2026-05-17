@@ -404,61 +404,12 @@
 .status-dot-v31--export_ready { background: var(--cs-green); }
 .status-dot-v31--archived { background: var(--cs-line-strong); }
 
-/* Upload popover ------------------------------------------------------- */
+/* Studio Canvas.Empty — inline upload dropzone ------------------------- */
+/* Reuses the visual vocabulary of the old dashboard upload popover. The */
+/* upload now lives in /studio's empty state (Canvas.Empty), per the     */
+/* 2026-05-17 owner directive.                                            */
 
-.upload-menu-v31 {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  width: 380px;
-  background: var(--cs-surface);
-  border: 1px solid var(--cs-line);
-  border-radius: var(--cs-radius-md);
-  box-shadow: var(--cs-shadow-popover);
-  z-index: 30;
-}
-
-.upload-menu-v31::before {
-  content: "";
-  position: absolute;
-  top: -7px;
-  right: 90px;
-  width: 12px;
-  height: 12px;
-  background: var(--cs-surface);
-  border-top: 1px solid var(--cs-line);
-  border-left: 1px solid var(--cs-line);
-  transform: rotate(45deg);
-}
-
-.upload-menu-v31__header {
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--cs-line);
-  font-size: 13px;
-  color: var(--cs-ink);
-}
-
-.upload-menu-v31__body {
-  padding: 16px;
-}
-
-.upload-menu-v31__lead {
-  font-size: 14px;
-  color: var(--cs-ink);
-  margin: 0 0 10px;
-}
-
-.upload-menu-v31__caption {
-  font-size: 12px;
-  color: var(--cs-muted);
-  margin: 0 0 14px;
-}
-
-.upload-menu-v31__form {
-  margin: 0;
-}
-
-.upload-menu-v31__dropzone {
+.studio-empty-upload__dropzone {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -472,21 +423,21 @@
   text-align: center;
 }
 
-.upload-menu-v31__dropzone:hover {
+.studio-empty-upload__dropzone:hover {
   border-color: var(--cs-green-2);
 }
 
-.upload-menu-v31__dropzone-text {
+.studio-empty-upload__dropzone-text {
   font-size: 13px;
   color: var(--cs-ink);
 }
 
-.upload-menu-v31__dropzone-hint {
+.studio-empty-upload__dropzone-hint {
   font-size: 11px;
   color: var(--cs-muted);
 }
 
-.upload-menu-v31__entries {
+.studio-empty-upload__entries {
   list-style: none;
   padding: 0;
   margin: 12px 0 0;
@@ -495,7 +446,7 @@
   gap: 6px;
 }
 
-.upload-menu-v31__entry {
+.studio-empty-upload__entry {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -503,19 +454,19 @@
   color: var(--cs-ink);
 }
 
-.upload-menu-v31__entry-name {
+.studio-empty-upload__entry-name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.upload-menu-v31__entry-progress {
+.studio-empty-upload__entry-progress {
   color: var(--cs-muted);
   font-variant-numeric: tabular-nums;
 }
 
-.upload-menu-v31__entry-cancel {
+.studio-empty-upload__entry-cancel {
   border: 0;
   background: transparent;
   color: var(--cs-muted);
@@ -695,6 +646,104 @@
 
 .landing-v31__footnote p {
   margin: 0;
+}
+
+/* ----------------------------------------------------------------------------
+   Preview overlay — Google-Docs paper-page aesthetic.
+   Mobile-only surface (PreviewOverlay LiveComponent). Light grey backdrop
+   hosts a centered white "page" with serif typography. No editor chrome,
+   no playful motion, no shadow-xl — hairline shadow only per the mature-
+   visual-language memory.
+   ---------------------------------------------------------------------------- */
+
+.preview-overlay__paper {
+  background-color: var(--cs-surface, #FFFFFF);
+  max-width: 816px; /* 8.5in @ 96dpi */
+  padding: 96px 96px 80px;
+  margin: 24px auto 48px;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.08),
+    0 1px 2px rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--cs-line, #E5E7EB);
+  border-radius: 2px;
+  color: var(--cs-ink, #171717);
+}
+
+.preview-overlay__paper--mobile {
+  max-width: none;
+  padding: 32px 24px;
+  margin: 12px auto 32px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.preview-overlay__body {
+  font-family: var(--font-serif, "Source Serif 4", "Nanum Myeongjo", serif);
+  font-size: 14.67px; /* 11pt */
+  line-height: 1.6;
+  color: var(--cs-ink, #171717);
+}
+
+.preview-overlay__empty {
+  color: var(--cs-muted, #6B7280);
+  font-style: italic;
+}
+
+.preview-overlay__h1 {
+  font-family: var(--font-serif, "Source Serif 4", "Nanum Myeongjo", serif);
+  font-size: 37.33px; /* 28pt */
+  line-height: 1.25;
+  font-weight: 600;
+  margin: 0 0 12px;
+  color: var(--cs-ink, #171717);
+}
+
+.preview-overlay__h2 {
+  font-family: var(--font-serif, "Source Serif 4", "Nanum Myeongjo", serif);
+  font-size: 26.67px; /* 20pt */
+  line-height: 1.3;
+  font-weight: 600;
+  margin: 24px 0 10px;
+  color: var(--cs-ink, #171717);
+}
+
+.preview-overlay__h3 {
+  font-family: var(--font-serif, "Source Serif 4", "Nanum Myeongjo", serif);
+  font-size: 21.33px; /* 16pt */
+  line-height: 1.35;
+  font-weight: 600;
+  margin: 18px 0 8px;
+  color: var(--cs-ink, #171717);
+}
+
+.preview-overlay__p {
+  margin: 0 0 12px;
+  white-space: pre-wrap;
+}
+
+.preview-overlay__ul,
+.preview-overlay__ol {
+  margin: 0 0 12px;
+  padding-left: 28px;
+}
+
+.preview-overlay__ul {
+  list-style: disc;
+}
+
+.preview-overlay__ol {
+  list-style: decimal;
+}
+
+.preview-overlay__table {
+  border-collapse: collapse;
+  margin: 12px 0;
+  width: 100%;
+}
+
+.preview-overlay__table td {
+  border: 1px solid var(--cs-line, #E5E7EB);
+  padding: 6px 10px;
+  vertical-align: top;
 }
 
 /* This file is for your main application CSS */

@@ -8,131 +8,85 @@
 ## #. TODO native-speaker review:
 ##   - 상태 라벨 (`초안` / `진행 중` / `검토 대기` / `완료` / `보관`)
 ##     anchored on Korean legal-tech UX register.
-##   - `계약서 업로드` is a content action label inside the dashboard
-##     header — explicitly NOT a global navbar item (DESIGN.md §4
-##     "Required behavior" + §7 "Final design prohibitions").
+##   - Upload affordance lives in `/studio` (Canvas.Empty), NOT on this
+##     dashboard surface or in the global navbar (2026-05-17 owner
+##     directive + DESIGN.md §7 "Final design prohibitions").
 msgid ""
 msgstr ""
 "Language: ko\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
-#: lib/contract_web/live/dashboard_live.ex:33
+#: lib/contract_web/live/dashboard_live.ex:34
 #, elixir-autogen, elixir-format
 msgid "Dashboard"
 msgstr "대시보드"
 
-#: lib/contract_web/live/dashboard_live.ex:76
-#, elixir-autogen, elixir-format
-msgid "Could not create the document."
-msgstr "문서를 만들 수 없습니다."
-
-#: lib/contract_web/live/dashboard_live.ex:360
-#, elixir-autogen, elixir-format
-msgid "PDF · DOCX · HWP"
-msgstr "PDF · DOCX · HWP"
-
-#: lib/contract_web/live/dashboard_live.ex:342
-#, elixir-autogen, elixir-format
-msgid "PDF, DOCX, HWP 지원 · StudioLive에서 열립니다."
-msgstr "PDF, DOCX, HWP 지원 · StudioLive에서 열립니다."
-
-#: lib/contract_web/live/dashboard_live.ex:390
+#: lib/contract_web/live/dashboard_live.ex:227
 #, elixir-autogen, elixir-format
 msgid "가져오는 중"
 msgstr "가져오는 중"
 
-#: lib/contract_web/live/dashboard_live.ex:392
+#: lib/contract_web/live/dashboard_live.ex:229
 #, elixir-autogen, elixir-format
 msgid "검토 대기"
 msgstr "검토 대기"
 
-#: lib/contract_web/live/dashboard_live.ex:200
-#: lib/contract_web/live/dashboard_live.ex:331
-#, elixir-autogen, elixir-format
-msgid "계약서 업로드"
-msgstr "계약서 업로드"
-
-#: lib/contract_web/live/dashboard_live.ex:339
-#, elixir-autogen, elixir-format
-msgid "기존 계약서 파일을 StudioLive로 가져옵니다."
-msgstr "기존 계약서 파일을 StudioLive로 가져옵니다."
-
-#: lib/contract_web/live/dashboard_live.ex:224
+#: lib/contract_web/live/dashboard_live.ex:126
 #, elixir-autogen, elixir-format
 msgid "모든 문서"
 msgstr "모든 문서"
 
-#: lib/contract_web/live/dashboard_live.ex:298
+#: lib/contract_web/live/dashboard_live.ex:200
 #, elixir-autogen, elixir-format
 msgid "문서 메뉴"
 msgstr "문서 메뉴"
 
-#: lib/contract_web/live/dashboard_live.ex:394
+#: lib/contract_web/live/dashboard_live.ex:231
 #, elixir-autogen, elixir-format
 msgid "보관"
 msgstr "보관"
 
-#: lib/contract_web/live/dashboard_live.ex:188
+#: lib/contract_web/live/dashboard_live.ex:106
 #, elixir-autogen, elixir-format
 msgid "새 문서"
 msgstr "새 문서"
 
-#: lib/contract_web/live/dashboard_live.ex:312
+#: lib/contract_web/live/dashboard_live.ex:214
 #, elixir-autogen, elixir-format
 msgid "수정일"
 msgstr "수정일"
 
-#: lib/contract_web/live/dashboard_live.ex:259
-#, elixir-autogen, elixir-format
-msgid "아직 문서가 없습니다. ‘새 문서’로 시작하거나 ‘계약서 업로드’로 가져오세요."
-msgstr "아직 문서가 없습니다. ‘새 문서’로 시작하거나 ‘계약서 업로드’로 가져오세요."
-
-#: lib/contract_web/live/dashboard_live.ex:373
-#, elixir-autogen, elixir-format
-msgid "업로드 취소"
-msgstr "업로드 취소"
-
-#: lib/contract_web/live/dashboard_live.ex:393
+#: lib/contract_web/live/dashboard_live.ex:230
 #, elixir-autogen, elixir-format
 msgid "완료"
 msgstr "완료"
 
-#: lib/contract_web/live/dashboard_live.ex:162
-#, elixir-autogen, elixir-format
-msgid "제목 없는 문서"
-msgstr "제목 없는 문서"
-
-#: lib/contract_web/live/dashboard_live.ex:237
+#: lib/contract_web/live/dashboard_live.ex:139
 #, elixir-autogen, elixir-format
 msgid "즐겨찾기"
 msgstr "즐겨찾기"
 
-#: lib/contract_web/live/dashboard_live.ex:251
+#: lib/contract_web/live/dashboard_live.ex:153
 #, elixir-autogen, elixir-format
 msgid "즐겨찾기한 문서가 아직 없습니다."
 msgstr "즐겨찾기한 문서가 아직 없습니다."
 
-#: lib/contract_web/live/dashboard_live.ex:391
+#: lib/contract_web/live/dashboard_live.ex:228
 #, elixir-autogen, elixir-format
 msgid "진행 중"
 msgstr "진행 중"
 
-#: lib/contract_web/live/dashboard_live.ex:389
+#: lib/contract_web/live/dashboard_live.ex:226
 #, elixir-autogen, elixir-format
 msgid "초안"
 msgstr "초안"
 
-#: lib/contract_web/live/dashboard_live.ex:179
+#: lib/contract_web/live/dashboard_live.ex:97
 #, elixir-autogen, elixir-format
 msgid "최근 문서"
 msgstr "최근 문서"
 
-#: lib/contract_web/live/dashboard_live.ex:335
+#: lib/contract_web/live/dashboard_live.ex:161
 #, elixir-autogen, elixir-format
-msgid "파일에서 가져오기"
-msgstr "파일에서 가져오기"
-
-#: lib/contract_web/live/dashboard_live.ex:357
-#, elixir-autogen, elixir-format
-msgid "파일을 선택하거나 끌어다 놓으세요"
-msgstr "파일을 선택하거나 끌어다 놓으세요"
+msgid "아직 문서가 없습니다. ‘새 문서’로 시작하세요."
+msgstr "아직 문서가 없습니다. ‘새 문서’로 시작하세요."

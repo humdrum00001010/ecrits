@@ -183,12 +183,49 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
         )
 
       assert html =~ ~s(data-layout="mobile")
-      # Full-viewport height marker.
-      assert html =~ "h-[100dvh]"
+      # Mobile relies on the parent flex container for height — no fixed
+      # 100dvh on the rail itself (parent already constrains height; a
+      # nested 100dvh causes overflow when the parent isn't body).
+      refute html =~ "h-[100dvh]"
+      # Mobile fills the parent's width + remaining flex space.
+      assert html =~ "w-full"
+      assert html =~ "flex-1"
       # Safe-area inset on the footer.
       assert html =~ "env(safe-area-inset-bottom)"
       # No desktop fixed-width rail.
       refute html =~ "w-[360px]"
+    end
+
+    test "case 6b — mobile header surfaces 문서 button (goto-document affordance)" do
+      html =
+        render_component(ChatRail,
+          id: "chat-rail",
+          studio_state: default_state(),
+          streams: %{chat_messages: empty_stream()},
+          current_scope: lawyer_scope(),
+          layout: :mobile_full
+        )
+
+      # Mobile chat-rail header must expose a leading 문서 button that
+      # fires `toggle_preview` so the user can pivot from chat → document
+      # without going via /dashboard.
+      assert html =~ ~s(data-role="chat-rail-open-document")
+      assert html =~ ~s(phx-click="toggle_preview")
+      assert html =~ "문서"
+    end
+
+    test "case 6c — desktop header does NOT carry the 문서 toggle button" do
+      html =
+        render_component(ChatRail,
+          id: "chat-rail",
+          studio_state: default_state(),
+          streams: %{chat_messages: empty_stream()},
+          current_scope: lawyer_scope()
+        )
+
+      # Desktop renders the document inline + uses the studio-document-
+      # header's Dashboard link, so the in-rail toggle is mobile-only.
+      refute html =~ ~s(data-role="chat-rail-open-document")
     end
 
     test "agent_supervised persona sees the observer-mode banner" do
@@ -614,6 +651,70 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       |> render_submit()
 
       assert_receive {:captured, "chat.submit", %{"message" => "hi agent"}}
+    end
+
+    test "case 5b — mobile layout: send button has a stable id, form delegates click → chat.submit",
+         %{conn: conn} do
+      # Item 6 regression — owner report: "send btn in mobile simply
+      # doesn't work in chat-rail." Root cause: the colocated hook bound
+      # `click` directly on the button node, which morphdom could swap
+      # across re-renders, losing the listener; iOS Safari additionally
+      # dismissed the keyboard on button-tap which reflowed the
+      # `h-[100dvh]` viewport before `click` fired. The fix moves all
+      # listeners onto the stable <form> element (event delegation) and
+      # gives the button a stable `id` so the DOM node is preserved.
+      #
+      # Hooks do not run server-side, so we pin the contract on the
+      # rendered HTML + the form-submit fallback (which the hook also
+      # listens to). Browser-side behavior is covered by Playwright.
+      {:ok, lv, html} =
+        live_isolated(conn, WrapperLive,
+          session: %{
+            "scope" => lawyer_scope(),
+            "layout" => :mobile_full,
+            "test_pid" => self()
+          }
+        )
+
+      # Mobile layout marker present.
+      assert html =~ ~s(data-layout="mobile")
+
+      # The send button carries a stable id so morphdom preserves the
+      # node across re-renders — otherwise the colocated hook's listener
+      # bound at mount time would silently disappear.
+      assert html =~ ~s(id="chat-rail-send")
+      assert html =~ ~s(data-role="chat-send")
+
+      # The form is wired to the colocated `.ChatInput` hook (LV 1.1
+      # expands `.ChatInput` to the fully-qualified module path at
+      # compile time) and carries `phx-submit="chat.submit"` as the
+      # no-JS fallback.
+      assert html =~ ~s(id="chat-rail-form")
+      assert html =~ ~s(phx-hook="ContractWeb.Live.Studio.Components.ChatRail.ChatInput")
+      assert html =~ ~s(phx-submit="chat.submit")
+
+      # The textarea has the data-role that the hook uses to delegate
+      # keydown/input events from the form.
+      assert html =~ ~s(data-role="chat-textarea")
+      assert html =~ ~s(name="message")
+
+      # The send button MUST remain type=button (preserves mobile
+      # keyboard focus — see module @moduledoc).
+      assert Regex.match?(
+               ~r/<button[^>]*id="chat-rail-send"[^>]*type="button"|<button[^>]*type="button"[^>]*id="chat-rail-send"/s,
+               html
+             )
+
+      # The fallback path: typing into the textarea + submitting the
+      # form dispatches chat.submit with the message body. This is the
+      # same event the delegated click handler in the hook pushes — so
+      # asserting the form-level wire is intact pins the contract that
+      # the rest of the system (StudioLive.event_to_command) expects.
+      lv
+      |> form("#chat-rail-form", %{"message" => "from mobile"})
+      |> render_submit()
+
+      assert_receive {:captured, "chat.submit", %{"message" => "from mobile"}}
     end
 
     test "case 7 — GrillRail mounts when grill_active? is true", %{conn: conn} do

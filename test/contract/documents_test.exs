@@ -67,6 +67,33 @@ defmodule Contract.DocumentsTest do
       assert id == doc.id
     end
 
+    test "list_all_for_scope/2 returns every owned document, ordered desc by updated_at" do
+      owner = scope()
+      other = scope()
+      {:ok, _hidden} = Documents.create(other, %{title: "Hidden"})
+
+      # Create a bunch of owner-scoped docs so we hit beyond the legacy
+      # recent-window size.
+      ids =
+        for i <- 1..30 do
+          {:ok, doc} = Documents.create(owner, %{title: "Doc #{i}"})
+          doc.id
+        end
+
+      results = Documents.list_all_for_scope(owner)
+      assert length(results) == length(ids)
+      assert Enum.all?(results, &(&1.id in ids))
+
+      # Order: most recently updated first.
+      updated_ats = Enum.map(results, & &1.updated_at)
+      assert updated_ats == Enum.sort(updated_ats, {:desc, NaiveDateTime})
+    end
+
+    test "list_all_for_scope/2 returns [] when scope has no user" do
+      anon = %Context{user: nil, perms: []}
+      assert Documents.list_all_for_scope(anon) == []
+    end
+
     test "search/3 returns only owned matches" do
       owner = scope()
       other = scope()
