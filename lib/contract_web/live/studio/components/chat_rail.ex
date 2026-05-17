@@ -165,12 +165,6 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             <p class="mb-2">{dgettext("studio", "새 문서를 시작합니다. 어떻게 시작할까요?")}</p>
             <ol class="list-decimal list-inside space-y-1 marker:text-base-content/60">
               <li>
-                <strong>{dgettext("studio", "기존 계약서 업로드")}</strong>
-                <span class="text-base-content/70">
-                  {dgettext("studio", " — PDF, HWP, HWPX를 드래그하거나 선택")}
-                </span>
-              </li>
-              <li>
                 <strong>{dgettext("studio", "최근 문서 열기")}</strong>
                 <span class="text-base-content/70">
                   {dgettext("studio", " — 최근 작업한 문서로 이동")}
@@ -415,204 +409,238 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
       |> assign(:operation_summary, operation_summary(assigns.operation))
 
     ~H"""
-    <section
-      id={"operation-block-#{@operation_id}"}
-      data-role="operation-block"
-      data-operation-type={@operation_type}
-      data-operation-status={@operation_status}
-      class="w-full rounded-md border border-base-300 bg-base-100 text-base-content shadow-sm overflow-hidden"
-    >
+    <%= if @operation_type == "tool_call" do %>
       <button
-        id={"operation-block-#{@operation_id}-toggle"}
+        id={"tool-trace-#{@operation_id}"}
         type="button"
         phx-click="ui.toggle_expand"
         phx-value-operation_id={@operation_id}
         phx-target={@target}
-        class="flex w-full items-start gap-2 px-3 py-2 text-left transition hover:bg-base-200/70"
+        data-role="tool-trace"
+        data-status={@operation_status}
+        class="tool-trace flex w-full items-center gap-2 rounded-md border border-base-200 bg-base-100 px-3 py-2 text-left text-sm text-base-content/75 transition hover:border-base-300 hover:text-base-content"
       >
         <.icon
-          name={if(@expanded, do: "hero-chevron-down", else: "hero-chevron-right")}
-          class="mt-0.5 size-4 shrink-0 text-base-content/50"
+          name={if(@expanded, do: "hero-chevron-down", else: "hero-check")}
+          class="size-4 shrink-0 text-base-content/50"
         />
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2">
-            <span class="truncate text-xs font-semibold uppercase text-base-content/60">
-              {operation_label(@operation_type)}
-            </span>
-            <span class="rounded-full bg-base-200 px-1.5 py-0.5 text-[10px] font-medium text-base-content/60">
-              {@operation_status}
-            </span>
-          </div>
-          <p class="truncate text-sm font-medium text-base-content">{@operation_title}</p>
-          <p :if={@operation_summary != ""} class="mt-0.5 text-xs text-base-content/60">
-            {@operation_summary}
-          </p>
-        </div>
+        <span class="tool-trace__label min-w-0 flex-1 truncate">
+          {dgettext("studio", "답변을 수정 범위에 연결함")}
+        </span>
+        <span
+          :if={@operation_summary != ""}
+          class="tool-trace__meta shrink-0 text-xs text-base-content/50"
+        >
+          {@operation_summary}
+        </span>
       </button>
       <div
-        :if={@operation_type == "evidence"}
-        data-role="evidence-block"
-        data-provider={evidence_provider(@operation)}
-        class="border-t border-base-200 bg-base-50 px-3 py-2 text-xs text-base-content/70"
-      >
-        <div class="flex items-start justify-between gap-3">
-          <dl class="grid min-w-0 flex-1 grid-cols-[auto_1fr] gap-x-2 gap-y-1">
-            <dt class="text-base-content/50">Citation</dt>
-            <dd class="truncate font-medium text-base-content">{evidence_citation(@operation)}</dd>
-            <dt class="text-base-content/50">Source</dt>
-            <dd class="truncate">{evidence_source(@operation)}</dd>
-            <dt class="text-base-content/50">Provider</dt>
-            <dd class="truncate">{evidence_provider(@operation)}</dd>
-            <dt class="text-base-content/50">Captured</dt>
-            <dd>
-              <time datetime={evidence_captured_at(@operation)}>
-                {evidence_captured_at(@operation)}
-              </time>
-            </dd>
-          </dl>
-          <button
-            :if={evidence_snapshot_id(@operation)}
-            type="button"
-            data-role="evidence-attach"
-            phx-click="evidence.attach"
-            phx-value-evidence_snapshot_id={evidence_snapshot_id(@operation)}
-            class="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-base-300 text-base-content/70 transition hover:bg-base-200 hover:text-base-content"
-            aria-label="Attach evidence"
-          >
-            <.icon name="hero-link" class="size-4" />
-          </button>
-        </div>
-      </div>
-      <div
-        :if={@operation_type == "source_interpretation"}
-        data-role="source-interpretation-block"
-        class="border-t border-base-200 bg-base-50 px-3 py-2 text-xs text-base-content/70"
-      >
-        <div class="flex items-center justify-between gap-3">
-          <span class="font-medium text-base-content">{source_document_id(@operation)}</span>
-          <span>{length(source_operation_claims(@operation))} claims</span>
-        </div>
-        <ul
-          :if={source_operation_regions(@operation) != []}
-          class="mt-2 space-y-1"
-          data-role="source-regions"
-        >
-          <li :for={region <- source_operation_regions(@operation)} class="truncate">
-            <span class="font-mono">{detail_value(region, "region_id")}</span>
-            <span>{detail_value(region, "raw_text")}</span>
-          </li>
-        </ul>
-        <ul
-          :if={source_operation_claims(@operation) != []}
-          class="mt-2 space-y-1"
-          data-role="source-claims"
-        >
-          <li
-            :for={claim <- source_operation_claims(@operation)}
-            class="rounded border border-base-200 px-2 py-1"
-          >
-            <span class="font-medium">{claim_kind(claim)}</span>
-            <span class="ml-1">{claim_value(claim)}</span>
-          </li>
-        </ul>
-      </div>
-      <div
-        :if={@operation_type == "source_claim"}
-        data-role="source-claim-block"
-        class="border-t border-base-200 bg-base-50 px-3 py-2 text-xs text-base-content/70"
-      >
-        <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1">
-          <dt class="font-medium text-base-content/60">Field</dt>
-          <dd class="font-mono">{source_claim_field(@operation)}</dd>
-          <dt class="font-medium text-base-content/60">Value</dt>
-          <dd>{source_claim_value(@operation)}</dd>
-          <dt class="font-medium text-base-content/60">Confidence</dt>
-          <dd>{source_claim_confidence(@operation)}</dd>
-        </dl>
-        <ul
-          :if={source_claim_anchors(@operation) != []}
-          class="mt-2 space-y-1"
-          data-role="source-claim-anchors"
-        >
-          <li
-            :for={anchor <- source_claim_anchors(@operation)}
-            class="rounded border border-base-200 px-2 py-1"
-          >
-            <span :if={detail_value(anchor, "page")}>p.{detail_value(anchor, "page")}</span>
-            <span>{detail_value(anchor, "text") || inspect(anchor)}</span>
-          </li>
-        </ul>
-        <div class="mt-2 flex flex-wrap gap-1.5" data-role="source-claim-controls">
-          <button
-            type="button"
-            class="btn btn-xs btn-primary"
-            phx-click="source_claim.confirm"
-            phx-value-source_claim_id={source_claim_id(@operation)}
-            phx-value-source_document_id={source_document_id(@operation)}
-          >
-            Confirm
-          </button>
-          <details class="group/correct" data-role="source-claim-correct-panel">
-            <summary class="btn btn-xs list-none marker:hidden">
-              Correct
-            </summary>
-            <.form
-              for={source_claim_correction_form(@operation)}
-              id={"source-claim-correct-form-#{source_claim_id(@operation)}"}
-              phx-submit="source_claim.correct"
-              data-role="source-claim-correct-form"
-              class="mt-2 flex w-full min-w-64 items-end gap-2 rounded-md border border-base-200 bg-base-100 p-2"
-            >
-              <input type="hidden" name="source_claim_id" value={source_claim_id(@operation)} />
-              <input type="hidden" name="source_document_id" value={source_document_id(@operation)} />
-              <.input
-                id={"source-claim-correct-value-#{source_claim_id(@operation)}"}
-                name="value"
-                type="text"
-                value={source_claim_value(@operation)}
-                class="input input-xs min-w-0 flex-1"
-              />
-              <button type="submit" class="btn btn-xs btn-primary">Save</button>
-            </.form>
-          </details>
-          <button
-            type="button"
-            class="btn btn-xs btn-ghost"
-            phx-click="source_claim.reject"
-            phx-value-source_claim_id={source_claim_id(@operation)}
-            phx-value-source_document_id={source_document_id(@operation)}
-          >
-            Reject
-          </button>
-          <button
-            type="button"
-            class="btn btn-xs"
-            phx-click="source_claim.link_to_document"
-            phx-value-source_claim_id={source_claim_id(@operation)}
-            phx-value-source_document_id={source_document_id(@operation)}
-          >
-            Link
-          </button>
-          <button
-            type="button"
-            class="btn btn-xs btn-ghost"
-            phx-click="source_claim.unlink"
-            phx-value-source_claim_id={source_claim_id(@operation)}
-            phx-value-source_document_id={source_document_id(@operation)}
-          >
-            Unlink
-          </button>
-        </div>
-      </div>
-      <div
         :if={@expanded}
-        id={"operation-block-#{@operation_id}-details"}
-        data-role="operation-details"
-        class="border-t border-base-200 bg-base-50 px-3 py-2"
+        id={"tool-trace-#{@operation_id}-details"}
+        data-role="tool-trace-details"
+        class="border-t border-base-200 bg-base-50 px-3 py-2 text-xs text-base-content/70"
       >
-        <pre class="whitespace-pre-wrap break-words text-xs leading-relaxed text-base-content/70">{operation_details(@operation)}</pre>
+        <pre class="whitespace-pre-wrap break-words leading-relaxed">{operation_details(@operation)}</pre>
       </div>
-    </section>
+    <% else %>
+      <section
+        id={"operation-block-#{@operation_id}"}
+        data-role="operation-block"
+        data-operation-type={@operation_type}
+        data-operation-status={@operation_status}
+        class={[
+          "w-full rounded-md border border-base-300 bg-base-100 text-base-content shadow-sm overflow-hidden",
+          @operation_type == "tool_call" && "tool-trace"
+        ]}
+      >
+        <button
+          id={"operation-block-#{@operation_id}-toggle"}
+          type="button"
+          phx-click="ui.toggle_expand"
+          phx-value-operation_id={@operation_id}
+          phx-target={@target}
+          class="flex w-full items-start gap-2 px-3 py-2 text-left transition hover:bg-base-200/70"
+        >
+          <.icon
+            name={if(@expanded, do: "hero-chevron-down", else: "hero-chevron-right")}
+            class="mt-0.5 size-4 shrink-0 text-base-content/50"
+          />
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2">
+              <span class="truncate text-xs font-semibold uppercase text-base-content/60">
+                {operation_label(@operation_type)}
+              </span>
+              <span class="rounded-full bg-base-200 px-1.5 py-0.5 text-[10px] font-medium text-base-content/60">
+                {operation_status_label(@operation_status)}
+              </span>
+            </div>
+            <p class="truncate text-sm font-medium text-base-content">{@operation_title}</p>
+            <p :if={@operation_summary != ""} class="mt-0.5 text-xs text-base-content/60">
+              {@operation_summary}
+            </p>
+          </div>
+        </button>
+        <div
+          :if={@operation_type == "evidence"}
+          data-role="evidence-block"
+          class="border-t border-base-200 bg-base-50 px-3 py-2 text-xs text-base-content/70"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <dl class="grid min-w-0 flex-1 grid-cols-[auto_1fr] gap-x-2 gap-y-1">
+              <dt class="text-base-content/50">인용</dt>
+              <dd class="truncate font-medium text-base-content">{evidence_citation(@operation)}</dd>
+              <dt class="text-base-content/50">출처</dt>
+              <dd class="truncate">{evidence_source(@operation)}</dd>
+              <dt class="text-base-content/50">수집 시각</dt>
+              <dd>
+                <time datetime={evidence_captured_at(@operation)}>
+                  {evidence_captured_at(@operation)}
+                </time>
+              </dd>
+            </dl>
+            <button
+              :if={evidence_snapshot_id(@operation)}
+              type="button"
+              data-role="evidence-attach"
+              phx-click="evidence.attach"
+              phx-value-evidence_snapshot_id={evidence_snapshot_id(@operation)}
+              class="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-base-300 text-base-content/70 transition hover:bg-base-200 hover:text-base-content"
+              aria-label={dgettext("studio", "근거 연결")}
+            >
+              <.icon name="hero-link" class="size-4" />
+            </button>
+          </div>
+        </div>
+        <div
+          :if={@operation_type == "source_interpretation"}
+          data-role="source-interpretation-block"
+          class="border-t border-base-200 bg-base-50 px-3 py-2 text-xs text-base-content/70"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <span class="font-medium text-base-content">{dgettext("studio", "원문 문서")}</span>
+            <span>{source_claim_count_label(length(source_operation_claims(@operation)))}</span>
+          </div>
+          <ul
+            :if={source_operation_regions(@operation) != []}
+            class="mt-2 space-y-1"
+            data-role="source-regions"
+          >
+            <li :for={region <- source_operation_regions(@operation)} class="truncate">
+              <span>{detail_value(region, "raw_text")}</span>
+            </li>
+          </ul>
+          <ul
+            :if={source_operation_claims(@operation) != []}
+            class="mt-2 space-y-1"
+            data-role="source-claims"
+          >
+            <li
+              :for={claim <- source_operation_claims(@operation)}
+              class="rounded border border-base-200 px-2 py-1"
+            >
+              <span class="font-medium">{claim_kind_label(claim)}</span>
+              <span class="ml-1">{claim_value(claim)}</span>
+            </li>
+          </ul>
+        </div>
+        <div
+          :if={@operation_type == "source_claim"}
+          data-role="source-claim-block"
+          class="border-t border-base-200 bg-base-50 px-3 py-2 text-xs text-base-content/70"
+        >
+          <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1">
+            <dt class="font-medium text-base-content/60">항목</dt>
+            <dd>{source_claim_field_label(@operation)}</dd>
+            <dt class="font-medium text-base-content/60">값</dt>
+            <dd>{source_claim_value(@operation)}</dd>
+            <dt class="font-medium text-base-content/60">신뢰도</dt>
+            <dd>{source_claim_confidence(@operation)}</dd>
+          </dl>
+          <ul
+            :if={source_claim_anchors(@operation) != []}
+            class="mt-2 space-y-1"
+            data-role="source-claim-anchors"
+          >
+            <li
+              :for={anchor <- source_claim_anchors(@operation)}
+              class="rounded border border-base-200 px-2 py-1"
+            >
+              <span :if={detail_value(anchor, "page")}>p.{detail_value(anchor, "page")}</span>
+              <span>{detail_value(anchor, "text") || inspect(anchor)}</span>
+            </li>
+          </ul>
+          <div class="mt-2 flex flex-wrap gap-1.5" data-role="source-claim-controls">
+            <button
+              type="button"
+              class="btn btn-xs btn-primary"
+              phx-click="source_claim.confirm"
+              phx-value-source_claim_id={source_claim_id(@operation)}
+              phx-value-source_document_id={source_document_id(@operation)}
+            >
+              확정
+            </button>
+            <details class="group/correct" data-role="source-claim-correct-panel">
+              <summary class="btn btn-xs list-none marker:hidden">
+                수정
+              </summary>
+              <.form
+                for={source_claim_correction_form(@operation)}
+                id={"source-claim-correct-form-#{source_claim_id(@operation)}"}
+                phx-submit="source_claim.correct"
+                data-role="source-claim-correct-form"
+                class="mt-2 flex w-full min-w-64 items-end gap-2 rounded-md border border-base-200 bg-base-100 p-2"
+              >
+                <input type="hidden" name="source_claim_id" value={source_claim_id(@operation)} />
+                <input type="hidden" name="source_document_id" value={source_document_id(@operation)} />
+                <.input
+                  id={"source-claim-correct-value-#{source_claim_id(@operation)}"}
+                  name="value"
+                  type="text"
+                  value={source_claim_value(@operation)}
+                  class="input input-xs min-w-0 flex-1"
+                />
+                <button type="submit" class="btn btn-xs btn-primary">저장</button>
+              </.form>
+            </details>
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost"
+              phx-click="source_claim.reject"
+              phx-value-source_claim_id={source_claim_id(@operation)}
+              phx-value-source_document_id={source_document_id(@operation)}
+            >
+              반려
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs"
+              phx-click="source_claim.link_to_document"
+              phx-value-source_claim_id={source_claim_id(@operation)}
+              phx-value-source_document_id={source_document_id(@operation)}
+            >
+              문서에 연결
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost"
+              phx-click="source_claim.unlink"
+              phx-value-source_claim_id={source_claim_id(@operation)}
+              phx-value-source_document_id={source_document_id(@operation)}
+            >
+              연결 해제
+            </button>
+          </div>
+        </div>
+        <div
+          :if={@expanded}
+          id={"operation-block-#{@operation_id}-details"}
+          data-role="operation-details"
+          class="border-t border-base-200 bg-base-50 px-3 py-2"
+        >
+          <pre class="whitespace-pre-wrap break-words text-xs leading-relaxed text-base-content/70">{operation_details(@operation)}</pre>
+        </div>
+      </section>
+    <% end %>
     """
   end
 
@@ -690,7 +718,6 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
   @doc false
   def start_options do
     [
-      %{key: "upload", label: dgettext("studio", "기존 계약서 업로드")},
       %{key: "recent", label: dgettext("studio", "최근 문서 열기")},
       %{key: "blank", label: dgettext("studio", "빈 계약서 만들기")},
       %{key: "draft_from_discussion", label: dgettext("studio", "논의에서 시작")},
@@ -736,16 +763,33 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
   defp operation_type(operation), do: operation_value(operation, "type") || "operation"
   defp operation_status(operation), do: operation_value(operation, "status") || "pending"
 
-  defp operation_title(operation),
-    do: operation_value(operation, "title") || operation_label(operation_type(operation))
+  defp operation_title(operation) do
+    case operation_type(operation) do
+      "source_claim" ->
+        dgettext("studio", "%{field} 확인", field: source_claim_field_label(operation))
+
+      _ ->
+        operation_value(operation, "title") || operation_label(operation_type(operation))
+    end
+  end
 
   defp operation_summary(operation) do
-    operation_value(operation, "summary") || operation_value(operation, "body") || ""
+    case operation_type(operation) do
+      "source_interpretation" ->
+        source_claim_count_label(length(source_operation_claims(operation)))
+
+      _ ->
+        operation_value(operation, "summary") || operation_value(operation, "body") || ""
+    end
   end
 
   defp evidence_snapshot_id(operation), do: operation_value(operation, "evidence_snapshot_id")
-  defp evidence_provider(operation), do: operation_value(operation, "provider") || "law_mcp"
-  defp evidence_source(operation), do: operation_value(operation, "source") || "Legal source"
+
+  defp evidence_source(operation) do
+    operation
+    |> operation_value("source")
+    |> source_label(operation_value(operation, "provider"))
+  end
 
   defp evidence_citation(operation),
     do: operation_value(operation, "citation") || operation_title(operation)
@@ -792,6 +836,8 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
     details["proposed_kind"] || details["field"] || details["field_id"] || ""
   end
 
+  defp source_claim_field_label(operation), do: source_claim_field(operation) |> field_label()
+
   defp source_claim_value(operation) do
     details = operation_details_map(operation)
     details["user_value"] || details["value"] || details["proposed_value"] || ""
@@ -805,6 +851,8 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
 
   defp claim_kind(claim),
     do: detail_value(claim, "proposed_kind") || detail_value(claim, "kind") || ""
+
+  defp claim_kind_label(claim), do: claim |> claim_kind() |> field_label()
 
   defp claim_value(claim),
     do: detail_value(claim, "proposed_value") || detail_value(claim, "value") || ""
@@ -831,17 +879,52 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
 
   defp operation_value(_operation, _key), do: nil
 
-  defp operation_label("tool_call"), do: "Tool call"
-  defp operation_label("source_interpretation"), do: "Source interpretation"
-  defp operation_label("source_claim"), do: "Source claim"
-  defp operation_label("evidence"), do: "Evidence"
-  defp operation_label("export_status"), do: "Export"
-  defp operation_label("conversion_plan"), do: "Conversion plan"
+  defp operation_label("tool_call"), do: "도구 실행"
+  defp operation_label("source_interpretation"), do: "원문 해석"
+  defp operation_label("source_claim"), do: "추출값"
+  defp operation_label("evidence"), do: "근거"
+  defp operation_label("export_status"), do: "내보내기"
+  defp operation_label("conversion_plan"), do: "변환 계획"
 
-  defp operation_label(type) when is_binary(type),
-    do: type |> String.replace("_", " ") |> String.capitalize()
+  defp operation_label(_type) when is_binary(_type), do: dgettext("studio", "작업")
 
-  defp operation_label(_), do: "Operation"
+  defp operation_label(_), do: "작업"
+
+  defp operation_status_label("completed"), do: dgettext("studio", "완료")
+  defp operation_status_label("ready"), do: dgettext("studio", "준비됨")
+  defp operation_status_label("proposed"), do: dgettext("studio", "제안됨")
+  defp operation_status_label("pending"), do: dgettext("studio", "대기")
+  defp operation_status_label("failed"), do: dgettext("studio", "실패")
+  defp operation_status_label(_status) when is_binary(_status), do: dgettext("studio", "진행 중")
+  defp operation_status_label(_), do: dgettext("studio", "진행 중")
+
+  defp source_claim_count_label(count), do: dgettext("studio", "추출값 %{count}개", count: count)
+
+  defp source_label(source, provider) do
+    source = to_string(source || "")
+    provider = to_string(provider || "")
+
+    cond do
+      String.contains?(provider, "law_mcp") or String.contains?(source, "Korea Law MCP") ->
+        dgettext("studio", "법령 검색 결과")
+
+      source == "" ->
+        dgettext("studio", "제공된 근거")
+
+      true ->
+        dgettext("studio", "제공된 근거")
+    end
+  end
+
+  defp field_label("effective_date"), do: dgettext("studio", "효력 발생일")
+  defp field_label("party_a"), do: dgettext("studio", "갑")
+  defp field_label("party_b"), do: dgettext("studio", "을")
+  defp field_label("counterparty"), do: dgettext("studio", "상대방")
+  defp field_label("contract_amount"), do: dgettext("studio", "계약 금액")
+  defp field_label("payment_terms"), do: dgettext("studio", "지급 조건")
+  defp field_label("term"), do: dgettext("studio", "계약 기간")
+  defp field_label(value) when is_binary(value) and value != "", do: dgettext("studio", "문서 항목")
+  defp field_label(_), do: dgettext("studio", "문서 항목")
 
   defp msg_role(%{role: :user}), do: "user"
   defp msg_role(%{role: "user"}), do: "user"

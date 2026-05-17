@@ -308,26 +308,18 @@ defmodule ContractWeb.StudioLiveTest do
   describe "agent_option_picked (no-document quick-start, SPEC.md §10)" do
     setup :log_in_a_user
 
-    test "renders the 5-option no-document welcome at /studio (no doc selected)",
+    test "renders the 4-option no-document welcome at /studio (no doc selected)",
          %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/studio")
 
       assert html =~ ~s(data-role="chat-no-doc-welcome")
-      # All 5 chip keys are present.
-      assert html =~ ~s(phx-value-key="upload")
+      # The 4 chip keys (upload removed per #19 — that affordance lives on
+      # the dashboard, not in the chat).
+      refute html =~ ~s(phx-value-key="upload")
       assert html =~ ~s(phx-value-key="recent")
       assert html =~ ~s(phx-value-key="blank")
       assert html =~ ~s(phx-value-key="draft_from_discussion")
       assert html =~ ~s(phx-value-key="variant_from_other")
-    end
-
-    test "upload option opens the upload modal", %{conn: conn} do
-      {:ok, lv, _html} = live(conn, ~p"/studio")
-      assert :sys.get_state(lv.pid).socket.assigns.studio_state.upload_panel_open? == false
-
-      _ = render_hook(lv, "agent_option_picked", %{"key" => "upload"})
-
-      assert :sys.get_state(lv.pid).socket.assigns.studio_state.upload_panel_open? == true
     end
 
     test "recent option opens the document-picker modal", %{conn: conn} do
