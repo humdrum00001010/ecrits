@@ -1,8 +1,8 @@
 defmodule ContractWeb.Components.AppShell do
   @moduledoc """
   Shared v33 Contract Studio shell — the single global chrome wrapping
-  the three product surfaces (`LandingLive`, `DashboardLive`,
-  `StudioLive`).
+  the three product surfaces (`PageController` `:home` / `/`,
+  `DashboardLive`, `StudioLive`).
 
   See `docs/contract-studio-final-v33/SPEC.md` §4. The shell renders
   only:

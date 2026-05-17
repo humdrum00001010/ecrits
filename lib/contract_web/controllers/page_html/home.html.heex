@@ -1,114 +1,38 @@
-<Layouts.app flash={@flash} current_scope={@current_scope} variant="default">
-  <%!--
-    v0.5/design-landing — DESIGN.md §3 LandingLive surface.
-
-    Three-block right column + restrained Korean-primary copy. The
-    landing communicates ONE value: 프로젝트의 맥락을 계약 조항으로
-    구체화합니다. No product screenshots, no people, no 3D props, no
-    pipeline diagrams, no pricing block, no feature cards. The visual
-    system uses --cs-* tokens defined in assets/css/tokens.css and
-    surfaced through the .landing-v31 class block in app.css.
-
-    Westlaw silhouette test: this template intentionally has zero of
-    the banned `pop`-tier Tailwind utilities (oversized hero text,
-    heavy drop shadows, oversized corner radii, ultra-bold weight)
-    and no "Powered by AI / revolutionize / seamless" copy.
-
-    Korean is the primary language. PageController.home/2 pins the
-    Gettext locale to "ko" so dgettext("landing", …) resolves
-    through priv/gettext/ko/LC_MESSAGES/landing.po; the English
-    msgstrs are intentionally identical to the msgids so the en
-    fallback degrades to the Korean source until a translator fills
-    them in.
-  --%>
-  <div class="landing-v31">
-    <section class="landing-v31__hero">
-      <div class="landing-v31__copy">
-        <p class="landing-v31__eyebrow">
-          {dgettext("landing", "Contract Studio")}
-        </p>
-        <h1 class="landing-v31__headline">
-          {dgettext("landing", "프로젝트의 맥락을")}<br />
-          {dgettext("landing", "계약 조항으로")}<br />
-          {dgettext("landing", "구체화합니다.")}
-        </h1>
-        <p class="landing-v31__lead">
-          {dgettext("landing", "Contract Studio는 계약서를 쓰기 전에")}<br />
-          {dgettext("landing", "프로젝트가 실제로 어떻게 진행되는지 묻습니다.")}<br />
-          {dgettext("landing", "그 답은 조항과 변경 이력으로 남습니다.")}
-        </p>
-        <p class="landing-v31__cta-row">
-          <.link
-            :if={@current_scope}
-            navigate={~p"/dashboard"}
-            class="landing-v31__cta-primary"
-          >
-            {dgettext("landing", "대시보드 열기")}
-          </.link>
-          <.link
-            :if={!@current_scope}
-            navigate={~p"/users/log-in"}
-            class="landing-v31__cta-primary"
-          >
-            {dgettext("landing", "대시보드 열기")}
-          </.link>
-          <a href="#how-it-works" class="landing-v31__cta-secondary">
-            {dgettext("landing", "작동 방식 보기 →")}
-          </a>
-        </p>
+<.app_shell active="랜딩">
+  <main class="landing-page" id="landing-page">
+    <section class="landing-copy" aria-labelledby="landing-headline">
+      <p class="eyebrow">Contract Studio</p>
+      <h1 id="landing-headline">
+        프로젝트의 맥락을<br />계약 조항으로<br />구체화합니다.
+      </h1>
+      <p class="lead">
+        Contract Studio는 계약서를 쓰기 전에<br /> 프로젝트가 실제로 어떻게 진행되는지 묻습니다.<br /> 그 답은 조항과 변경 이력으로 남습니다.
+      </p>
+      <div class="landing-actions">
+        <.link navigate={~p"/dashboard"} class="button button--primary">
+          대시보드 열기
+        </.link>
+        <a href="#how" class="text-link">작동 방식 보기 →</a>
       </div>
-
-      <section
-        class="landing-v31__system"
-        aria-label={dgettext("landing", "프로젝트 맥락을 계약 조항으로 구체화하는 흐름")}
-        id="how-it-works"
-      >
-        <article class="landing-v31__block">
-          <p class="landing-v31__block-eyebrow">01</p>
-          <h2 class="landing-v31__block-title">
-            {dgettext("landing", "프로젝트 브리프")}
-          </h2>
-          <hr class="landing-v31__block-rule" />
-          <p class="landing-v31__block-caption">
-            {dgettext(
-              "landing",
-              "계약 상대방, 거래 구조, 위험 수용도를 자연어로 정리합니다."
-            )}
-          </p>
-        </article>
-
-        <article class="landing-v31__block">
-          <p class="landing-v31__block-eyebrow">02</p>
-          <h2 class="landing-v31__block-title">
-            {dgettext("landing", "StudioLive가 먼저 묻는 질문")}
-          </h2>
-          <hr class="landing-v31__block-rule" />
-          <p class="landing-v31__block-caption">
-            {dgettext(
-              "landing",
-              "에이전트가 빠진 결정을 식별하고 맥락에 맞게 한 번에 하나씩 묻습니다."
-            )}
-          </p>
-        </article>
-
-        <article class="landing-v31__block">
-          <p class="landing-v31__block-eyebrow">03</p>
-          <h2 class="landing-v31__block-title">
-            {dgettext("landing", "조항과 변경 이력으로 남김")}
-          </h2>
-          <hr class="landing-v31__block-rule" />
-          <p class="landing-v31__block-caption">
-            {dgettext(
-              "landing",
-              "답변은 수정 범위에 연결되어 조항으로 반영되고, 변경 이력으로 보존됩니다."
-            )}
-          </p>
-        </article>
-      </section>
     </section>
 
-    <section class="landing-v31__footnote">
-      <p>{dgettext("landing", "비공개 베타. 초청제로 운영합니다.")}</p>
+    <section id="how" class="landing-dossier" aria-label="프로젝트 맥락 정리">
+      <article class="project-context-panel">
+        <p class="panel-kicker">01</p>
+        <h2>프로젝트 맥락</h2>
+        <p>계약 상대방, 거래 구조, 일정, 위험 수용도를 한 곳에 정리합니다.</p>
+      </article>
+      <article class="agent-questions-panel">
+        <p class="panel-kicker">02</p>
+        <h2>중요 질문</h2>
+        <p>계약서를 쓰기 전에 빠진 결정을 찾아 맥락에 맞게 묻습니다.</p>
+      </article>
+      <article class="change-history-panel">
+        <p class="panel-kicker">03</p>
+        <h2>조항과 변경 이력</h2>
+        <p>답변은 수정 범위에 연결되어 조항으로 반영되고 변경 이력으로 남습니다.</p>
+      </article>
     </section>
-  </div>
-</Layouts.app>
+  </main>
+</.app_shell>
+<Layouts.flash_group flash={@flash} />

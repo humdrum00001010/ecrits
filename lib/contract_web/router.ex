@@ -63,12 +63,6 @@ defmodule ContractWeb.Router do
     end
   end
 
-  scope "/", ContractWeb do
-    pipe_through :browser
-
-    get "/", PageController, :home
-  end
-
   # Browser product flow is LiveView-only. The document-first product
   # routes live in the authenticated browser scope below, inside the
   # single `:require_authenticated_user` live_session.
@@ -130,6 +124,7 @@ defmodule ContractWeb.Router do
       ] do
       live "/dashboard", DashboardLive
       live "/studio", StudioLive
+      live "/studio/:document_id", StudioLive
       live "/documents/:document_id", StudioLive
       live "/documents/:document_id/review", StudioLive
       live "/users/settings", UserLive.Settings, :edit
@@ -156,6 +151,8 @@ defmodule ContractWeb.Router do
 
   scope "/", ContractWeb do
     pipe_through [:browser]
+
+    get "/", PageController, :home
 
     live_session :current_user,
       on_mount: [{ContractWeb.UserAuth, :mount_current_scope}, ContractWeb.Locale] do
