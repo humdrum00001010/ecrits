@@ -184,7 +184,7 @@ defmodule Contract.IO.LawMCPTest do
                LawMCP.verify_citations(["민법 제390조", "상법 제42조"])
     end
 
-    test "single-string citation via Contract.IO façade", %{bypass: bypass} do
+    test "single-string citation via Providers boundary", %{bypass: bypass} do
       Bypass.expect_once(bypass, "POST", "/mcp", fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn, length: 50_000_000)
         decoded = Jason.decode!(body)
@@ -205,7 +205,7 @@ defmodule Contract.IO.LawMCPTest do
         )
       end)
 
-      assert {:ok, [%{"valid" => true}]} = Contract.IO.verify_citation(nil, "민법 제390조")
+      assert {:ok, [%{"valid" => true}]} = Contract.Providers.verify_citation(nil, "민법 제390조")
     end
   end
 end

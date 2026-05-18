@@ -224,11 +224,13 @@ defmodule Contract.ContractTypesTest do
         })
       end
 
-      base = fn -> %{
-        "key" => "x",
-        "name_en" => "X",
-        "version" => "1"
-      } end
+      base = fn ->
+        %{
+          "key" => "x",
+          "name_en" => "X",
+          "version" => "1"
+        }
+      end
 
       assert_raise ArgumentError, ~r/unknown family/, fn ->
         TypeSpec.from_toml(Map.merge(base.(), %{"family" => "lawful_evil", "source" => "custom"}))

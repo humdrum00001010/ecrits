@@ -545,6 +545,9 @@ defmodule Contract.Store do
       op_kind in [:set_attr, :set_field] and Map.has_key?(args, :key) ->
         Map.update!(args, :key, &atomize_value/1)
 
+      op_kind == :create_node and Map.has_key?(args, :kind) ->
+        Map.update!(args, :kind, &coerce_create_node_kind/1)
+
       true ->
         args
     end
@@ -553,6 +556,22 @@ defmodule Contract.Store do
   defp atomize_keys(map) when is_map(map) do
     Map.new(map, fn {k, v} -> {atomize_key(k), v} end)
   end
+
+  @create_node_kinds [
+    :paragraph, :heading, :list, :list_item, :table, :caption,
+    :footer, :equation, :cell, :section, :field_ref
+  ]
+
+  defp coerce_create_node_kind(k) when is_atom(k), do: k
+
+  defp coerce_create_node_kind(k) when is_binary(k) do
+    case Enum.find(@create_node_kinds, &(Atom.to_string(&1) == k)) do
+      nil -> :paragraph
+      atom -> atom
+    end
+  end
+
+  defp coerce_create_node_kind(_), do: :paragraph
 
   defp atomize_key(k) when is_atom(k), do: k
 
@@ -612,9 +631,9 @@ defmodule Contract.Store do
       metadata: decode_simple(get_proj(projection, :metadata, %{})),
       nodes: decode_nodes(get_proj(projection, :nodes, %{})),
       node_order: get_proj(projection, :node_order, []),
-      fields: decode_simple(get_proj(projection, :fields, %{})),
-      marks: decode_simple(get_proj(projection, :marks, %{})),
-      refs: decode_simple(get_proj(projection, :refs, %{}))
+      fields: decode_fields(get_proj(projection, :fields, %{})),
+      marks: decode_marks(get_proj(projection, :marks, %{})),
+      refs: decode_refs(get_proj(projection, :refs, %{}))
     })
   end
 
@@ -628,11 +647,190 @@ defmodule Contract.Store do
   defp decode_simple(value) when is_list(value), do: value
   defp decode_simple(other), do: other
 
+  # ----------------------------------------------------------------------------
+  # JSONB → atom coercion at the Store decode boundary.
+  #
+  # `Snapshot.projection` is a JSONB column; after round-tripping through Postgres
+  # the in-memory shape — atom-keyed maps with atom `kind`, `intent`, etc. — comes
+  # back stringified. The renderer (PreviewOverlay.render_node/1) and downstream
+  # code pattern-match on atom keys and atom values, so without coercion every
+  # node falls through to the catch-all clause (headings render as <div>, tables
+  # don't render as <table>, etc.).
+  #
+  # We coerce here using strict allow-lists. NEVER `String.to_atom/1` — only
+  # atoms already known to the system are produced, with safe fallbacks
+  # (`:paragraph` for an unknown node kind; the raw string for unknown
+  # intent/source/confidence so the catch-all renderer clause still handles it).
+  # ----------------------------------------------------------------------------
+
+  # Outer keys of a node map (`@type node_t` in Runtime.State).
+  @node_keys [:id, :kind, :parent_id, :content, :children, :attrs]
+
+  # Node kinds produced by `Contract.IO.Upstage.map_category/1` plus the
+  # additional baseline kinds named in Runtime.State's @moduledoc (`:cell`,
+  # `:section`, `:field_ref`). `:figure`, `:footnote`, `:header` are also
+  # emitted by `map_category/1`. Anything outside this list falls back to
+  # `:paragraph`, which is the safest renderer kind.
+  @node_kinds [
+    :paragraph,
+    :heading,
+    :list,
+    :list_item,
+    :table,
+    :cell,
+    :section,
+    :field_ref,
+    :caption,
+    :footer,
+    :equation,
+    :figure,
+    :footnote,
+    :header
+  ]
+
+  # Atom-keyed attrs we care about preserving — superset of HWPX IR-richness
+  # keys (table_attr_keys, cell_attr_keys) and renderer-consumed keys
+  # (`:level`, `:ordered`, `:rows`). Unknown keys fall through as strings; the
+  # renderer ignores them.
+  @node_attr_keys [
+    :level,
+    :ordered,
+    :rows,
+    :cols,
+    :column_widths,
+    :border_fill_id,
+    :header_row_count,
+    :footer_row_count,
+    :row_span,
+    :col_span,
+    :vertical_alignment,
+    :padding_top,
+    :padding_right,
+    :padding_bottom,
+    :padding_left,
+    :page,
+    :coordinates,
+    :category
+  ]
+
+  # Outer keys of a mark map (`@type mark_t` in Runtime.State).
+  @mark_keys [:id, :intent, :source, :target_type, :target_id, :text, :confidence, :data]
+
   defp decode_nodes(map) when is_map(map) do
-    Map.new(map, fn {k, v} -> {k, decode_simple(v)} end)
+    Map.new(map, fn {k, v} -> {k, decode_node(v)} end)
   end
 
   defp decode_nodes(other), do: other
+
+  defp decode_node(node) when is_map(node) do
+    node
+    |> atomize_known_keys(@node_keys)
+    |> Map.update(:kind, :paragraph, &coerce_node_kind/1)
+    |> update_if_present(:attrs, &decode_node_attrs/1)
+  end
+
+  defp decode_node(other), do: other
+
+  defp coerce_node_kind(kind) when is_atom(kind) and not is_nil(kind) do
+    if kind in @node_kinds, do: kind, else: :paragraph
+  end
+
+  defp coerce_node_kind(kind) when is_binary(kind) do
+    case Enum.find(@node_kinds, &(Atom.to_string(&1) == kind)) do
+      nil -> :paragraph
+      atom -> atom
+    end
+  end
+
+  defp coerce_node_kind(_), do: :paragraph
+
+  defp decode_node_attrs(attrs) when is_map(attrs) do
+    atomize_known_keys(attrs, @node_attr_keys)
+  end
+
+  defp decode_node_attrs(other), do: other
+
+  defp decode_marks(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {k, decode_mark(v)} end)
+  end
+
+  defp decode_marks(other), do: other
+
+  defp decode_mark(mark) when is_map(mark) do
+    mark
+    |> atomize_known_keys(@mark_keys)
+    |> update_if_present(:intent, &coerce_known_atom/1)
+    |> update_if_present(:source, &coerce_known_atom/1)
+    |> update_if_present(:target_type, &coerce_known_atom/1)
+    |> update_if_present(:confidence, &coerce_known_atom/1)
+  end
+
+  defp decode_mark(other), do: other
+
+  defp decode_fields(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {k, decode_field(v)} end)
+  end
+
+  defp decode_fields(other), do: other
+
+  defp decode_field(field) when is_map(field) do
+    atomize_known_keys(field, [:id, :key, :value, :attrs])
+  end
+
+  defp decode_field(other), do: other
+
+  defp decode_refs(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {k, decode_ref(v)} end)
+  end
+
+  defp decode_refs(other), do: other
+
+  defp decode_ref(ref) when is_map(ref) do
+    ref
+    |> atomize_known_keys([:id, :source_node_id, :target_id, :type])
+    |> update_if_present(:type, &coerce_known_atom/1)
+  end
+
+  defp decode_ref(other), do: other
+
+  # Re-key a map so that any string key whose atom form is in `allowed` becomes
+  # an atom. Unknown keys pass through unchanged. Safe because `allowed` is a
+  # compile-time list of atoms — they are already loaded.
+  defp atomize_known_keys(map, allowed) when is_map(map) and is_list(allowed) do
+    Map.new(map, fn {k, v} -> {atomize_known_key(k, allowed), v} end)
+  end
+
+  defp atomize_known_key(k, _allowed) when is_atom(k), do: k
+
+  defp atomize_known_key(k, allowed) when is_binary(k) do
+    case Enum.find(allowed, &(Atom.to_string(&1) == k)) do
+      nil -> k
+      atom -> atom
+    end
+  end
+
+  defp atomize_known_key(k, _allowed), do: k
+
+  defp update_if_present(map, key, fun) when is_map(map) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> Map.put(map, key, fun.(value))
+      :error -> map
+    end
+  end
+
+  # For mark intent/source/target_type/confidence: convert to atom only if the
+  # string corresponds to an already-loaded atom. Otherwise leave as string so
+  # downstream catch-all clauses (e.g. `intent_badge_class/1`) handle it
+  # gracefully.
+  defp coerce_known_atom(v) when is_atom(v), do: v
+
+  defp coerce_known_atom(v) when is_binary(v) do
+    String.to_existing_atom(v)
+  rescue
+    ArgumentError -> v
+  end
+
+  defp coerce_known_atom(v), do: v
 
   defp topic(document_id), do: "document:#{document_id}"
 

@@ -130,7 +130,9 @@ defmodule Contract.Export.HTMLTest do
 
     # Out-of-range clamps to <h6>.
     {:ok, clamped} =
-      HTML.render(state_with_nodes([%{id: "h", kind: :heading, content: "X", attrs: %{level: 99}}]))
+      HTML.render(
+        state_with_nodes([%{id: "h", kind: :heading, content: "X", attrs: %{level: 99}}])
+      )
 
     assert clamped =~ "<h6>X</h6>"
   end

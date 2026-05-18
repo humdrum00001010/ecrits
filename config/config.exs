@@ -48,7 +48,7 @@ config :contract,
   generators: [timestamp_type: :utc_datetime, binary_id: true]
 
 # Default UI locale. Korean-primary for the public-facing surface
-# (landing, dashboard, auth, settings). Tests override this back to
+# (landing, storage, auth, settings). Tests override this back to
 # "en" in `config/test.exs` so gen.auth's generated LiveViewTests
 # continue to match English `msgid` strings (= source-of-truth).
 config :contract, :ui_locale, "ko"
@@ -152,7 +152,7 @@ config :phoenix, :json_library, Jason
 # SPEC.md §21.
 config :mime, :types, %{
   "text/event-stream" => ["event-stream"],
-  # DESIGN.md §4 — DashboardLive accepts HWP / HWPX uploads. The MIME
+  # DESIGN.md §4 — StorageLive accepts HWP / HWPX uploads. The MIME
   # registry needs these extensions before `allow_upload(accept: ~w(.hwp
   # .hwpx))` can validate them.
   "application/x-hwp" => ["hwp"],

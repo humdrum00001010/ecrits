@@ -3,6 +3,7 @@ defmodule ContractWeb.UserLive.Registration do
 
   alias Contract.Accounts
   alias Contract.Accounts.User
+  alias ContractWeb.AuthEmailURL
 
   @impl true
   def render(assigns) do
@@ -80,8 +81,8 @@ defmodule ContractWeb.UserLive.Registration do
 
           <p class="text-xs text-base-content/50 mt-8 text-center">
             {dgettext("auth", "Need help getting in?")}
-            <a href="mailto:hello@contractstudio.example" class="underline hover:text-base-content">
-              {dgettext("auth", "Email the team")}
+            <a href="mailto:ereignis@korea.ac.kr" class="underline hover:text-base-content">
+              ereignis@korea.ac.kr
             </a>
           </p>
         </:form>
@@ -109,7 +110,7 @@ defmodule ContractWeb.UserLive.Registration do
         {:ok, _} =
           Accounts.deliver_login_instructions(
             user,
-            &url(~p"/users/log-in/#{&1}")
+            &AuthEmailURL.login_url/1
           )
 
         {:noreply,

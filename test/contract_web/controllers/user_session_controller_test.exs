@@ -74,6 +74,20 @@ defmodule ContractWeb.UserSessionControllerTest do
   end
 
   describe "POST /users/log-in - magic link" do
+    test "email-only post sends login instructions without crashing", %{conn: conn, user: user} do
+      conn =
+        post(conn, ~p"/users/log-in", %{
+          "user" => %{"email" => user.email}
+        })
+
+      refute get_session(conn, :user_token)
+
+      assert Phoenix.Flash.get(conn.assigns.flash, :info) =~
+               "If your email is in our system"
+
+      assert redirected_to(conn) == ~p"/users/log-in"
+    end
+
     test "logs the user in", %{conn: conn, user: user} do
       {token, _hashed_token} = generate_user_magic_link_token(user)
 

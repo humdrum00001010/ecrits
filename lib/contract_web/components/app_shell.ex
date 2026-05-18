@@ -1,36 +1,33 @@
 defmodule ContractWeb.Components.AppShell do
   @moduledoc """
-  Shared v33 Contract Studio shell — the single global chrome wrapping
-  the three product surfaces (`PageController` `:home` / `/`,
-  `DashboardLive`, `StudioLive`).
+  Shared v33 계약기계 shell — the single global chrome wrapping the
+  product surfaces (`PageController` `:home` / `/`, `StorageLive`,
+  `StudioLive`).
 
-  See `docs/contract-studio-final-v33/SPEC.md` §4. The shell renders
-  only:
+  See `docs/contract-studio-final-v33/SPEC.md` §4. The shell renders:
 
-    * brand mark + "Contract Studio" wordmark on the left, linking to `/`
-    * topbar nav with `대시보드` link and `스튜디오` active-state span
+    * brand mark + "계약기계" wordmark on the left, linking to `/`
+    * topbar nav with the `보관함` link → `/storage`
+    * a right-side account menu when the caller passes a signed-in
+      `current_scope` (delegates to `ContractWeb.Layouts.user_menu/1` so
+      the same affordance appears in `Layouts.app/1`-based pages too)
 
-  Anything else — dashboard actions (`새 문서`, `계약서 업로드`), theme
-  switcher, account menu, breadcrumbs, footer — is intentionally OUT of
-  this shell. Dashboard actions live in `DashboardLive`'s content (§6);
-  auth and settings surfaces use `Layouts.app` with their own chrome.
-
-  ## Why no `<.link>` for `스튜디오`?
-
-  Studio is a per-document surface (`/studio/:document_id`). There is no
-  "open Studio" action without a chosen document, so the nav item is a
-  state indicator (`<span>`), not a navigable destination. To enter
-  Studio the user opens a document from the dashboard. This is the
-  intent of SPEC §0's "core loop" framing.
+  Storage actions (`새 문서`, `계약서 업로드`) and breadcrumbs are
+  intentionally OUT of this shell — they live in the per-surface
+  content. The 2026-05-17 owner directive removed the topbar's
+  `스튜디오` state span: Studio is reached by opening a document, so a
+  topbar state indicator with no destination only added noise.
 
   ## Usage
 
-      <.app_shell active="대시보드">
-        <main class="dashboard-page">...</main>
+      <.app_shell active="보관함" current_scope={@current_scope}>
+        <main class="storage-page">...</main>
       </.app_shell>
 
-  Pass `active` matching one of `"대시보드"` / `"스튜디오"` / `"랜딩"`
-  to set the active-state class.
+  Pass `active` matching one of `"보관함"` / `"랜딩"` to set the
+  active-state class. `current_scope` is optional; when nil (anonymous,
+  e.g. the landing page before sign-in) the account menu is omitted and
+  no error is raised.
   """
   use Phoenix.Component
 
@@ -39,9 +36,16 @@ defmodule ContractWeb.Components.AppShell do
     router: ContractWeb.Router,
     statics: ContractWeb.static_paths()
 
+  alias ContractWeb.Layouts
+
   attr :active, :string,
     default: nil,
-    doc: "Current v33 surface label: 대시보드, 스튜디오, or 랜딩 (or nil for none)"
+    doc: "Current v33 surface label: 보관함 or 랜딩 (or nil for none)"
+
+  attr :current_scope, :map,
+    default: nil,
+    doc:
+      "the current Contract.Context — pass through from the LiveView/conn so the topbar can render the account menu when signed in"
 
   slot :inner_block, required: true
 
@@ -49,18 +53,20 @@ defmodule ContractWeb.Components.AppShell do
     ~H"""
     <div class="app-shell">
       <header class="topbar">
-        <.link navigate={~p"/"} class="brand" aria-label="Contract Studio">
+        <.link navigate={~p"/"} class="brand" aria-label="계약기계">
           <img src={~p"/assets/icons/brand-mark.svg"} alt="" class="brand__icon" />
-          <span>Contract Studio</span>
+          <span>계약기계</span>
         </.link>
 
-        <nav class="topbar__nav" aria-label="Contract Studio">
-          <.link navigate={~p"/dashboard"} class={[@active == "대시보드" && "is-active"]}>
-            대시보드
-          </.link>
+        <div class="inline-flex items-center gap-3">
+          <nav class="topbar__nav" aria-label="계약기계">
+            <.link navigate={~p"/storage"} class={[@active == "보관함" && "is-active"]}>
+              보관함
+            </.link>
+          </nav>
 
-          <span class={[@active == "스튜디오" && "is-active"]}>스튜디오</span>
-        </nav>
+          <Layouts.user_menu :if={@current_scope} current_scope={@current_scope} />
+        </div>
       </header>
 
       {render_slot(@inner_block)}

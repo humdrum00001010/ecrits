@@ -88,6 +88,7 @@ defmodule ContractWeb.StudioLive do
 
   alias Contract.ChatThreads
   alias Contract.Command
+  alias Contract.ContractTypes
   alias Contract.Documents
   alias Contract.Studio
   alias ContractWeb.Components.Breadcrumbs
@@ -115,6 +116,8 @@ defmodule ContractWeb.StudioLive do
           |> assign(:breadcrumbs, breadcrumbs)
           |> assign(:page_title, page_title(scope))
           |> assign(:viewport, :desktop)
+          |> assign(:chat_rail_hidden?, false)
+          |> assign(:other_documents, list_other_documents(scope, studio_state))
           |> assign(:preview_modal_open?, false)
           |> assign(:reconcile_modal_open?, false)
           |> assign(:reconcile_request, nil)
@@ -130,7 +133,13 @@ defmodule ContractWeb.StudioLive do
             max_file_size: 50_000_000
           )
           |> stream_configure(:chat_messages, dom_id: &"chat-msg-#{&1.id}")
-          |> stream(:chat_messages, ChatThreads.list_visible_messages(scope, studio_state))
+          |> then(fn s ->
+            visible = ChatThreads.list_visible_messages(scope, studio_state)
+
+            s
+            |> stream(:chat_messages, visible)
+            |> maybe_dispatch_grill_seed(visible)
+          end)
           |> stream_configure(:changes, dom_id: &"change-#{&1.id}")
           |> stream(:changes, [])
           |> stream_configure(:toasts, dom_id: &"toast-#{&1.id}")
@@ -149,6 +158,8 @@ defmodule ContractWeb.StudioLive do
           |> assign(:breadcrumbs, build_breadcrumbs(scope, nil, nil))
           |> assign(:page_title, "Studio")
           |> assign(:viewport, :desktop)
+          |> assign(:chat_rail_hidden?, false)
+          |> assign(:other_documents, list_other_documents(scope, %{selected_document_id: nil}))
           |> assign(:preview_modal_open?, false)
           |> assign(:reconcile_modal_open?, false)
           |> assign(:reconcile_request, nil)
@@ -194,6 +205,25 @@ defmodule ContractWeb.StudioLive do
 
   def handle_event("toggle_preview", _params, socket) do
     {:noreply, update(socket, :preview_modal_open?, &(!&1))}
+  end
+
+  def handle_event("toggle_chat_rail", _params, socket) do
+    {:noreply, update(socket, :chat_rail_hidden?, &(!&1))}
+  end
+
+  def handle_event("cancel_agent", _params, socket) do
+    studio_state = socket.assigns.studio_state
+
+    case studio_state.agent_run_id do
+      run_id when is_binary(run_id) ->
+        _ = Contract.Agent.cancel(socket.assigns.current_scope, run_id)
+
+        new_state = %{studio_state | agent_run_id: nil}
+        {:noreply, assign(socket, :studio_state, new_state)}
+
+      _ ->
+        {:noreply, socket}
+    end
   end
 
   def handle_event("open_modal", %{"modal" => modal}, socket) do
@@ -1409,34 +1439,127 @@ defmodule ContractWeb.StudioLive do
 
       <Layouts.flash_group flash={@flash} />
     <% else %>
-      <.app_shell active="스튜디오">
+      <.app_shell current_scope={@current_scope}>
         <main
           id="studio-root"
           phx-hook=".Viewport"
           data-viewport="desktop"
-          class="studio-live flex h-[calc(100vh-60px)] min-h-[480px]"
+          class={[
+            "studio-live min-h-[calc(100vh-60px)] w-full",
+            @chat_rail_hidden? && "!pr-0"
+          ]}
         >
             <%!-- Desktop: document canvas + right chat rail. No permanent Context Reservoir. --%>
-            <section class="studio-document flex min-w-0 flex-1 flex-col">
+            <section class="studio-document flex min-w-0 flex-col">
               <header
                 id="studio-document-header"
                 class="studio-document__bar justify-between"
               >
-                <div class="flex min-w-0 items-center gap-3">
-                  <h1>
-                    {document_header_title(@current_document, @projection, @studio_state)}
-                  </h1>
-                  <span
-                    class={["status-dot", document_status_dot_modifier(@current_document)]}
-                    aria-hidden="true"
+                <div class="inline-flex items-center gap-1 min-w-0">
+                <form
+                  phx-submit="rename_document"
+                  phx-change="rename_document"
+                  class="inline-flex items-center h-8"
+                  data-role="document-title-form"
+                >
+                  <% title_value = document_header_title(@current_document, @projection, @studio_state) %>
+                  <input
+                    type="text"
+                    name="title"
+                    value={title_value}
+                    size={title_input_size(title_value)}
+                    aria-label={dgettext("studio", "문서 제목")}
+                    placeholder={dgettext("studio", "제목을 입력하세요")}
+                    autocomplete="off"
+                    spellcheck="false"
+                    phx-debounce="400"
+                    class="h-8 leading-none cursor-text bg-transparent text-sm font-medium text-base-content px-2 py-0 rounded-md border border-base-300 hover:border-base-content/30 focus:border-base-content/50 focus:bg-base-100 outline-none focus:outline-none focus:ring-0 focus:shadow-none transition-colors"
+                    style="min-width: 0; width: auto;"
+                  />
+                </form>
+
+                <%!-- Contract-type field — READ-ONLY display.            --%>
+                <%!-- 2026-05-18 owner directive: the type is decided at  --%>
+                <%!-- creation (Storage's 새 문서 dropdown) and immutable --%>
+                <%!-- afterwards. The header just surfaces what was       --%>
+                <%!-- chosen; no in-place editing, no clearing.            --%>
+                <span
+                  class="inline-flex h-7 items-center px-2 rounded-md text-xs font-medium border border-base-300 text-base-content/70"
+                  data-role="document-type-summary"
+                  aria-label={dgettext("studio", "문서 타입")}
+                  title={ContractTypes.display_name(projection_type_key(@projection))}
+                >
+                  {ContractTypes.display_name(projection_type_key(@projection))}
+                </span>
+
+                <details :if={@other_documents != []} class="relative shrink-0" data-role="document-picker">
+                  <summary
+                    class="list-none inline-flex h-7 w-7 items-center justify-center rounded-md cursor-pointer text-base-content/60 hover:text-base-content hover:bg-base-200"
+                    aria-label={dgettext("studio", "다른 문서로 이동")}
                   >
-                  </span>
-                  <span>
-                    {document_status_label(@current_document)}
-                  </span>
-                  <span class="saved-state">
-                    {dgettext("studio", "저장됨")}
-                  </span>
+                    <.icon name="hero-chevron-down" class="size-4" />
+                  </summary>
+                  <div
+                    class="absolute left-0 top-full mt-1 z-30 w-64 max-h-72 overflow-y-auto rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
+                    role="menu"
+                  >
+                    <.link
+                      :for={d <- @other_documents}
+                      navigate={~p"/studio/#{d.id}"}
+                      role="menuitem"
+                      class="block px-3 py-1.5 truncate text-base-content hover:bg-base-200"
+                      title={d.title}
+                    >
+                      {d.title}
+                    </.link>
+                  </div>
+                </details>
+                </div>
+
+                <div class="inline-flex items-center">
+                <details class="relative shrink-0" data-role="export-picker">
+                  <summary
+                    class="list-none inline-flex h-8 items-center gap-1 px-2 rounded-md cursor-pointer text-base-content/70 hover:text-base-content hover:bg-base-200 text-sm transition-colors"
+                    aria-label={dgettext("studio", "내보내기")}
+                  >
+                    <.icon name="hero-arrow-down-tray" class="size-4" />
+                    <span>{dgettext("studio", "내보내기")}</span>
+                  </summary>
+                  <div
+                    class="absolute right-0 top-full mt-1 z-30 w-44 rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
+                    role="menu"
+                  >
+                    <button
+                      :for={fmt <- ["pdf", "docx", "hwpx", "markdown"]}
+                      type="button"
+                      role="menuitem"
+                      phx-click="export.request"
+                      phx-value-format={fmt}
+                      class="flex w-full items-center justify-between px-3 py-1.5 text-base-content hover:bg-base-200"
+                    >
+                      <span class="font-medium">{export_format_label(fmt)}</span>
+                      <span class="text-xs uppercase tracking-wide text-base-content/40">{fmt}</span>
+                    </button>
+                  </div>
+                </details>
+
+                <button
+                  type="button"
+                  phx-click="toggle_chat_rail"
+                  class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors"
+                  aria-label={
+                    if @chat_rail_hidden?,
+                      do: dgettext("studio", "에이전트 패널 펼치기"),
+                      else: dgettext("studio", "전체화면")
+                  }
+                  aria-pressed={to_string(@chat_rail_hidden?)}
+                  data-role="toggle-chat-rail"
+                >
+                  <.icon
+                    name={if @chat_rail_hidden?, do: "hero-arrows-pointing-in", else: "hero-arrows-pointing-out"}
+                    class="size-4"
+                  />
+                </button>
                 </div>
               </header>
 
@@ -1471,7 +1594,88 @@ defmodule ContractWeb.StudioLive do
               </article>
             </section>
 
-            <aside class="studio-rail agent-rail w-[360px] shrink-0">
+            <aside
+              :if={not @chat_rail_hidden?}
+              id="studio-chat-rail"
+              phx-hook=".RailResizer"
+              class="studio-rail fixed top-[60px] right-0 h-[calc(100vh-60px)] min-h-0 flex flex-col z-30"
+              style="width: var(--chat-rail-width, 380px);"
+            >
+              <div
+                class="chat-rail-resizer"
+                data-role="chat-rail-resizer"
+                aria-hidden="true"
+              ></div>
+              <script :type={Phoenix.LiveView.ColocatedHook} name=".RailResizer">
+                export default {
+                  mounted() {
+                    const aside = this.el
+                    const handle = aside.querySelector('[data-role="chat-rail-resizer"]')
+                    if (!handle) return
+
+                    const root = document.documentElement
+                    const storageKey = "cs:chat-rail-width"
+                    const MIN = 280
+                    const MAX = 720
+
+                    const stored = localStorage.getItem(storageKey)
+                    if (stored) {
+                      const w = parseInt(stored, 10)
+                      if (!isNaN(w) && w >= MIN && w <= MAX) {
+                        root.style.setProperty("--chat-rail-width", w + "px")
+                      }
+                    }
+
+                    let startX = 0
+                    let startWidth = 0
+                    let dragging = false
+
+                    const onMove = (e) => {
+                      if (!dragging) return
+                      const x = e.touches ? e.touches[0].clientX : e.clientX
+                      const next = Math.min(MAX, Math.max(MIN, startWidth + (startX - x)))
+                      root.style.setProperty("--chat-rail-width", next + "px")
+                    }
+
+                    const onUp = () => {
+                      if (!dragging) return
+                      dragging = false
+                      handle.removeAttribute("data-dragging")
+                      document.body.removeAttribute("data-chat-rail-dragging")
+                      const current = parseInt(getComputedStyle(root).getPropertyValue("--chat-rail-width"), 10)
+                      if (!isNaN(current)) localStorage.setItem(storageKey, String(current))
+                      window.removeEventListener("mousemove", onMove)
+                      window.removeEventListener("mouseup", onUp)
+                      window.removeEventListener("touchmove", onMove)
+                      window.removeEventListener("touchend", onUp)
+                    }
+
+                    const onDown = (e) => {
+                      e.preventDefault()
+                      dragging = true
+                      startX = e.touches ? e.touches[0].clientX : e.clientX
+                      startWidth = aside.getBoundingClientRect().width
+                      handle.setAttribute("data-dragging", "true")
+                      document.body.setAttribute("data-chat-rail-dragging", "true")
+                      window.addEventListener("mousemove", onMove)
+                      window.addEventListener("mouseup", onUp)
+                      window.addEventListener("touchmove", onMove, { passive: false })
+                      window.addEventListener("touchend", onUp)
+                    }
+
+                    handle.addEventListener("mousedown", onDown)
+                    handle.addEventListener("touchstart", onDown, { passive: false })
+                    this._onDown = onDown
+                    this._handle = handle
+                  },
+                  destroyed() {
+                    if (this._handle && this._onDown) {
+                      this._handle.removeEventListener("mousedown", this._onDown)
+                      this._handle.removeEventListener("touchstart", this._onDown)
+                    }
+                  }
+                }
+              </script>
               <.live_component
                 module={Components.ChatRail}
                 id="chat-rail"
@@ -1530,6 +1734,50 @@ defmodule ContractWeb.StudioLive do
 
   defp current_document(_scope, _state), do: nil
 
+  defp list_other_documents(scope, %{selected_document_id: current_id}) do
+    scope
+    |> Contract.Documents.list_all_for_scope(limit: 30)
+    |> Enum.reject(&(&1.status in [:template, :archived]))
+    |> Enum.reject(&(&1.id == current_id))
+    |> Enum.map(fn d -> %{id: d.id, title: d.title} end)
+  rescue
+    _ -> []
+  end
+
+  defp list_other_documents(_scope, _state), do: []
+
+  defp export_format_label("pdf"), do: dgettext("studio", "PDF로 내려받기")
+  defp export_format_label("docx"), do: dgettext("studio", "DOCX로 내려받기")
+  defp export_format_label("hwpx"), do: dgettext("studio", "HWPX로 내려받기")
+  defp export_format_label("markdown"), do: dgettext("studio", "Markdown으로 내려받기")
+  defp export_format_label("lawyer_packet"), do: dgettext("studio", "변호사 패킷")
+  defp export_format_label(other), do: to_string(other)
+
+  # Estimate input `size=` for the editable title. The HTML `size` attribute
+  # measures in average-glyph widths (effectively ASCII "0"). CJK glyphs
+  # render roughly 2× wider, so a raw `String.length/1` count clips Korean
+  # titles. Count CJK codepoints as 2, others as 1, then pad +2 for the
+  # input's inner padding/caret breathing room.
+  defp title_input_size(nil), do: 4
+
+  defp title_input_size(s) when is_binary(s) do
+    weighted =
+      s
+      |> String.graphemes()
+      |> Enum.reduce(0, fn g, acc ->
+        acc + if wide_glyph?(g), do: 2, else: 1
+      end)
+
+    max(weighted + 2, 4)
+  end
+
+  defp title_input_size(_), do: 4
+
+  # Conservative CJK / fullwidth heuristic — anything outside U+0000..U+02AF
+  # counts as wide. Covers Hangul, Han, Kana, fullwidth punctuation.
+  defp wide_glyph?(<<cp::utf8>>) when cp > 0x02AF, do: true
+  defp wide_glyph?(_), do: false
+
   defp document_header_title(%{title: title}, _projection, _state)
        when is_binary(title) and title != "",
        do: title
@@ -1544,6 +1792,15 @@ defmodule ContractWeb.StudioLive do
 
   defp document_header_title(_document, _projection, _state),
     do: dgettext("studio", "No document selected")
+
+  # ContractTypes.display_name/1 accepts a string key, a TypeSpec, or
+  # nil; the projection may be the empty-projection map (type_key: nil)
+  # or a struct/map decoded from the snapshot. Always normalize to
+  # `string | nil` so the dropdown's "currently selected" rendering and
+  # the equality check against `spec.key` stay correct after a JSON
+  # roundtrip.
+  defp projection_type_key(%{type_key: tk}) when is_binary(tk) and tk != "", do: tk
+  defp projection_type_key(_), do: nil
 
   defp document_status_label(%{status: status}) when is_binary(status) do
     case status do
@@ -1814,4 +2071,100 @@ defmodule ContractWeb.StudioLive do
 
   defp stream_event_id(agent_run_id, _event),
     do: "agent-#{agent_run_id}-" <> Integer.to_string(System.unique_integer([:positive]))
+
+  # ---------------------------------------------------------------------------
+  # Auto-grill seed on cold document open. When the user lands on a document
+  # that (a) has body content, (b) has an empty chat thread, and (c) is not
+  # already mid-agent-run, dispatch a hidden `:chat_message` Command carrying
+  # `payload["grill_seed"] => true`. The Command's user-side row is persisted
+  # with role `"system"` so the visible rail stays empty until the agent's
+  # first turn lands.
+  # ---------------------------------------------------------------------------
+  @grill_seed_message "GRILL_SEED: 사용자에게 인사하고, 이 계약 문서를 한 단락으로 요약한 뒤, 프로젝트 맥락을 묻는 1-3개의 한국어 질문을 한 메시지에 담아 시작하세요."
+
+  defp maybe_dispatch_grill_seed(socket, visible_messages) do
+    if should_dispatch_grill_seed?(socket, visible_messages) do
+      dispatch_grill_seed(socket)
+    else
+      socket
+    end
+  end
+
+  defp should_dispatch_grill_seed?(socket, visible_messages) do
+    state = socket.assigns[:studio_state]
+    projection = socket.assigns[:projection]
+
+    not is_nil(state) and is_binary(state.selected_document_id) and
+      is_nil(state.agent_run_id) and
+      visible_messages == [] and
+      has_summarizable_body?(projection)
+  end
+
+  defp has_summarizable_body?(%{nodes: nodes}) when is_map(nodes) and map_size(nodes) > 0 do
+    Enum.any?(nodes, fn {_id, node} -> summarizable_node?(node) end)
+  end
+
+  defp has_summarizable_body?(_), do: false
+
+  @summarizable_kinds ~w(paragraph heading list_item section)
+
+  defp summarizable_node?(%{} = node) do
+    kind = node[:kind] || node["kind"]
+
+    to_string(kind) in @summarizable_kinds and
+      String.trim(to_string(node[:content] || node["content"] || "")) != ""
+  end
+
+  defp summarizable_node?(_), do: false
+
+  defp dispatch_grill_seed(socket) do
+    state = socket.assigns.studio_state
+    projection = socket.assigns.projection
+
+    action = %Command{
+      kind: :chat_message,
+      actor_type: :system,
+      actor_id: nil,
+      document_id: state.selected_document_id,
+      base_revision: state.last_seen_revision,
+      idempotency_key: "grill-seed:" <> state.selected_document_id,
+      payload: %{
+        "grill_seed" => true,
+        "grill_seed_nodes" => grill_seed_nodes_payload(projection)
+      },
+      message: @grill_seed_message
+    }
+
+    dispatch(socket, action)
+  end
+
+  defp grill_seed_nodes_payload(%{nodes: nodes, node_order: order})
+       when is_map(nodes) and is_list(order) and order != [] do
+    order
+    |> Enum.map(&Map.get(nodes, &1))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(&summarizable_node?/1)
+    |> Enum.take(25)
+    |> Enum.map(
+      &%{
+        "kind" => to_string(&1[:kind] || &1["kind"]),
+        "content" => &1[:content] || &1["content"] || ""
+      }
+    )
+  end
+
+  defp grill_seed_nodes_payload(%{nodes: nodes}) when is_map(nodes) do
+    nodes
+    |> Map.values()
+    |> Enum.filter(&summarizable_node?/1)
+    |> Enum.take(25)
+    |> Enum.map(
+      &%{
+        "kind" => to_string(&1[:kind] || &1["kind"]),
+        "content" => &1[:content] || &1["content"] || ""
+      }
+    )
+  end
+
+  defp grill_seed_nodes_payload(_), do: []
 end

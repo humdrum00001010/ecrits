@@ -38,10 +38,6 @@ defmodule Contract.StudioTest do
     Context.for_user(user)
   end
 
-  # ---------------------------------------------------------------------------
-  # open/2 (renamed from load/2)
-  # ---------------------------------------------------------------------------
-
   describe "open/2" do
     test "loads no-document state when no document_id is supplied" do
       assert {:ok, {%State{} = state, projection}} = Studio.open(scope(), %{})
@@ -67,66 +63,6 @@ defmodule Contract.StudioTest do
       assert {:error, :forbidden} = Studio.open(other, %{"document_id" => doc.id})
     end
   end
-
-  # ---------------------------------------------------------------------------
-  # Deprecated forwarders: load/2 + submit/3 + submit_result/3
-  #
-  # These keep unmigrated callers compiling. We pin the dispatch so a
-  # future cleanup can delete them confidently.
-  # ---------------------------------------------------------------------------
-
-  describe "deprecated load/2 forwarder" do
-    test "load/2 dispatches to open/2 with identical results" do
-      s = scope()
-      assert Studio.load(s, %{}) == Studio.open(s, %{})
-    end
-  end
-
-  describe "deprecated submit/3 forwarder" do
-    test "submit/3 dispatches a Command through Runtime and folds state" do
-      s = scope()
-      {:ok, doc} = Documents.create(s, %{title: "Submit-via-deprecated"})
-
-      command = %Command{
-        kind: :rename_document,
-        document_id: doc.id,
-        actor_type: :user,
-        actor_id: s.user.id,
-        base_revision: 0,
-        idempotency_key: "rename-submit-#{doc.id}",
-        payload: %{"title" => "Renamed via submit/3"}
-      }
-
-      state = %State{selected_document_id: doc.id, last_seen_revision: 0, mode: :briefing}
-
-      assert {:ok, %State{}} = Studio.submit(s, state, command)
-    end
-  end
-
-  describe "deprecated submit_result/3 forwarder" do
-    test "submit_result/3 dispatches to command_result/3" do
-      s = scope()
-      {:ok, doc} = Documents.create(s, %{title: "Submit-result-deprecated"})
-
-      command = %Command{
-        kind: :rename_document,
-        document_id: doc.id,
-        actor_type: :user,
-        actor_id: s.user.id,
-        base_revision: 0,
-        idempotency_key: "rename-sr-#{doc.id}",
-        payload: %{"title" => "Renamed"}
-      }
-
-      state = %State{selected_document_id: doc.id, last_seen_revision: 0, mode: :briefing}
-
-      assert {:ok, %State{}, %Change{}} = Studio.submit_result(s, state, command)
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # command/2 (replacement for submit/3 — Command carries document_id)
-  # ---------------------------------------------------------------------------
 
   describe "command/2" do
     test "routes a document-scoped Command to Runtime.apply/2" do
@@ -407,6 +343,7 @@ defmodule Contract.StudioTest do
     test "accepts nil and mints a scope-only token" do
       s = scope()
       assert {:ok, token} = Studio.route_ref(s, nil, purpose: "scope_only")
+
       assert {:ok, %RouteRef{document_id: nil, purpose: "scope_only"}} =
                Contract.Gateway.verify_route_ref(s, token)
     end

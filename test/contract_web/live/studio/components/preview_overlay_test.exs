@@ -181,7 +181,6 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlayTest do
       assert html =~ ~s(data-role="preview-panel-marks")
       refute html =~ ~s(data-role="preview-panel-body")
     end
-
   end
 
   describe "persona perms" do
@@ -206,7 +205,6 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlayTest do
       refute html =~ ~s(data-role="preview-tab-marks")
       refute html =~ ~s(data-role="preview-tab-changes")
     end
-
   end
 
   describe "body tab — projection rendering" do
@@ -281,7 +279,6 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlayTest do
       assert html =~ ~s(phx-value-node_id="n2")
       assert html =~ ~s(phx-value-node_id="n3")
     end
-
   end
 
   describe "i18n — studio domain" do
@@ -312,6 +309,5 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlayTest do
         Gettext.put_locale(ContractWeb.Gettext, original)
       end
     end
-
   end
 end

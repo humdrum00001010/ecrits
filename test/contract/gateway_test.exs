@@ -97,14 +97,8 @@ defmodule Contract.GatewayTest do
     test "returns :invalid for tampered / garbage / non-string input" do
       assert {:ok, token} = Gateway.issue_route_ref(@ctx, %{purpose: "tamper"})
 
-      tampered =
-        token
-        |> String.graphemes()
-        |> List.update_at(-1, fn
-          "A" -> "B"
-          _ -> "A"
-        end)
-        |> Enum.join()
+      {left, right} = String.split_at(token, div(String.length(token), 2))
+      tampered = left <> "!" <> right
 
       assert {:error, :invalid} = Gateway.verify_route_ref(@ctx, tampered)
       assert {:error, :invalid} = Gateway.verify_route_ref(@ctx, "not-a-real-token")
@@ -189,7 +183,11 @@ defmodule Contract.GatewayTest do
       end)
 
       submit = Enum.find(desc, &(&1["name"] == "studio.submit_action"))
-      refute Map.has_key?(submit["inputSchema"]["properties"]["action"]["properties"], "matter_id")
+
+      refute Map.has_key?(
+               submit["inputSchema"]["properties"]["action"]["properties"],
+               "matter_id"
+             )
     end
 
     test "unknown tool returns {:error, {:unknown_tool, name}}" do

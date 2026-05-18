@@ -124,6 +124,66 @@ defmodule ContractWeb.CoreComponents do
   end
 
   @doc """
+  Renders a v33 Contract Studio product button.
+
+  Use this for the landing/dashboard/studio product surfaces that rely on the
+  `button button--*` design tokens instead of daisyUI button classes.
+  """
+  attr :rest, :global, include: ~w(href navigate patch method download name value disabled type)
+  attr :class, :any, default: nil
+  attr :variant, :string, default: "primary", values: ~w(primary secondary)
+  slot :inner_block, required: true
+
+  def cs_button(%{rest: rest} = assigns) do
+    assigns =
+      assign(assigns, :button_class, [
+        "button",
+        "button--#{assigns.variant}",
+        assigns.class
+      ])
+
+    if rest[:href] || rest[:navigate] || rest[:patch] do
+      ~H"""
+      <.link class={@button_class} {@rest}>
+        {render_slot(@inner_block)}
+      </.link>
+      """
+    else
+      ~H"""
+      <button class={@button_class} {@rest}>
+        {render_slot(@inner_block)}
+      </button>
+      """
+    end
+  end
+
+  @doc """
+  Renders the compact v33 document status dot.
+  """
+  attr :status, :any, default: nil
+  attr :class, :any, default: nil
+  attr :rest, :global
+
+  def status_dot(assigns) do
+    assigns =
+      assign(assigns, :dot_class, [
+        "status-dot",
+        status_dot_modifier(assigns.status),
+        assigns.class
+      ])
+
+    ~H"""
+    <span class={@dot_class} aria-hidden="true" {@rest}></span>
+    """
+  end
+
+  defp status_dot_modifier(nil), do: nil
+
+  defp status_dot_modifier(status) do
+    "status-dot--#{status |> to_string() |> String.replace("_", "-")}"
+  end
+
+  @doc """
   Renders an input with label and error messages.
 
   A `Phoenix.HTML.FormField` may be passed as argument,

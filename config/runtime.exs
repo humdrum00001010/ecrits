@@ -61,18 +61,31 @@ end
 # ---------------------------------------------------------------------------
 # Mailer — Swoosh SMTP, Worksmobile (port 465 implicit TLS), OTP-28 hardened
 # ---------------------------------------------------------------------------
-# Only production is allowed to configure SMTP. Development always keeps
-# Swoosh.Adapters.Local from config/config.exs so messages land in /dev/mailbox;
-# test always uses Swoosh.Adapters.Test from config/test.exs.
-if config_env() == :prod and System.get_env("MAIL_HOST") not in [nil, ""] do
-  config :contract,
-         Contract.Mailer,
-         Contract.Mailer.smtp_config(%{
-           "MAIL_HOST" => System.fetch_env!("MAIL_HOST"),
-           "MAIL_PORT" => System.fetch_env!("MAIL_PORT"),
-           "MAIL_USERNAME" => System.fetch_env!("MAIL_USERNAME"),
-           "MAIL_PASSWORD" => System.fetch_env!("MAIL_PASSWORD")
-         })
+# Only configure SMTP when MAIL_HOST is present (prod/dev with .env).
+# `:dev` keeps Swoosh.Adapters.Local when env is missing; `:test` always
+# uses Swoosh.Adapters.Test (set in config/test.exs).
+if config_env() != :test and System.get_env("MAIL_HOST") not in [nil, ""] do
+  config :contract, Contract.Mailer,
+    adapter: Swoosh.Adapters.SMTP,
+    relay: System.fetch_env!("MAIL_HOST"),
+    port: String.to_integer(System.fetch_env!("MAIL_PORT")),
+    ssl: true,
+    tls: :never,
+    auth: :always,
+    username: System.fetch_env!("MAIL_USERNAME"),
+    password: System.fetch_env!("MAIL_PASSWORD"),
+    retries: 2,
+    no_mx_lookups: true,
+    sockopts: [
+      versions: [:"tlsv1.2", :"tlsv1.3"],
+      verify: :verify_peer,
+      cacerts: :public_key.cacerts_get(),
+      depth: 3,
+      customize_hostname_check: [
+        match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+      ],
+      server_name_indication: System.fetch_env!("MAIL_HOST") |> String.to_charlist()
+    ]
 
   config :swoosh, :api_client, Swoosh.ApiClient.Finch
   config :swoosh, local: false
@@ -81,7 +94,7 @@ end
 if System.get_env("MAIL_FROM_ADDRESS") not in [nil, ""] do
   config :contract,
          :mail_from,
-         {System.get_env("MAIL_FROM_NAME", "Contract"), System.fetch_env!("MAIL_FROM_ADDRESS")}
+         {System.get_env("MAIL_FROM_NAME", "계약기계"), System.fetch_env!("MAIL_FROM_ADDRESS")}
 end
 
 # ---------------------------------------------------------------------------

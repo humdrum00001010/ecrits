@@ -269,6 +269,5 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.EditorTest do
       # appear as a standalone sequence.
       refute html =~ <<0x1100::utf8, 0x1161::utf8, 0x11B8::utf8>>
     end
-
   end
 end

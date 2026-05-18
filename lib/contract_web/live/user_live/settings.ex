@@ -4,6 +4,7 @@ defmodule ContractWeb.UserLive.Settings do
   on_mount {ContractWeb.UserAuth, :require_sudo_mode}
 
   alias Contract.Accounts
+  alias ContractWeb.AuthEmailURL
 
   @impl true
   def render(assigns) do
@@ -100,8 +101,8 @@ defmodule ContractWeb.UserLive.Settings do
 
       <p class="text-xs text-base-content/50 mt-8 text-center">
         {dgettext("settings", "Need help?")}
-        <a href="mailto:support@contractstudio.example" class="underline hover:text-base-content">
-          {dgettext("settings", "Email support")}
+        <a href="mailto:ereignis@korea.ac.kr" class="underline hover:text-base-content">
+          ereignis@korea.ac.kr
         </a>
       </p>
     </Layouts.app>
@@ -164,7 +165,7 @@ defmodule ContractWeb.UserLive.Settings do
         Accounts.deliver_user_update_email_instructions(
           Ecto.Changeset.apply_action!(changeset, :insert),
           user.email,
-          &url(~p"/users/settings/confirm-email/#{&1}")
+          &AuthEmailURL.confirm_email_url/1
         )
 
         info =

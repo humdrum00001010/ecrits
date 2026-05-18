@@ -97,7 +97,6 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.BriefingTest do
       refute html =~ "<textarea"
       refute html =~ ~s(phx-submit="edit_document")
     end
-
   end
 
   describe "render/1 — ask-mark highlighting" do
@@ -134,7 +133,6 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.BriefingTest do
       # n1 is NOT wrapped.
       refute html =~ ~s(data-mark-target="n1")
     end
-
   end
 
   describe "render/1 — set_node_focus affordance" do

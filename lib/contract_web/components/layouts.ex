@@ -3,9 +3,9 @@ defmodule ContractWeb.Layouts do
   Layouts and shared chrome for Contract Studio's web surface.
 
   The `app/1` component is the standard "navbar + main + flash" frame used
-  by every dead view (landing) and most LiveViews (auth, dashboard). It
+  by every dead view (landing) and most LiveViews (auth, storage). It
   reads `@current_scope` and switches the right-side nav between
-  signed-out (Log in / Get started) and signed-in (Dashboard / Settings /
+  signed-out (Log in / Get started) and signed-in (Storage / Settings /
   Log out) states.
 
   The Studio LiveView (Wave 3C1) is expected to render its own chrome and
@@ -26,7 +26,7 @@ defmodule ContractWeb.Layouts do
   Accepts an optional `variant`:
 
     * `"default"` (default) — full-width main, used by the landing page
-      and dashboard.
+      and storage.
     * `"narrow"` — centered max-w container, used by auth pages and other
       single-column forms.
     * `"split"` — no main container; the caller renders its own
@@ -99,7 +99,7 @@ defmodule ContractWeb.Layouts do
 
   @doc """
   Top navigation. Renders a public set of links + Log in / Get started
-  when anonymous; switches to a Dashboard / persona / Settings / Log out
+  when anonymous; switches to a Storage / persona / Settings / Log out
   cluster once `@current_scope.user` is present.
   """
   def top_nav(assigns) do
@@ -107,7 +107,7 @@ defmodule ContractWeb.Layouts do
     <header class="border-b border-base-200 bg-base-100/85 backdrop-blur sticky top-0 z-30">
       <div class="mx-auto max-w-7xl flex flex-nowrap items-center gap-3 sm:gap-6 px-4 sm:px-6 lg:px-8 h-14">
         <.link
-          navigate={if signed_in?(@current_scope), do: ~p"/dashboard", else: ~p"/"}
+          navigate={if signed_in?(@current_scope), do: ~p"/storage", else: ~p"/"}
           class="inline-flex items-center gap-2 shrink-0 h-9"
           aria-label={dgettext("layouts", "Contract Studio home")}
         >
@@ -147,6 +147,62 @@ defmodule ContractWeb.Layouts do
     """
   end
 
+  attr :current_scope, :map, required: true,
+    doc: "must contain `:user` with `:email`"
+
+  @doc """
+  Authenticated user-profile affordance for the topbar. Renders an
+  avatar-style `<details>` dropdown (no JS) with the user's email + a
+  Settings link + a Log out action.
+  """
+  def user_menu(assigns) do
+    email = assigns.current_scope.user.email
+    assigns = assign(assigns, :email, email)
+    assigns = assign(assigns, :initial, email |> String.first() |> String.upcase())
+
+    ~H"""
+    <details class="relative" data-role="user-menu">
+      <summary
+        class="list-none inline-flex items-center justify-center h-9 w-9 rounded-full bg-base-200 text-base-content/80 hover:bg-base-300 hover:text-base-content cursor-pointer font-semibold text-sm chrome select-none"
+        aria-label={dgettext("layouts", "Account menu for %{email}", email: @email)}
+        title={@email}
+      >
+        <span aria-hidden="true">{@initial}</span>
+      </summary>
+
+      <div
+        class="absolute right-0 mt-2 w-56 rounded-box border border-base-200 bg-base-100 shadow-lg z-40 p-2 text-sm"
+        role="menu"
+      >
+        <p class="px-3 py-2 text-xs text-base-content/60">
+          {dgettext("layouts", "Signed in as")}
+        </p>
+        <p class="px-3 pb-2 text-sm text-base-content/80 truncate" title={@email}>
+          {@email}
+        </p>
+
+        <div class="border-t border-base-200 my-1" />
+
+        <.link
+          navigate={~p"/users/settings"}
+          role="menuitem"
+          class="block px-3 py-2 rounded-box hover:bg-base-200"
+        >
+          {dgettext("layouts", "Settings")}
+        </.link>
+        <.link
+          href={~p"/users/log-out"}
+          method="delete"
+          role="menuitem"
+          class="block px-3 py-2 rounded-box hover:bg-base-200 text-base-content/80"
+        >
+          {dgettext("layouts", "Log out")}
+        </.link>
+      </div>
+    </details>
+    """
+  end
+
   attr :current_scope, :map, default: nil
 
   @doc """
@@ -178,8 +234,8 @@ defmodule ContractWeb.Layouts do
         <p class="text-sm text-base-content/80 truncate">{@current_scope.user.email}</p>
 
         <nav class="flex flex-col gap-1 text-sm">
-          <.link navigate={~p"/dashboard"} class="px-3 py-2 rounded-box hover:bg-base-200">
-            {dgettext("layouts", "Dashboard")}
+          <.link navigate={~p"/storage"} class="px-3 py-2 rounded-box hover:bg-base-200">
+            {dgettext("layouts", "Storage")}
           </.link>
           <.link navigate={~p"/studio"} class="px-3 py-2 rounded-box hover:bg-base-200">
             {dgettext("layouts", "Studio")}

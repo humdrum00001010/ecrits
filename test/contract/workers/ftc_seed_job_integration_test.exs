@@ -16,7 +16,6 @@ defmodule Contract.Workers.FtcSeedJobIntegrationTest do
   @moduletag :live_upstage
 
   alias Contract.Documents.Document
-  alias Contract.Matters.Matter
   alias Contract.Workers.FtcSeedJob
 
   # The FTC landing page used in `priv/seeds/ftc_templates.exs`. This
@@ -35,12 +34,11 @@ defmodule Contract.Workers.FtcSeedJobIntegrationTest do
 
     assert :ok = perform_job(FtcSeedJob, args)
 
-    assert %Matter{} = matter = Repo.get_by(Matter, name: FtcSeedJob.templates_matter_name())
-
     assert [%Document{status: :template}] =
              Repo.all(
                from d in Document,
-                 where: d.matter_id == ^matter.id and d.type_key == "franchise_v1"
+                 where:
+                   d.owner_id == ^FtcSeedJob.system_user_id() and d.type_key == "franchise_v1"
              )
   end
 end

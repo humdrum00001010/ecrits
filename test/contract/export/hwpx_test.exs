@@ -362,11 +362,12 @@ defmodule Contract.Export.HWPXTest do
   end
 
   # --------------------------------------------------------------------------
-  # 12. End-to-end via Engine.apply
+  # 12. End-to-end via Session.Reducer.apply
   # --------------------------------------------------------------------------
 
-  test "renders a state built up via Engine.apply pipeline" do
-    alias Contract.{Command, Engine, Runtime}
+  test "renders a state built up via Session.Reducer.apply pipeline" do
+    alias Contract.{Command, Runtime}
+    alias Contract.Session.Reducer
 
     # Build a small document with three create_node ops.
     state = %Runtime.State{
@@ -409,13 +410,13 @@ defmodule Contract.Export.HWPXTest do
       }
     }
 
-    {:ok, input} = Engine.compile(action, state)
-    {:ok, :ok} = Engine.validate(input, state)
-    {:ok, pre} = Engine.preimage(input, state)
-    {:ok, inv} = Engine.inverse(input, pre)
-    {:ok, refs} = Engine.affected_refs(input, state)
+    {:ok, input} = Reducer.compile(action, state)
+    {:ok, :ok} = Reducer.validate(input, state)
+    {:ok, pre} = Reducer.preimage(input, state)
+    {:ok, inv} = Reducer.inverse(input, pre)
+    {:ok, refs} = Reducer.affected_refs(input, state)
     input = %{input | preimage: pre, inverse_ops: inv, affected_refs: refs}
-    {:ok, new_state} = Engine.apply(input, state)
+    {:ok, new_state} = Reducer.apply(input, state)
 
     assert {:ok, bin} = HWPX.render(new_state)
     section = unzip_body(bin, "Contents/section0.xml")

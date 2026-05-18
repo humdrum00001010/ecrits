@@ -66,13 +66,6 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Empty do
           loading="lazy"
         />
 
-        <h2 class="mt-6 text-lg font-semibold tracking-tight text-base-content">
-          {dgettext("studio", "문서를 선택하거나 새로 만드세요")}
-        </h2>
-        <p class="mt-2 text-sm text-base-content/60">
-          {dgettext("studio", "왼쪽에서 문서를 고르거나, 새 계약서를 시작합니다.")}
-        </p>
-
         <div
           :if={@can_write?}
           class="mt-6 flex flex-col gap-3"

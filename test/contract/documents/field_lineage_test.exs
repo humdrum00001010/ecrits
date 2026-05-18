@@ -4,7 +4,6 @@ defmodule Contract.Documents.FieldLineageTest do
   alias Contract.Context
   alias Contract.Documents
   alias Contract.Documents.FieldLineage
-  alias Contract.Matters
 
   defp scope do
     %Context{
@@ -16,18 +15,15 @@ defmodule Contract.Documents.FieldLineageTest do
 
   defp seed do
     s = scope()
-    {:ok, m} = Matters.create(s, %{"name" => "m"})
 
     {:ok, parent} =
       Documents.create(s, %{
-        "matter_id" => m.id,
         "title" => "parent",
         "type_key" => "nda_v1"
       })
 
     {:ok, variant} =
       Documents.create(s, %{
-        "matter_id" => m.id,
         "title" => "variant",
         "type_key" => "service_agreement_v1",
         "parent_document_id" => parent.id

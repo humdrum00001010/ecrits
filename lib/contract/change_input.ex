@@ -1,18 +1,18 @@
 defmodule Contract.ChangeInput do
   @moduledoc """
-  Intermediate result of `Contract.Engine.compile/2`: a validated, ready-to-apply
+  Intermediate result of `Contract.Session.Reducer.compile/2`: a validated, ready-to-apply
   representation of an `Contract.Command`. Not durable — only `Contract.Change`
   is. See SPEC.md §13.
 
   Lifecycle:
 
-      Engine.compile/2     → returns %ChangeInput{}            (ops, marks filled)
-      Engine.validate/2    → returns :ok                       (no struct change)
-      Engine.preimage/2    → returns map                       (caller stuffs into :preimage)
-      Engine.inverse/2     → returns [Operation.t()]           (caller stuffs into :inverse_ops)
-      Engine.apply/2       → returns new Runtime.State
-      Engine.affected_refs → returns [map()]                   (caller stuffs into :affected_refs)
-      Engine.build_change/3 → returns Contract.Change          (durable)
+      Reducer.compile/2       → returns %ChangeInput{}            (ops, marks filled)
+      Reducer.validate/2      → returns :ok                       (no struct change)
+      Reducer.preimage/2      → returns map                       (caller stuffs into :preimage)
+      Reducer.inverse/2       → returns [Operation.t()]           (caller stuffs into :inverse_ops)
+      Reducer.apply/2         → returns new Runtime.State
+      Reducer.affected_refs/2 → returns [map()]                   (caller stuffs into :affected_refs)
+      Reducer.build_change/3  → returns Contract.Change           (durable)
   """
 
   alias Contract.{MarkInput, Operation, Types}

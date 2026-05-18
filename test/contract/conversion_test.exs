@@ -8,7 +8,6 @@ defmodule Contract.ConversionTest do
   alias Contract.Documents.Document
   alias Contract.Documents.FieldLineage
   alias Contract.IO.R2Stub
-  alias Contract.Matters
 
   setup do
     R2Stub.setup()
@@ -30,22 +29,19 @@ defmodule Contract.ConversionTest do
   end
 
   defp build_source_doc(s, type_key \\ "nda_v1") do
-    {:ok, m} = Matters.create(s, %{"name" => "m"})
-
     {:ok, d} =
       Documents.create(s, %{
-        "matter_id" => m.id,
         "title" => "src",
         "type_key" => type_key
       })
 
-    {m, d}
+    d
   end
 
   describe "plan/4" do
     test "returns a Plan with field_plans for compatible types" do
       s = scope()
-      {_m, d} = build_source_doc(s, "nda_v1")
+      d = build_source_doc(s, "nda_v1")
 
       assert {:ok, %Plan{} = plan} =
                Conversion.plan(s, d.id, "service_agreement_v1", [])
@@ -60,7 +56,7 @@ defmodule Contract.ConversionTest do
 
     test "returns a Plan with :ask_user defaults for incompatible types" do
       s = scope()
-      {_m, d} = build_source_doc(s, "nda_v1")
+      d = build_source_doc(s, "nda_v1")
 
       # nda_v1 is NOT declared compatible with employment_v1.
       assert {:ok, %Plan{} = plan} =
@@ -72,12 +68,14 @@ defmodule Contract.ConversionTest do
 
     test "rejects unknown target / missing :type_change perm / nil-perms scope" do
       s = scope()
-      {_m, d} = build_source_doc(s)
+      d = build_source_doc(s)
       assert {:error, :not_found} = Conversion.plan(s, d.id, "nonsense_v1", [])
 
       read_only = scope(perms: [:read])
-      {_m, ro_doc} = build_source_doc(read_only)
-      assert {:error, :forbidden} = Conversion.plan(read_only, ro_doc.id, "service_agreement_v1", [])
+      ro_doc = build_source_doc(read_only)
+
+      assert {:error, :forbidden} =
+               Conversion.plan(read_only, ro_doc.id, "service_agreement_v1", [])
 
       nil_perms = %Context{
         user: %Contract.Accounts.User{id: Ecto.UUID.generate(), email: "u@x"},
@@ -93,7 +91,7 @@ defmodule Contract.ConversionTest do
   describe "propose_fields/2" do
     test "deterministic for all five shipped types" do
       s = scope()
-      {_m, d} = build_source_doc(s, "nda_v1")
+      d = build_source_doc(s, "nda_v1")
 
       for target <-
             ~w(nda_v1 service_agreement_v1 supply_v1 employment_v1 franchise_v1) do
@@ -111,7 +109,7 @@ defmodule Contract.ConversionTest do
   describe "set_field_strategy/4" do
     test "accepts valid strategies (atom + string), rejects unknown" do
       s = scope()
-      {_m, d} = build_source_doc(s, "nda_v1")
+      d = build_source_doc(s, "nda_v1")
       {:ok, plan} = Conversion.plan(s, d.id, "service_agreement_v1", [])
       [first | _] = plan.field_plans
 
@@ -134,7 +132,7 @@ defmodule Contract.ConversionTest do
   describe "create_variant/2" do
     test "produces new Document with parent + new type_key + Change + variant_of_change_id" do
       s = scope()
-      {_m, source} = build_source_doc(s, "nda_v1")
+      source = build_source_doc(s, "nda_v1")
       {:ok, plan} = Conversion.plan(s, source.id, "service_agreement_v1", [])
 
       assert {:ok, {%Document{} = new_doc, %Contract.Change{} = change}} =
@@ -155,7 +153,7 @@ defmodule Contract.ConversionTest do
 
     test "lineage rows track non-ignored/non-ask_user strategies and drop on per-field force" do
       s = scope()
-      {_m, source} = build_source_doc(s, "nda_v1")
+      source = build_source_doc(s, "nda_v1")
       {:ok, %Plan{} = plan} = Conversion.plan(s, source.id, "service_agreement_v1", [])
 
       eligible =
@@ -190,7 +188,9 @@ defmodule Contract.ConversionTest do
       all_ignored = %Plan{
         plan
         | field_plans:
-            Enum.map(plan.field_plans, &%FieldPlan{&1 | strategy: :ignore})
+            Enum.map(plan.field_plans, fn %FieldPlan{} = field_plan ->
+              %FieldPlan{field_plan | strategy: :ignore}
+            end)
       }
 
       {:ok, {empty_doc, _}} = Conversion.create_variant(s, all_ignored)
@@ -199,7 +199,7 @@ defmodule Contract.ConversionTest do
 
     test "remaining :ask_user fields block create_variant" do
       s = scope()
-      {_m, source} = build_source_doc(s, "nda_v1")
+      source = build_source_doc(s, "nda_v1")
       {:ok, %Plan{} = plan} = Conversion.plan(s, source.id, "employment_v1", [])
 
       # Incompatible types → every field defaults to :ask_user.
@@ -208,7 +208,7 @@ defmodule Contract.ConversionTest do
 
     test "scope without :type_change perm → :forbidden" do
       s = scope(perms: [:read])
-      {_m, d} = build_source_doc(s, "nda_v1")
+      d = build_source_doc(s, "nda_v1")
 
       plan = %Plan{
         source_document_id: d.id,
@@ -219,7 +219,6 @@ defmodule Contract.ConversionTest do
 
       assert {:error, :forbidden} = Conversion.create_variant(s, plan)
     end
-
   end
 
   describe "allowed_strategies/0" do
@@ -246,7 +245,7 @@ defmodule Contract.ConversionTest do
   describe "FieldLineage append-only" do
     test "lineage rows survive a re-read with the correct columns" do
       s = scope()
-      {_m, source} = build_source_doc(s, "nda_v1")
+      source = build_source_doc(s, "nda_v1")
       {:ok, plan} = Conversion.plan(s, source.id, "service_agreement_v1", [])
 
       {:ok, {new_doc, _change}} = Conversion.create_variant(s, plan)

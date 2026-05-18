@@ -106,7 +106,6 @@ defmodule Contract.AccountsTest do
     end
   end
 
-
   describe "deliver_user_update_email_instructions/3" do
     setup do
       %{user: user_fixture()}

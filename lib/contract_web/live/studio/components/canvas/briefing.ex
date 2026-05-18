@@ -35,38 +35,11 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Briefing do
     ~H"""
     <section
       id={@id}
-      class="overflow-y-auto bg-base-100"
+      class="bg-base-100"
       data-component="canvas-briefing"
       data-mode="briefing"
     >
-      <div class="max-w-3xl mx-auto p-8">
-        <header class="mb-6 flex items-baseline gap-3 chrome" data-role="briefing-header">
-          <span :if={@matter_name} class="text-sm text-base-content/60" data-role="matter-name">
-            {@matter_name}
-          </span>
-          <h1 class="text-xl font-semibold text-base-content" data-role="document-title">
-            {@document_title}
-          </h1>
-          <span
-            class="badge badge-sm badge-soft badge-primary"
-            data-role="briefing-badge"
-            aria-label={dgettext("studio", "Briefing mode")}
-          >
-            {dgettext("studio", "Briefing")}
-          </span>
-        </header>
-
-        <p
-          class="mb-6 text-sm text-base-content/60 chrome"
-          role="status"
-          data-role="briefing-status"
-        >
-          {dgettext(
-            "studio",
-            "에이전트가 질문 중입니다. 답하시면 편집이 적용됩니다."
-          )}
-        </p>
-
+      <div class="w-full px-6 py-4">
         <article
           class="contract-body text-base-content"
           data-role="briefing-body"
@@ -99,6 +72,10 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Briefing do
   attr :viewer?, :boolean, required: true
 
   defp render_node(%{node: nil} = assigns), do: ~H""
+
+  defp render_node(%{node: %{kind: kind}} = assigns) when kind in [:footer, "footer"] do
+    ~H""
+  end
 
   defp render_node(assigns) do
     assigns =

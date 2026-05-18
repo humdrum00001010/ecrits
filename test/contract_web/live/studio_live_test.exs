@@ -235,21 +235,13 @@ defmodule ContractWeb.StudioLiveTest do
     # header carries the 문서 toggle, so the floating preview FAB is dropped
     # to avoid duplicate affordances.
     # -------------------------------------------------------------------------
-    test "desktop viewport renders v33 app_shell topbar (single navbar)",
+    test "desktop viewport renders Layouts.app chrome (navbar + breadcrumbs)",
          %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/studio")
 
-      assert html =~ ~s(class="app-shell")
-      assert html =~ ~s(class="topbar")
-      assert html =~ "Contract Studio"
-      assert html =~ ~s(href="/dashboard")
-      assert html =~ "대시보드"
-      assert html =~ "스튜디오"
-      # v33 SPEC §6: 새 문서 / 계약서 업로드 are dashboard content actions, not topbar.
-      refute html =~ ~r/<header[^>]*class="[^"]*topbar[^"]*"[^>]*>.*계약서 업로드.*<\/header>/su
-      refute html =~ ~r/<header[^>]*class="[^"]*topbar[^"]*"[^>]*>.*새 문서.*<\/header>/su
-
-      # Studio document header (Document / title / 변경 이력) is present.
+      # Top navbar lives inside Layouts.app — sticky header at top.
+      assert html =~ "backdrop-blur sticky top-0 z-30"
+      # Studio document header (Document / title / Dashboard link) is present.
       assert html =~ ~s(id="studio-document-header")
       # Desktop root has the calc-based height (not fixed inset-0).
       assert html =~ ~s(data-viewport="desktop")
@@ -289,7 +281,7 @@ defmodule ContractWeb.StudioLiveTest do
       assert html =~ ~s(phx-click="toggle_preview")
     end
 
-    test "rotating mobile → desktop restores v33 app_shell topbar",
+    test "rotating mobile → desktop restores Layouts.app chrome",
          %{conn: conn} do
       {:ok, lv, _html} = live(conn, ~p"/studio")
       _ = render_hook(lv, "viewport_change", %{"w" => 600})
@@ -297,8 +289,122 @@ defmodule ContractWeb.StudioLiveTest do
 
       assert html =~ ~s(data-viewport="desktop")
       assert html =~ ~s(id="studio-document-header")
-      assert html =~ ~s(class="topbar")
+      assert html =~ "backdrop-blur sticky top-0 z-30"
       refute html =~ ~s(fixed inset-0)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Auto-grill seed on cold document open. When the user lands on a document
+  # that has body content + an empty chat thread + no running agent, the LV
+  # should dispatch a hidden `:chat_message` Command carrying
+  # `payload["grill_seed"] => true` so the agent speaks first.
+  # ---------------------------------------------------------------------------
+  describe "auto-grill seed on cold document open" do
+    setup :log_in_a_user
+
+    test "mount on a fresh document with body content dispatches the grill seed",
+         %{conn: conn, user: user} do
+      test_pid = self()
+
+      # Stub OpenAI to capture that the agent run started and signal back to
+      # the test (without that signal, the stub returns instantly and the
+      # run reaches :completed before we can observe the agent_run_id on
+      # the LV's state).
+      Contract.IO.OpenAIMock
+      |> stub(:stream_chat, fn params, _opts ->
+        send(test_pid, {:stream_chat_called, params})
+        # Empty stream — never emits :stream_done, so the run hangs and
+        # the agent_run_id stays set on studio_state long enough to
+        # assert on it.
+        stream =
+          Stream.repeatedly(fn ->
+            Process.sleep(1000)
+            nil
+          end)
+          |> Stream.reject(&is_nil/1)
+
+        {:ok, %{stream: stream, task_pid: self()}}
+      end)
+
+      doc = seed_document_with_paragraph(user, "비밀유지계약서 본문")
+
+      conn =
+        Plug.Conn.put_session(
+          conn,
+          :user_perms,
+          ~w(read write commit revoke export type_change agent_run)a
+        )
+
+      {:ok, lv, _html} = live(conn, ~p"/documents/#{doc.id}")
+
+      # The OpenAI driver MUST have been invoked — i.e. the grill seed
+      # was dispatched all the way through Runtime.apply → Agent.start.
+      assert_receive {:stream_chat_called, params}, 1500
+
+      # The instructions carried the Korean grill-intro system prompt
+      # (NOT the regular grill-me JSON-envelope prompt).
+      assert params.instructions =~ "당신이 먼저 말을 걸어야"
+      assert params.instructions =~ "1-3개의 질문"
+      # The document body the LV passed through carries our seeded
+      # paragraph.
+      assert hd(params.input).content =~ "비밀유지계약서 본문"
+      # Grill-intro path drops the JSON-object format constraint.
+      refute Map.has_key?(params, :text)
+
+      # The dispatch flow folds the Agent.Run id back into studio_state.
+      assert eventually(fn ->
+               %State{agent_run_id: run_id} = assigns(lv).studio_state
+               is_binary(run_id)
+             end)
+
+      # The hidden seed was persisted with role "system" so it never
+      # reaches the visible rail.
+      ctx = Contract.Context.for_user(user)
+      state = %State{selected_document_id: doc.id, mode: :editing}
+      visible = Contract.ChatThreads.list_visible_messages(ctx, state)
+      refute Enum.any?(visible, &(&1.role == :system))
+    end
+
+    test "mount on a document with existing chat messages does NOT dispatch",
+         %{conn: conn, user: user} do
+      doc = seed_document_with_paragraph(user, "이미 대화가 있는 문서")
+      seed_thread_with_user_message(user, doc, "Earlier user turn")
+
+      conn =
+        Plug.Conn.put_session(
+          conn,
+          :user_perms,
+          ~w(read write commit revoke export type_change agent_run)a
+        )
+
+      {:ok, lv, _html} = live(conn, ~p"/documents/#{doc.id}")
+
+      # `agent_run_id` must remain nil — no auto-grill should have been
+      # triggered, even though the projection has body content.
+      Process.sleep(50)
+      assert assigns(lv).studio_state.agent_run_id == nil
+    end
+
+    test "mount on an empty document (no projection nodes) does NOT dispatch",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      # An empty document — no edit_document command applied, so
+      # projection.nodes stays %{}.
+      {:ok, doc} =
+        Contract.Documents.create(scope, %{"title" => "empty-doc", "type_key" => "nda_v1"})
+
+      conn =
+        Plug.Conn.put_session(
+          conn,
+          :user_perms,
+          ~w(read write commit revoke export type_change agent_run)a
+        )
+
+      {:ok, lv, _html} = live(conn, ~p"/documents/#{doc.id}")
+
+      Process.sleep(50)
+      assert assigns(lv).studio_state.agent_run_id == nil
     end
   end
 
@@ -308,18 +414,26 @@ defmodule ContractWeb.StudioLiveTest do
   describe "agent_option_picked (no-document quick-start, SPEC.md §10)" do
     setup :log_in_a_user
 
-    test "renders the 4-option no-document welcome at /studio (no doc selected)",
+    test "renders the 5-option no-document welcome at /studio (no doc selected)",
          %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/studio")
 
       assert html =~ ~s(data-role="chat-no-doc-welcome")
-      # The 4 chip keys (upload removed per #19 — that affordance lives on
-      # the dashboard, not in the chat).
-      refute html =~ ~s(phx-value-key="upload")
+      # All 5 chip keys are present.
+      assert html =~ ~s(phx-value-key="upload")
       assert html =~ ~s(phx-value-key="recent")
       assert html =~ ~s(phx-value-key="blank")
       assert html =~ ~s(phx-value-key="draft_from_discussion")
       assert html =~ ~s(phx-value-key="variant_from_other")
+    end
+
+    test "upload option opens the upload modal", %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+      assert :sys.get_state(lv.pid).socket.assigns.studio_state.upload_panel_open? == false
+
+      _ = render_hook(lv, "agent_option_picked", %{"key" => "upload"})
+
+      assert :sys.get_state(lv.pid).socket.assigns.studio_state.upload_panel_open? == true
     end
 
     test "recent option opens the document-picker modal", %{conn: conn} do
@@ -889,7 +1003,7 @@ defmodule ContractWeb.StudioLiveTest do
       assert assigns(lv).studio_state.agent_run_id == nil
     end
 
-    test "tool-call protocol messages render compact trace rows", %{conn: conn} do
+    test "tool-call protocol messages render structured operation blocks", %{conn: conn} do
       {:ok, lv, _html} = live(conn, ~p"/studio")
       run_id = Ecto.UUID.generate()
       tool_id = Ecto.UUID.generate()
@@ -897,18 +1011,18 @@ defmodule ContractWeb.StudioLiveTest do
       send(lv.pid, {:tool_call_started, run_id, %{id: tool_id, tool_name: "law.search"}})
       html = render(lv)
 
-      assert html =~ ~s(id="tool-trace-tool-#{run_id}-#{tool_id}")
-      assert html =~ ~s(data-role="tool-trace")
-      assert html =~ ~s(data-status="running")
-      assert html =~ "답변을 수정 범위에 연결함"
-      refute html =~ "law.search"
+      assert html =~ ~s(id="operation-block-tool-#{run_id}-#{tool_id}")
+      assert html =~ ~s(data-role="operation-block")
+      assert html =~ ~s(data-operation-type="tool_call")
+      assert html =~ ~s(data-operation-status="running")
+      assert html =~ "law.search"
       refute html =~ "Tool started: law.search"
 
       send(lv.pid, {:tool_call_completed, run_id, tool_id, %{summary: "Found 2 clauses"}})
       html = render(lv)
 
-      assert html =~ ~s(id="tool-trace-tool-#{run_id}-#{tool_id}")
-      assert html =~ ~s(data-status="completed")
+      assert html =~ ~s(id="operation-block-tool-#{run_id}-#{tool_id}")
+      assert html =~ ~s(data-operation-status="completed")
       assert html =~ "Found 2 clauses"
     end
 
@@ -1090,7 +1204,7 @@ defmodule ContractWeb.StudioLiveTest do
   describe "dev/test operation block QA synthesis" do
     setup :log_in_a_user
 
-    test "authenticated browser hook synthesizes compact trace rows that can expand", %{
+    test "authenticated browser hook synthesizes operation blocks that can expand", %{
       conn: conn
     } do
       {:ok, lv, _html} = live(conn, ~p"/studio")
@@ -1099,16 +1213,17 @@ defmodule ContractWeb.StudioLiveTest do
       assert %{"ok" => true, "operation_ids" => [operation_id | _]} = json_response(conn, 200)
 
       html = render(lv)
-      assert html =~ ~s(id="tool-trace-#{operation_id}")
-      assert html =~ ~s(data-role="tool-trace")
-      refute html =~ ~s(id="tool-trace-#{operation_id}-details")
+      assert html =~ ~s(id="operation-block-#{operation_id}")
+      assert html =~ ~s(data-role="operation-block")
+      assert html =~ ~s(id="operation-block-#{operation_id}-toggle")
+      refute html =~ ~s(id="operation-block-#{operation_id}-details")
 
       html =
         lv
-        |> element("#tool-trace-#{operation_id}")
+        |> element("#operation-block-#{operation_id}-toggle")
         |> render_click()
 
-      assert html =~ ~s(id="tool-trace-#{operation_id}-details")
+      assert html =~ ~s(id="operation-block-#{operation_id}-details")
       assert html =~ "Synthetic QA operation"
     end
 
@@ -1342,5 +1457,77 @@ defmodule ContractWeb.StudioLiveTest do
     send(lv.pid, {:studio_loaded, state})
     _ = render(lv)
     :ok
+  end
+
+  # Creates a document and lands a single `:create_node` op so the
+  # projection has a real paragraph (`map_size(projection.nodes) > 0`).
+  defp seed_document_with_paragraph(user, content) do
+    scope = Contract.Context.for_user(user)
+
+    {:ok, doc} =
+      Contract.Documents.create(scope, %{
+        "title" => "seeded-doc-#{System.unique_integer([:positive])}",
+        "type_key" => "nda_v1"
+      })
+
+    command = %Command{
+      kind: :edit_document,
+      actor_type: :user,
+      actor_id: user.id,
+      document_id: doc.id,
+      base_revision: 0,
+      idempotency_key: "seed-paragraph-#{Ecto.UUID.generate()}",
+      payload: %{
+        "ops" => [
+          %{
+            "op" => "create_node",
+            "target_type" => "node",
+            "target_id" => "node-1",
+            "args" => %{
+              "kind" => "paragraph",
+              "content" => content
+            }
+          }
+        ]
+      }
+    }
+
+    {:ok, %Contract.Change{}} = Contract.Runtime.apply(scope, command)
+    doc
+  end
+
+  defp seed_thread_with_user_message(user, document, message_text) do
+    %ChatThread{}
+    |> ChatThread.changeset(%{
+      owner_id: user.id,
+      document_id: document.id,
+      title: "Discussion",
+      messages: [
+        %{
+          "id" => Ecto.UUID.generate(),
+          "role" => "user",
+          "content" => message_text,
+          "inserted_at" => DateTime.to_iso8601(DateTime.utc_now(:second))
+        }
+      ],
+      status: "active",
+      last_message_at: DateTime.utc_now(:second)
+    })
+    |> Repo.insert!()
+  end
+
+  # Polls a predicate up to ~1 second. Used to ride out the async
+  # round-trip between mount-time grill seed dispatch and the
+  # `agent_run_id` landing on `studio_state`.
+  defp eventually(fun, retries \\ 20)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, retries) do
+    if fun.() do
+      true
+    else
+      Process.sleep(50)
+      eventually(fun, retries - 1)
+    end
   end
 end

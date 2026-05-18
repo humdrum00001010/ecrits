@@ -331,6 +331,30 @@ defmodule Contract.Session.ReducerTest do
       {:ok, input} = Reducer.compile(a, state)
       assert [%Operation{op: :set_attr, args: %{key: :type_key, value: "msa"}}] = input.ops
     end
+
+    test "validate/2 rejects :set_contract_type when the document already has a type_key" do
+      # 2026-05-18 owner directive: "유형은 새 문서일 때만 가능해야 하고,
+      # … 한번 결정되면 immutable". The initial set succeeds (state's
+      # type_key is nil); every subsequent attempt — same key or
+      # different — must fail at validate/2.
+      typed_state =
+        new_state(
+          projection: %{Runtime.State.empty_projection() | type_key: "service_agreement_v1"}
+        )
+
+      a = action(:set_contract_type, payload: %{"type_key" => "nda_v1"})
+      {:ok, input} = Reducer.compile(a, typed_state)
+
+      assert {:error, {:type_key_immutable, _details}} = Reducer.validate(input, typed_state)
+    end
+
+    test "validate/2 still allows :set_contract_type as the first assignment" do
+      blank_state = new_state()
+      a = action(:set_contract_type, payload: %{"type_key" => "service_agreement_v1"})
+      {:ok, input} = Reducer.compile(a, blank_state)
+
+      assert {:ok, :ok} = Reducer.validate(input, blank_state)
+    end
   end
 
   describe "compile/2 — edit_document and agent_change" do

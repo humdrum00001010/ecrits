@@ -1,14 +1,14 @@
 <!DOCTYPE html>
-<html lang="ko" class="h-full" data-theme="studio">
+<html lang="ko">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content={get_csrf_token()} />
     <meta
       name="description"
-      content="Contract Studio — contract studio for small-business operators. An AI agent grills you before it edits; 법제처 citations are verified; no silent rewrites."
+      content="계약기계 — contract studio for small-business operators. An AI agent grills you before it edits; 법제처 citations are verified; no silent rewrites."
     />
-    <.live_title default="Contract Studio" suffix=" · Contract Studio">
+    <.live_title default="계약기계" suffix=" · 계약기계">
       {assigns[:page_title]}
     </.live_title>
     <link phx-track-static rel="stylesheet" href={~p"/assets/css/app.css"} />
@@ -19,25 +19,30 @@
       // error pages) as well as LiveViews. The button click is caught
       // here directly; we don't rely on phx-click/JS.dispatch (which
       // only fire after LiveSocket connects). Valid values are
-      // "studio" (light) and "studio-dark" (dark). The default is
-      // "studio" (set server-side on <html> in this file) so v33
-      // surfaces don't collide with prefers-color-scheme dark.
+      // "studio" (light), "studio-dark" (dark), and "system" (no
+      // attribute; daisyUI uses prefers-color-scheme to pick).
       //
       // localStorage key is "phx:theme" (kept from the upstream
       // Phoenix gen template for compatibility with any external
       // tooling). Persists across reload; "storage" event keeps
       // multiple tabs in sync.
       (() => {
-        const VALID = new Set(["studio", "studio-dark"]);
+        const VALID = new Set(["studio", "studio-dark", "system"]);
         const setTheme = (theme) => {
-          if (!VALID.has(theme)) theme = "studio";
-          localStorage.setItem("phx:theme", theme);
-          document.documentElement.setAttribute("data-theme", theme);
+          if (!VALID.has(theme)) theme = "system";
+          if (theme === "system") {
+            localStorage.removeItem("phx:theme");
+            document.documentElement.removeAttribute("data-theme");
+          } else {
+            localStorage.setItem("phx:theme", theme);
+            document.documentElement.setAttribute("data-theme", theme);
+          }
         };
-        // Boot: respect persisted preference if present; otherwise the
-        // server-rendered data-theme="studio" stays.
-        const persisted = localStorage.getItem("phx:theme");
-        if (persisted && VALID.has(persisted)) setTheme(persisted);
+        // Boot: apply persisted preference before LiveView mounts, so
+        // there's no flash of unstyled theme.
+        if (!document.documentElement.hasAttribute("data-theme")) {
+          setTheme(localStorage.getItem("phx:theme") || "system");
+        }
         // Delegated click handler: catches the theme-toggle buttons no
         // matter where they live and no matter what nested element
         // (<svg>, <path>, …) was actually clicked.
@@ -47,7 +52,7 @@
           setTheme(btn.dataset.phxTheme);
         });
         // Cross-tab sync + back-compat with the old phx:set-theme dispatch.
-        window.addEventListener("storage", (e) => e.key === "phx:theme" && setTheme(e.newValue || "studio"));
+        window.addEventListener("storage", (e) => e.key === "phx:theme" && setTheme(e.newValue || "system"));
         window.addEventListener("phx:set-theme", (e) => {
           const t = (e.target && e.target.dataset && e.target.dataset.phxTheme) || e.detail;
           if (t) setTheme(t);

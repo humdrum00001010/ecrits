@@ -11,186 +11,92 @@
 msgid ""
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:334
-#, elixir-autogen, elixir-format
-msgid "About"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:237
-#: lib/contract_web/components/layouts.ex:397
+#: lib/contract_web/components/layouts.ex:176
 #, elixir-autogen, elixir-format
 msgid "Account"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:419
-#: lib/contract_web/components/layouts.ex:431
+#: lib/contract_web/components/layouts.ex:266
+#: lib/contract_web/components/layouts.ex:278
 #, elixir-autogen, elixir-format
 msgid "Attempting to reconnect"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:134
-#: lib/contract_web/components/layouts.ex:271
-#: lib/contract_web/components/layouts.ex:318
+#: lib/contract_web/components/layouts.ex:210
 #, elixir-autogen, elixir-format
 msgid "Changelog"
 msgstr ""
 
 #: lib/contract_web/components/layouts.ex:73
-#: lib/contract_web/components/layouts.ex:229
+#: lib/contract_web/components/layouts.ex:168
 #, elixir-autogen, elixir-format
 msgid "Close menu"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:330
-#, elixir-autogen, elixir-format
-msgid "Company"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:337
-#, elixir-autogen, elixir-format
-msgid "Contact"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:121
+#: lib/contract_web/components/layouts.ex:112
 #, elixir-autogen, elixir-format
 msgid "Contract Studio home"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:470
+#: lib/contract_web/components/layouts.ex:317
 #, elixir-autogen, elixir-format
 msgid "Dark theme"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:143
-#: lib/contract_web/components/layouts.ex:178
-#: lib/contract_web/components/layouts.ex:243
+#: lib/contract_web/components/layouts.ex:182
 #, elixir-autogen, elixir-format
-msgid "Dashboard"
+msgid "Storage"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:131
-#: lib/contract_web/components/layouts.ex:268
+#: lib/contract_web/components/layouts.ex:207
 #, elixir-autogen, elixir-format
 msgid "Docs"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:313
-#, elixir-autogen, elixir-format
-msgid "Documentation"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:351
-#, elixir-autogen, elixir-format
-msgid "Language"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:356
-#, elixir-autogen, elixir-format
-msgid "Language switcher (placeholder)"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:461
+#: lib/contract_web/components/layouts.ex:308
 #, elixir-autogen, elixir-format
 msgid "Light theme"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:196
-#: lib/contract_web/components/layouts.ex:277
+#: lib/contract_web/components/layouts.ex:135
+#: lib/contract_web/components/layouts.ex:216
 #, elixir-autogen, elixir-format
 msgid "Log in"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:186
-#: lib/contract_web/components/layouts.ex:259
+#: lib/contract_web/components/layouts.ex:128
+#: lib/contract_web/components/layouts.ex:198
 #, elixir-autogen, elixir-format
 msgid "Log out"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:112
-#, elixir-autogen, elixir-format
-msgid "Open menu"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:380
-#, elixir-autogen, elixir-format
-msgid "Privacy"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:308
-#, elixir-autogen, elixir-format
-msgid "Product"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:202
-#: lib/contract_web/components/layouts.ex:280
+#: lib/contract_web/components/layouts.ex:141
+#: lib/contract_web/components/layouts.ex:219
 #, elixir-autogen, elixir-format
 msgid "Register"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:323
-#, elixir-autogen, elixir-format
-msgid "Security"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:344
-#, elixir-autogen, elixir-format
-msgid "Security & Privacy"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:181
-#: lib/contract_web/components/layouts.ex:249
+#: lib/contract_web/components/layouts.ex:188
 #, elixir-autogen, elixir-format
 msgid "Settings"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:174
-#, elixir-autogen, elixir-format
-msgid "Signed in as"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:426
+#: lib/contract_web/components/layouts.ex:273
 #, elixir-autogen, elixir-format
 msgid "Something went wrong!"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:340
-#: lib/contract_web/components/layouts.ex:382
-#, elixir-autogen, elixir-format
-msgid "Status"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:146
-#: lib/contract_web/components/layouts.ex:246
+#: lib/contract_web/components/layouts.ex:185
 #, elixir-autogen, elixir-format
 msgid "Studio"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:452
+#: lib/contract_web/components/layouts.ex:299
 #, elixir-autogen, elixir-format
 msgid "System theme"
 msgstr ""
 
-#: lib/contract_web/components/layouts.ex:378
-#, elixir-autogen, elixir-format
-msgid "Terms"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:414
+#: lib/contract_web/components/layouts.ex:261
 #, elixir-autogen, elixir-format
 msgid "We can't find the internet"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:373
-#, elixir-autogen, elixir-format
-msgid "© %{year} Contract Studio. All rights reserved."
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:366
-#, elixir-autogen, elixir-format
-msgid "한국어 UI · English fallback"
-msgstr ""
-
-#: lib/contract_web/components/layouts.ex:300
-#, elixir-autogen, elixir-format
-msgid "A contract studio for small-business operators. Built to be precise, auditable, and quiet."
 msgstr ""

@@ -6,7 +6,7 @@ defmodule ContractWeb.Components.AppShellTest do
   alias ContractWeb.Components.AppShell
 
   describe "app_shell/1" do
-    test "renders v33 shared topbar with brand icon, dashboard link, studio label, and no upload action" do
+    test "renders v33 shared topbar with brand icon + 보관함 link, and no 스튜디오 state span or upload action" do
       inner_block = [
         %{
           __slot__: :inner_block,
@@ -16,7 +16,7 @@ defmodule ContractWeb.Components.AppShellTest do
 
       html =
         render_component(&AppShell.app_shell/1,
-          active: "대시보드",
+          active: "보관함",
           inner_block: inner_block
         )
 
@@ -24,15 +24,44 @@ defmodule ContractWeb.Components.AppShellTest do
       assert html =~ ~s(class="topbar")
       assert html =~ ~s(href="/")
       assert html =~ ~s(src="/assets/icons/brand-mark.svg")
-      assert html =~ "Contract Studio"
-      assert html =~ ~s(href="/dashboard")
-      assert html =~ "대시보드"
-      assert html =~ "스튜디오"
+      assert html =~ "계약기계"
+      assert html =~ ~s(href="/storage")
+      assert html =~ "보관함"
+      # The legacy 대시보드 label was renamed to 보관함 (2026-05-18 directive).
+      refute html =~ "대시보드"
+      refute html =~ ~s(href="/dashboard")
       assert html =~ "shell-content"
       assert html =~ "문서 목록"
       assert html =~ "is-active"
+      # 2026-05-17 owner directive: 스튜디오 state span removed from topbar.
+      refute html =~ "스튜디오"
       refute html =~ "계약서 업로드"
       refute html =~ "새 문서"
+      # No current_scope passed → account menu is omitted.
+      refute html =~ ~s(data-role="user-menu")
+    end
+
+    test "renders the account menu when current_scope is signed in" do
+      inner_block = [
+        %{
+          __slot__: :inner_block,
+          inner_block: fn _, _ -> Phoenix.HTML.raw("") end
+        }
+      ]
+
+      scope = %{user: %{id: 1, email: "lawyer@example.com"}}
+
+      html =
+        render_component(&AppShell.app_shell/1,
+          active: "보관함",
+          current_scope: scope,
+          inner_block: inner_block
+        )
+
+      assert html =~ ~s(data-role="user-menu")
+      assert html =~ "lawyer@example.com"
+      assert html =~ ~s(href="/users/settings")
+      assert html =~ ~s(href="/users/log-out")
     end
 
     test "v33 icon source assets are tracked outside generated static assets" do

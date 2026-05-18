@@ -1,8 +1,7 @@
 defmodule Contract.Runtime.State do
   @moduledoc """
-  The in-memory projection of a document that the Engine compiles against and
-  the Session hydrates from `Contract.Store`. SPEC.md §13 references this as
-  the second argument to `Engine.compile/2` and friends.
+  The in-memory projection of a document that `Contract.Session.Reducer`
+  compiles against and the Session hydrates from `Contract.Store`.
 
   ## Projection shape
 

@@ -60,7 +60,7 @@ msgstr ""
 #: lib/contract_web/controllers/page_html/home.html.heex:46
 #: lib/contract_web/controllers/page_html/home.html.heex:53
 #, elixir-autogen, elixir-format
-msgid "대시보드 열기"
+msgid "보관함 열기"
 msgstr ""
 
 #: lib/contract_web/controllers/page_html/home.html.heex:87

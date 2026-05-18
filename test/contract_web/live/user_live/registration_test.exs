@@ -86,5 +86,4 @@ defmodule ContractWeb.UserLive.RegistrationTest do
       assert result =~ "has already been taken"
     end
   end
-
 end

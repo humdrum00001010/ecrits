@@ -3,6 +3,7 @@ defmodule ContractWeb.UserSessionController do
 
   alias Contract.Accounts
   alias ContractWeb.UserAuth
+  alias ContractWeb.AuthEmailURL
 
   # Default perm set for confirmed production users. Mirrors what
   # `Contract.PersonaFactory.spec(:lawyer)` ships for the Playwright
@@ -42,9 +43,7 @@ defmodule ContractWeb.UserSessionController do
   end
 
   # email + password login
-  defp create(conn, %{"user" => user_params}, info) do
-    %{"email" => email, "password" => password} = user_params
-
+  defp create(conn, %{"user" => %{"email" => email, "password" => password} = user_params}, info) do
     if user = Accounts.get_user_by_email_and_password(email, password) do
       conn
       |> put_flash(:info, info)
@@ -56,6 +55,25 @@ defmodule ContractWeb.UserSessionController do
       |> put_flash(:email, String.slice(email, 0, 160))
       |> redirect(to: ~p"/users/log-in")
     end
+  end
+
+  # magic link request fallback for non-LiveView form posts
+  defp create(conn, %{"user" => %{"email" => email}}, _info) when is_binary(email) do
+    if user = Accounts.get_user_by_email(email) do
+      Accounts.deliver_login_instructions(
+        user,
+        &AuthEmailURL.login_url/1
+      )
+    end
+
+    # Avoid account enumeration: the response is identical whether the email exists.
+    conn
+    |> put_flash(
+      :info,
+      "If your email is in our system, you will receive instructions for logging in shortly."
+    )
+    |> put_flash(:email, String.slice(email, 0, 160))
+    |> redirect(to: ~p"/users/log-in")
   end
 
   # Per-user perm derivation. Today every confirmed user gets the

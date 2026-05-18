@@ -170,6 +170,9 @@ defmodule Contract.Session.Reducer do
       not Map.has_key?(normalize_args(args), :kind) ->
         {:error, {:invalid_op_args, index: idx, reason: :missing_kind}}
 
+      not valid_content?(normalize_args(args)) ->
+        {:error, {:invalid_op_args, index: idx, reason: :content_not_string}}
+
       true ->
         :ok
     end
@@ -188,7 +191,8 @@ defmodule Contract.Session.Reducer do
   defp validate_op_shape(%Operation{op: :set_attr} = op, idx, state) do
     with :ok <-
            if(needs_target?(op), do: check_target_exists(op, idx, state), else: :ok),
-         :ok <- check_set_attr_node_kind(op, idx, state) do
+         :ok <- check_set_attr_node_kind(op, idx, state),
+         :ok <- check_type_key_immutability(op, idx, state) do
       :ok
     end
   end
@@ -203,6 +207,19 @@ defmodule Contract.Session.Reducer do
   end
 
   defp validate_op_shape(_op, _idx, _state), do: :ok
+
+  # `content` is optional on :create_node (e.g. structural nodes like a table
+  # carry their text in cells), but when present it MUST be a String.t() —
+  # never a map. This guards against producer regressions like the Upstage
+  # `%{"text" => _, "html" => _, "markdown" => _}` shape that the projection
+  # renderer cannot handle.
+  defp valid_content?(args) do
+    case Map.fetch(args, :content) do
+      :error -> true
+      {:ok, nil} -> true
+      {:ok, value} -> is_binary(value)
+    end
+  end
 
   # IR-richness (task #37): structural validation of the table/cell attr keys.
   # Additive — only rejects when a *known* key is present with the wrong shape;
@@ -232,6 +249,30 @@ defmodule Contract.Session.Reducer do
   end
 
   defp check_set_attr_node_kind(_op, _idx, _state), do: :ok
+
+  # Type-key immutability: 2026-05-18 owner directive — "유형은 새 문서일
+  # 때만 가능해야 하고, … 한번 결정되면 immutable". Once a document has a
+  # type_key, no subsequent set_attr op may change or clear it. The
+  # initial assignment at :create_document time passes because the
+  # state.projection.type_key is still nil; every later attempt fails.
+  defp check_type_key_immutability(
+         %Operation{op: :set_attr, target_type: :document, args: args},
+         idx,
+         %Runtime.State{projection: %{type_key: existing}}
+       )
+       when is_binary(existing) and existing != "" do
+    case args |> normalize_args() |> Map.get(:key) do
+      :type_key ->
+        {:error,
+         {:type_key_immutable,
+          index: idx, existing: existing, attempted: Map.get(normalize_args(args), :value)}}
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp check_type_key_immutability(_op, _idx, _state), do: :ok
 
   defp validate_table_attr(:column_widths, value, idx) do
     if is_list(value) and Enum.all?(value, &(is_integer(&1) and &1 > 0)) do
@@ -909,6 +950,8 @@ defmodule Contract.Session.Reducer do
     type_key = Map.get(payload, :type_key)
     nodes = Map.get(payload, :nodes) || []
     node_order = Map.get(payload, :node_order) || []
+    fields = Map.get(payload, :fields) || []
+    field_bindings = Map.get(payload, :field_bindings) || []
 
     document_op = %Operation{
       op: :create_node,
@@ -941,15 +984,28 @@ defmodule Contract.Session.Reducer do
           []
       end
 
-    ops = [document_op | node_ops] ++ order_ops
+    field_ops =
+      fields
+      |> List.wrap()
+      |> Enum.flat_map(&field_payload_to_ops/1)
+
+    binding_ops =
+      field_bindings
+      |> List.wrap()
+      |> Enum.flat_map(&field_binding_payload_to_op/1)
+
+    ops = [document_op | node_ops] ++ order_ops ++ field_ops ++ binding_ops
 
     {ops, [],
      %{
        title: title,
        type_key: type_key,
-       node_count: length(node_ops)
+       node_count: length(node_ops),
+       field_count: length(fields),
+       binding_count: length(field_bindings)
      }}
   end
+
 
   defp build_ops_and_marks(%Command{kind: :archive_document} = command, _state) do
     op = %Operation{
@@ -1210,6 +1266,85 @@ defmodule Contract.Session.Reducer do
   defp build_ops_and_marks(%Command{kind: kind}, _state) do
     raise ArgumentError,
           "Contract.Session.Reducer: unhandled Command.kind=#{inspect(kind)} in build_ops_and_marks/2"
+  end
+
+  # ----------------------------------------------------------------------------
+  # field + field-binding payload helpers (used by :create_document)
+  # ----------------------------------------------------------------------------
+
+  defp field_payload_to_ops(%Operation{} = op), do: [op]
+
+  defp field_payload_to_ops(field) when is_map(field) do
+    field = Map.new(field, fn {k, v} -> {atomize_key(k), v} end)
+
+    case Map.get(field, :id) do
+      id when is_binary(id) and id != "" ->
+        payload =
+          %{}
+          |> maybe_put(:key, Map.get(field, :key))
+          |> maybe_put(:value, Map.get(field, :value))
+          |> maybe_put(:attrs, Map.get(field, :attrs))
+
+        [
+          %Operation{
+            op: :set_field,
+            target_type: :field,
+            target_id: id,
+            args: %{value: payload}
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp field_payload_to_ops(_), do: []
+
+  defp field_binding_payload_to_op(%Operation{} = op), do: [op]
+
+  defp field_binding_payload_to_op(binding) when is_map(binding) do
+    binding = Map.new(binding, fn {k, v} -> {atomize_key(k), v} end)
+    node_id = Map.get(binding, :node_id)
+    field_id = Map.get(binding, :field_id)
+
+    cond do
+      is_binary(node_id) and is_binary(field_id) ->
+        ref_id =
+          Map.get(binding, :id) ||
+            "ref:#{field_id}@#{node_id}:#{Map.get(binding, :start, 0)}"
+
+        ref = %{
+          id: ref_id,
+          source_node_id: node_id,
+          target_id: field_id,
+          type: :field,
+          start: Map.get(binding, :start),
+          end: Map.get(binding, :end)
+        }
+
+        [
+          %Operation{
+            op: :bind_ref,
+            target_type: :ref,
+            target_id: ref_id,
+            args: %{ref: ref}
+          }
+        ]
+
+      true ->
+        []
+    end
+  end
+
+  defp field_binding_payload_to_op(_), do: []
+
+  defp atomize_key(k) when is_atom(k), do: k
+
+  defp atomize_key(k) when is_binary(k) do
+    String.to_existing_atom(k)
+  rescue
+    ArgumentError -> String.to_atom(k)
   end
 
   # ----------------------------------------------------------------------------

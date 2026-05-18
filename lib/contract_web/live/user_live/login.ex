@@ -2,6 +2,7 @@ defmodule ContractWeb.UserLive.Login do
   use ContractWeb, :live_view
 
   alias Contract.Accounts
+  alias ContractWeb.AuthEmailURL
 
   @impl true
   def render(assigns) do
@@ -57,14 +58,14 @@ defmodule ContractWeb.UserLive.Login do
             </p>
           </div>
 
-          <div :if={local_mail_adapter?()} class="alert alert-info mt-4">
+          <div :if={AuthEmailURL.mailbox_visible?()} class="alert alert-info mt-4">
             <.icon name="hero-information-circle" class="size-5 shrink-0" />
             <div>
-              <p class="font-medium">{dgettext("auth", "Local mail adapter is active.")}</p>
+              <p class="font-medium">{dgettext("auth", "Development mailbox is available.")}</p>
               <p class="text-sm">
                 {dgettext("auth", "Magic links land in")}
                 <.link href="/dev/mailbox" class="underline">
-                  {dgettext("auth", "the dev mailbox")}
+                  {dgettext("auth", "Open dev mailbox")}
                 </.link>
                 {dgettext("auth", ", not real email.")}
               </p>
@@ -138,8 +139,8 @@ defmodule ContractWeb.UserLive.Login do
 
           <p class="text-xs text-base-content/50 mt-8 text-center">
             {dgettext("auth", "Trouble signing in?")}
-            <a href="mailto:support@contractstudio.example" class="underline hover:text-base-content">
-              {dgettext("auth", "Email support")}
+            <a href="mailto:ereignis@korea.ac.kr" class="underline hover:text-base-content">
+              ereignis@korea.ac.kr
             </a>
           </p>
         </:form>
@@ -168,7 +169,7 @@ defmodule ContractWeb.UserLive.Login do
     if user = Accounts.get_user_by_email(email) do
       Accounts.deliver_login_instructions(
         user,
-        &url(~p"/users/log-in/#{&1}")
+        &AuthEmailURL.login_url/1
       )
     end
 
@@ -184,7 +185,4 @@ defmodule ContractWeb.UserLive.Login do
      |> push_navigate(to: ~p"/users/log-in")}
   end
 
-  defp local_mail_adapter? do
-    Application.get_env(:contract, Contract.Mailer)[:adapter] == Swoosh.Adapters.Local
-  end
 end

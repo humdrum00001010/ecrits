@@ -1,0 +1,103 @@
+## Korean translations for the authenticated storage surface (보관함).
+##
+## Source-of-truth is the Korean `msgid` (legal-tech draft register, per
+## DESIGN.md §4 v31). The `msgstr` mirrors the `msgid` for the ko locale
+## because the source uses Hangul directly; the en locale falls back to
+## the msgid.
+##
+## #. TODO native-speaker review:
+##   - 상태 라벨 (`초안` / `진행 중` / `검토 대기` / `완료` / `보관`)
+##     anchored on Korean legal-tech UX register.
+##   - Upload affordance lives in `/studio` (Canvas.Empty), NOT on this
+##     storage surface or in the global navbar (2026-05-17 owner
+##     directive + DESIGN.md §7 "Final design prohibitions").
+msgid ""
+msgstr ""
+"Language: ko\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: lib/contract_web/live/storage_live.ex:37
+#, elixir-autogen, elixir-format
+msgid "Storage"
+msgstr "보관함"
+
+#: lib/contract_web/live/storage_live.ex:255
+#, elixir-autogen, elixir-format
+msgid "가져오는 중"
+msgstr "가져오는 중"
+
+#: lib/contract_web/live/storage_live.ex:257
+#, elixir-autogen, elixir-format
+msgid "검토 대기"
+msgstr "검토 대기"
+
+#: lib/contract_web/live/storage_live.ex:101
+#: lib/contract_web/live/storage_live.ex:130
+#, elixir-autogen, elixir-format
+msgid "모든 문서"
+msgstr "모든 문서"
+
+#: lib/contract_web/live/storage_live.ex:220
+#, elixir-autogen, elixir-format
+msgid "문서 메뉴"
+msgstr "문서 메뉴"
+
+#: lib/contract_web/live/storage_live.ex:259
+#, elixir-autogen, elixir-format
+msgid "보관"
+msgstr "보관"
+
+#: lib/contract_web/live/storage_live.ex:110
+#, elixir-autogen, elixir-format
+msgid "새 문서"
+msgstr "새 문서"
+
+#: lib/contract_web/live/storage_live.ex:187
+#, elixir-autogen, elixir-format
+msgid "수정일"
+msgstr "수정일"
+
+#: lib/contract_web/live/storage_live.ex:258
+#, elixir-autogen, elixir-format
+msgid "완료"
+msgstr "완료"
+
+#: lib/contract_web/live/storage_live.ex:143
+#, elixir-autogen, elixir-format
+msgid "즐겨찾기"
+msgstr "즐겨찾기"
+
+#: lib/contract_web/live/storage_live.ex:158
+#, elixir-autogen, elixir-format
+msgid "즐겨찾기한 문서가 아직 없습니다."
+msgstr "즐겨찾기한 문서가 아직 없습니다."
+
+#: lib/contract_web/live/storage_live.ex:256
+#, elixir-autogen, elixir-format
+msgid "진행 중"
+msgstr "진행 중"
+
+#: lib/contract_web/live/storage_live.ex:254
+#, elixir-autogen, elixir-format
+msgid "초안"
+msgstr "초안"
+
+#: lib/contract_web/live/storage_live.ex:188
+#, elixir-autogen, elixir-format
+msgid "메뉴"
+msgstr "메뉴"
+
+#: lib/contract_web/live/storage_live.ex:185
+#, elixir-autogen, elixir-format
+msgid "문서명"
+msgstr "문서명"
+
+#: lib/contract_web/live/storage_live.ex:186
+#, elixir-autogen, elixir-format
+msgid "상태"
+msgstr "상태"
+
+#: lib/contract_web/live/storage_live.ex:195
+#, elixir-autogen, elixir-format
+msgid "아직 문서가 없습니다."
+msgstr "아직 문서가 없습니다."

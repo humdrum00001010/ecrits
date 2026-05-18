@@ -23,6 +23,9 @@ defmodule Contract.IO.UpstageTest do
 
         {:ok, body, conn} = Plug.Conn.read_body(conn, length: 50_000_000)
         assert body =~ ~r/form-data; name="document"/i
+        # Upstage rejects requests where the `document` part lacks a filename
+        # (HTTP 400 "no_document"), so this is the regression assertion.
+        assert body =~ ~r/form-data;\s*name="document";\s*filename="/i
         assert body =~ ~r/name="ocr"/
         assert body =~ "auto"
         assert body =~ ~r/name="coordinates"/
@@ -56,6 +59,64 @@ defmodule Contract.IO.UpstageTest do
       assert is_list(parsed.elements)
       assert hd(parsed.elements)["category"] == "paragraph"
       assert parsed.content == %{"text" => "hello"}
+    end
+
+    test "document part carries filename + hwpx content_type when path ends in .hwpx",
+         %{bypass: bypass} do
+      parent = self()
+
+      Bypass.expect_once(bypass, "POST", "/v1/document-ai/document-parse", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn, length: 50_000_000)
+        send(parent, {:body, body})
+
+        Plug.Conn.resp(conn, 200, Jason.encode!(%{"elements" => [], "content" => %{}}))
+      end)
+
+      tmpfile = write_tempfile_with_ext("hwpx-bytes", ".hwpx")
+      assert {:ok, _} = Upstage.parse(tmpfile)
+
+      assert_receive {:body, body}, 5_000
+      basename = Path.basename(tmpfile)
+      # The document part must include a `filename=` directive AND a
+      # `Content-Type: application/vnd.hancom.hwpx` header for Upstage to
+      # accept the upload.
+      assert body =~ ~s|filename="#{basename}"|
+      assert body =~ ~r/Content-Type:\s*application\/vnd\.hancom\.hwpx/i
+    end
+
+    test "raw bytes path honors :filename override and derives content_type",
+         %{bypass: bypass} do
+      parent = self()
+
+      Bypass.expect_once(bypass, "POST", "/v1/document-ai/document-parse", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn, length: 50_000_000)
+        send(parent, {:body, body})
+        Plug.Conn.resp(conn, 200, Jason.encode!(%{"elements" => [], "content" => %{}}))
+      end)
+
+      assert {:ok, _} =
+               Upstage.parse(<<0, 1, 2, 3>>, filename: "real_contract.hwpx")
+
+      assert_receive {:body, body}, 5_000
+      assert body =~ ~s|filename="real_contract.hwpx"|
+      assert body =~ ~r/Content-Type:\s*application\/vnd\.hancom\.hwpx/i
+    end
+
+    test "raw bytes without :filename fall back to document.bin + octet-stream",
+         %{bypass: bypass} do
+      parent = self()
+
+      Bypass.expect_once(bypass, "POST", "/v1/document-ai/document-parse", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn, length: 50_000_000)
+        send(parent, {:body, body})
+        Plug.Conn.resp(conn, 200, Jason.encode!(%{"elements" => [], "content" => %{}}))
+      end)
+
+      assert {:ok, _} = Upstage.parse(<<0, 1, 2, 3>>)
+
+      assert_receive {:body, body}, 5_000
+      assert body =~ ~s|filename="document.bin"|
+      assert body =~ ~r/Content-Type:\s*application\/octet-stream/i
     end
 
     test "non-200 returns {:error, {:upstage_http, ...}}", %{bypass: bypass} do
@@ -105,7 +166,7 @@ defmodule Contract.IO.UpstageTest do
         ])
 
       assert single["id"] == "node:0"
-      assert single["content"]["text"] == "hi"
+      assert single["content"] == "hi"
     end
 
     test "preserves page + coordinates + original category in attrs" do
@@ -283,6 +344,17 @@ defmodule Contract.IO.UpstageTest do
 
   defp write_tempfile(contents) do
     path = Path.join(System.tmp_dir!(), "upstage-test-#{System.unique_integer([:positive])}")
+    File.write!(path, contents)
+    path
+  end
+
+  defp write_tempfile_with_ext(contents, ext) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "upstage-test-#{System.unique_integer([:positive])}#{ext}"
+      )
+
     File.write!(path, contents)
     path
   end

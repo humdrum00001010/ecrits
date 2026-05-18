@@ -68,18 +68,18 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
       data-layout={if @mobile?, do: "mobile", else: "desktop"}
       data-stub="chat-rail"
       class={[
-        "flex flex-col bg-base-100 min-h-0",
-        not @mobile? && "shrink-0 w-[360px] border-l border-base-200",
+        "flex flex-col bg-base-200 text-base-content min-h-0 h-full w-full",
+        not @mobile? && "shrink-0 border-l border-base-300",
         @mobile? && "w-full flex-1 h-full"
       ]}
     >
-      <%!-- Header --%>
-      <header class={[
-        "flex items-center gap-2 px-4 py-3 border-b border-base-200 shrink-0",
-        @mobile? && "py-2"
-      ]}>
+      <%!-- Mobile-only header: just the "문서 보기" toggle. Desktop renders
+           the chat at the top of the rail with no chrome. --%>
+      <header
+        :if={@mobile?}
+        class="flex items-center gap-2 px-4 py-2 border-b border-base-300 shrink-0"
+      >
         <button
-          :if={@mobile?}
           type="button"
           phx-click="toggle_preview"
           data-role="chat-rail-open-document"
@@ -89,27 +89,6 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
           <.icon name="hero-document-text" class="size-4" />
           {dgettext("studio", "문서")}
         </button>
-
-        <h2 :if={not @mobile?} class="font-medium text-sm text-base-content/80">
-          {dgettext("studio", "에이전트")}
-        </h2>
-
-        <span
-          data-role="agent-status-pill"
-          data-status={@agent_status.key}
-          class={[
-            "ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs",
-            status_pill_class(@agent_status.key)
-          ]}
-        >
-          <span
-            :if={@agent_status.key == :responding}
-            class="inline-block size-1.5 rounded-full bg-current animate-pulse"
-            aria-hidden="true"
-          >
-          </span>
-          {@agent_status.label}
-        </span>
       </header>
 
       <%!-- Observer-mode banner (agent_supervised persona) --%>
@@ -160,7 +139,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
         >
           <div
             data-role="chat-no-doc-message"
-            class="rounded-lg bg-base-200 text-base-content text-sm px-3 py-2"
+            class="rounded-lg bg-base-100 border border-base-300 text-base-content text-sm px-3 py-2"
           >
             <p class="mb-2">{dgettext("studio", "새 문서를 시작합니다. 어떻게 시작할까요?")}</p>
             <ol class="list-decimal list-inside space-y-1 marker:text-base-content/60">
@@ -225,9 +204,9 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             data-message-role={msg_role(msg)}
             data-transient={msg_transient?(msg)}
             class={[
-              "flex flex-col gap-1 max-w-[88%]",
-              msg_role(msg) == "user" && "self-end items-end ml-auto",
-              msg_role(msg) == "agent" && "self-start items-start"
+              "flex items-end gap-2 max-w-[88%]",
+              msg_role(msg) == "user" && "self-end ml-auto flex-row-reverse",
+              msg_role(msg) == "agent" && "self-start"
             ]}
           >
             <.operation_block
@@ -239,9 +218,12 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             <div
               :if={is_nil(msg_operation(msg))}
               class={[
-                "chat-message whitespace-pre-wrap break-words",
-                msg_role(msg) == "user" && "chat-message--user",
-                msg_role(msg) == "agent" && msg_transient?(msg) == "true" && "italic opacity-70"
+                "rounded-lg px-2 py-0.5 text-[13px] leading-snug whitespace-pre-wrap break-words",
+                msg_role(msg) == "user" && "bg-primary text-primary-content rounded-br-sm",
+                msg_role(msg) == "agent" && msg_transient?(msg) != "true" &&
+                  "bg-base-100 border border-base-300 text-base-content rounded-bl-sm",
+                msg_role(msg) == "agent" && msg_transient?(msg) == "true" &&
+                  "bg-base-100 border border-base-300 text-base-content/60 italic rounded-bl-sm"
               ]}
             >
               {msg_body(msg)}
@@ -249,68 +231,75 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             <time
               :if={msg_timestamp(msg)}
               datetime={msg_timestamp(msg)}
-              class="text-[10px] text-base-content/40 px-1"
+              class="text-[10px] text-base-content/40 shrink-0 pb-1 whitespace-nowrap"
             >
-              {msg_timestamp(msg)}
+              {format_msg_time(msg_timestamp(msg))}
             </time>
           </article>
         </div>
       </div>
 
-      <%!-- Input footer — three controls in a horizontal row:
-           [upload] [input] [send]. Identical on desktop and mobile. The
-           upload button reuses the existing `agent_option_picked` flow
-           (key="upload") which the parent StudioLive handles by opening
-           the upload modal. --%>
+      <%!-- Input footer — icon upload + message input + icon send.
+           The row shape is identical on desktop and mobile. --%>
       <form
         id={"#{@id}-form"}
         phx-hook=".ChatInput"
         phx-submit="chat.submit"
         data-role="chat-form"
         class={[
-          "border-t border-base-200 bg-base-100 shrink-0 px-3 py-2",
+          "border-t border-base-300 bg-base-200 shrink-0 px-3 py-2",
           @mobile? && "pb-[max(0.5rem,env(safe-area-inset-bottom))]"
         ]}
         autocomplete="off"
       >
-        <div class="flex items-end gap-2">
+        <div class="flex items-center gap-1 rounded-md border border-base-300 bg-base-100 pl-1 pr-1 focus-within:border-base-content/40 transition-colors">
           <button
             id={"#{@id}-upload"}
             type="button"
             data-role="chat-upload"
             phx-click="agent_option_picked"
             phx-value-key="upload"
-            class="composer-btn shrink-0"
+            class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded text-base-content/50 hover:text-base-content hover:bg-base-200 transition-colors"
             aria-label={dgettext("studio", "파일 업로드")}
           >
-            <.icon name="hero-arrow-up-tray" class="size-4" />
+            <.icon name="hero-paper-clip" class="size-4" />
           </button>
           <label for={"#{@id}-textarea"} class="sr-only">
             {dgettext("studio", "메시지")}
           </label>
-          <div class="flex-1 [&_.fieldset]:!mb-0">
-            <.input
-              id={"#{@id}-textarea"}
-              type="textarea"
-              name="message"
-              value=""
-              rows="1"
-              data-role="chat-textarea"
-              data-autosize="true"
-              placeholder={dgettext("studio", "메시지를 입력하세요…")}
-              class="w-full textarea textarea-bordered textarea-sm resize-none min-h-[2.25rem] max-h-32"
-            />
-          </div>
-          <button
-            id={"#{@id}-send"}
-            type="button"
-            data-role="chat-send"
-            data-action="send"
-            class="composer-btn composer-btn--primary shrink-0"
-            aria-label={dgettext("studio", "보내기")}
-          >
-            <.icon name="hero-paper-airplane" class="size-4" />
-          </button>
+          <textarea
+            id={"#{@id}-textarea"}
+            name="message"
+            rows="1"
+            data-role="chat-textarea"
+            data-autosize="true"
+            placeholder={dgettext("studio", "메시지를 입력하세요…")}
+            class="flex-1 min-w-0 h-9 max-h-32 px-2 py-2 bg-transparent border-0 text-sm text-base-content resize-none outline-none focus:outline-none focus:ring-0 focus:shadow-none"
+          ></textarea>
+          <%= if @agent_status.key == :responding do %>
+            <button
+              id={"#{@id}-send"}
+              type="button"
+              phx-click="cancel_agent"
+              data-role="chat-stop"
+              data-action="stop"
+              class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded bg-base-content text-base-100 hover:bg-base-content/80 transition-colors"
+              aria-label={dgettext("studio", "중지")}
+            >
+              <.icon name="hero-stop" class="size-4" />
+            </button>
+          <% else %>
+            <button
+              id={"#{@id}-send"}
+              type="button"
+              data-role="chat-send"
+              data-action="send"
+              class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded text-base-content/50 hover:text-primary transition-colors"
+              aria-label={dgettext("studio", "보내기")}
+            >
+              <.icon name="hero-paper-airplane" class="size-4" />
+            </button>
+          <% end %>
         </div>
       </form>
 
@@ -958,4 +947,18 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
   defp msg_timestamp(%{timestamp: %DateTime{} = ts}), do: DateTime.to_iso8601(ts)
   defp msg_timestamp(%{timestamp: ts}) when is_binary(ts), do: ts
   defp msg_timestamp(_), do: nil
+
+  # Compact wall-time HH:MM for the bubble side-marker. Falls back to the
+  # raw string if parsing fails so tests / non-iso inputs don't crash.
+  defp format_msg_time(nil), do: ""
+
+  defp format_msg_time(ts) when is_binary(ts) do
+    case DateTime.from_iso8601(ts) do
+      {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
+      _ -> ts
+    end
+  end
+
+  defp format_msg_time(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M")
+  defp format_msg_time(_), do: ""
 end

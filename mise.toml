@@ -1,6 +1,3 @@
 [tools]
 erlang = "28.5"
 elixir = "1.19.5-otp-28"
-
-[env]
-ERL_AFLAGS = "-kernel shell_history enabled"

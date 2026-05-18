@@ -23,7 +23,7 @@ defmodule ContractWeb.Brand do
       size_class(@size),
       @class
     ]}>
-      <span>Contract Studio</span>
+      <span>계약기계</span>
       <span class="text-primary" aria-hidden="true">.</span>
     </span>
     """

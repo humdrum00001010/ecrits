@@ -208,7 +208,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
 
       # Mobile chat-rail header must expose a leading 문서 button that
       # fires `toggle_preview` so the user can pivot from chat → document
-      # without going via /dashboard.
+      # without going via /storage.
       assert html =~ ~s(data-role="chat-rail-open-document")
       assert html =~ ~s(phx-click="toggle_preview")
       assert html =~ "문서"
@@ -224,7 +224,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
         )
 
       # Desktop renders the document inline + uses the studio-document-
-      # header's Dashboard link, so the in-rail toggle is mobile-only.
+      # header's Storage link, so the in-rail toggle is mobile-only.
       refute html =~ ~s(data-role="chat-rail-open-document")
     end
 
@@ -256,32 +256,16 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ ~s(data-role="chat-no-doc-welcome")
       refute html =~ ~s(data-role="chat-welcome")
 
-      # The 4 option labels (upload removed from the welcome chips per #19 —
-      # the upload affordance now lives in the chat composer footer, not
-      # in the no-doc welcome list).
-      refute html =~ "기존 계약서 업로드"
+      # All 5 option labels are present.
+      assert html =~ "기존 계약서 업로드"
       assert html =~ "최근 문서 열기"
       assert html =~ "빈 계약서 만들기"
       assert html =~ "논의에서 시작"
       assert html =~ "다른 문서에서 변형 만들기"
 
-      # Each chip emits agent_option_picked with the right key. Upload is
-      # still NOT a no-doc welcome chip — scope the refute to the welcome
-      # options container so it does not collide with the composer footer
-      # upload button (which also fires agent_option_picked key="upload").
+      # Each chip emits agent_option_picked with the right key.
       assert html =~ ~s(phx-click="agent_option_picked")
-
-      no_doc_options =
-        Regex.run(
-          ~r/data-role="chat-no-doc-options".*?<\/div>/s,
-          html
-        )
-        |> case do
-          [matched] -> matched
-          _ -> ""
-        end
-
-      refute no_doc_options =~ ~s(phx-value-key="upload")
+      assert html =~ ~s(phx-value-key="upload")
       assert html =~ ~s(phx-value-key="recent")
       assert html =~ ~s(phx-value-key="blank")
       assert html =~ ~s(phx-value-key="draft_from_discussion")
@@ -375,7 +359,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       assert busy_html =~ ~s(data-status="responding")
     end
 
-    test "tool protocol messages render compact trace rows with stable DOM ids" do
+    test "operation protocol messages render structured blocks with stable DOM ids" do
       html =
         render_component(ChatRail,
           id: "chat-rail",
@@ -401,12 +385,11 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
           current_scope: lawyer_scope()
         )
 
-      assert html =~ ~s(id="tool-trace-tool-search-1")
-      assert html =~ ~s(data-role="tool-trace")
-      assert html =~ ~s(data-status="running")
-      assert html =~ "답변을 수정 범위에 연결함"
-      assert html =~ "Searching statutes"
-      refute html =~ "law.search"
+      assert html =~ ~s(id="operation-block-tool-search-1")
+      assert html =~ ~s(data-role="operation-block")
+      assert html =~ ~s(data-operation-type="tool_call")
+      assert html =~ ~s(data-operation-status="running")
+      assert html =~ "law.search"
     end
 
     test "source interpretation block renders parse summary and proposed claims" do
@@ -452,14 +435,10 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
 
       assert html =~ ~s(data-role="source-interpretation-block")
       assert html =~ "Counterparty draft"
-      assert html =~ "추출값 2개"
-      assert html =~ "효력 발생일"
+      assert html =~ "2 claims"
+      assert html =~ "effective_date"
       assert html =~ "2026-01-01"
-      assert html =~ "갑"
-      refute html =~ "2 claims"
-      refute html =~ "effective_date"
-      refute html =~ "party_a"
-      refute html =~ "Source interpretation"
+      assert html =~ "party_a"
     end
 
     test "source claim block renders anchors and supervision controls" do
@@ -495,37 +474,18 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
         )
 
       assert html =~ ~s(data-role="source-claim-block")
-      assert html =~ "항목"
-      assert html =~ "값"
-      assert html =~ "신뢰도"
-      assert html =~ "효력 발생일"
+      assert html =~ "effective_date"
       assert html =~ "2026-01-01"
       assert html =~ "0.91"
       assert html =~ "Effective Date: 2026-01-01"
-      assert html =~ "확정"
-      assert html =~ "수정"
-      assert html =~ "저장"
-      assert html =~ "반려"
-      assert html =~ "문서에 연결"
-      assert html =~ "연결 해제"
       assert html =~ ~s(phx-click="source_claim.confirm")
       assert html =~ ~s(phx-submit="source_claim.correct")
       assert html =~ ~s(phx-click="source_claim.reject")
       assert html =~ ~s(phx-click="source_claim.link_to_document")
       assert html =~ ~s(phx-click="source_claim.unlink")
       assert html =~ ~s(phx-value-source_claim_id="claim-1")
-      refute html =~ "Effective date"
-      refute html =~ "Source claim"
-      refute html =~ "Field"
-      refute html =~ "Value"
-      refute html =~ "Confirm"
-      refute html =~ "Correct"
-      refute html =~ "Save"
-      refute html =~ "Reject"
-      refute html =~ "Link"
-      refute html =~ "Unlink"
-      refute html =~ "effective_date"
     end
+
   end
 
   # ===========================================================================
@@ -722,22 +682,16 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
 
       html = render(lv)
       assert html =~ ~s(data-role="evidence-block")
+      assert html =~ ~s(data-provider="law_mcp.search_law")
       assert html =~ "민법 제390조"
-      assert html =~ "출처"
-      assert html =~ "법령 검색 결과"
+      assert html =~ "Korea Law MCP"
       assert html =~ "2026-05-17T12:00:00Z"
       assert html =~ ~s(data-role="evidence-attach")
-      assert html =~ "근거 연결"
       assert html =~ ~s(phx-click="evidence.attach")
       assert html =~ ~s(phx-value-evidence_snapshot_id="11111111-1111-1111-1111-111111111111")
-      refute html =~ ~s(data-provider="law_mcp.search_law")
-      refute html =~ "Korea Law MCP"
-      refute html =~ "Provider"
-      refute html =~ "Source"
-      refute html =~ "Attach evidence"
     end
 
-    test "ui.toggle_expand toggles compact trace details", %{conn: conn} do
+    test "ui.toggle_expand toggles an operation block", %{conn: conn} do
       {:ok, lv, _html} =
         live_isolated(conn, WrapperLive, session: %{"scope" => lawyer_scope()})
 
@@ -760,15 +714,16 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       })
 
       html = render(lv)
-      assert html =~ ~s(id="tool-trace-tool-toggle-1")
-      refute html =~ ~s(data-role="tool-trace-details")
+      assert html =~ ~s(id="operation-block-tool-toggle-1")
+      assert html =~ ~s(id="operation-block-tool-toggle-1-toggle")
+      refute html =~ ~s(data-role="operation-details")
 
       html =
         lv
-        |> element("#tool-trace-tool-toggle-1")
+        |> element("#operation-block-tool-toggle-1-toggle")
         |> render_click()
 
-      assert html =~ ~s(data-role="tool-trace-details")
+      assert html =~ ~s(data-role="operation-details")
       assert html =~ "상법 제542조"
     end
   end

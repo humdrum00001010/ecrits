@@ -188,7 +188,7 @@ msgstr "폐기"
 #: lib/contract_web/live/user_live/api_tokens.ex:100
 #, elixir-autogen, elixir-format
 msgid "Route-ref tokens grant access to Contract Studio's MCP endpoint. Tokens are signed; revoke any time by deleting."
-msgstr "Route-ref 토큰은 Contract Studio의 MCP 엔드포인트 접근 권한을 부여합니다. 토큰은 서명되어 있으며, 언제든 삭제하여 폐기할 수 있습니다."
+msgstr "Route-ref 토큰은 계약기계의 MCP 엔드포인트 접근 권한을 부여합니다. 토큰은 서명되어 있으며, 언제든 삭제하여 폐기할 수 있습니다."
 
 #: lib/contract_web/live/user_live/settings.ex:96
 #, elixir-autogen, elixir-format

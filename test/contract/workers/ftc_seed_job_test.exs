@@ -5,7 +5,6 @@ defmodule Contract.Workers.FtcSeedJobTest do
   alias Contract.Change
   alias Contract.Documents.Document
   alias Contract.IO.UpstageStub
-  alias Contract.Matters.Matter
   alias Contract.Workers.FtcSeedJob
 
   @ftc_url "http://localhost:0/franchise.hwp"
@@ -64,7 +63,7 @@ defmodule Contract.Workers.FtcSeedJobTest do
   end
 
   describe "perform/1 — happy path" do
-    test "creates the system user + templates matter + template Document + Change", %{
+    test "creates the system user + template Document + Change", %{
       bypass: bypass
     } do
       stub_ftc_download(bypass)
@@ -76,18 +75,11 @@ defmodule Contract.Workers.FtcSeedJobTest do
       assert %Contract.Accounts.User{email: "system@contract.local"} =
                Repo.get(Contract.Accounts.User, FtcSeedJob.system_user_id())
 
-      # Templates matter landed, owned by the system user, system flag in metadata.
-      assert %Matter{} = matter = Repo.get_by(Matter, name: FtcSeedJob.templates_matter_name())
-      assert matter.owner_id == FtcSeedJob.system_user_id()
-      assert is_map(matter.metadata)
-      assert matter.metadata["system"] == true
-      assert matter.metadata["source"] == "ftc"
-
       # Document landed under the system owner with parsed metadata.
       [doc] =
         Repo.all(
           from d in Document,
-            where: d.owner_id == ^matter.owner_id and d.type_key == "franchise_v1"
+            where: d.owner_id == ^FtcSeedJob.system_user_id() and d.type_key == "franchise_v1"
         )
 
       assert doc.status == :draft
@@ -140,12 +132,11 @@ defmodule Contract.Workers.FtcSeedJobTest do
       assert :ok = perform_job(FtcSeedJob, job_args(bypass))
 
       # Idempotency: single Document row, second run skipped the Upstage driver.
-      matter = Repo.get_by!(Matter, name: FtcSeedJob.templates_matter_name())
-
       assert 1 =
                Repo.aggregate(
                  from(d in Document,
-                   where: d.owner_id == ^matter.owner_id and d.type_key == "franchise_v1"
+                   where:
+                     d.owner_id == ^FtcSeedJob.system_user_id() and d.type_key == "franchise_v1"
                  ),
                  :count,
                  :id

@@ -63,6 +63,12 @@ defmodule ContractWeb.Router do
     end
   end
 
+  scope "/", ContractWeb do
+    pipe_through :browser
+
+    get "/", PageController, :home
+  end
+
   # Browser product flow is LiveView-only. The document-first product
   # routes live in the authenticated browser scope below, inside the
   # single `:require_authenticated_user` live_session.
@@ -122,7 +128,7 @@ defmodule ContractWeb.Router do
         ContractWeb.Locale,
         {ContractWeb.DocumentScope, :assign_scope}
       ] do
-      live "/dashboard", DashboardLive
+      live "/storage", StorageLive
       live "/studio", StudioLive
       live "/studio/:document_id", StudioLive
       live "/documents/:document_id", StudioLive
@@ -138,6 +144,10 @@ defmodule ContractWeb.Router do
         LegacyRedirectController,
         :matter_document
 
+    # /dashboard → /storage (Document library was renamed to "보관함"
+    # 2026-05-17; old bookmarks/Slack unfurls must still resolve.)
+    get "/dashboard", LegacyRedirectController, :dashboard
+
     get "/exports/:export_id/download", ExportDownloadController, :show
 
     post "/users/update-password", UserSessionController, :update_password
@@ -151,8 +161,6 @@ defmodule ContractWeb.Router do
 
   scope "/", ContractWeb do
     pipe_through [:browser]
-
-    get "/", PageController, :home
 
     live_session :current_user,
       on_mount: [{ContractWeb.UserAuth, :mount_current_scope}, ContractWeb.Locale] do

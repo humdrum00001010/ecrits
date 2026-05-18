@@ -517,4 +517,147 @@ defmodule Contract.StoreTest do
       assert [%Operation{op: :create_node, target_type: :document}] = input.ops
     end
   end
+
+  describe "load/1 projection decode (JSONB → atom coercion)" do
+    # When a Snapshot row's projection blob round-trips through Postgres
+    # JSONB, atoms come back as strings. The renderer (PreviewOverlay) pattern-
+    # matches on atom `kind`, so without coercion every node falls through to
+    # the catch-all <div> clause. These tests pin the coercion contract at the
+    # Store decode boundary.
+
+    defp insert_raw_snapshot(document_id, projection) do
+      {:ok, _} =
+        %Contract.Snapshot{}
+        |> Contract.Snapshot.changeset(%{
+          document_id: document_id,
+          revision: 1,
+          projection: projection,
+          r2_key: "documents/#{document_id}/snapshots/1.json"
+        })
+        |> Contract.Repo.insert()
+    end
+
+    test "coerces node kind from string to atom via allow-list" do
+      doc = new_document_id()
+
+      # JSONB-shaped projection: string keys all the way down, string kinds.
+      projection = %{
+        "title" => "Real Doc",
+        "type_key" => "nda",
+        "metadata" => %{},
+        "nodes" => %{
+          "node:1" => %{
+            "id" => "node:1",
+            "kind" => "heading",
+            "attrs" => %{"level" => 1},
+            "content" => "Article 1"
+          },
+          "node:2" => %{
+            "id" => "node:2",
+            "kind" => "paragraph",
+            "content" => "Body text"
+          },
+          "node:3" => %{
+            "id" => "node:3",
+            "kind" => "table",
+            "attrs" => %{"rows" => [["a", "b"]]}
+          },
+          "node:4" => %{
+            "id" => "node:4",
+            "kind" => "list_item",
+            "attrs" => %{"ordered" => true}
+          }
+        },
+        "node_order" => ["node:1", "node:2", "node:3", "node:4"],
+        "fields" => %{},
+        "marks" => %{},
+        "refs" => %{}
+      }
+
+      insert_raw_snapshot(doc, projection)
+
+      assert {:ok, %Runtime.State{projection: proj}} = Store.load(doc)
+
+      # Outer node-map keys atomized.
+      assert %{kind: :heading, id: "node:1", attrs: %{level: 1}, content: "Article 1"} =
+               proj.nodes["node:1"]
+
+      assert %{kind: :paragraph} = proj.nodes["node:2"]
+      assert %{kind: :table, attrs: %{rows: [["a", "b"]]}} = proj.nodes["node:3"]
+      assert %{kind: :list_item, attrs: %{ordered: true}} = proj.nodes["node:4"]
+
+      # node_order preserved verbatim (string ids).
+      assert proj.node_order == ["node:1", "node:2", "node:3", "node:4"]
+    end
+
+    test "falls back unknown node kinds to :paragraph" do
+      doc = new_document_id()
+
+      projection = %{
+        "nodes" => %{
+          "node:x" => %{
+            "id" => "node:x",
+            "kind" => "weird_made_up_kind",
+            "content" => "?"
+          }
+        },
+        "node_order" => ["node:x"]
+      }
+
+      insert_raw_snapshot(doc, projection)
+
+      assert {:ok, %Runtime.State{projection: proj}} = Store.load(doc)
+      assert proj.nodes["node:x"].kind == :paragraph
+    end
+
+    test "atomizes mark intent/source/target_type/confidence via existing atoms" do
+      doc = new_document_id()
+
+      # Force the intent atoms to be loaded by referencing them as literals.
+      _ = [:assertion, :question, :risk, :user, :high]
+
+      projection = %{
+        "marks" => %{
+          "mark:1" => %{
+            "id" => "mark:1",
+            "intent" => "assertion",
+            "source" => "user",
+            "target_type" => "node",
+            "target_id" => "node:1",
+            "confidence" => "high",
+            "text" => "hi"
+          }
+        }
+      }
+
+      insert_raw_snapshot(doc, projection)
+
+      assert {:ok, %Runtime.State{projection: proj}} = Store.load(doc)
+
+      assert %{
+               id: "mark:1",
+               intent: :assertion,
+               source: :user,
+               target_type: :node,
+               confidence: :high,
+               text: "hi"
+             } = proj.marks["mark:1"]
+    end
+
+    test "in-memory atoms passed back through decode are preserved" do
+      doc = new_document_id()
+
+      projection = %{
+        nodes: %{
+          "node:1" => %{id: "node:1", kind: :heading, attrs: %{level: 2}}
+        },
+        node_order: ["node:1"]
+      }
+
+      insert_raw_snapshot(doc, projection)
+
+      assert {:ok, %Runtime.State{projection: proj}} = Store.load(doc)
+      assert %{kind: :heading, attrs: %{level: 2}} = proj.nodes["node:1"]
+    end
+  end
 end

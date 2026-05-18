@@ -151,10 +151,10 @@ defmodule ContractWeb.Live.Studio.Components.ChatCommandButtonTest do
         )
 
       # Nav row exists.
-      assert html =~ ~s(data-cmd-id="nav_dashboard")
+      assert html =~ ~s(data-cmd-id="nav_storage")
       # JS.navigate command renders as a serialized JSON ops list — assert
-      # the row contains the dashboard path somewhere in its phx-click attr.
-      assert html =~ "/dashboard"
+      # the row contains the storage path somewhere in its phx-click attr.
+      assert html =~ "/storage"
     end
 
   end
@@ -189,7 +189,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatCommandButtonTest do
       refute html =~ ~s(data-cmd-id="doc_revoke_last")
       refute html =~ ~s(data-cmd-id="doc_set_type")
       # Navigation still present.
-      assert html =~ ~s(data-cmd-id="nav_dashboard")
+      assert html =~ ~s(data-cmd-id="nav_storage")
     end
 
     test "nil scope only shows navigation commands (no Documents group)" do
@@ -204,7 +204,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatCommandButtonTest do
       html = render_component(ChatCommandButton, assigns)
 
       refute html =~ ~s(data-cmd-id="doc_request_export")
-      assert html =~ ~s(data-cmd-id="nav_dashboard")
+      assert html =~ ~s(data-cmd-id="nav_storage")
     end
 
     test "sheet_commands/1 strips :mode sub-mode entries", %{user: user} do
@@ -217,7 +217,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatCommandButtonTest do
       refute :help_shortcuts in ids
       # Emit + navigate commands survive.
       assert :doc_request_export in ids
-      assert :nav_dashboard in ids
+      assert :nav_storage in ids
     end
   end
 

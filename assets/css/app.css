@@ -10,8 +10,14 @@
    unchanged; --cs-* tokens are scoped for the landing/dashboard/studio
    refresh wave). See DESIGN.md §2. */
 
-/* === v33 tokens === */
-:root {
+/* === v33 tokens ===
+   Palette tokens are theme-scoped. daisyUI swaps `--color-*` via
+   `[data-theme=...]`; `--cs-*` tokens must follow the same scope or
+   the chrome (topbar, app-shell, brand, etc.) stays in light mode
+   even when daisyUI flips to studio-dark. See feedback memory
+   `css-philosophy`: palette in CSS, shapes in Tailwind utilities. */
+:root,
+[data-theme="studio"] {
   --cs-bg: #fbfaf7;
   --cs-surface: #ffffff;
   --cs-surface-soft: #f6f4ee;
@@ -30,6 +36,24 @@
   --cs-radius-lg: 16px;
   --cs-shadow-card: 0 8px 28px rgba(17, 24, 39, 0.06);
   --cs-shadow-popover: 0 18px 44px rgba(17, 24, 39, 0.12);
+}
+
+[data-theme="studio-dark"] {
+  --cs-bg: #111111;
+  --cs-surface: #181818;
+  --cs-surface-soft: #1f1f1f;
+  --cs-ink: #ededed;
+  --cs-muted: #a3a3a3;
+  --cs-subtle: #737373;
+  --cs-line: #2a2a2a;
+  --cs-line-strong: #3a3a3a;
+  --cs-green: #6dbf95;
+  --cs-green-2: #7fd1a7;
+  --cs-blue: #7aa6ff;
+  --cs-amber: #d6a86a;
+  --cs-red: #e89485;
+  --cs-shadow-card: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --cs-shadow-popover: 0 18px 44px rgba(0, 0, 0, 0.6);
 }
 
 body {
@@ -62,16 +86,16 @@ body {
 /* === v33 surface classes === */
 .app-shell {
   min-height: 100vh;
+  padding-top: 60px;
   color: var(--cs-ink);
-  background:
-    linear-gradient(180deg, rgba(246, 244, 238, 0.86) 0%, rgba(251, 250, 247, 0) 240px),
-    var(--cs-bg);
+  background: var(--cs-bg);
 }
 
 .topbar {
-  position: -webkit-sticky;
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 40;
   display: flex;
   align-items: center;
@@ -81,12 +105,12 @@ body {
   padding: 0 28px;
   border-bottom: 1px solid var(--cs-line);
   background: var(--cs-bg);
-  /* Solid bg so it never lets scrolled content bleed through. */
 }
+
 
 @supports (backdrop-filter: blur(14px)) {
   .topbar {
-    background: rgba(251, 250, 247, 0.92);
+    background: color-mix(in oklab, var(--cs-bg) 92%, transparent);
     backdrop-filter: blur(14px);
   }
 }
@@ -99,11 +123,18 @@ body {
   color: var(--cs-ink);
   font-size: 14px;
   font-weight: 600;
+  line-height: 1;
   letter-spacing: 0;
   text-decoration: none;
 }
 
+.brand > span {
+  display: inline-block;
+  line-height: 1;
+}
+
 .brand__icon {
+  display: block;
   width: 22px;
   height: 22px;
   flex: 0 0 auto;
@@ -112,11 +143,7 @@ body {
 .topbar__nav {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px;
-  border: 1px solid var(--cs-line);
-  border-radius: var(--cs-radius-sm);
-  background: var(--cs-surface);
+  gap: 4px;
 }
 
 .topbar__nav a,
@@ -124,12 +151,11 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 32px;
-  padding: 0 12px;
+  padding: 6px 10px;
   border-radius: 4px;
   color: var(--cs-muted);
   font-size: 13px;
-  font-weight: 550;
+  font-weight: 500;
   line-height: 1;
   letter-spacing: 0;
   text-decoration: none;
@@ -142,13 +168,14 @@ body {
 
 .topbar__nav a:hover {
   color: var(--cs-ink);
-  background: var(--cs-surface-soft);
+  background: transparent;
 }
 
 .topbar__nav .is-active {
   color: var(--cs-ink);
-  background: var(--cs-surface-soft);
-  box-shadow: inset 0 0 0 1px var(--cs-line-strong);
+  background: transparent;
+  box-shadow: none;
+  font-weight: 600;
 }
 
 .button,
@@ -694,9 +721,8 @@ body {
 .document-card {
   position: relative;
   display: grid;
-  grid-template-rows: 156px auto;
+  grid-template-rows: 160px auto;
   overflow: hidden;
-  min-height: 260px;
   border: 1px solid var(--cs-line);
   border-radius: var(--cs-radius-md);
   color: var(--cs-ink);
@@ -716,12 +742,12 @@ body {
 }
 
 .document-card__thumb {
+  position: relative;
   display: grid;
   place-items: center;
+  overflow: hidden;
   border-bottom: 1px solid var(--cs-line);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(246, 244, 238, 0.9)),
-    var(--cs-surface-soft);
+  background: var(--cs-surface);
 }
 
 .document-card__thumb img,
@@ -731,10 +757,54 @@ body {
   opacity: 0.74;
 }
 
+/* Google-Docs-style preview: render the first ~6 lines of the contract
+   body inside the thumb, then fade out at the bottom so the card never
+   looks cropped. Text is unselectable and pointer-events-none so the
+   thumb stays one click target. */
+.document-card__thumb--lines {
+  display: block;
+  padding: 12px 14px 0;
+  text-align: left;
+  font-family: "Noto Sans CJK KR", "NanumBarunGothic", system-ui, sans-serif;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--cs-ink);
+  user-select: none;
+  pointer-events: none;
+}
+
+.document-card__thumb-line {
+  display: block;
+  margin: 0 0 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  opacity: 0.78;
+}
+
+.document-card__thumb-line--heading {
+  font-weight: 600;
+  font-size: 11.5px;
+  opacity: 0.92;
+  margin-top: 6px;
+}
+
+.document-card__thumb-line:first-child {
+  margin-top: 0;
+}
+
+.document-card__thumb-fade {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 38px;
+  background: linear-gradient(180deg, transparent, var(--cs-surface));
+  pointer-events: none;
+}
+
 .document-card__body {
   display: grid;
-  gap: 10px;
-  padding: 14px;
+  gap: 6px;
+  padding: 10px 14px 12px;
 }
 
 .document-card__title {
@@ -765,13 +835,15 @@ body {
   position: absolute;
   top: 8px;
   right: 8px;
+  z-index: 30;
   display: inline-grid;
   place-items: center;
   width: 30px;
   height: 30px;
   border: 1px solid transparent;
   border-radius: var(--cs-radius-sm);
-  background: rgba(255, 255, 255, 0.86);
+  background: color-mix(in oklab, var(--cs-surface) 86%, transparent);
+  color: var(--cs-ink);
   cursor: pointer;
 }
 
@@ -860,17 +932,59 @@ body {
   font-size: 12px;
 }
 
+:root {
+  --chat-rail-width: 380px;
+}
+
 .studio-live {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 390px);
-  gap: 0;
   min-height: calc(100vh - 60px);
+  padding-right: var(--chat-rail-width);
+}
+
+@media (max-width: 960px) {
+  :root {
+    --chat-rail-width: 320px;
+  }
+}
+
+.chat-rail-resizer {
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 40;
+  user-select: none;
+  touch-action: none;
+}
+
+.chat-rail-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1px;
+  height: 100%;
+  background: var(--cs-line);
+  transition: background 120ms ease, width 120ms ease;
+}
+
+.chat-rail-resizer:hover::after,
+.chat-rail-resizer[data-dragging="true"]::after {
+  width: 2px;
+  background: var(--cs-line-strong);
+}
+
+body[data-chat-rail-dragging="true"] {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .studio-document {
   min-width: 0;
-  border-right: 1px solid var(--cs-line);
-  background: var(--cs-surface-soft);
+  background: transparent;
 }
 
 .studio-document__bar {
@@ -943,13 +1057,11 @@ body {
 }
 
 .contract-projection {
-  min-height: calc(100vh - 170px);
-  margin: 24px;
-  padding: clamp(32px, 4vw, 56px);
-  border: 1px solid var(--cs-line);
-  border-radius: 2px;
-  background: var(--cs-surface);
-  box-shadow: 0 1px 3px rgba(17, 24, 39, 0.08);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
   color: var(--cs-ink);
   font-size: 15px;
   line-height: 1.78;
@@ -1303,10 +1415,10 @@ body {
   prefersdark: false;
   color-scheme: "light";
 
-  --color-base-100: oklch(99% 0.002 250);
-  --color-base-200: oklch(96% 0.003 250);
-  --color-base-300: oklch(92% 0.005 250);
-  --color-base-content: oklch(20% 0.01 250);
+  --color-base-100: oklch(98.5% 0 0);
+  --color-base-200: oklch(96% 0 0);
+  --color-base-300: oklch(92% 0 0);
+  --color-base-content: oklch(20% 0 0);
 
   --color-primary: oklch(54% 0.13 162);
   --color-primary-content: oklch(98% 0 0);
@@ -1339,13 +1451,13 @@ body {
 @plugin "../vendor/daisyui-theme" {
   name: "studio-dark";
   default: false;
-  prefersdark: true;
+  prefersdark: false;
   color-scheme: "dark";
 
-  --color-base-100: oklch(18% 0.01 250);
-  --color-base-200: oklch(22% 0.01 250);
-  --color-base-300: oklch(26% 0.01 250);
-  --color-base-content: oklch(92% 0.005 250);
+  --color-base-100: oklch(18% 0 0);
+  --color-base-200: oklch(22% 0 0);
+  --color-base-300: oklch(26% 0 0);
+  --color-base-content: oklch(92% 0 0);
 
   --color-primary: oklch(70% 0.15 162);
   --color-primary-content: oklch(15% 0.02 162);
@@ -1568,107 +1680,6 @@ body {
   color: var(--cs-muted);
   font-size: 14px;
   background: var(--cs-surface);
-}
-
-/* Document table -------------------------------------------------------
-   Hairline table that replaces the card grid. Per-row hover/focus —
-   never per-card. Owner clarification 2026-05-17: "table hover means,
-   the per row needs to have effect on user's interaction."
-   --------------------------------------------------------------------- */
-
-.document-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
-  background: var(--cs-surface);
-  border: 1px solid var(--cs-line);
-  border-radius: var(--cs-radius-sm);
-  overflow: hidden;
-}
-
-.document-table th {
-  text-align: left;
-  font-weight: 500;
-  color: var(--cs-muted);
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--cs-line);
-  font-size: 12px;
-  text-transform: none;
-  letter-spacing: 0;
-  background: var(--cs-surface-soft);
-}
-
-.document-table td {
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--cs-line);
-  vertical-align: middle;
-  color: var(--cs-ink);
-}
-
-.document-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-
-.document-table__row {
-  cursor: pointer;
-  transition: background-color 120ms ease;
-}
-
-.document-table__row:hover {
-  background: var(--cs-surface-soft);
-}
-
-.document-table__row:active {
-  background: var(--cs-line);
-}
-
-.document-table__row:focus-visible {
-  outline: 2px solid var(--cs-blue);
-  outline-offset: -2px;
-}
-
-.document-table__title {
-  font-weight: 500;
-  color: var(--cs-ink);
-}
-
-.document-table__date {
-  color: var(--cs-muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.document-table__menu-cell {
-  width: 1%;
-  text-align: right;
-}
-
-.document-table__menu {
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--cs-muted);
-  border: 0;
-  cursor: pointer;
-  font-size: 18px;
-  line-height: 1;
-}
-
-.document-table__menu:hover {
-  background: var(--cs-line);
-  color: var(--cs-ink);
-}
-
-.document-table__empty {
-  text-align: center;
-  color: var(--cs-muted);
-  padding: 40px 16px;
-}
-
-@media (max-width: 640px) {
-  .document-table th:nth-child(3),
-  .document-table td:nth-child(3) { display: none; }  /* hide 수정일 on mobile */
 }
 
 /* Status dots --------------------------------------------------------- */
@@ -1992,11 +2003,25 @@ body {
   color: var(--cs-ink, #171717);
 }
 
-.preview-overlay__paper--mobile {
+.preview-overlay__paper--mobile,
+.preview-overlay__paper--mobile.preview-overlay__paper {
   max-width: none;
-  padding: 32px 24px;
-  margin: 12px auto 32px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  width: 100%;
+  padding: 20px 16px;
+  margin: 0;
+  border: 0;
+  box-shadow: none;
+}
+
+@media (max-width: 840px) {
+  .preview-overlay__paper {
+    max-width: none;
+    width: 100%;
+    padding: 20px 16px;
+    margin: 0;
+    border: 0;
+    box-shadow: none;
+  }
 }
 
 .preview-overlay__body {

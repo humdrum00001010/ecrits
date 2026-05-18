@@ -87,6 +87,7 @@ defmodule ContractWeb do
       # Core UI components
       import ContractWeb.CoreComponents
       import ContractWeb.AuthComponents
+      import ContractWeb.Components.AppShell
 
       # Common modules used in templates
       alias Phoenix.LiveView.JS

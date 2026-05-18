@@ -20,7 +20,7 @@ defmodule ContractWeb.Dev.ThemePreviewLive do
     <div class="min-h-screen bg-base-100 text-base-content p-6 chrome">
       <header class="flex items-center justify-between mb-6">
         <div>
-          <h1 class="text-2xl font-semibold">Contract Studio — theme preview</h1>
+          <h1 class="text-2xl font-semibold">계약기계 — theme preview</h1>
           <p class="text-sm opacity-70">
             DaisyUI <code>studio</code> / <code>studio-dark</code> tokens
           </p>

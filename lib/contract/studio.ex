@@ -16,15 +16,6 @@ defmodule Contract.Studio do
       callers (Slack, MCP, deep links) can act on a Document without ever
       seeing a BEAM pid (SPEC.md §15 invariant 2).
 
-  v0.5 W10: facade renamed per SPEC.md §10.
-
-    * `load/2` → `open/2`
-    * `submit/3` → `command/2` (Command now carries `document_id`)
-    * `+ sync/3`, `subscribe/2` (document_id form), `route_ref/3`
-
-  Old names are kept as `@deprecated` forwarders so unmigrated callers
-  still compile this pass. They will be removed in a later wave.
-
   v0.5: Matter is gone — `open/2` no longer reads `:matter_id` from
   params. The Context Reservoir is no longer in spec — the
   `load_context_reservoir/2`, `refresh_context_reservoir/2`, and
@@ -76,10 +67,6 @@ defmodule Contract.Studio do
   end
 
   def open(_ctx, _params), do: {:error, :invalid_params}
-
-  @doc deprecated: "Use Contract.Studio.open/2"
-  @spec load(T.ctx(), T.params() | map()) :: T.result({State.t(), map()})
-  def load(ctx, params), do: open(ctx, params)
 
   defp do_open(_ctx, nil) do
     state = %State{
@@ -198,15 +185,6 @@ defmodule Contract.Studio do
     Runtime.apply(ctx, command)
   end
 
-  @doc deprecated: "Use Contract.Studio.command/2"
-  @spec submit(T.ctx(), State.t(), Command.t()) :: T.result(State.t())
-  def submit(%Context{} = ctx, %State{} = state, %Command{} = command) do
-    case command_result(ctx, state, command) do
-      {:ok, %State{} = new_state, _result} -> {:ok, new_state}
-      {:error, _} = err -> err
-    end
-  end
-
   # Internal helper used by `ContractWeb.StudioLive.dispatch/2`. Submits a
   # command and folds any new `agent_run_id` back into the LV's state. Public
   # callers should use `command/2` and update state themselves.
@@ -231,11 +209,6 @@ defmodule Contract.Studio do
         err
     end
   end
-
-  @doc deprecated: "Use Contract.Studio.command/2 — state folding moved to caller"
-  @spec submit_result(T.ctx(), State.t(), Command.t()) ::
-          {:ok, State.t(), term()} | {:error, term()}
-  def submit_result(ctx, state, command), do: command_result(ctx, state, command)
 
   # ----------------------------------------------------------------------------
   # sync/3

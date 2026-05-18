@@ -1,90 +1,114 @@
-<.app_shell active="랜딩">
-  <main class="landing-page" id="landing-page">
-    <section class="landing-copy" aria-labelledby="landing-headline">
-      <p class="eyebrow">Contract Studio</p>
-      <h1 id="landing-headline">
-        프로젝트의 맥락을<br />계약 조항으로<br />구체화합니다.
-      </h1>
-      <p class="lead">
-        Contract Studio는 계약서를 쓰기 전에<br /> 프로젝트가 실제로 어떻게 진행되는지 묻습니다.<br /> 그 답은 조항과 변경 이력으로 남습니다.
-      </p>
-      <div class="landing-actions">
-        <.link navigate={~p"/dashboard"} class="button button--primary">
-          대시보드 열기
-        </.link>
-        <a href="#how" class="text-link">작동 방식 보기 →</a>
+<Layouts.app flash={@flash} current_scope={@current_scope} variant="default">
+  <%!--
+    v0.5/design-landing — DESIGN.md §3 LandingLive surface.
+
+    Three-block right column + restrained Korean-primary copy. The
+    landing communicates ONE value: 프로젝트의 맥락을 계약 조항으로
+    구체화합니다. No product screenshots, no people, no 3D props, no
+    pipeline diagrams, no pricing block, no feature cards. The visual
+    system uses --cs-* tokens defined in assets/css/tokens.css and
+    surfaced through the .landing-v31 class block in app.css.
+
+    Westlaw silhouette test: this template intentionally has zero of
+    the banned `pop`-tier Tailwind utilities (oversized hero text,
+    heavy drop shadows, oversized corner radii, ultra-bold weight)
+    and no "Powered by AI / revolutionize / seamless" copy.
+
+    Korean is the primary language. PageController.home/2 pins the
+    Gettext locale to "ko" so dgettext("landing", …) resolves
+    through priv/gettext/ko/LC_MESSAGES/landing.po; the English
+    msgstrs are intentionally identical to the msgids so the en
+    fallback degrades to the Korean source until a translator fills
+    them in.
+  --%>
+  <div class="landing-v31">
+    <section class="landing-v31__hero">
+      <div class="landing-v31__copy">
+        <p class="landing-v31__eyebrow">
+          {dgettext("landing", "Contract Studio")}
+        </p>
+        <h1 class="landing-v31__headline">
+          {dgettext("landing", "프로젝트의 맥락을")}<br />
+          {dgettext("landing", "계약 조항으로")}<br />
+          {dgettext("landing", "구체화합니다.")}
+        </h1>
+        <p class="landing-v31__lead">
+          {dgettext("landing", "Contract Studio는 계약서를 쓰기 전에")}<br />
+          {dgettext("landing", "프로젝트가 실제로 어떻게 진행되는지 묻습니다.")}<br />
+          {dgettext("landing", "그 답은 조항과 변경 이력으로 남습니다.")}
+        </p>
+        <p class="landing-v31__cta-row">
+          <.link
+            :if={@current_scope}
+            navigate={~p"/storage"}
+            class="landing-v31__cta-primary"
+          >
+            {dgettext("landing", "보관함 열기")}
+          </.link>
+          <.link
+            :if={!@current_scope}
+            navigate={~p"/users/log-in"}
+            class="landing-v31__cta-primary"
+          >
+            {dgettext("landing", "보관함 열기")}
+          </.link>
+          <a href="#how-it-works" class="landing-v31__cta-secondary">
+            {dgettext("landing", "작동 방식 보기 →")}
+          </a>
+        </p>
       </div>
-    </section>
 
-    <section id="how" class="landing-preview" aria-label="StudioLive 미리보기">
-      <div class="landing-preview__frame">
-        <header class="landing-preview__bar">
-          <span class="landing-preview__title">용역계약서</span>
-          <span class="landing-preview__status">
-            <span class="status-dot status-dot--review" aria-hidden="true"></span>검토 중
-          </span>
-          <span class="landing-preview__saved">저장됨</span>
-        </header>
-
-        <article class="landing-preview__doc">
-          <p class="landing-preview__clause">
-            <span class="landing-preview__clause-num">제3조 (대금)</span>
-            본 계약의 대금은 <span class="landing-preview__slot landing-preview__slot--active">12,000,000원</span>으로 한다.
-          </p>
-          <p class="landing-preview__clause">
-            <span class="landing-preview__clause-num">제4조 (지급 기한)</span>
-            대금은 <span class="landing-preview__slot">계약 체결일로부터 30일 이내</span>에 지급한다.
-          </p>
-          <p class="landing-preview__clause">
-            <span class="landing-preview__clause-num">제8조 (특약)</span>
-            <span class="ai-applied-change">최근 변경: 위약금 한도 8% → 5%</span>로 한다.
+      <section
+        class="landing-v31__system"
+        aria-label={dgettext("landing", "프로젝트 맥락을 계약 조항으로 구체화하는 흐름")}
+        id="how-it-works"
+      >
+        <article class="landing-v31__block">
+          <p class="landing-v31__block-eyebrow">01</p>
+          <h2 class="landing-v31__block-title">
+            {dgettext("landing", "프로젝트 브리프")}
+          </h2>
+          <hr class="landing-v31__block-rule" />
+          <p class="landing-v31__block-caption">
+            {dgettext(
+              "landing",
+              "계약 상대방, 거래 구조, 위험 수용도를 자연어로 정리합니다."
+            )}
           </p>
         </article>
 
-        <aside class="landing-preview__rail" aria-label="StudioLive 대화">
-          <p class="landing-preview__rail-meta">에이전트</p>
-          <p class="landing-preview__rail-q">
-            이 거래에서 상대방이 지급을 늦출 가능성이 높은 시점이 있나요?
+        <article class="landing-v31__block">
+          <p class="landing-v31__block-eyebrow">02</p>
+          <h2 class="landing-v31__block-title">
+            {dgettext("landing", "StudioLive가 먼저 묻는 질문")}
+          </h2>
+          <hr class="landing-v31__block-rule" />
+          <p class="landing-v31__block-caption">
+            {dgettext(
+              "landing",
+              "에이전트가 빠진 결정을 식별하고 맥락에 맞게 한 번에 하나씩 묻습니다."
+            )}
           </p>
-          <p class="landing-preview__rail-a">
-            분기 결산 직후가 늦어집니다. 30일이 그쯤 걸쳐요.
-          </p>
-          <p class="landing-preview__rail-trace">
-            › 답변을 수정 범위에 연결함 <span>제4조 · 84ms</span>
-          </p>
-        </aside>
-      </div>
+        </article>
 
-      <ul class="landing-preview__legend" aria-label="구성 요소">
-        <li><span class="landing-preview__legend-dot landing-preview__legend-dot--slot"></span>수정 가능한 자리</li>
-        <li><span class="landing-preview__legend-dot landing-preview__legend-dot--change"></span>반영된 변경</li>
-        <li><span class="landing-preview__legend-dot landing-preview__legend-dot--rail"></span>대화 · 변경 이력</li>
-      </ul>
+        <article class="landing-v31__block">
+          <p class="landing-v31__block-eyebrow">03</p>
+          <h2 class="landing-v31__block-title">
+            {dgettext("landing", "조항과 변경 이력으로 남김")}
+          </h2>
+          <hr class="landing-v31__block-rule" />
+          <p class="landing-v31__block-caption">
+            {dgettext(
+              "landing",
+              "답변은 수정 범위에 연결되어 조항으로 반영되고, 변경 이력으로 보존됩니다."
+            )}
+          </p>
+        </article>
+      </section>
     </section>
-  </main>
 
-  <footer class="landing-footer" aria-label="시작하기">
-    <div class="landing-footer__primary">
-      <p class="landing-footer__cta">
-        준비가 되었다면 <.link navigate={~p"/dashboard"}>대시보드를 여세요 →</.link>
-      </p>
-      <p class="landing-footer__meta">Contract Studio · 비공개 베타 · 2026</p>
-    </div>
-
-    <div class="landing-footer__contacts" aria-label="문의">
-      <p class="landing-footer__contacts-label">문의</p>
-      <ul class="landing-footer__contacts-list">
-        <li>
-          <a href="mailto:hello@contract.studio">hello@contract.studio</a>
-        </li>
-        <li>
-          <.link navigate={~p"/users/log-in"}>로그인</.link>
-        </li>
-        <li>
-          <.link navigate={~p"/users/register"}>회원가입</.link>
-        </li>
-      </ul>
-    </div>
-  </footer>
-</.app_shell>
-<Layouts.flash_group flash={@flash} />
+    <section class="landing-v31__footnote">
+      <p>{dgettext("landing", "비공개 베타. 초청제로 운영합니다.")}</p>
+    </section>
+  </div>
+</Layouts.app>

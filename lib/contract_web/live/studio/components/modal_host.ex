@@ -641,7 +641,6 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
               data-role="upload-file-input"
             />
           <% end %>
-          <.input type="text" name="title" value="" label={dgettext("studio", "Title (optional)")} />
           <button type="submit" class="btn btn-primary btn-sm mt-2">
             {dgettext("studio", "Upload")}
           </button>

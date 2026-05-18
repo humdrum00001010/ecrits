@@ -63,9 +63,22 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
     # tab the user picked via `switch_tab`.
     initial_tab = Map.get(assigns, :initial_tab, :body)
 
+    # `:streams` is a reserved assign on the LV socket — we can't blindly
+    # copy it onto our LC's socket. Pull the changes stream out and re-key
+    # it onto our own `:changes_stream` assign instead. Mirrors the
+    # pattern in ContractWeb.Live.Studio.Components.ToastQueue.
+    changes_stream =
+      case Map.get(assigns, :streams) do
+        %{changes: cs} -> cs
+        _ -> nil
+      end
+
+    safe_assigns = Map.drop(assigns, [:streams])
+
     socket =
       socket
-      |> assign(assigns)
+      |> assign(safe_assigns)
+      |> assign(:changes_stream, changes_stream)
       |> assign_new(:_seen?, fn -> false end)
       |> apply_initial_tab(initial_tab)
       |> maybe_pin_to_body()
@@ -128,7 +141,7 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
     ~H"""
     <div
       id={@id}
-      class="preview-overlay fixed inset-0 z-[60] flex flex-col"
+      class="preview-overlay fixed inset-0 z-40 flex flex-col"
       phx-hook=".PreviewOverlay"
       phx-target={@myself}
       role="dialog"
@@ -222,12 +235,25 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
         class="preview-overlay__strip flex items-center justify-between gap-3 px-4 py-2 shrink-0"
         style="background-color: var(--cs-bg, #FAFAF7); border-bottom: 1px solid var(--cs-line, #E5E7EB);"
       >
-        <h2
-          class="truncate flex-1 min-w-0 text-sm"
-          style="font-family: var(--font-serif, 'Source Serif 4', serif); color: var(--cs-ink, #171717);"
+        <form
+          phx-submit="rename_document"
+          phx-change="rename_document"
+          class="flex-1 min-w-0"
+          data-role="preview-title-form"
         >
-          {document_title(@projection)}
-        </h2>
+          <% preview_title = document_title(@projection) %>
+          <input
+            type="text"
+            name="title"
+            value={preview_title}
+            aria-label={dgettext("studio", "문서 제목")}
+            placeholder={dgettext("studio", "제목을 입력하세요")}
+            autocomplete="off"
+            spellcheck="false"
+            phx-debounce="400"
+            class="w-full bg-transparent text-sm font-medium text-base-content px-2 py-1 rounded-md border border-base-300 hover:border-base-content/30 focus:border-base-content/50 focus:bg-base-100 outline-none focus:outline-none focus:ring-0 focus:shadow-none transition-colors"
+          />
+        </form>
 
         <button
           type="button"
@@ -239,29 +265,6 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
           <.icon name="hero-x-mark" class="size-5" />
         </button>
       </header>
-
-      <nav
-        class="flex px-4 gap-1 shrink-0"
-        style="background-color: var(--cs-bg, #FAFAF7); border-bottom: 1px solid var(--cs-line, #E5E7EB);"
-        role="tablist"
-        aria-label={dgettext("studio", "Preview tabs")}
-      >
-        <.tab_button tab={:body} active={@tab} target={@myself} label={dgettext("studio", "Body")} />
-        <.tab_button
-          :if={!viewer?(@current_scope)}
-          tab={:marks}
-          active={@tab}
-          target={@myself}
-          label={dgettext("studio", "Marks")}
-        />
-        <.tab_button
-          :if={!viewer?(@current_scope)}
-          tab={:changes}
-          active={@tab}
-          target={@myself}
-          label={dgettext("studio", "Changes")}
-        />
-      </nav>
 
       <%!-- Scroll container — light grey backdrop hosting the centered
            paper page. --%>
@@ -378,13 +381,9 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
     assigns = %{text: node[:content] || "", id: node[:id], ordered?: ordered?}
 
     if ordered? do
-      ~H|<ol class="preview-overlay__ol">
-  <li id={"node-#{@id}"}>{@text}</li>
-</ol>|
+      ~H|<ol class="preview-overlay__ol"><li id={"node-#{@id}"}>{@text}</li></ol>|
     else
-      ~H|<ul class="preview-overlay__ul">
-  <li id={"node-#{@id}"}>{@text}</li>
-</ul>|
+      ~H|<ul class="preview-overlay__ul"><li id={"node-#{@id}"}>{@text}</li></ul>|
     end
   end
 
@@ -490,13 +489,13 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
   # --- Changes tab: recent changes feed --------------------------------------
 
   defp render_changes(assigns) do
-    streams = Map.get(assigns, :streams) || %{}
-    stream = if is_map(streams), do: Map.get(streams, :changes), else: nil
+    # `:changes_stream` is set in `update/2` from the parent's
+    # `streams={%{changes: @streams.changes}}` attr. We can't carry the
+    # raw `:streams` map onto the LC socket (LV reserves that key), so
+    # we re-key it in update/2 and read from `:changes_stream` here.
+    stream = Map.get(assigns, :changes_stream)
 
-    assigns =
-      assigns
-      |> assign(:has_stream?, not is_nil(stream))
-      |> assign(:changes_stream, stream)
+    assigns = assign(assigns, :has_stream?, not is_nil(stream))
 
     ~H"""
     <div

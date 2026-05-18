@@ -1,5 +1,5 @@
 defmodule ContractWeb.UserLive.LoginTest do
-  use ContractWeb.ConnCase, async: true
+  use ContractWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
   import Contract.AccountsFixtures
@@ -11,6 +11,29 @@ defmodule ContractWeb.UserLive.LoginTest do
       assert html =~ "Log in"
       assert html =~ "Register"
       assert html =~ "Log in with email"
+    end
+
+    test "shows dev mailbox link when dev routes are enabled", %{conn: conn} do
+      original_dev_routes = Application.get_env(:contract, :dev_routes)
+      original_mailer = Application.get_env(:contract, Contract.Mailer)
+
+      Application.put_env(:contract, :dev_routes, true)
+      Application.put_env(:contract, Contract.Mailer, adapter: Swoosh.Adapters.SMTP)
+
+      on_exit(fn ->
+        if is_nil(original_dev_routes) do
+          Application.delete_env(:contract, :dev_routes)
+        else
+          Application.put_env(:contract, :dev_routes, original_dev_routes)
+        end
+
+        Application.put_env(:contract, Contract.Mailer, original_mailer)
+      end)
+
+      {:ok, _lv, html} = live(conn, ~p"/users/log-in")
+
+      assert html =~ ~s(href="/dev/mailbox")
+      assert html =~ "Open dev mailbox"
     end
   end
 

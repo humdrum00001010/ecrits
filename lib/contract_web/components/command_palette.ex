@@ -917,7 +917,7 @@ defmodule ContractWeb.Components.CommandPalette do
 
     ~H"""
     <p>
-      The Contract Studio agent grades draft clauses, drafts replacement
+      The 계약기계 agent grades draft clauses, drafts replacement
       language, verifies Korean-law citations via 법제처, and writes its
       reasoning into the document's change history. Every agent change is
       provenance-logged and revocable.

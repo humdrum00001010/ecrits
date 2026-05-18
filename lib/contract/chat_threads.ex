@@ -18,18 +18,34 @@ defmodule Contract.ChatThreads do
 
   @assistant_roles MapSet.new(["assistant", "agent"])
 
-  @doc "Persists the user's chat command and returns the enriched command."
+  @doc """
+  Persists the user's chat command and returns the enriched command.
+
+  When the command carries `payload["grill_seed"] == true` (auto-grill
+  on document open), the row is persisted with role `"system"` instead
+  of `"user"` so it stays out of the visible rail and the LLM history.
+  See `list_visible_messages/2` and `history_for_agent/2` for the
+  filters.
+  """
   @spec persist_user_message(Context.t(), Command.t()) ::
           {:ok, ChatThread.t(), Command.t(), map()} | {:error, term()}
   def persist_user_message(%Context{} = ctx, %Command{kind: :chat_message} = command) do
+    role = if grill_seed?(command), do: "system", else: "user"
+
     with {:ok, thread} <- ensure_thread(ctx, command),
-         message <- build_message("user", command.message || "", command),
+         message <- build_message(role, command.message || "", command),
          {:ok, updated} <- append_message(thread, message) do
       {:ok, updated, %{command | chat_thread_id: updated.id}, message}
     end
   end
 
   def persist_user_message(_ctx, _command), do: {:error, :invalid_chat_command}
+
+  defp grill_seed?(%Command{payload: payload}) when is_map(payload) do
+    Map.get(payload, "grill_seed") == true or Map.get(payload, :grill_seed) == true
+  end
+
+  defp grill_seed?(_), do: false
 
   @doc "Appends an assistant-visible message to a thread."
   @spec append_assistant_message(Context.t() | nil, Command.t(), String.t() | nil) ::
@@ -49,7 +65,13 @@ defmodule Contract.ChatThreads do
     end
   end
 
-  @doc "Returns chat messages to seed the Studio rail for the current state."
+  @doc """
+  Returns chat messages to seed the Studio rail for the current state.
+
+  Filters out rows whose role is `"system"` (used by the auto-grill seed
+  on document open — the seed is an instruction to the agent and must
+  never surface in the visible rail).
+  """
   @spec list_visible_messages(Context.t(), State.t()) :: [map()]
   def list_visible_messages(%Context{} = ctx, %State{} = state) do
     ctx
@@ -58,10 +80,18 @@ defmodule Contract.ChatThreads do
       nil -> []
       %ChatThread{} = thread -> thread.messages || []
     end
+    |> Enum.reject(&hidden_message?/1)
     |> Enum.map(&message_for_rail(ctx, &1))
   end
 
   def list_visible_messages(_ctx, _state), do: []
+
+  defp hidden_message?(%{} = message) do
+    role = read(message, "role") || read(message, :role)
+    role == "system"
+  end
+
+  defp hidden_message?(_), do: false
 
   @doc "Returns messages in OpenAI input shape for an agent command."
   @spec history_for_agent(Context.t() | nil, Command.t()) :: [

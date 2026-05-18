@@ -37,13 +37,23 @@ defmodule ContractWeb.Live.Studio.Components.ToastQueueTest do
     test ":info / :warning / :error toasts render the right border + icon + level data-attr" do
       cases = [
         {%{level: :info, title: "Hello", body: "An informational note.", id: "t-info-1"},
-         ["border-l-success", "hero-information-circle-mini", ~s(data-toast-level="info"),
-          "Hello", "An informational note."]},
+         [
+           "border-l-success",
+           "hero-information-circle-mini",
+           ~s(data-toast-level="info"),
+           "Hello",
+           "An informational note."
+         ]},
         {%{level: :warning, title: "Heads up", body: nil, id: "t-w-1"},
          ["border-l-warning", "hero-exclamation-triangle-mini", "Heads up"]},
         {%{level: :error, title: "Boom", body: "Stack: …", id: "t-e-1"},
-         ["border-l-error", "hero-exclamation-circle-mini", ~s(data-toast-level="error"),
-          "Boom", "Stack: …"]}
+         [
+           "border-l-error",
+           "hero-exclamation-circle-mini",
+           ~s(data-toast-level="error"),
+           "Boom",
+           "Stack: …"
+         ]}
       ]
 
       for {toast_attrs, expected_substrings} <- cases do
@@ -59,7 +69,8 @@ defmodule ContractWeb.Live.Studio.Components.ToastQueueTest do
         assert html =~ ~s(role="alert")
 
         for substring <- expected_substrings do
-          assert html =~ substring, "expected #{toast_attrs.level} toast HTML to contain #{substring}"
+          assert html =~ substring,
+                 "expected #{toast_attrs.level} toast HTML to contain #{substring}"
         end
       end
 

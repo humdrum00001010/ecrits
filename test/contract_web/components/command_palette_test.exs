@@ -55,7 +55,7 @@ defmodule ContractWeb.Components.CommandPaletteTest do
       assert :doc_request_export in ids
       refute :doc_revoke_last in ids
       assert :doc_set_type in ids
-      assert :nav_dashboard in ids
+      assert :nav_storage in ids
       assert :search_law in ids
     end
 
@@ -97,7 +97,7 @@ defmodule ContractWeb.Components.CommandPaletteTest do
       refute :doc_request_export in ids
       refute :doc_revoke_last in ids
       refute :doc_set_type in ids
-      assert :nav_dashboard in ids
+      assert :nav_storage in ids
       assert :search_law in ids
       assert :help_shortcuts in ids
     end
@@ -139,7 +139,7 @@ defmodule ContractWeb.Components.CommandPaletteTest do
       refute :doc_revoke_last in ids
       refute :doc_set_type in ids
       # Navigation/search/help still present.
-      assert :nav_dashboard in ids
+      assert :nav_storage in ids
     end
 
     test "nil scope yields navigation+search+help only (no Documents group)",
@@ -152,7 +152,7 @@ defmodule ContractWeb.Components.CommandPaletteTest do
       refute :doc_request_export in ids
       refute :doc_revoke_last in ids
       refute :doc_set_type in ids
-      assert :nav_dashboard in ids
+      assert :nav_storage in ids
       assert :search_law in ids
     end
   end
@@ -174,7 +174,7 @@ defmodule ContractWeb.Components.CommandPaletteTest do
         |> CommandPalette.filter_commands("go to")
         |> Enum.map(& &1.label)
 
-      assert "Go to dashboard" in labels
+      assert "Go to storage" in labels
       assert "Go to landing" in labels
       refute "Search Korean law…" in labels
     end
@@ -182,10 +182,10 @@ defmodule ContractWeb.Components.CommandPaletteTest do
     test "case-insensitive substring fuzzy match", %{commands: commands} do
       labels =
         commands
-        |> CommandPalette.filter_commands("DASH")
+        |> CommandPalette.filter_commands("STOR")
         |> Enum.map(& &1.label)
 
-      assert "Go to dashboard" in labels
+      assert "Go to storage" in labels
     end
 
     test "nonsense query yields empty list", %{commands: commands} do
@@ -282,16 +282,16 @@ defmodule ContractWeb.Components.CommandPaletteTest do
       assert html =~ "Keyboard shortcuts"
     end
 
-    test "initial_query='dashboard' narrows the rendered list", %{user: user} do
+    test "initial_query='storage' narrows the rendered list", %{user: user} do
       html =
         render_component(CommandPalette,
           id: "cmd-k-palette",
           current_scope: lawyer_scope(user),
           initial_open?: true,
-          initial_query: "dashboard"
+          initial_query: "storage"
         )
 
-      assert html =~ "Go to dashboard"
+      assert html =~ "Go to storage"
       refute html =~ "Search Korean law"
     end
 
@@ -312,12 +312,12 @@ defmodule ContractWeb.Components.CommandPaletteTest do
     end
   end
 
-  describe "end-to-end via /dashboard — palette mount (trigger button removed 2026-05-17)" do
+  describe "end-to-end via /storage — palette mount (trigger button removed 2026-05-17)" do
     setup :log_in_a_user
 
-    test "the palette LiveComponent mounts on /dashboard (keyboard-only invocation)",
+    test "the palette LiveComponent mounts on /storage (keyboard-only invocation)",
          %{conn: conn} do
-      {:ok, _lv, html} = live(conn, ~p"/dashboard")
+      {:ok, _lv, html} = live(conn, ~p"/storage")
       # The visible trigger button was stripped per owner directive;
       # the LiveComponent mount and Cmd+K keyboard shortcut still work.
       assert html =~ "cmd-k-palette"
@@ -326,7 +326,7 @@ defmodule ContractWeb.Components.CommandPaletteTest do
 
     @tag :skip
     test "Esc closes the open palette", %{conn: conn} do
-      {:ok, lv, _html} = live(conn, ~p"/dashboard")
+      {:ok, lv, _html} = live(conn, ~p"/storage")
 
       lv
       |> element(~s([data-role="palette-trigger"]))

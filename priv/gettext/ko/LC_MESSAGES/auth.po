@@ -243,12 +243,12 @@ msgstr "개발자 메일함"
 #: lib/contract_web/components/auth_components.ex:61
 #, elixir-autogen, elixir-format
 msgid "© %{year} Contract Studio"
-msgstr "© %{year} Contract Studio"
+msgstr "© %{year} 계약기계"
 
 #: lib/contract_web/live/user_live/login.ex:55
 #, elixir-autogen, elixir-format
 msgid "— Contract Studio is invite-only for the closed beta."
-msgstr "— Contract Studio는 비공개 베타로 초대제로만 운영됩니다."
+msgstr "— 계약기계는 비공개 베타로 초대제로만 운영됩니다."
 
 #: lib/contract_web/live/user_live/login.ex:24
 #, elixir-autogen, elixir-format

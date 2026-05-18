@@ -107,13 +107,21 @@ defmodule Contract.Agent.RunServer do
   def handle_continue(:start_stream, state) do
     {:ok, context} = Agent.build_context(state.ctx, state.action)
 
+    base_params = %{
+      input: context.input,
+      instructions: context.system,
+      tools: context.tools
+    }
+
+    # Grill-intro responses are plain Korean text, not the JSON envelope
+    # the regular grill protocol uses — drop the json_object format
+    # constraint so the model is free to emit prose.
     params =
-      %{
-        input: context.input,
-        instructions: context.system,
-        tools: context.tools,
-        text: %{format: %{type: "json_object"}}
-      }
+      if Map.get(context, :grill_seed?) do
+        base_params
+      else
+        Map.put(base_params, :text, %{format: %{type: "json_object"}})
+      end
       |> maybe_put(:previous_response_id, Map.get(context, :previous_response_id))
 
     case state.openai.stream_chat(params, []) do
@@ -148,7 +156,14 @@ defmodule Contract.Agent.RunServer do
   end
 
   def handle_info({:stream_done, final_text}, state) do
-    case Agent.decode_action(final_text, run_id: state.run.id, turn_index: state.run.turn_index) do
+    decoder =
+      if Agent.grill_seed?(state.action) do
+        &Agent.decode_grill_intro/2
+      else
+        &Agent.decode_action/2
+      end
+
+    case decoder.(final_text, run_id: state.run.id, turn_index: state.run.turn_index) do
       {:ok, action} ->
         new_run = %{state.run | status: :completed}
         _ = Contract.ChatThreads.append_assistant_message(state.ctx, state.action, action.message)

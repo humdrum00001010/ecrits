@@ -2,9 +2,16 @@ defmodule Contract.IO.Upstage do
   @moduledoc """
   Upstage Document Parse client (multipart upload + element normalization).
 
-  See `/tmp/wave1-research.md` §4 for the verified request/response shape.
+  After normalization, `import_upload/3` invokes `Contract.IO.IRRefiner.refine/2`
+  to enrich the Upstage IR with live-editable field bindings and surgical
+  clause-polish patches. The refiner is opt-out via `llm_refine: false` and
+  always a no-op when no OpenAI API key is configured — Upstage's IR is the
+  source of truth and shipping bare Upstage output is a supported fallback.
   """
 
+  require Logger
+
+  alias Contract.IO.IRRefiner
   alias Contract.Types, as: T
 
   @default_endpoint "https://api.upstage.ai/v1/document-ai/document-parse"
@@ -15,21 +22,19 @@ defmodule Contract.IO.Upstage do
   parses it with Upstage Document Parse, and returns an
   `Action(:create_document)` whose payload contains the normalized node
   tree plus the R2 artifact id.
-
-  The `upload` argument is typically a `Phoenix.LiveView.UploadEntry`,
-  consumed via `consume_uploaded_entry/3`. For tests, callers may pass a
-  map `%{path: tmpfile_path, client_name: name, client_size: bytes,
-  client_type: mime}`.
   """
-  @spec import_upload(T.ctx(), T.user_id() | nil, map() | T.upload()) ::
+  @spec import_upload(T.ctx(), T.user_id() | nil, map() | T.upload(), keyword()) ::
           {:ok, Contract.Command.t()} | {:error, term()}
-  def import_upload(_ctx, owner_id, upload) do
+  def import_upload(_ctx, owner_id, upload, opts \\ []) do
     with {:ok, info} <- read_upload(upload),
          artifact_id <- Ecto.UUID.generate(),
          {:ok, _r2} <- upload_source(owner_id, artifact_id, info),
          {:ok, parsed} <- parse(info.path, []) do
       nodes = normalize_elements(parsed.elements)
       node_order = Enum.map(nodes, & &1["id"])
+
+      {nodes, node_order, fields, field_bindings} =
+        maybe_refine(nodes, node_order, opts)
 
       action = %Contract.Command{
         kind: :create_document,
@@ -42,6 +47,8 @@ defmodule Contract.IO.Upstage do
           "byte_size" => info.byte_size,
           "nodes" => nodes,
           "node_order" => node_order,
+          "fields" => fields,
+          "field_bindings" => field_bindings,
           "source" => %{
             "kind" => "r2",
             "key" => source_key(owner_id, artifact_id, info),
@@ -51,6 +58,29 @@ defmodule Contract.IO.Upstage do
       }
 
       {:ok, action}
+    end
+  end
+
+  defp maybe_refine(nodes, node_order, opts) do
+    if Keyword.get(opts, :llm_refine, true) and llm_enabled?() do
+      case IRRefiner.refine(nodes, Keyword.take(opts, [:api_key, :base_url, :endpoint])) do
+        {:ok, %{nodes_patch: patches, fields: fields, field_bindings: bindings}} ->
+          {nodes, node_order} = IRRefiner.apply_patches(nodes, node_order, patches)
+          {nodes, node_order, fields, bindings}
+
+        {:error, reason} ->
+          Logger.warning("IRRefiner skipped: #{inspect(reason)}")
+          {nodes, node_order, [], []}
+      end
+    else
+      {nodes, node_order, [], []}
+    end
+  end
+
+  defp llm_enabled? do
+    case Application.get_env(:contract, :openai, [])[:api_key] do
+      key when is_binary(key) and key != "" -> true
+      _ -> false
     end
   end
 
@@ -66,10 +96,10 @@ defmodule Contract.IO.Upstage do
     api_key = Keyword.get(opts, :api_key) || cfg[:api_key] || env!("UPSTAGE_API_KEY")
     timeout = Keyword.get(opts, :timeout, @default_timeout)
 
-    {file_part, _filename} = build_file_part(file_or_path)
+    {bytes, filename, content_type} = build_file_part(file_or_path, opts)
 
     form = [
-      document: file_part,
+      document: {bytes, filename: filename, content_type: content_type},
       ocr: Keyword.get(opts, :ocr, "auto"),
       coordinates: to_string(Keyword.get(opts, :coordinates, true)),
       output_formats:
@@ -129,7 +159,10 @@ defmodule Contract.IO.Upstage do
           {:ok, %{elements: list(), content: map()}} | {:error, term()}
   def parse_source(_ctx, source_ref, opts) do
     with {:ok, body} <- fetch_source(source_ref) do
-      parse(body, opts)
+      # Pass source_ref so `build_file_part/2` can derive a filename (and
+      # thereby a content_type) for the multipart upload. Caller-supplied
+      # `:filename` always wins.
+      parse(body, Keyword.put_new(opts, :source_ref, source_ref))
     end
   end
 
@@ -147,26 +180,35 @@ defmodule Contract.IO.Upstage do
     category = Map.get(elem, "category", "paragraph")
     kind = map_category(category)
     content_map = Map.get(elem, "content", %{})
+    text = (is_map(content_map) && Map.get(content_map, "text")) || content_map || ""
+    text = if is_binary(text), do: text, else: ""
 
-    base_attrs = %{
-      "page" => Map.get(elem, "page"),
-      "coordinates" => Map.get(elem, "coordinates"),
-      "category" => category
-    }
+    base_attrs =
+      %{
+        "page" => Map.get(elem, "page"),
+        "coordinates" => Map.get(elem, "coordinates"),
+        "category" => category
+      }
+      |> maybe_put_heading_level(category)
 
     attrs = Map.merge(base_attrs, table_attrs(kind, elem))
 
     %{
       "id" => to_node_id(elem),
       "kind" => kind,
-      "content" => %{
-        "text" => Map.get(content_map, "text", ""),
-        "html" => Map.get(content_map, "html"),
-        "markdown" => Map.get(content_map, "markdown")
-      },
+      "content" => text,
       "attrs" => attrs
     }
   end
+
+  defp maybe_put_heading_level(attrs, "heading" <> rest) do
+    case Integer.parse(rest) do
+      {n, ""} when n in 1..6 -> Map.put(attrs, "level", n)
+      _ -> attrs
+    end
+  end
+
+  defp maybe_put_heading_level(attrs, _category), do: attrs
 
   # IR-richness (task #37): derive HWPX-grade column widths from Upstage's cell
   # bounding boxes when the element is a table. Upstage returns a `cells` list
@@ -332,17 +374,52 @@ defmodule Contract.IO.Upstage do
   defp default_ext(""), do: "bin"
   defp default_ext(ext), do: String.downcase(ext)
 
-  defp build_file_part(path) when is_binary(path) do
+  defp build_file_part(path, opts) when is_binary(path) do
     if File.exists?(path) do
-      {File.read!(path), Path.basename(path)}
+      filename = Keyword.get(opts, :filename) || Path.basename(path)
+      {File.read!(path), filename, content_type_for(filename)}
     else
-      # Treat as raw bytes (e.g. from R2 fetch).
-      {path, "document.bin"}
+      # Treat as raw bytes (e.g. from R2 fetch). Allow callers to pass a
+      # filename via opts (preferred) or `:source_ref` so the multipart
+      # part carries enough metadata for Upstage to accept the upload.
+      filename =
+        Keyword.get(opts, :filename) ||
+          filename_from_source_ref(Keyword.get(opts, :source_ref)) ||
+          "document.bin"
+
+      {path, filename, content_type_for(filename)}
     end
   end
 
-  defp build_file_part({:bytes, bytes, filename}) when is_binary(bytes),
-    do: {bytes, filename}
+  defp build_file_part({:bytes, bytes, filename}, opts) when is_binary(bytes) do
+    filename = Keyword.get(opts, :filename) || filename || "document.bin"
+    {bytes, filename, content_type_for(filename)}
+  end
+
+  defp filename_from_source_ref(nil), do: nil
+
+  defp filename_from_source_ref(ref) when is_binary(ref) do
+    case ref |> String.split("/") |> List.last() do
+      nil -> nil
+      "" -> nil
+      name -> name
+    end
+  end
+
+  defp filename_from_source_ref(_), do: nil
+
+  defp content_type_for(filename) when is_binary(filename) do
+    case filename |> Path.extname() |> String.downcase() do
+      ".hwpx" -> "application/vnd.hancom.hwpx"
+      ".hwp" -> "application/x-hwp"
+      ".pdf" -> "application/pdf"
+      ".docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      ".doc" -> "application/msword"
+      _ -> "application/octet-stream"
+    end
+  end
+
+  defp content_type_for(_), do: "application/octet-stream"
 
   defp fetch_source("r2://" <> rest) do
     [_bucket, key] = String.split(rest, "/", parts: 2)

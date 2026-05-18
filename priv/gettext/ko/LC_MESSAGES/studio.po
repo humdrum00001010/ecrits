@@ -26,8 +26,8 @@ msgstr ""
 msgid "Documents"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:436
-#: lib/contract_web/live/studio/components/preview_overlay.ex:439
+#: lib/contract_web/live/studio/components/preview_overlay.ex:471
+#: lib/contract_web/live/studio/components/preview_overlay.ex:474
 #, elixir-autogen, elixir-format
 msgid "(no text)"
 msgstr "(내용 없음)"
@@ -37,17 +37,12 @@ msgstr "(내용 없음)"
 msgid "+ %{n}개 더 보기"
 msgstr "+ %{n}개 더 보기"
 
-#: lib/contract_web/live/studio/components/canvas/empty.ex:64
-#, elixir-autogen, elixir-format
-msgid "+ 새 문서"
-msgstr ""
-
 #: lib/contract_web/live/studio/components/grill_rail.ex:141
 #, elixir-autogen, elixir-format
 msgid "Agent questions"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/canvas/empty.ex:38
+#: lib/contract_web/live/studio/components/canvas/empty.ex:62
 #, elixir-autogen, elixir-format
 msgid "An empty folder line drawing — no document selected."
 msgstr ""
@@ -78,7 +73,7 @@ msgstr ""
 msgid "Back"
 msgstr "이전"
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:242
+#: lib/contract_web/live/studio/components/preview_overlay.ex:249
 #, elixir-autogen, elixir-format
 msgid "Body"
 msgstr "본문"
@@ -104,7 +99,7 @@ msgstr "취소"
 msgid "Cancel revoke"
 msgstr "철회 취소"
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:255
+#: lib/contract_web/live/studio/components/preview_overlay.ex:262
 #, elixir-autogen, elixir-format
 msgid "Changes"
 msgstr "변경 사항"
@@ -141,7 +136,7 @@ msgstr "각 원본 필드를 어떻게 이전할지 선택하세요."
 msgid "Close"
 msgstr "닫기"
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:230
+#: lib/contract_web/live/studio/components/preview_overlay.ex:236
 #, elixir-autogen, elixir-format
 msgid "Close preview"
 msgstr "미리보기 닫기"
@@ -191,7 +186,7 @@ msgstr "문서 미리보기"
 msgid "Edit document metadata"
 msgstr "문서 메타데이터 편집"
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:297
+#: lib/contract_web/live/studio/components/chat_rail.ex:310
 #, elixir-autogen, elixir-format
 msgid "Enter로 전송 · Shift+Enter로 줄바꿈"
 msgstr ""
@@ -226,7 +221,7 @@ msgstr "무시"
 msgid "Jump to clarifying question"
 msgstr "해당 질문으로 이동"
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:248
+#: lib/contract_web/live/studio/components/preview_overlay.ex:255
 #, elixir-autogen, elixir-format
 msgid "Marks"
 msgstr "주석"
@@ -252,7 +247,7 @@ msgstr "다음: 필드 전략"
 msgid "No document content yet."
 msgstr "아직 문서 내용이 없습니다."
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:328
+#: lib/contract_web/live/studio/components/preview_overlay.ex:343
 #, elixir-autogen, elixir-format
 msgid "No document selected."
 msgstr "선택된 문서가 없습니다."
@@ -262,7 +257,7 @@ msgstr "선택된 문서가 없습니다."
 msgid "No documents found."
 msgstr "검색된 문서가 없습니다."
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:411
+#: lib/contract_web/live/studio/components/preview_overlay.ex:446
 #, elixir-autogen, elixir-format
 msgid "No marks on this document."
 msgstr "이 문서에는 주석이 없습니다."
@@ -276,11 +271,6 @@ msgstr "메모"
 #, elixir-autogen, elixir-format
 msgid "Open mark for node %{node_id}"
 msgstr "노드 %{node_id}의 메모 열기"
-
-#: lib/contract_web/live/studio/components/canvas/empty.ex:74
-#, elixir-autogen, elixir-format
-msgid "PDF 가져오기"
-msgstr ""
 
 #: lib/contract_web/live/studio/components/modal_host.ex:1204
 #, elixir-autogen, elixir-format
@@ -297,12 +287,12 @@ msgstr "변환 대상 계약 유형을 선택하세요. 어떤 필드가 이전 
 msgid "Plan"
 msgstr "계획"
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:240
+#: lib/contract_web/live/studio/components/preview_overlay.ex:247
 #, elixir-autogen, elixir-format
 msgid "Preview tabs"
 msgstr "미리보기 탭"
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:485
+#: lib/contract_web/live/studio/components/preview_overlay.ex:520
 #, elixir-autogen, elixir-format
 msgid "Recent changes will appear here."
 msgstr "최근 변경 사항이 여기에 표시됩니다."
@@ -384,18 +374,18 @@ msgstr "제목 (선택)"
 msgid "Type your answer…"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:506
+#: lib/contract_web/live/studio/components/preview_overlay.ex:541
 #, elixir-autogen, elixir-format
 msgid "Unanchored"
 msgstr "위치 미지정"
 
-#: lib/contract_web/live/studio/components/preview_overlay.ex:519
+#: lib/contract_web/live/studio/components/preview_overlay.ex:554
 #, elixir-autogen, elixir-format
 msgid "Unknown node"
 msgstr "알 수 없는 노드"
 
 #: lib/contract_web/live/studio/components/canvas/briefing.ex:175
-#: lib/contract_web/live/studio/components/preview_overlay.ex:502
+#: lib/contract_web/live/studio/components/preview_overlay.ex:537
 #, elixir-autogen, elixir-format
 msgid "Untitled document"
 msgstr "제목 없는 문서"
@@ -430,7 +420,7 @@ msgstr "—"
 msgid "검토 모드 / Review"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:110
+#: lib/contract_web/live/studio/components/chat_rail.ex:122
 #, elixir-autogen, elixir-format
 msgid "관찰 모드 — 메시지는 다른 사용자가 받습니다"
 msgstr ""
@@ -440,7 +430,7 @@ msgstr ""
 msgid "다른 사용자의 변경이 먼저 적용되었습니다. 입력 내용을 서버 값으로 되돌렸습니다."
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:612
+#: lib/contract_web/live/studio/components/chat_rail.ex:650
 #, elixir-autogen, elixir-format
 msgid "대기 중"
 msgstr ""
@@ -470,12 +460,12 @@ msgstr ""
 msgid "메모"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:271
+#: lib/contract_web/live/studio/components/chat_rail.ex:283
 #, elixir-autogen, elixir-format
 msgid "메시지"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:282
+#: lib/contract_web/live/studio/components/chat_rail.ex:294
 #, elixir-autogen, elixir-format
 msgid "메시지를 입력하세요…"
 msgstr ""
@@ -485,7 +475,7 @@ msgstr ""
 msgid "문서 본문이 비어 있습니다 / Empty document."
 msgstr ""
 
-#: lib/contract_web/live/studio/components/canvas/empty.ex:46
+#: lib/contract_web/live/studio/components/canvas/empty.ex:70
 #, elixir-autogen, elixir-format
 msgid "문서를 선택하거나 새로 만드세요"
 msgstr ""
@@ -520,8 +510,8 @@ msgstr ""
 msgid "변호사 / Lawyer"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:291
-#: lib/contract_web/live/studio/components/chat_rail.ex:293
+#: lib/contract_web/live/studio/components/chat_rail.ex:304
+#: lib/contract_web/live/studio/components/chat_rail.ex:306
 #, elixir-autogen, elixir-format
 msgid "보내기"
 msgstr ""
@@ -551,7 +541,7 @@ msgstr "알림"
 msgid "알림 닫기"
 msgstr "알림 닫기"
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:82
+#: lib/contract_web/live/studio/components/chat_rail.ex:94
 #, elixir-autogen, elixir-format
 msgid "에이전트"
 msgstr ""
@@ -566,12 +556,12 @@ msgstr ""
 msgid "에이전트가 질문 중입니다. 답하시면 편집이 적용됩니다."
 msgstr "에이전트가 질문 중입니다. 답하시면 편집이 적용됩니다."
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:137
+#: lib/contract_web/live/studio/components/chat_rail.ex:149
 #, elixir-autogen, elixir-format
 msgid "에이전트에게 무엇이든 물어보세요 — 초안, 마크, 내보내기."
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:613
+#: lib/contract_web/live/studio/components/chat_rail.ex:651
 #, elixir-autogen, elixir-format
 msgid "응답 중…"
 msgstr ""
@@ -711,92 +701,93 @@ msgstr ""
 msgid "Upload from PDF/HWPX/HWP…"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/canvas/empty.ex:49
+#: lib/contract_web/live/studio/components/canvas/empty.ex:73
 #, elixir-autogen, elixir-format
 msgid "왼쪽에서 문서를 고르거나, 새 계약서를 시작합니다."
 msgstr "왼쪽에서 문서를 고르거나, 새 계약서를 시작합니다."
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:158
+#: lib/contract_web/live/studio/components/chat_rail.ex:170
 #, elixir-autogen, elixir-format
 msgid " — PDF, HWP, HWPX를 드래그하거나 선택"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:182
+#: lib/contract_web/live/studio/components/chat_rail.ex:194
 #, elixir-autogen, elixir-format
 msgid " — 기존 문서의 유형 변환"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:176
+#: lib/contract_web/live/studio/components/chat_rail.ex:188
 #, elixir-autogen, elixir-format
 msgid " — 사실관계, 거래 배경부터 정리한 뒤 초안"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:170
+#: lib/contract_web/live/studio/components/chat_rail.ex:182
 #, elixir-autogen, elixir-format
 msgid " — 처음부터 작성"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:164
+#: lib/contract_web/live/studio/components/chat_rail.ex:176
 #, elixir-autogen, elixir-format
 msgid " — 최근 작업한 문서로 이동"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:156
-#: lib/contract_web/live/studio/components/chat_rail.ex:655
+#: lib/contract_web/live/studio/components/chat_rail.ex:168
+#: lib/contract_web/live/studio/components/chat_rail.ex:693
 #, elixir-autogen, elixir-format
 msgid "기존 계약서 업로드"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:174
-#: lib/contract_web/live/studio/components/chat_rail.ex:658
+#: lib/contract_web/live/studio/components/chat_rail.ex:186
+#: lib/contract_web/live/studio/components/chat_rail.ex:696
 #, elixir-autogen, elixir-format
 msgid "논의에서 시작"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:180
-#: lib/contract_web/live/studio/components/chat_rail.ex:659
+#: lib/contract_web/live/studio/components/chat_rail.ex:192
+#: lib/contract_web/live/studio/components/chat_rail.ex:697
 #, elixir-autogen, elixir-format
 msgid "다른 문서에서 변형 만들기"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:187
+#: lib/contract_web/live/studio/components/chat_rail.ex:199
 #, elixir-autogen, elixir-format
 msgid "무엇으로 시작할까요?"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:168
-#: lib/contract_web/live/studio/components/chat_rail.ex:657
+#: lib/contract_web/live/studio/components/chat_rail.ex:180
+#: lib/contract_web/live/studio/components/chat_rail.ex:695
 #, elixir-autogen, elixir-format
 msgid "빈 계약서 만들기"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:153
+#: lib/contract_web/live/studio/components/chat_rail.ex:165
 #, elixir-autogen, elixir-format
 msgid "새 문서를 시작합니다. 어떻게 시작할까요?"
 msgstr ""
 
-#: lib/contract_web/live/studio/components/chat_rail.ex:162
-#: lib/contract_web/live/studio/components/chat_rail.ex:656
+#: lib/contract_web/live/studio/components/canvas/empty.ex:152
+#: lib/contract_web/live/studio/components/chat_rail.ex:174
+#: lib/contract_web/live/studio/components/chat_rail.ex:694
 #, elixir-autogen, elixir-format
 msgid "최근 문서 열기"
 msgstr ""
 
-#: lib/contract_web/live/studio_live.ex:1369
+#: lib/contract_web/live/studio_live.ex:1469
 #, elixir-autogen, elixir-format
 msgid "Document"
 msgstr "문서"
 
-#: lib/contract_web/live/studio_live.ex:1377
+#: lib/contract_web/live/studio_live.ex:1477
 #, elixir-autogen, elixir-format
-msgid "Dashboard"
-msgstr ""
+msgid "Storage"
+msgstr "보관함"
 
 #: lib/contract_web/live/studio/components/modal_host.ex:1256
 #, elixir-autogen, elixir-format
 msgid "Export format"
 msgstr "내보내기 형식"
 
-#: lib/contract_web/live/studio_live.ex:1503
+#: lib/contract_web/live/studio_live.ex:1559
 #, elixir-autogen, elixir-format, fuzzy
 msgid "No document selected"
 msgstr "선택된 문서가 없습니다."
@@ -816,3 +807,33 @@ msgstr "내보내기"
 #, elixir-autogen, elixir-format
 msgid "취소"
 msgstr "취소"
+
+#: lib/contract_web/live/studio/components/canvas/empty.ex:113
+#, elixir-autogen, elixir-format
+msgid "PDF · DOCX · HWP · HWPX"
+msgstr ""
+
+#: lib/contract_web/live/studio/components/canvas/empty.ex:110
+#, elixir-autogen, elixir-format, fuzzy
+msgid "계약서 업로드"
+msgstr ""
+
+#: lib/contract_web/live/studio/components/chat_rail.ex:90
+#, elixir-autogen, elixir-format
+msgid "문서"
+msgstr ""
+
+#: lib/contract_web/live/studio/components/chat_rail.ex:87
+#, elixir-autogen, elixir-format
+msgid "문서 보기"
+msgstr ""
+
+#: lib/contract_web/live/studio/components/canvas/empty.ex:142
+#, elixir-autogen, elixir-format
+msgid "빈 문서로 시작"
+msgstr ""
+
+#: lib/contract_web/live/studio/components/canvas/empty.ex:161
+#, elixir-autogen, elixir-format
+msgid "에이전트와 먼저 상의하기"
+msgstr ""

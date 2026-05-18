@@ -394,7 +394,6 @@ defmodule ContractWeb.Live.Studio.Components.ModalHostTest do
       refute html =~
                ~r/<button[^>]*disabled[^>]*data-role="migration-create-variant"|<button[^>]*data-role="migration-create-variant"[^>]*disabled/
     end
-
   end
 
   # ---------------------------------------------------------------------

@@ -9,8 +9,8 @@ defmodule Contract.MailerTest do
       original = Application.get_env(:contract, :mail_from)
 
       try do
-        Application.put_env(:contract, :mail_from, {"Contract", "ereignis@korea.ac.kr"})
-        assert {"Contract", "ereignis@korea.ac.kr"} = Mailer.from()
+        Application.put_env(:contract, :mail_from, {"계약기계", "ereignis@korea.ac.kr"})
+        assert {"계약기계", "ereignis@korea.ac.kr"} = Mailer.from()
       after
         if original do
           Application.put_env(:contract, :mail_from, original)
@@ -25,7 +25,7 @@ defmodule Contract.MailerTest do
       Application.delete_env(:contract, :mail_from)
 
       try do
-        assert {"Contract", "no-reply@example.com"} = Mailer.from()
+        assert {"계약기계", "no-reply@example.com"} = Mailer.from()
       after
         if original, do: Application.put_env(:contract, :mail_from, original)
       end
@@ -36,7 +36,7 @@ defmodule Contract.MailerTest do
     import Swoosh.TestAssertions
 
     test "deliver/1 captures the email and uses Mailer.from()" do
-      Application.put_env(:contract, :mail_from, {"Contract", "ereignis@korea.ac.kr"})
+      Application.put_env(:contract, :mail_from, {"계약기계", "ereignis@korea.ac.kr"})
 
       email =
         new()
@@ -50,73 +50,6 @@ defmodule Contract.MailerTest do
     end
   end
 
-  describe "smtp_config/1 (prod runtime config)" do
-    test "builds the expected SMTP adapter keyword list from env vars" do
-      env = %{
-        "MAIL_HOST" => "smtp.example.com",
-        "MAIL_PORT" => "465",
-        "MAIL_USERNAME" => "user@example.com",
-        "MAIL_PASSWORD" => "secret"
-      }
-
-      cfg = Mailer.smtp_config(env)
-
-      assert cfg[:adapter] == Swoosh.Adapters.SMTP
-      assert cfg[:relay] == "smtp.example.com"
-      assert cfg[:port] == 465
-      assert cfg[:ssl] == true
-      assert cfg[:tls] == :never
-      assert cfg[:auth] == :always
-      assert cfg[:username] == "user@example.com"
-      assert cfg[:password] == "secret"
-      assert cfg[:retries] == 2
-      assert cfg[:no_mx_lookups] == true
-
-      sockopts = cfg[:sockopts]
-      assert is_list(sockopts)
-      assert sockopts[:versions] == [:"tlsv1.2", :"tlsv1.3"]
-      assert sockopts[:verify] == :verify_peer
-      assert is_list(sockopts[:cacerts])
-      assert sockopts[:depth] == 3
-      assert sockopts[:server_name_indication] == ~c"smtp.example.com"
-
-      hostname_check = sockopts[:customize_hostname_check]
-      assert is_list(hostname_check)
-      assert is_function(hostname_check[:match_fun], 2)
-    end
-
-    test "raises KeyError when MAIL_HOST is missing" do
-      env = %{
-        "MAIL_PORT" => "465",
-        "MAIL_USERNAME" => "u",
-        "MAIL_PASSWORD" => "p"
-      }
-
-      assert_raise KeyError, fn -> Mailer.smtp_config(env) end
-    end
-
-    test "raises KeyError when MAIL_PORT is missing" do
-      env = %{
-        "MAIL_HOST" => "h",
-        "MAIL_USERNAME" => "u",
-        "MAIL_PASSWORD" => "p"
-      }
-
-      assert_raise KeyError, fn -> Mailer.smtp_config(env) end
-    end
-
-    test "raises ArgumentError when MAIL_PORT is non-numeric" do
-      env = %{
-        "MAIL_HOST" => "h",
-        "MAIL_PORT" => "not-a-port",
-        "MAIL_USERNAME" => "u",
-        "MAIL_PASSWORD" => "p"
-      }
-
-      assert_raise ArgumentError, fn -> Mailer.smtp_config(env) end
-    end
-  end
-
   describe "live SMTP smoke (tagged, opt-in)" do
     @describetag :live_smtp
 
@@ -127,7 +60,7 @@ defmodule Contract.MailerTest do
         new()
         |> to({"Self", addr})
         |> from(Mailer.from())
-        |> subject("Contract Studio :live_smtp smoke")
+        |> subject("계약기계 :live_smtp smoke")
         |> text_body("If you see this, Worksmobile SMTP works under OTP 28.")
 
       assert {:ok, _meta} = Mailer.deliver(email)

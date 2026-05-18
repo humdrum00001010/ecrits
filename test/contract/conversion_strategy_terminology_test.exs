@@ -9,7 +9,6 @@ defmodule Contract.ConversionStrategyTerminologyTest do
   alias Contract.Context
   alias Contract.Documents
   alias Contract.IO.R2Stub
-  alias Contract.Matters
   alias Contract.Workers.ConversionPlanJob
 
   setup :set_mox_from_context
@@ -33,11 +32,8 @@ defmodule Contract.ConversionStrategyTerminologyTest do
   end
 
   defp source_doc(scope) do
-    {:ok, matter} = Matters.create(scope, %{"name" => "m"})
-
     {:ok, doc} =
       Documents.create(scope, %{
-        "matter_id" => matter.id,
         "title" => "src",
         "type_key" => "nda_v1"
       })
@@ -71,7 +67,12 @@ defmodule Contract.ConversionStrategyTerminologyTest do
     [first | _] = plan.field_plans
 
     assert {:ok, %Plan{field_plans: field_plans}} =
-             Conversion.set_field_strategy(scope, plan, first.source_field_id, :link_to_matter_field)
+             Conversion.set_field_strategy(
+               scope,
+               plan,
+               first.source_field_id,
+               :link_to_matter_field
+             )
 
     assert Enum.find(field_plans, &(&1.source_field_id == first.source_field_id)).strategy ==
              :link_to_shared_fact

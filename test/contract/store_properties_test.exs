@@ -6,16 +6,16 @@ defmodule Contract.StorePropertiesTest do
     1. Across any sequence of successful appends, `result_revision`
        advances by exactly +1 each step.
     2. `Store.load(doc)` reconstructs the same `Runtime.State` as folding
-       `Engine.apply/2` over every persisted Change.
+       `Session.Reducer.apply/2` over every persisted Change.
   """
   use Contract.DataCase, async: false
   use ExUnitProperties
 
   alias Contract.Change
-  alias Contract.Engine
   alias Contract.IO.R2Stub
   alias Contract.Lease
   alias Contract.Runtime
+  alias Contract.Session.Reducer
   alias Contract.Store
 
   setup do
@@ -118,7 +118,7 @@ defmodule Contract.StorePropertiesTest do
     end
   end
 
-  property "load(doc) equals fold of Engine.apply over the persisted changes" do
+  property "load(doc) equals fold of Session.Reducer.apply over the persisted changes" do
     check all(sequence <- StreamData.list_of(action_gen(), min_length: 1, max_length: 6)) do
       doc = Ecto.UUID.generate()
       {:ok, lease} = Lease.acquire(doc, "prop-fold-#{System.unique_integer([:positive])}")
@@ -138,7 +138,7 @@ defmodule Contract.StorePropertiesTest do
 
       folded =
         Enum.reduce(all_changes, base, fn change, acc ->
-          {:ok, next} = Engine.apply(Store.change_to_input(change), acc)
+          {:ok, next} = Reducer.apply(Store.change_to_input(change), acc)
           next
         end)
 

@@ -14,24 +14,22 @@ defmodule Contract.Workers.FtcSeedJob do
 
   ## Pipeline
 
-    1. `ensure_templates_matter/0` — gets or creates the legacy seed bucket
-       used by older FTC-template rows.
-    2. `check_not_already_seeded/2` — short-circuits with `:ok` if a
+    1. `check_not_already_seeded/2` — short-circuits with `:ok` if a
        `status: :template` Document with this `type_key` already
-       exists in the templates matter. Re-running the seed task is
+       exists for the system user. Re-running the seed task is
        therefore idempotent.
-    3. `download_source/1` — fetches the source HWP/PDF bytes via Req
+    2. `download_source/1` — fetches the source HWP/PDF bytes via Req
        with a Korean `Accept-Language` and a desktop User-Agent (the
        FTC site rejects bare clients otherwise).
-    4. `Upstage.parse/2` — runs the bytes through Upstage Document
+    3. `Upstage.parse/2` — runs the bytes through Upstage Document
        Parse and returns the raw elements.
-    5. `Upstage.normalize_elements/1` — maps elements to the hard-IR
+    4. `Upstage.normalize_elements/1` — maps elements to the hard-IR
        node taxonomy (paragraph/heading/list/table/figure/...).
-    6. `Contract.Documents.create/2` — inserts the owner-scoped Document
+    5. `Contract.Documents.create/2` — inserts the owner-scoped Document
        row. The system user is synthesized in the seed-system-user migration.
-    7. `emit_initial_change/2` — runs an `Action(:create_document)`
+    6. `emit_initial_change/2` — runs a `Command(:create_document)`
        through `Contract.Runtime.apply/2` so an audit Change row
-       lands. The parsed nodes ride along in the Action payload for
+       lands. The parsed nodes ride along in the Command payload for
        future Engine-side hydration; currently the projection is
        seeded at load-time via Snapshot replay.
 
@@ -66,20 +64,17 @@ defmodule Contract.Workers.FtcSeedJob do
   alias Contract.Context
   alias Contract.Documents
   alias Contract.Documents.Document
-  alias Contract.Matters.Matter
   alias Contract.Repo
   alias Contract.Runtime
 
   @system_user_id "00000000-0000-0000-0000-00000000c0de"
   @system_user_email "system@contract.local"
-  @templates_matter_name "FTC 표준약관"
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: %{"type_key" => type_key, "source_url" => url, "title" => title}}) do
     with {:ok, system_user} <- ensure_system_user(),
-         {:ok, templates_matter} <- ensure_templates_matter(system_user.id),
-         scope = system_scope(system_user, templates_matter),
-         :ok <- check_not_already_seeded(scope, templates_matter, type_key),
+         scope = system_scope(system_user),
+         :ok <- check_not_already_seeded(system_user.id, type_key),
          {:ok, file_path, mime_type} <- download_source(url),
          {:ok, parsed} <- upstage_driver().parse(file_path, []),
          projection_nodes <- normalize_to_projection(parsed),
@@ -150,34 +145,10 @@ defmodule Contract.Workers.FtcSeedJob do
   end
 
   # ----------------------------------------------------------------------------
-  # ensure_templates_matter/1
+  # check_not_already_seeded/2
   # ----------------------------------------------------------------------------
 
-  @doc false
-  @spec ensure_templates_matter(binary()) :: {:ok, Matter.t()} | {:error, term()}
-  def ensure_templates_matter(system_user_id) do
-    case Repo.get_by(Matter, name: @templates_matter_name) do
-      %Matter{} = matter ->
-        {:ok, matter}
-
-      nil ->
-        %Matter{}
-        |> Matter.changeset(%{
-          "name" => @templates_matter_name,
-          "owner_id" => system_user_id,
-          "tenant_id" => nil,
-          "status" => "active",
-          "metadata" => %{"system" => true, "source" => "ftc"}
-        })
-        |> Repo.insert()
-    end
-  end
-
-  # ----------------------------------------------------------------------------
-  # check_not_already_seeded/3
-  # ----------------------------------------------------------------------------
-
-  defp check_not_already_seeded(_scope, %Matter{owner_id: owner_id}, type_key) do
+  defp check_not_already_seeded(owner_id, type_key) do
     import Ecto.Query
 
     exists? =
@@ -320,7 +291,7 @@ defmodule Contract.Workers.FtcSeedJob do
   # system_scope/2
   # ----------------------------------------------------------------------------
 
-  defp system_scope(user, _matter) do
+  defp system_scope(user) do
     %Context{
       user: user,
       tenant: nil,
@@ -344,8 +315,4 @@ defmodule Contract.Workers.FtcSeedJob do
   @doc "Stable id of the synthetic system user that owns the templates matter."
   @spec system_user_id() :: binary()
   def system_user_id, do: @system_user_id
-
-  @doc "Display name of the system-owned templates matter."
-  @spec templates_matter_name() :: binary()
-  def templates_matter_name, do: @templates_matter_name
 end

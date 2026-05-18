@@ -20,31 +20,31 @@ defmodule ContractWeb.Components.BreadcrumbsTest do
       refute html =~ "aria-current"
     end
 
-    test "single Dashboard crumb renders as the current page (no link)" do
-      trail = [%{label: "Dashboard", navigate: nil, current?: true}]
+    test "single Storage crumb renders as the current page (no link)" do
+      trail = [%{label: "Storage", navigate: nil, current?: true}]
       html = render_component(&Breadcrumbs.breadcrumbs/1, trail: trail)
 
       assert html =~ ~s(aria-label="Breadcrumb")
       assert html =~ ~s(aria-current="page")
-      assert html =~ "Dashboard"
+      assert html =~ "Storage"
       refute html =~ ~s(<a href)
       refute html =~ ~s(<a data-phx-link)
     end
 
     test "studio trail with document section renders 3 crumbs, last is current" do
       trail = [
-        %{label: "Dashboard", navigate: "/dashboard", current?: false},
-        %{label: "Documents", navigate: "/dashboard", current?: false},
+        %{label: "Storage", navigate: "/storage", current?: false},
+        %{label: "Documents", navigate: "/storage", current?: false},
         %{label: "Term Sheet v3", navigate: nil, current?: true}
       ]
 
       html = render_component(&Breadcrumbs.breadcrumbs/1, trail: trail)
 
-      assert html =~ "Dashboard"
+      assert html =~ "Storage"
       assert html =~ "Documents"
       assert html =~ "Term Sheet v3"
-      assert html =~ ~s(href="/dashboard")
-      assert html =~ ~s(href="/dashboard")
+      assert html =~ ~s(href="/storage")
+      assert html =~ ~s(href="/storage")
       # The last crumb is plain text, not a link
       assert html =~ ~s(aria-current="page")
 
@@ -86,21 +86,21 @@ defmodule ContractWeb.Components.BreadcrumbsTest do
 
   describe "build/2 — trail construction" do
     test "returns [] for unauthenticated / user-less / unknown-page scopes" do
-      assert Breadcrumbs.build(nil, page: :dashboard) == []
-      assert Breadcrumbs.build(%{user: nil}, page: :dashboard) == []
+      assert Breadcrumbs.build(nil, page: :storage) == []
+      assert Breadcrumbs.build(%{user: nil}, page: :storage) == []
       assert Breadcrumbs.build(scope(), page: :mystery) == []
     end
 
-    test "dashboard: single current Dashboard crumb" do
-      assert Breadcrumbs.build(scope(), page: :dashboard) ==
-               [%{label: "Dashboard", navigate: nil, current?: true}]
+    test "storage: single current Storage crumb" do
+      assert Breadcrumbs.build(scope(), page: :storage) ==
+               [%{label: "Storage", navigate: nil, current?: true}]
     end
 
     test "settings: 3 crumbs with custom page label, default label = 'Account'" do
       custom = Breadcrumbs.build(scope(), page: :settings, settings_label: "Email & password")
 
       assert custom == [
-               %{label: "Dashboard", navigate: "/dashboard", current?: false},
+               %{label: "Storage", navigate: "/storage", current?: false},
                %{label: "Settings", navigate: "/users/settings", current?: false},
                %{label: "Email & password", navigate: nil, current?: true}
              ]
@@ -110,31 +110,31 @@ defmodule ContractWeb.Components.BreadcrumbsTest do
     end
 
     # Document-pivot (SPEC.md 2026-05-15): Matter is internal context.
-    # Studio trail collapses to 2 crumbs — Dashboard > (Document.title | Studio).
-    test "studio: matter is always dropped; trail is Dashboard > (Document | Studio)" do
+    # Studio trail collapses to 2 crumbs — Storage > (Document.title | Studio).
+    test "studio: matter is always dropped; trail is Storage > (Document | Studio)" do
       matter = %{id: "m_42", name: "Acme/NewCo merger"}
       document = %{id: "d_1", title: "Term Sheet v3"}
 
-      dashboard_crumb = %{label: "Dashboard", navigate: "/dashboard", current?: false}
+      storage_crumb = %{label: "Storage", navigate: "/storage", current?: false}
 
       # With matter + document → document name wins.
       assert Breadcrumbs.build(scope(), page: :studio, matter: matter, document: document) ==
-               [dashboard_crumb, %{label: "Term Sheet v3", navigate: nil, current?: true}]
+               [storage_crumb, %{label: "Term Sheet v3", navigate: nil, current?: true}]
 
       # With matter only → "Studio" fallback.
       assert Breadcrumbs.build(scope(), page: :studio, matter: matter) ==
-               [dashboard_crumb, %{label: "Studio", navigate: nil, current?: true}]
+               [storage_crumb, %{label: "Studio", navigate: nil, current?: true}]
 
       # No matter, no document → "Studio" fallback.
       assert Breadcrumbs.build(scope(), page: :studio) ==
-               [dashboard_crumb, %{label: "Studio", navigate: nil, current?: true}]
+               [storage_crumb, %{label: "Studio", navigate: nil, current?: true}]
 
       # Document only (no matter) → document name.
       assert Breadcrumbs.build(scope(),
                page: :studio,
                document: %{id: "d_1", title: "Untitled draft"}
              ) ==
-               [dashboard_crumb, %{label: "Untitled draft", navigate: nil, current?: true}]
+               [storage_crumb, %{label: "Untitled draft", navigate: nil, current?: true}]
     end
   end
 end

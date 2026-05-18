@@ -104,11 +104,8 @@ defmodule Contract.Workers.ConversionPlanJobTest do
         perms: [:type_change, :read, :write]
       }
 
-      {:ok, m} = Contract.Matters.create(scope, %{"name" => "m"})
-
       {:ok, d} =
         Contract.Documents.create(scope, %{
-          "matter_id" => m.id,
           "title" => "src",
           "type_key" => "nda_v1"
         })
@@ -124,7 +121,6 @@ defmodule Contract.Workers.ConversionPlanJobTest do
       # unexpected call. Also assert via Oban.Testing:
       refute_enqueued(worker: ConversionPlanJob)
     end
-
 
     test "5 ambiguous fields, OpenAI refines only 3 → other 2 stay :ask_user" do
       plan = build_plan(ambiguous_count: 5)
@@ -229,11 +225,8 @@ defmodule Contract.Workers.ConversionPlanJobTest do
         perms: [:type_change, :read, :write]
       }
 
-      {:ok, m} = Contract.Matters.create(scope, %{"name" => "m"})
-
       {:ok, d} =
         Contract.Documents.create(scope, %{
-          "matter_id" => m.id,
           "title" => "src",
           "type_key" => "nda_v1"
         })

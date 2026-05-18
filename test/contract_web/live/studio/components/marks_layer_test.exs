@@ -134,7 +134,6 @@ defmodule ContractWeb.Live.Studio.Components.MarksLayerTest do
       assert html =~ ~s(phx-value-node_id="node-42")
       assert html =~ ~s(phx-value-mark_id="m1")
     end
-
   end
 
   # ---------------------------------------------------------------------------

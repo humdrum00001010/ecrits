@@ -358,7 +358,7 @@ defmodule Contract.Gateway do
     opts = if is_integer(limit), do: [limit: limit], else: []
 
     if is_binary(query) and query != "" do
-      Contract.IO.search_law(ctx, query, opts)
+      Contract.Providers.search_law(ctx, query, opts)
     else
       {:error, :invalid_query}
     end

@@ -1,14 +1,13 @@
 defmodule Contract.Runtime do
   @moduledoc """
   Routes `Contract.Command`s into the correct execution path
-  (Engine/Store directly, Session, Agent, IO import/export, Conversion).
+  (Store directly, Session, Agent, source import, export, Conversion).
   See SPEC.md §12.
 
   ## Routing table
 
-      :create_document             → Engine + Store.append  (no Session needed)
-      :upload_document             → Contract.IO.import_upload (returns Action,
-                                                                recurse)
+      :create_document             → Store.append  (no Session needed)
+      :upload_document             → Contract.SourceDocuments.create_from_upload
       :open_document               → Runtime.load
       :rename_document             → ensure_session → Session.commit
       :update_metadata             → ensure_session → Session.commit
@@ -26,7 +25,7 @@ defmodule Contract.Runtime do
       :create_converted_variant    → Contract.Conversion.create_variant/2
       :revoke_change               → ensure_session → Session.revoke
       :resolve_revoke              → ensure_session → Session.revoke
-      :request_export              → Contract.IO.export
+      :request_export              → Contract.Exports + ExportJob
   """
 
   alias Contract.ChatThreads

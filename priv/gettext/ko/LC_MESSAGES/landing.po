@@ -25,7 +25,7 @@ msgstr ""
 #: lib/contract_web/controllers/page_html/home.html.heex:28
 #, elixir-autogen, elixir-format
 msgid "Contract Studio"
-msgstr "Contract Studio"
+msgstr "계약기계"
 
 #: lib/contract_web/controllers/page_html/home.html.heex:111
 #, elixir-autogen, elixir-format
@@ -35,7 +35,7 @@ msgstr "비공개 베타. 초청제로 운영합니다."
 #: lib/contract_web/controllers/page_html/home.html.heex:36
 #, elixir-autogen, elixir-format
 msgid "Contract Studio는 계약서를 쓰기 전에"
-msgstr "Contract Studio는 계약서를 쓰기 전에"
+msgstr "계약기계는 계약서를 쓰기 전에"
 
 #: lib/contract_web/controllers/page_html/home.html.heex:83
 #, elixir-autogen, elixir-format

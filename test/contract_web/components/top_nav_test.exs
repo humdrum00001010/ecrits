@@ -71,7 +71,7 @@ defmodule ContractWeb.LayoutsTopNavTest do
     test "drawer renders the right nav landmarks for signed-in + anonymous scopes" do
       signed_in = render_component(&Layouts.mobile_nav/1, current_scope: scope())
       assert signed_in =~ "<aside"
-      assert signed_in =~ "Dashboard"
+      assert signed_in =~ "Storage"
       assert signed_in =~ "Studio"
       assert signed_in =~ "Settings"
 
