@@ -1743,30 +1743,34 @@ defmodule ContractWeb.StudioLive do
                 </script>
 
                 <div
-                  class="inline-flex h-7 w-7 flex-col items-stretch overflow-hidden rounded-md text-base-content/65 transition-colors hover:bg-base-200"
+                  class="inline-flex h-7 w-7 flex-col items-stretch overflow-hidden rounded-md border border-base-300 text-base-content/70 hover:bg-base-200 hover:text-base-content transition-colors"
                   role="group"
                   aria-label={dgettext("studio", "편집 항목 이동")}
                 >
-                  <button
-                    type="button"
-                    class="flex h-1/2 items-center justify-center hover:text-base-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error/70"
+                  <svg
+                    role="button"
+                    tabindex="0"
                     data-role="rhwp-prev-edit-target"
                     aria-label={dgettext("studio", "이전 편집 항목")}
-                    title={dgettext("studio", "이전 편집 항목")}
-                    tabindex="0"
+                    class="block h-1/2 w-full cursor-pointer fill-none stroke-current"
+                    viewBox="0 0 20 10"
+                    preserveAspectRatio="xMidYMid meet"
                   >
-                    <.icon name="hero-chevron-up" class="size-3" />
-                  </button>
-                  <button
-                    type="button"
-                    class="flex h-1/2 items-center justify-center hover:text-base-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error/70"
+                    <title>{dgettext("studio", "이전 편집 항목")}</title>
+                    <path d="M5 7l5 -4 5 4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                  <svg
+                    role="button"
+                    tabindex="0"
                     data-role="rhwp-next-edit-target"
                     aria-label={dgettext("studio", "다음 편집 항목")}
-                    title={dgettext("studio", "다음 편집 항목")}
-                    tabindex="0"
+                    class="block h-1/2 w-full cursor-pointer fill-none stroke-current"
+                    viewBox="0 0 20 10"
+                    preserveAspectRatio="xMidYMid meet"
                   >
-                    <.icon name="hero-chevron-down" class="size-3" />
-                  </button>
+                    <title>{dgettext("studio", "다음 편집 항목")}</title>
+                    <path d="M5 3l5 4 5 -4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
                 </div>
               </div>
 
