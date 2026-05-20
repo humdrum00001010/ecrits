@@ -1743,34 +1743,34 @@ defmodule ContractWeb.StudioLive do
                 </script>
 
                 <div
-                  class="inline-flex h-7 w-7 flex-col items-stretch overflow-hidden rounded-md border border-base-300 text-base-content/70 hover:bg-base-200 hover:text-base-content transition-colors"
+                  class="inline-flex h-7 w-7 flex-col items-stretch overflow-hidden rounded-md border border-base-300 text-base-content/70 transition-colors"
                   role="group"
                   aria-label={dgettext("studio", "편집 항목 이동")}
                 >
-                  <svg
+                  <div
                     role="button"
                     tabindex="0"
                     data-role="rhwp-prev-edit-target"
                     aria-label={dgettext("studio", "이전 편집 항목")}
-                    class="block h-1/2 w-full cursor-pointer fill-none stroke-current"
-                    viewBox="0 0 20 10"
-                    preserveAspectRatio="xMidYMid meet"
+                    title={dgettext("studio", "이전 편집 항목")}
+                    class="flex h-1/2 w-full items-center justify-center cursor-pointer transition-colors hover:bg-base-200 hover:text-base-content"
                   >
-                    <title>{dgettext("studio", "이전 편집 항목")}</title>
-                    <path d="M5 7l5 -4 5 4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-                  </svg>
-                  <svg
+                    <svg class="size-2.5 fill-none stroke-current" viewBox="0 0 10 10" aria-hidden="true">
+                      <path d="M2 6.5l3 -3 3 3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                  </div>
+                  <div
                     role="button"
                     tabindex="0"
                     data-role="rhwp-next-edit-target"
                     aria-label={dgettext("studio", "다음 편집 항목")}
-                    class="block h-1/2 w-full cursor-pointer fill-none stroke-current"
-                    viewBox="0 0 20 10"
-                    preserveAspectRatio="xMidYMid meet"
+                    title={dgettext("studio", "다음 편집 항목")}
+                    class="flex h-1/2 w-full items-center justify-center cursor-pointer transition-colors hover:bg-base-200 hover:text-base-content"
                   >
-                    <title>{dgettext("studio", "다음 편집 항목")}</title>
-                    <path d="M5 3l5 4 5 -4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-                  </svg>
+                    <svg class="size-2.5 fill-none stroke-current" viewBox="0 0 10 10" aria-hidden="true">
+                      <path d="M2 3.5l3 3 3 -3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                  </div>
                 </div>
               </div>
 
