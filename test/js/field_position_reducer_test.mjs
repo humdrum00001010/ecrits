@@ -194,6 +194,40 @@ test("ParagraphDeleted before the table shifts parentParaIndex -1", () => {
   assert.equal(applyEvent(f, ev).parentParaIndex, 15)
 })
 
+test("body ParagraphMerged before the table shifts cell field's parentParaIndex -1", () => {
+  // 본문에서 paragraph 11 와 paragraph 12가 합쳐짐. 표가 들어있는 parentParaIndex=16
+  // 의 셀 필드는 parentParaIndex 15로 시프트해야 한다.
+  const f = {sectionIndex: 0, parentParaIndex: 16, controlIndex: 0, cellIndex: 11,
+             cellParaIndex: 0, row: 2, col: 1, charOffset: 0}
+  const ev = {type: "ParagraphMerged", sectionIndex: 0, paragraphIndex: 11, prevLen: 5}
+  assert.equal(applyEvent(f, ev).parentParaIndex, 15)
+})
+
+test("body ParagraphMerged on the absorbing para leaves cell field intact", () => {
+  // mergedPara 또는 그 위에 있는 표는 영향 없음.
+  const f = {sectionIndex: 0, parentParaIndex: 5, controlIndex: 0, cellIndex: 0,
+             cellParaIndex: 0, row: 0, col: 0, charOffset: 0}
+  const ev = {type: "ParagraphMerged", sectionIndex: 0, paragraphIndex: 11, prevLen: 5}
+  assert.deepEqual(applyEvent(f, ev), f)
+})
+
+test("body ParagraphSplit before the table shifts cell field's parentParaIndex +1", () => {
+  const f = {sectionIndex: 0, parentParaIndex: 16, controlIndex: 0, cellIndex: 11,
+             cellParaIndex: 0, row: 2, col: 1, charOffset: 0}
+  const ev = {type: "ParagraphSplit", sectionIndex: 0, paragraphIndex: 5, charOffset: 3}
+  assert.equal(applyEvent(f, ev).parentParaIndex, 17)
+})
+
+test("body ParagraphMerged does NOT invalidate body fields in the absorbed paragraph", () => {
+  // 사용자가 본문 line 위를 지웠을 때 라인 위에 있던 매칭(start_date 등)이
+  // 통째로 invalidate 되는 것을 막는 회귀 테스트.
+  const f = {sectionIndex: 0, paragraphIndex: 12, charOffset: 12}
+  const ev = {type: "ParagraphMerged", sectionIndex: 0, paragraphIndex: 11, prevLen: 0}
+  const r = applyEvent(f, ev)
+  assert.notEqual(r, INVALID)
+  assert.deepEqual(r, {sectionIndex: 0, paragraphIndex: 11, charOffset: 12})
+})
+
 test("ParagraphDeleted on the table's paragraph invalidates cell fields", () => {
   const f = {sectionIndex: 0, parentParaIndex: 16, controlIndex: 0, cellIndex: 11,
              cellParaIndex: 0, row: 2, col: 1, charOffset: 0}

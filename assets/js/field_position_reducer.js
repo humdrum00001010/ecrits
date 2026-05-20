@@ -123,8 +123,19 @@ function applyEventToInner(inner, event) {
       }
       // 본문 split
       if (inner.sectionIndex !== sec) return inner
-      if (inCell) return inner
       const splitPara = event.paragraphIndex
+      if (inCell) {
+        // 표가 들어있는 본문 paragraph가 split되면 parentParaIndex가 시프트.
+        // splitPara 위는 그대로, splitPara 이하/같음은... 본문 split은 char-offset
+        // 기준이므로 table control이 splitPara에 남는지 splitPara+1로 가는지가
+        // 표의 paragraph 내 위치(control)와 split 지점(offset)의 관계에 달림.
+        // 우리 측은 어느 쪽인지 모르므로, parentParaIndex >= splitPara+1 인 경우만
+        // +1 시프트 (보수적). 같은 para에 anchor된 표는 그대로 둔다 — rebuild로 보정.
+        if (inner.parentParaIndex > splitPara) {
+          return {...inner, parentParaIndex: inner.parentParaIndex + 1}
+        }
+        return inner
+      }
       if (inner.paragraphIndex < splitPara) return inner
       if (inner.paragraphIndex > splitPara) {
         return {...inner, paragraphIndex: inner.paragraphIndex + 1}
@@ -158,8 +169,18 @@ function applyEventToInner(inner, event) {
         return {...inner, cellParaIndex: cpi - 1}
       }
       if (inner.sectionIndex !== sec) return inner
-      if (inCell) return inner
       const mergedPara = event.paragraphIndex
+      if (inCell) {
+        // 본문에서 paragraph 합치기 — 표가 들어있는 paragraph도 시프트가 필요.
+        // mergedPara+1 의 표는 mergedPara 로 옮겨오고 (parentParaIndex = mergedPara),
+        // mergedPara 또는 그 위는 그대로. mergedPara+1 보다 큰 것은 -1.
+        if (inner.parentParaIndex < mergedPara) return inner
+        if (inner.parentParaIndex === mergedPara) return inner
+        if (inner.parentParaIndex === mergedPara + 1) {
+          return {...inner, parentParaIndex: mergedPara}
+        }
+        return {...inner, parentParaIndex: inner.parentParaIndex - 1}
+      }
       if (inner.paragraphIndex < mergedPara) return inner
       if (inner.paragraphIndex === mergedPara) return inner
       if (inner.paragraphIndex === mergedPara + 1) {
