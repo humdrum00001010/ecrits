@@ -18,6 +18,15 @@ defmodule ContractWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # DEV ONLY: rhwp IR debug endpoint — POST {ir: {...}} → 200 with rendered text.
+  if Mix.env() == :dev do
+    scope "/__dev__", ContractWeb do
+      pipe_through :api
+
+      post "/render-ir", DevController, :render_ir
+    end
+  end
+
   # External MCP / Slack ingress pipeline. No CSRF, no session — MCP and
   # Slack are API-only. SPEC.md §4 / §21.
   pipeline :mcp do

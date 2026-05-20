@@ -98,6 +98,47 @@ defmodule Contract.IO.OpenAI do
 
   def slack_mcp_tool(_), do: nil
 
+  @contract_doc_allowed_tools ~w(
+    doc.get
+    doc.edit_text
+    doc.insert_block
+    doc.delete_block
+    doc.edit_table
+    doc.set_field_value
+  )
+
+  @doc """
+  Agent-facing MCP tool spec for the in-house `contract-doc` server. Takes
+  a signed route_ref `bearer` token (which carries document_id +
+  agent_run_id) and returns the spec to splice into a Responses-API tools
+  list. `allowed_tools` restricts the model's surface to the 6 doc.* tools
+  even though the server advertises more.
+
+  Returns `nil` when no bearer is supplied so callers can drop it.
+  """
+  @spec contract_doc_mcp_tool(bearer :: String.t() | nil) :: map() | nil
+  def contract_doc_mcp_tool(nil), do: nil
+  def contract_doc_mcp_tool(""), do: nil
+
+  def contract_doc_mcp_tool(bearer) when is_binary(bearer) do
+    base = Application.get_env(:contract, :mcp, []) |> Keyword.get(:public_base_url)
+
+    case base do
+      nil ->
+        nil
+
+      url ->
+        %{
+          type: "mcp",
+          server_label: "contract-doc",
+          server_url: String.trim_trailing(url, "/") <> "/mcp",
+          require_approval: "never",
+          allowed_tools: @contract_doc_allowed_tools,
+          headers: %{"Authorization" => "Bearer " <> bearer}
+        }
+    end
+  end
+
   # --- internals ---------------------------------------------------------
 
   # Write-capable Slack tool names that REQUIRE user approval before
@@ -129,6 +170,7 @@ defmodule Contract.IO.OpenAI do
       OpenaiEx.new(api_key)
       |> OpenaiEx.with_base_url(base_url)
       |> OpenaiEx.with_receive_timeout(60_000)
+      |> OpenaiEx.with_finch_name(Contract.Finch.OpenAI)
 
     extra_tools = Keyword.get(opts, :extra_tools, [])
     include_law = Keyword.get(opts, :include_law_mcp?, true)
@@ -156,7 +198,15 @@ defmodule Contract.IO.OpenAI do
     request =
       params
       |> Map.put_new(:model, cfg[:default_model] || "gpt-5-mini")
-      |> Map.put_new(:reasoning, %{effort: cfg[:reasoning_effort] || "high"})
+      |> Map.put_new(:reasoning, %{
+        effort: cfg[:reasoning_effort] || "high",
+        # `auto` opts into `response.reasoning_summary_text.delta` events so
+        # the chat rail can render a "Thinking…" stream while the model is
+        # in its silent reasoning phase. Without this the API runs the same
+        # reasoning but emits no summary, leaving the UI blank during the
+        # 5–15s TTFT gap that high-effort gpt-5 has.
+        summary: "auto"
+      })
       |> Map.put(:tools, tools)
 
     {client, request}

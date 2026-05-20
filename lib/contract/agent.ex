@@ -21,30 +21,23 @@ defmodule Contract.Agent do
   alias Contract.Types, as: T
 
   @grill_system_prompt """
-  You are a legal-document agent for Contract Studio. You modify documents only via Actions.
+  당신은 계약기계의 법률 문서 에이전트입니다. 한국어 존댓말로 사용자와 자연스럽게 대화합니다.
 
-  GRILL-ME PROTOCOL:
-  On the FIRST turn of a conversation, you MUST emit clarifying questions as marks, NOT edits, when the user's intent is ambiguous. Output JSON in the schema:
+  기본 원칙:
+    * 사용자에게 친절히 답하세요. 모든 메시지가 편집 요청은 아닙니다.
+    * 사용자가 "X를 박아줘", "Y로 바꿔줘", "Z 추가해줘" 같이 **명시적으로 편집을 요청한 경우에만** contract-doc MCP 도구를 호출하세요.
+    * 단순 질문 ("어떤 내용인가요?", "이 조항은 무슨 의미?", "안녕"), 의견 요청, 일반 대화는 **도구 호출 없이** 자연스럽게 답하세요.
+    * 편집 요청이라도 의도가 모호하면 먼저 한두 문장의 명확화 질문을 하세요. 추측으로 편집하지 마세요.
 
-  {
-    "mode": "grill" | "edit",
-    "questions": [{"text": "...", "rationale": "...", "target_node_id": null | "..."}],
-    "ops": [],
-    "marks": [],
-    "message": "..."
-  }
+  편집을 할 때:
+    * 먼저 `doc.get` 으로 현재 IR + revision 을 한 번 읽으세요.
+    * 변경 도구에 `base_revision` 을 마지막 본 값으로 고정하세요.
+    * 충돌이 나면 `doc.get` 으로 재조회 후 한 번만 재시도하세요.
+    * 마치고 나서 무엇을 했는지 한두 문장으로 보고하세요 (예: "0번 단락 끝에 '[X]' 를 박았습니다.").
 
-  Use mode=grill when ANY of:
-    - the user said "make stricter"/"clean up"/"fix" without specifying which clause
-    - the change implies a legal-policy decision (penalty amount, term length, jurisdiction)
-    - the contract type is ambiguous
-    - the user's request would affect >= 3 clauses
+  법령(민법, 상법 등) 인용은 `korean-law` MCP 의 `verify_citations` 로 먼저 확인.
 
-  Otherwise use mode=edit. ON THE SECOND TURN (after user answered grill questions), default to mode=edit.
-
-  CITATION POLICY: When you cite Korean law (민법, 상법, etc.), you MUST call the `korean-law` MCP tool's `verify_citations` to confirm the article exists before emitting the citation. Never emit a citation that failed verification.
-
-  OUTPUT: Always JSON. No prose outside the JSON envelope.
+  중요: 응답은 일반 한국어 대화체 문장입니다. JSON 으로 감싸지 마세요.
   """
 
   @grill_intro_system_prompt """
@@ -62,7 +55,7 @@ defmodule Contract.Agent do
      - 결정/확정해야 할 핵심 슬롯이 무엇인지 (금액·기간·당사자 등)
      질문은 한 문장씩, 한국어 존댓말, 답하기 좋게 구체적으로.
 
-  마크나 ops는 emit하지 마세요. 이 첫 응답은 순수 텍스트 메시지여야 합니다. JSON envelope을 쓰는 다른 grill 프로토콜과 달리, 이 grill_seed 첫 응답은 그냥 한국어 일반 텍스트로.
+  도구 호출 없이, 순수 한국어 텍스트로 답하세요.
 
   문서 본문 IR이 비어 있다면 요약 단계를 건너뛰고 곧장 3번의 질문만 던지세요.
   """
@@ -126,18 +119,6 @@ defmodule Contract.Agent do
   @spec cancel(T.ctx(), T.agent_run_id()) :: {:ok, Run.t()} | {:error, term()}
   def cancel(_ctx, run_id), do: RunServer.cancel(run_id)
 
-  @spec observe_change(T.agent_run_id(), Contract.Change.t()) :: :ok
-  def observe_change(run_id, change) do
-    _ = RunServer.observe_change(run_id, change)
-    :ok
-  end
-
-  @spec observe_revoke(T.agent_run_id(), Contract.Change.t()) :: :ok
-  def observe_revoke(run_id, revoke_change) do
-    _ = RunServer.observe_revoke(run_id, revoke_change)
-    :ok
-  end
-
   @doc """
   Assembles the system prompt, conversation history, MCP tool list, and
   optional `previous_response_id` for one agent run.
@@ -154,19 +135,59 @@ defmodule Contract.Agent do
     end
   end
 
+  @mcp_tools_addendum """
+  도구 — contract-doc MCP:
+
+    * `doc.get` — 현재 문서 IR 읽기 (revision + 단락 `p` + 필드 `f`)
+    * `doc.edit_text` — paragraph/cell 안 글자 구간 교체
+    * `doc.insert_block` — paragraph/heading/list_item/table 삽입
+    * `doc.delete_block` — block 제거
+    * `doc.edit_table` — 표의 row/col 구조 변경
+    * `doc.set_field_value` — 슬롯 (필드 id) 값 갱신
+
+  사용 흐름:
+
+    1. 편집 작업이 필요하면 도구를 호출하기 전에 `doc.get` 으로 현재 상태와 revision 을 한 번 읽으세요.
+    2. 변경 도구를 호출할 때 `base_revision` 을 마지막으로 본 revision 으로 고정하세요. 충돌이 나면 `doc.get` 으로 다시 읽고 재시도하세요.
+    3. 모든 편집을 마친 뒤 사용자에게 무엇을 했는지 짧은 한국어 문장으로 보고하세요 (예: "0번 단락 끝에 '[X]' 를 박았습니다."). 도구를 호출하지 않았다면 그 사실을 굳이 언급하지 말고 자연스럽게 답하세요.
+  """
+
   defp build_regular_context(ctx, %Command{} = action) do
-    snapshot = fetch_snapshot(action.document_id)
+    snapshot = fetch_snapshot(ctx, action.document_id)
     history = fetch_history(ctx, action)
 
+    # Plain Korean text reply. No JSON envelope coupling — the user-message
+    # suffix that forced "Respond in JSON only" is gone now that
+    # text.format=json_object isn't set on the request.
     input =
       Enum.map(history, fn msg -> %{role: msg.role, content: msg.content} end) ++
         [%{role: "user", content: action.message || ""}]
 
-    tools = [Contract.IO.OpenAI.law_mcp_tool()]
+    # law_mcp_tool is auto-injected by Contract.IO.OpenAI.build_request, so
+    # we only contribute the run-scoped contract-doc tool here.
+    tools =
+      case mint_doc_route_ref(ctx, action) do
+        {:ok, bearer} ->
+          case Contract.IO.OpenAI.contract_doc_mcp_tool(bearer) do
+            nil -> []
+            tool -> [tool]
+          end
+
+        _ ->
+          []
+      end
+
+    system_prompt =
+      [
+        @grill_system_prompt,
+        @mcp_tools_addendum,
+        Contract.Agent.Prompt.IRRenderer.schema_prompt(),
+        "CURRENT_DOCUMENT_IR:\n" <> Jason.encode!(snapshot)
+      ]
+      |> Enum.join("\n\n")
 
     frame = %{
-      system:
-        @grill_system_prompt <> "\n\nCURRENT_DOCUMENT_SNAPSHOT:\n" <> Jason.encode!(snapshot),
+      system: system_prompt,
       input: input,
       tools: tools,
       previous_response_id: action.payload["previous_response_id"],
@@ -175,6 +196,37 @@ defmodule Contract.Agent do
 
     {:ok, frame}
   end
+
+  defp mint_doc_route_ref(_ctx, %Command{document_id: nil}), do: {:error, :no_document}
+
+  defp mint_doc_route_ref(ctx, %Command{
+         document_id: doc_id,
+         agent_run_id: run_id,
+         chat_thread_id: thread_id
+       })
+       when is_binary(doc_id) do
+    user_id = if ctx, do: get_in(Map.from_struct(ctx), [:user, Access.key!(:id)]), else: nil
+
+    Contract.Gateway.issue_route_ref(ctx, %{
+      user_id: user_id,
+      document_id: doc_id,
+      agent_run_id: run_id,
+      chat_thread_id: thread_id,
+      purpose: "agent_doc_mcp",
+      scopes: ["agent_doc"],
+      # Bearer outlives a single run on purpose: token verification is
+      # statless, and run-aliveness is re-checked at the /mcp plug per
+      # request, so a 24h TTL is no looser than the 30m we had — it just
+      # spares us from minting a fresh token on every run. (Cross-run
+      # `tools/list` caching on OpenAI's hosted-MCP side still won't fire
+      # because every mint includes a fresh `issued_at` and a new
+      # `agent_run_id`; that requires the deterministic-bearer rework
+      # tracked separately.)
+      ttl: 24 * 60 * 60
+    })
+  end
+
+  defp mint_doc_route_ref(_ctx, _action), do: {:error, :missing}
 
   defp build_grill_intro_context(%Command{} = action) do
     nodes_summary = grill_seed_nodes_summary(action.payload["grill_seed_nodes"])
@@ -281,19 +333,34 @@ defmodule Contract.Agent do
   def decode_grill_intro(other, _opts), do: {:error, {:decode_failed, {:bad_shape, other}}}
 
   @doc """
-  Parses the model's JSON envelope and returns an `Action(:agent_change)`.
+  Builds an `Action(:agent_change)` from the model's final output.
 
-  Accepts either the raw response string or a final OpenAI Response map
-  with an `output_text` field.
+  Free-form text is the common case (no JSON envelope coupling). For
+  backwards compatibility we still detect a JSON envelope (used by older
+  tests / grill-protocol prompts) and route through `build_agent_change_action/2`.
   """
   @spec decode_action(String.t() | map(), keyword()) ::
           {:ok, Command.t()} | {:error, term()}
   def decode_action(provider_output, opts \\ [])
 
   def decode_action(text, opts) when is_binary(text) do
-    case extract_json(text) do
-      {:ok, payload} -> build_agent_change_action(payload, opts)
-      {:error, _} = err -> err
+    trimmed = String.trim(text)
+
+    case extract_json(trimmed) do
+      {:ok, %{"mode" => _} = payload} ->
+        build_agent_change_action(payload, opts)
+
+      _ ->
+        # Plain prose reply — wrap into an agent_change Command with
+        # empty ops/marks and the text as the user-visible message.
+        {:ok,
+         %Command{
+           kind: :agent_change,
+           actor_type: :agent,
+           idempotency_key: idempotency_key(opts),
+           payload: %{"mode" => "edit", "ops" => [], "marks" => [], "message" => trimmed},
+           message: trimmed
+         }}
     end
   end
 
@@ -321,34 +388,12 @@ defmodule Contract.Agent do
   def decode_action(other, _opts), do: {:error, {:decode_failed, {:bad_shape, other}}}
 
   # --- internals --------------------------------------------------------
-
-  defp build_agent_change_action(%{"mode" => "grill"} = payload, opts) do
-    marks =
-      Enum.map(payload["questions"] || [], fn q ->
-        %{
-          "intent" => "ask",
-          "source" => "agent",
-          "text" => q["text"],
-          "target_type" => mark_target_type(q),
-          "target_id" => q["target_node_id"],
-          "data" => %{"rationale" => q["rationale"]}
-        }
-      end)
-
-    {:ok,
-     %Command{
-       kind: :agent_change,
-       actor_type: :agent,
-       idempotency_key: idempotency_key(opts),
-       payload: %{
-         "mode" => "grill",
-         "ops" => [],
-         "marks" => marks,
-         "message" => payload["message"]
-       },
-       message: payload["message"]
-     }}
-  end
+  # decode_action's mode:"grill" branch (with `mark_target_type/1`) is
+  # gone — the new free-form prompt asks the model to chat naturally, so
+  # JSON envelopes with `mode: "grill" | "edit"` no longer arrive from
+  # production runs. The `mode: "edit"` clause below is kept as a
+  # backwards-compat decoder for the legacy envelope shape (and is what
+  # `agent_test.exs` still exercises).
 
   defp build_agent_change_action(%{"mode" => "edit"} = payload, opts) do
     ops = payload["ops"] || []
@@ -370,10 +415,6 @@ defmodule Contract.Agent do
   end
 
   defp build_agent_change_action(_other, _opts), do: {:error, {:decode_failed, :missing_mode}}
-
-  defp mark_target_type(%{"target_node_id" => nil}), do: "document"
-  defp mark_target_type(%{"target_node_id" => _}), do: "node"
-  defp mark_target_type(_), do: "document"
 
   defp idempotency_key(opts) do
     run_id = Keyword.get(opts, :run_id, "anon")
@@ -413,12 +454,16 @@ defmodule Contract.Agent do
     end
   end
 
-  # Wave-2 owns the real Store; until it lands, return an empty snapshot
-  # so the agent can run end-to-end in tests.
-  defp fetch_snapshot(nil), do: %{nodes: []}
+  # Real IR fetch via the Store + IRRenderer. Falls back to an empty
+  # placeholder when ctx/doc resolution fails so the agent run still
+  # starts (it can call doc.get over MCP to retry once tools are wired).
+  defp fetch_snapshot(_ctx, nil), do: %{"p" => [], "f" => []}
 
-  defp fetch_snapshot(_document_id) do
-    %{nodes: []}
+  defp fetch_snapshot(ctx, document_id) when is_binary(document_id) do
+    case Contract.MCP.Projection.load_agent_ir(ctx, document_id) do
+      {:ok, ir} -> Contract.Agent.Prompt.IRRenderer.compact_map(ir)
+      {:error, _} -> %{"p" => [], "f" => []}
+    end
   end
 
   # Wave-3 owns the chat store; until it lands, return an empty history.

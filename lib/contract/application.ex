@@ -18,6 +18,19 @@ defmodule Contract.Application do
       # Finch pool used by Swoosh.ApiClient.Finch. openai_ex / req each
       # manage their own pools internally, so one pool here is enough.
       {Finch, name: Swoosh.Finch},
+      # Dedicated pool for OpenAI Responses streaming. We override
+      # OpenaiEx's default `OpenaiEx.Finch` (which uses
+      # `conn_max_idle_time: :infinity`) because OpenAI's edge silently
+      # closes HTTPS keepalive connections after ~60s, leaving dead
+      # sockets in the pool. Re-using one triggers "Connection closed"
+      # and forces the agent's retry path, adding hundreds of ms of
+      # perceived latency to the first token. 30s is safely below
+      # OpenAI's window.
+      {Finch,
+       name: Contract.Finch.OpenAI,
+       pools: %{
+         :default => [size: 10, count: 1, conn_max_idle_time: 30_000]
+       }},
       {Oban, Application.fetch_env!(:contract, Oban)},
       ContractWeb.Endpoint,
       # Wave 1A2 Agent runtime: per-run GenServer registry + transient supervisor.

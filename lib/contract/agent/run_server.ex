@@ -21,8 +21,6 @@ defmodule Contract.Agent.RunServer do
     :ctx,
     :action,
     :openai,
-    :json_buffer,
-    :final_response,
     :task_ref,
     :stream_task_pid,
     :test_pid,
@@ -69,20 +67,6 @@ defmodule Contract.Agent.RunServer do
     end
   end
 
-  def observe_change(run_id, change) do
-    case whereis(run_id) do
-      nil -> {:error, :not_found}
-      pid -> GenServer.cast(pid, {:observe_change, change})
-    end
-  end
-
-  def observe_revoke(run_id, revoke_change) do
-    case whereis(run_id) do
-      nil -> {:error, :not_found}
-      pid -> GenServer.cast(pid, {:observe_revoke, revoke_change})
-    end
-  end
-
   # --- GenServer callbacks ---------------------------------------------
 
   @impl true
@@ -97,7 +81,6 @@ defmodule Contract.Agent.RunServer do
       ctx: ctx,
       action: action,
       openai: Application.fetch_env!(:contract, :io_drivers)[:openai],
-      json_buffer: [],
       test_pid: test_pid
     }
 
@@ -106,40 +89,56 @@ defmodule Contract.Agent.RunServer do
 
   @impl true
   def handle_continue(:start_stream, state) do
-    {:ok, context} = Agent.build_context(state.ctx, state.action)
+    # Stamp the agent_run_id onto the triggering Command so the agent
+    # context can mint a route_ref scoped to this run for the contract-doc
+    # MCP tool. The original action is preserved elsewhere; we only mutate
+    # the in-memory copy used to build the OpenAI request.
+    action = %{state.action | agent_run_id: state.run.id}
+    {:ok, context} = Agent.build_context(state.ctx, action)
 
-    base_params = %{
-      input: context.input,
-      instructions: context.system,
-      tools: context.tools
-    }
-
-    # Grill-intro responses are plain Korean text, not the JSON envelope
-    # the regular grill protocol uses — drop the json_object format
-    # constraint so the model is free to emit prose.
+    # Free-form Korean text response. We used to require a JSON envelope
+    # (`text.format=json_object`) because ops/marks lived in the envelope,
+    # but MCP tools are the side channel for edits now — the model only
+    # needs to emit a normal chat reply. Removing the JSON constraint lets
+    # the agent actually converse + ask clarifying questions.
     params =
-      if Map.get(context, :grill_seed?) do
-        base_params
-      else
-        Map.put(base_params, :text, %{format: %{type: "json_object"}})
-      end
+      %{
+        input: context.input,
+        instructions: context.system,
+        tools: context.tools
+      }
       |> maybe_put(:previous_response_id, Map.get(context, :previous_response_id))
 
-    case start_stream_with_retry(state.openai, params, _attempts_left = 2) do
-      {:ok, %{stream: stream, task_pid: task_pid}} ->
-        ref = consume_stream(stream)
-        {:noreply, %{state | task_ref: ref, stream_task_pid: task_pid}}
+    # IMPORTANT: stream creation AND consumption must both happen in the
+    # Task process. OpenaiEx's `stream_chat` calls Finch.stream with the
+    # caller's pid as the chunk-receiver, so `:chunk` messages land in
+    # whichever process invoked the function. If we create the stream in
+    # the GenServer and then iterate it in a Task, the Task's mailbox is
+    # empty and Stream.resource waits forever. By moving start_stream into
+    # the Task, chunks land in the Task's mailbox, the stream iterator
+    # consumes them, and parsed events flow back to the GenServer via send.
+    me = self()
+    openai = state.openai
 
-      {:error, reason} ->
-        fail(state, reason)
-    end
+    task =
+      Task.async(fn ->
+        case start_stream_with_retry(openai, params, _attempts_left = 2) do
+          {:ok, %{stream: stream}} ->
+            consume_into(stream, me)
+
+          {:error, reason} ->
+            send(me, {:stream_error, reason})
+        end
+      end)
+
+    {:noreply, %{state | task_ref: task.ref, stream_task_pid: task.pid}}
   end
 
-  # Single retry on transient OpenAI connection errors (the request body
-  # never reached the model, so it's safe to replay). Anything else —
-  # auth failure, validation error, rate limit envelope — fails fast.
-  # Backoff is 400ms, then 1.2s; total cap stays well under the 60s
-  # receive timeout we configure on the OpenaiEx client.
+  # Single retry on transient OpenAI connection errors. The request body
+  # never reached the model on a conn-reuse failure (Finch returns the
+  # error before any bytes leave the socket), so retry is safe AND can
+  # fire immediately — no backoff. Anything else — auth failure,
+  # validation error, rate-limit envelope — fails fast.
   defp start_stream_with_retry(openai, params, attempts_left)
        when attempts_left > 0 do
     case openai.stream_chat(params, []) do
@@ -152,7 +151,6 @@ defmodule Contract.Agent.RunServer do
             "Agent stream_chat transient failure; retrying. reason=#{inspect(reason)}"
           )
 
-          Process.sleep(if(attempts_left == 2, do: 400, else: 1_200))
           start_stream_with_retry(openai, params, attempts_left - 1)
         else
           {:error, reason}
@@ -174,6 +172,22 @@ defmodule Contract.Agent.RunServer do
 
   defp transient_openai_error?(_), do: false
 
+  # Build a short Korean error string from an OpenAI failure payload.
+  # Keeps the model's `code` for ops debugging but stays one line so it
+  # fits a chat bubble.
+  defp format_failure({:openai_failed, %{"message" => msg} = err}) when is_binary(msg) do
+    code = Map.get(err, "code")
+    base = "AI 응답 실패: " <> msg
+
+    if is_binary(code) and code != "" do
+      base <> " [" <> code <> "]"
+    else
+      base
+    end
+  end
+
+  defp format_failure(other), do: "AI 응답 실패: " <> inspect(other)
+
   @impl true
   def handle_call(:get_run, _from, state) do
     {:reply, {:ok, state.run}, state}
@@ -186,13 +200,24 @@ defmodule Contract.Agent.RunServer do
   end
 
   @impl true
-  def handle_cast({:observe_change, _change}, state), do: {:noreply, state}
-  def handle_cast({:observe_revoke, _change}, state), do: {:noreply, state}
+  def handle_info({:agent_text_delta, piece}, state) do
+    broadcast(state, {:agent_text_delta, state.run.id, piece})
+    {:noreply, state}
+  end
 
-  @impl true
   def handle_info({:stream_event, event}, state) do
+    # The raw event broadcast is kept for tests + future text-streaming UI.
+    # tool_call/reasoning bubbles do NOT come from this broadcast — tool
+    # calls are emitted by `Contract.MCP.instrumented/4` (truthful, single
+    # source) and reasoning summary deltas by `classify_stream_event/1`.
     broadcast(state, {:agent_stream, state.run.id, event})
-    {:noreply, accumulate(state, event)}
+
+    case classify_stream_event(event) do
+      :ignore -> :ok
+      {tag, payload} -> broadcast(state, {tag, state.run.id, payload})
+    end
+
+    {:noreply, state}
   end
 
   def handle_info({:stream_done, final_text}, state) do
@@ -206,13 +231,68 @@ defmodule Contract.Agent.RunServer do
     case decoder.(final_text, run_id: state.run.id, turn_index: state.run.turn_index) do
       {:ok, action} ->
         new_run = %{state.run | status: :completed}
-        _ = Contract.ChatThreads.append_assistant_message(state.ctx, state.action, action.message)
+
+        # If the model returned an envelope with an empty message field,
+        # synthesize a fallback so the chat rail still has something to
+        # render after the run. Better than a blank bubble.
+        reply =
+          case action.message do
+            msg when is_binary(msg) and msg != "" -> msg
+            _ -> "(완료)"
+          end
+
+        action = %{action | message: reply}
+        _ = Contract.ChatThreads.append_assistant_message(state.ctx, state.action, reply)
         broadcast(state, {:agent_completed, state.run.id, action})
         {:stop, :normal, %{state | run: new_run}}
 
       {:error, reason} ->
-        fail(state, {:decode_failed, reason})
+        # Even when envelope decoding fails (model returned non-JSON or
+        # nothing after MCP work), surface a placeholder reply in the
+        # chat so the user isn't left wondering — they can still see the
+        # tool_call cards persisted by `Contract.MCP.instrumented/4`.
+        placeholder = "(완료)"
+        _ = Contract.ChatThreads.append_assistant_message(state.ctx, state.action, placeholder)
+
+        synthetic =
+          %Contract.Command{
+            kind: :agent_change,
+            actor_type: :agent,
+            message: placeholder,
+            payload: %{"message" => placeholder, "ops" => [], "marks" => []}
+          }
+
+        broadcast(state, {:agent_completed, state.run.id, synthetic})
+        new_run = %{state.run | status: :completed}
+
+        Logger.warning(
+          "Agent envelope decode failed (#{inspect(reason)}); synthesized placeholder reply."
+        )
+
+        {:stop, :normal, %{state | run: new_run}}
     end
+  end
+
+  def handle_info({:stream_failed, reason}, state) do
+    # Surface OpenAI-side failures truthfully instead of letting them be
+    # masked as a silent `(완료)` reply. Persists a visible error bubble
+    # in the chat so the user knows what happened.
+    message = format_failure(reason)
+    _ = Contract.ChatThreads.append_assistant_message(state.ctx, state.action, message)
+
+    synthetic = %Contract.Command{
+      kind: :agent_change,
+      actor_type: :agent,
+      message: message,
+      payload: %{"message" => message, "ops" => [], "marks" => []}
+    }
+
+    broadcast(state, {:agent_completed, state.run.id, synthetic})
+
+    Logger.warning("Agent stream failed (#{inspect(reason)})")
+
+    new_run = %{state.run | status: :failed}
+    {:stop, :normal, %{state | run: new_run}}
   end
 
   def handle_info({:stream_error, reason}, state) do
@@ -224,8 +304,7 @@ defmodule Contract.Agent.RunServer do
 
         new_state = %{
           state
-          | json_buffer: [],
-            task_ref: nil,
+          | task_ref: nil,
             stream_task_pid: nil,
             stream_retries_left: state.stream_retries_left - 1
         }
@@ -241,40 +320,80 @@ defmodule Contract.Agent.RunServer do
 
   # --- helpers ----------------------------------------------------------
 
-  defp consume_stream(stream) do
-    me = self()
+  # Runs in the Task process that just created the stream. For each text
+  # delta we (a) forward as `:agent_text_delta` so the LV streams chars
+  # into the chat bubble in real time, and (b) accumulate the full text.
+  # We also watch for `response.failed` / `error` events — if the upstream
+  # reports a failure (e.g. our `/mcp` returned 5xx and the MCP tools/list
+  # discovery aborted the run) we surface it as `:stream_failed` instead
+  # of letting an empty `:stream_done` get masked by the `(완료)` fallback.
+  defp consume_into(stream, run_server_pid) do
+    try do
+      {final_text, failure} =
+        Enum.reduce(stream, {"", nil}, fn event, {acc, failure} ->
+          send(run_server_pid, {:stream_event, event})
 
-    Task.async(fn ->
-      try do
-        Enum.reduce(stream, "", fn event, acc ->
-          send(me, {:stream_event, event})
+          failure = failure || extract_failure(event)
 
           case extract_text_delta(event) do
-            nil -> acc
-            piece -> acc <> piece
+            nil ->
+              {acc, failure}
+
+            piece ->
+              send(run_server_pid, {:agent_text_delta, piece})
+              {acc <> piece, failure}
           end
         end)
-        |> then(&send(me, {:stream_done, &1}))
-      rescue
-        e -> send(me, {:stream_error, e})
+
+      case failure do
+        nil -> send(run_server_pid, {:stream_done, final_text})
+        reason -> send(run_server_pid, {:stream_failed, reason})
       end
-    end)
+    rescue
+      e -> send(run_server_pid, {:stream_error, e})
+    end
   end
 
-  defp accumulate(state, _event), do: state
+  # response.failed: top-level failure with a nested error object.
+  defp extract_failure(%{type: "response.failed", data: data}) when is_map(data) do
+    case get_in(data, ["response", "error"]) do
+      %{"message" => msg} = err when is_binary(msg) -> {:openai_failed, err}
+      _ -> {:openai_failed, %{"message" => "response.failed"}}
+    end
+  end
+
+  # Standalone `error` event (e.g. MCP server unreachable).
+  defp extract_failure(%{type: "error", data: %{"error" => err}}) when is_map(err),
+    do: {:openai_failed, err}
+
+  defp extract_failure(%{type: "error", data: err}) when is_map(err),
+    do: {:openai_failed, err}
+
+  defp extract_failure(_), do: nil
+
+  # Reasoning summary delta/done are the only OpenAI stream events we
+  # classify here. Tool calls are broadcast by `Contract.MCP.instrumented/4`
+  # (the actual server-side handler, single source of truth). Final assistant
+  # text comes from the {:stream_done, text} accumulator in `consume_stream`.
+  defp classify_stream_event(%{
+         type: "response.reasoning_summary_text.delta",
+         data: %{"delta" => delta}
+       })
+       when is_binary(delta),
+       do: {:agent_reasoning_delta, delta}
+
+  defp classify_stream_event(%{
+         type: "response.reasoning_summary_text.done",
+         data: %{"text" => text}
+       })
+       when is_binary(text),
+       do: {:agent_reasoning_done, text}
+
+  defp classify_stream_event(_), do: :ignore
 
   defp extract_text_delta(%{type: "response.output_text.delta", data: %{"delta" => delta}})
        when is_binary(delta),
        do: delta
-
-  defp extract_text_delta(%{type: "response.completed", data: %{"response" => resp}})
-       when is_map(resp) do
-    # The final response payload often carries the full output text.
-    case Map.get(resp, "output_text") do
-      text when is_binary(text) -> text
-      _ -> nil
-    end
-  end
 
   defp extract_text_delta(_), do: nil
 

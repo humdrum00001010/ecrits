@@ -53,6 +53,20 @@ defmodule Contract.Session.Reducer do
     :update_mark
   ]
 
+  # Freeform rhwp text ops. rhwp WASM 이 진짜 source of truth — Reducer 는 단지
+  # changes 테이블에 append 만 함 (IR projection 은 그대로 통과).
+  @text_op_kinds [
+    :insert_text,
+    :delete_text,
+    :insert_paragraph,
+    :merge_paragraph,
+    :table_row_insert,
+    :table_row_delete,
+    :table_column_insert,
+    :table_column_delete,
+    :table_delete
+  ]
+
   @unsupported_kinds [
     :open_document,
     :upload_document,
@@ -154,6 +168,9 @@ defmodule Contract.Session.Reducer do
 
   defp validate_op(%Operation{op: kind} = op, idx, state) do
     cond do
+      kind in @text_op_kinds ->
+        :ok
+
       kind not in @valid_op_kinds ->
         {:error, {:invalid_op_kind, index: idx, kind: kind}}
 
@@ -426,6 +443,12 @@ defmodule Contract.Session.Reducer do
     %{op: :create_projection, target_id: id}
   end
 
+  defp capture_preimage(%Operation{op: kind}, _state) when kind in @text_op_kinds do
+    # rhwp text ops 의 inverse 는 nil (revoke 불가) — preimage 는 marker 만.
+    # 정확한 undo 는 클라이언트 WASM snapshot 이 담당.
+    %{op: kind}
+  end
+
   defp position_of(state, node_id) do
     Enum.find_index(state.projection.node_order, &(&1 == node_id))
   end
@@ -570,6 +593,11 @@ defmodule Contract.Session.Reducer do
     # represent as a no-op marker for traceability.
     %Operation{op: :create_projection, target_type: type, target_id: id, args: %{inverse: true}}
   end
+
+  # rhwp text ops: server-side 단일 op 로 정확한 inverse 합성은 클라이언트 컨텍스트
+  # (선택된 range, 삭제된 문자열 등) 가 필요. revoke 흐름은 클라이언트 WASM 의
+  # snapshot 기반 undo 를 거치므로 inverse 는 nil (revoke 불가 표시).
+  defp build_inverse_op(%Operation{op: kind}, _pre) when kind in @text_op_kinds, do: nil
 
   # ----------------------------------------------------------------------------
   # apply/2
@@ -761,6 +789,13 @@ defmodule Contract.Session.Reducer do
   defp apply_op(%Operation{op: :create_projection}, projection) do
     # No-op on the current state. Variant creation produces a *new* projection
     # in the caller (Conversion module); the source projection is untouched.
+    projection
+  end
+
+  # Freeform rhwp text ops 은 IR projection 을 갱신하지 않는다 — rhwp WASM
+  # (브라우저) 이 실제 document 상태를 보유한다. Reducer 는 op 를 그대로
+  # changes 테이블에 흘려보내고 projection 은 통과시킨다.
+  defp apply_op(%Operation{op: kind}, projection) when kind in @text_op_kinds do
     projection
   end
 
@@ -1071,6 +1106,17 @@ defmodule Contract.Session.Reducer do
     ops = parse_ops(Map.get(payload, :ops, []))
     marks = parse_marks(Map.get(payload, :marks, []))
     {ops, marks, %{}}
+  end
+
+  defp build_ops_and_marks(%Command{kind: :edit_text} = command, _state) do
+    payload = normalize_payload(command.payload)
+    ops =
+      payload
+      |> Map.get(:ops, [])
+      |> List.wrap()
+      |> Enum.map(&parse_text_op(&1, command.document_id))
+
+    {ops, [], %{}}
   end
 
   defp build_ops_and_marks(%Command{kind: :add_mark} = command, _state) do
@@ -1484,6 +1530,20 @@ defmodule Contract.Session.Reducer do
       target_type: atomize(Map.get(map, :target_type)),
       target_id: Map.get(map, :target_id),
       args: normalize_args(Map.get(map, :args, %{}))
+    }
+  end
+
+  # rhwp text-op shape: %{kind: :insert_text, sec: 0, para: 5, off: 12, text: "X", ...}.
+  # target_type = :document, target_id = document_id, kind 외 모든 키 → args.
+  defp parse_text_op(map, document_id) when is_map(map) do
+    map = Map.new(map, fn {k, v} -> {atomize(k), v} end)
+    kind = atomize(Map.get(map, :kind))
+
+    %Operation{
+      op: kind,
+      target_type: :document,
+      target_id: document_id,
+      args: Map.drop(map, [:kind])
     }
   end
 

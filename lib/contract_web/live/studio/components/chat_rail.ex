@@ -195,18 +195,19 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
           id={"#{@id}-stream"}
           phx-update="stream"
           data-role="chat-stream"
-          class="flex flex-col gap-3"
+          class="flex flex-col gap-4"
         >
           <article
             :for={{dom_id, msg} <- @streams.chat_messages}
             id={dom_id}
             data-role="chat-message"
             data-message-role={msg_role(msg)}
+            data-message-kind={msg_kind(msg)}
             data-transient={msg_transient?(msg)}
             class={[
-              "flex items-end gap-2 max-w-[88%]",
-              msg_role(msg) == "user" && "self-end ml-auto flex-row-reverse",
-              msg_role(msg) == "agent" && "self-start"
+              "flex items-end gap-2",
+              msg_role(msg) == "user" && "max-w-[88%] self-end ml-auto flex-row-reverse",
+              msg_role(msg) == "agent" && "max-w-full self-stretch"
             ]}
           >
             <.operation_block
@@ -215,23 +216,54 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
               expanded={operation_expanded?(@expanded_operation_ids, msg, msg_operation(msg))}
               target={@myself}
             />
+            <%!-- Reasoning / "thinking" bubble. Streaming summary from
+                 reasoning models. Dimmed italic w/ a thin left rail. --%>
             <div
-              :if={is_nil(msg_operation(msg))}
+              :if={is_nil(msg_operation(msg)) and msg_kind(msg) == "reasoning"}
+              data-role="agent-reasoning"
               class={[
-                "rounded-lg px-2 py-0.5 text-[13px] leading-snug whitespace-pre-wrap break-words",
-                msg_role(msg) == "user" && "bg-primary text-primary-content rounded-tr-sm",
-                msg_role(msg) == "agent" && msg_transient?(msg) != "true" &&
-                  "bg-base-100 border border-base-300 text-base-content rounded-tl-sm",
-                msg_role(msg) == "agent" && msg_transient?(msg) == "true" &&
-                  "bg-base-100 border border-base-300 text-base-content/60 italic rounded-tl-sm"
+                "flex items-start gap-2 pl-3 pr-2 py-1 text-[12px] leading-snug whitespace-pre-wrap break-words flex-1",
+                "text-base-content/55 italic border-l border-base-content/15",
+                msg_transient?(msg) == "true" && "animate-pulse"
               ]}
+            >
+              <.icon name="hero-sparkles" class="size-3.5 shrink-0 mt-0.5 text-base-content/35" />
+              <span data-role="agent-reasoning-text" data-message-id={dom_id}>{msg_body(msg)}</span>
+            </div>
+
+            <%!-- User message: small pill, sharp top-right (chat tail). --%>
+            <div
+              :if={is_nil(msg_operation(msg)) and msg_kind(msg) != "reasoning"
+                   and msg_role(msg) == "user"}
+              class="px-3 py-1.5 bg-primary text-primary-content rounded-2xl rounded-tr-none text-[13px] leading-snug whitespace-pre-wrap break-words"
             >
               {msg_body(msg)}
             </div>
+
+            <%!-- Agent message: NO bubble, Zed-style flat prose with
+                 a subtle left-rail accent. The inner `[data-role=
+                 agent-text]` span is the live-streaming target — token
+                 deltas land there via the `agent_text_append` push_event
+                 (see ChatInput hook). --%>
+            <div
+              :if={is_nil(msg_operation(msg)) and msg_kind(msg) != "reasoning"
+                   and msg_role(msg) == "agent"}
+              class={[
+                "flex-1 pl-3 py-0.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words",
+                "border-l-2",
+                msg_transient?(msg) == "true" &&
+                  "text-base-content/60 italic border-base-content/15",
+                msg_transient?(msg) != "true" &&
+                  "text-base-content border-primary/40"
+              ]}
+            >
+              <span data-role="agent-text" data-message-id={dom_id}>{msg_body(msg)}</span>
+            </div>
+
             <time
-              :if={msg_timestamp(msg)}
+              :if={not is_nil(msg_timestamp(msg)) and msg_kind(msg) != "reasoning"}
               datetime={msg_timestamp(msg)}
-              class="text-[10px] text-base-content/40 shrink-0 pb-1 whitespace-nowrap"
+              class="text-[10px] text-base-content/35 shrink-0 pb-1 whitespace-nowrap"
             >
               {format_msg_time(msg_timestamp(msg))}
             </time>
@@ -241,10 +273,12 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
 
       <%!-- Input footer — icon upload + message input + icon send.
            The row shape is identical on desktop and mobile. --%>
+      <%!-- No `phx-submit` here — the colocated ChatInput hook is the
+           single source of truth for sending. Keeping both produces a
+           duplicate user message (empty + real) per turn. --%>
       <form
         id={"#{@id}-form"}
         phx-hook=".ChatInput"
-        phx-submit="chat.submit"
         data-role="chat-form"
         class={[
           "border-t border-base-300 bg-base-200 shrink-0 px-3 py-2",
@@ -369,6 +403,65 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
 
             this.onFormSubmit = (e) => this.send(e)
 
+            // Live token streaming: per-delta `agent_text_append` events
+            // bypass LV's stream-diff cycle (which would batch successive
+            // stream_inserts into one render). We just look up the
+            // bubble's text span by data-message-id and append the piece.
+            this.onAppend = (e) => {
+              const id = e.detail && e.detail.message_id
+              const piece = e.detail && e.detail.piece
+              if (!id || !piece) return
+              const span = document.querySelector(
+                `[data-role="agent-text"][data-message-id="${id}"]`
+              )
+              if (span) span.appendChild(document.createTextNode(piece))
+            }
+            window.addEventListener("phx:agent_text_append", this.onAppend)
+
+            // Same trick for the reasoning bubble. Without this, every
+            // reasoning_summary delta (hundreds per turn) re-sent the
+            // entire accumulated buffer through LV diffs and the text
+            // arrived in big chunks instead of flowing.
+            this.onReasoningAppend = (e) => {
+              const id = e.detail && e.detail.message_id
+              const piece = e.detail && e.detail.piece
+              if (!id || !piece) return
+              const span = document.querySelector(
+                `[data-role="agent-reasoning-text"][data-message-id="${id}"]`
+              )
+              if (span) span.appendChild(document.createTextNode(piece))
+            }
+            window.addEventListener("phx:agent_reasoning_append", this.onReasoningAppend)
+
+            // Sticky-bottom auto-scroll. Watches the chat-scroll container
+            // for ANY DOM change (stream_inserts, TextNode appends, etc.)
+            // and pulls the viewport to bottom — but only while the user
+            // is already pinned there. As soon as they scroll up to read
+            // earlier turns we stop forcing them back down.
+            this.scroller = document.querySelector('[data-role="chat-scroll"]')
+            if (this.scroller) {
+              this.pinned = true
+              const pinThreshold = 80
+              this.onScroll = () => {
+                const distance =
+                  this.scroller.scrollHeight - this.scroller.scrollTop - this.scroller.clientHeight
+                this.pinned = distance < pinThreshold
+              }
+              this.scroller.addEventListener("scroll", this.onScroll, { passive: true })
+
+              this.scrollObserver = new MutationObserver(() => {
+                if (this.pinned) this.scroller.scrollTop = this.scroller.scrollHeight
+              })
+              this.scrollObserver.observe(this.scroller, {
+                childList: true,
+                subtree: true,
+                characterData: true
+              })
+
+              // Initial position at the bottom.
+              this.scroller.scrollTop = this.scroller.scrollHeight
+            }
+
             this.form.addEventListener("keydown", this.onFormKeydown)
             this.form.addEventListener("input", this.onFormInput)
             this.form.addEventListener("pointerdown", this.onFormPointerDown)
@@ -379,6 +472,10 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             this.autosize()
           },
           destroyed() {
+            if (this.onAppend) window.removeEventListener("phx:agent_text_append", this.onAppend)
+            if (this.onReasoningAppend) window.removeEventListener("phx:agent_reasoning_append", this.onReasoningAppend)
+            if (this.scrollObserver) this.scrollObserver.disconnect()
+            if (this.scroller && this.onScroll) this.scroller.removeEventListener("scroll", this.onScroll)
             if (!this.form) return
             this.form.removeEventListener("keydown", this.onFormKeydown)
             this.form.removeEventListener("input", this.onFormInput)
@@ -416,18 +513,31 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
         phx-target={@target}
         data-role="tool-trace"
         data-status={@operation_status}
-        class="tool-trace flex w-full items-center gap-2 rounded-md border border-base-200 bg-base-100 px-3 py-2 text-left text-sm text-base-content/75 transition hover:border-base-300 hover:text-base-content"
+        class={[
+          "tool-trace flex w-full items-center gap-2 rounded-md border bg-base-100 px-3 py-1.5 text-left text-sm transition",
+          @operation_status == "running" &&
+            "border-base-300 bg-base-200/60 text-base-content/70 animate-pulse",
+          @operation_status == "completed" &&
+            "border-base-200 text-base-content/75 hover:border-base-300 hover:text-base-content",
+          @operation_status == "failed" &&
+            "border-error/30 bg-error/5 text-error"
+        ]}
       >
         <.icon
-          name={if(@expanded, do: "hero-chevron-down", else: "hero-check")}
-          class="size-4 shrink-0 text-base-content/50"
+          name={tool_trace_icon(@operation_status, @expanded)}
+          class={[
+            "size-4 shrink-0",
+            @operation_status == "running" && "text-base-content/40",
+            @operation_status == "completed" && "text-success/70",
+            @operation_status == "failed" && "text-error"
+          ]}
         />
-        <span class="tool-trace__label min-w-0 flex-1 truncate">
-          {dgettext("studio", "답변을 수정 범위에 연결함")}
-        </span>
+        <code class="min-w-0 flex-1 truncate font-mono text-[12px] text-base-content/85">
+          {@operation_title}
+        </code>
         <span
           :if={@operation_summary != ""}
-          class="tool-trace__meta shrink-0 text-xs text-base-content/50"
+          class="shrink-0 text-[11px] text-base-content/50"
         >
           {@operation_summary}
         </span>
@@ -925,6 +1035,15 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
 
   defp msg_transient?(%{transient?: true}), do: "true"
   defp msg_transient?(_), do: "false"
+
+  defp msg_kind(%{kind: kind}) when is_atom(kind), do: Atom.to_string(kind)
+  defp msg_kind(%{kind: kind}) when is_binary(kind), do: kind
+  defp msg_kind(_), do: "text"
+
+  defp tool_trace_icon("running", _), do: "hero-arrow-path"
+  defp tool_trace_icon("failed", _), do: "hero-exclamation-triangle"
+  defp tool_trace_icon(_, true), do: "hero-chevron-down"
+  defp tool_trace_icon(_, false), do: "hero-check"
 
   defp msg_body(%{body: body}) when is_binary(body), do: body
   defp msg_body(%{result: %{body: body}}) when is_binary(body), do: body

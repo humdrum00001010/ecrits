@@ -61,9 +61,20 @@ config :contract, :upstage,
 
 config :contract, :openai,
   api_key: System.get_env("OPENAI_API_KEY"),
-  base_url: System.get_env("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-  default_model: "gpt-5-mini",
-  reasoning_effort: "high"
+  base_url: System.get_env("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
+# NOTE: `default_model` + `reasoning_effort` live in `config/runtime.exs`,
+# not here. Putting them in `config.exs` makes the Phoenix dev code
+# reloader 500 every HTTP request when they change (you must restart the
+# whole VM for compile-time config edits). runtime.exs is re-read on each
+# boot, doesn't trip the reloader, and is also where env-var overrides
+# (OPENAI_MODEL, OPENAI_REASONING_EFFORT) get wired in.
+
+# Public base URL for our MCP server. OpenAI Responses MCP calls back into
+# this URL during a run, so it must be reachable from OpenAI's edge. Local
+# tunnel: cloudflared `main` → :4000 (see ~/.cloudflared/main.yml).
+config :contract, :mcp,
+  public_base_url: System.get_env("MCP_PUBLIC_BASE_URL", "https://contract.cloudxyz.org")
 
 config :contract, :law_mcp,
   endpoint: System.get_env("LAW_MCP_URL", "https://korean-law-mcp.fly.dev/mcp"),

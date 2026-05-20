@@ -47,6 +47,36 @@ defmodule Contract.ChatThreads do
 
   defp grill_seed?(_), do: false
 
+  @doc """
+  Persists a tool-call operation as a thread message so it survives page
+  reloads. The MCP `instrumented/4` wrapper calls this after a successful
+  or failed tool dispatch. Skipped (no-op) if `chat_thread_id` is nil
+  (test/legacy tokens) — those calls remain ephemeral over PubSub only.
+  """
+  @spec append_tool_call_message(binary() | nil, map()) ::
+          {:ok, ChatThread.t()} | :ok | {:error, term()}
+  def append_tool_call_message(nil, _operation), do: :ok
+
+  def append_tool_call_message(thread_id, operation)
+      when is_binary(thread_id) and is_map(operation) do
+    case Repo.get(ChatThread, thread_id) do
+      %ChatThread{} = thread ->
+        message = %{
+          "id" => operation["id"] || Ecto.UUID.generate(),
+          "role" => "agent",
+          "content" => "",
+          "agent_run_id" => operation["agent_run_id"],
+          "operation" => operation,
+          "inserted_at" => DateTime.to_iso8601(utc_now())
+        }
+
+        append_message(thread, message)
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
   @doc "Appends an assistant-visible message to a thread."
   @spec append_assistant_message(Context.t() | nil, Command.t(), String.t() | nil) ::
           {:ok, ChatThread.t()} | :ok | {:error, term()}
@@ -201,12 +231,23 @@ defmodule Contract.ChatThreads do
     |> Repo.insert()
   end
 
-  defp append_message(%ChatThread{} = thread, message) do
-    messages = (thread.messages || []) ++ [message]
+  # Re-read the row each time to minimize the race window between
+  # `MCP.instrumented/4` (which fires from N parallel /mcp handler
+  # processes) and the final assistant message append from RunServer.
+  # Some lost-write potential remains under heavy concurrency — see #131
+  # for a future atomic array_append implementation.
+  defp append_message(%ChatThread{id: thread_id}, message) do
+    case Repo.get(ChatThread, thread_id) do
+      %ChatThread{} = thread ->
+        messages = (thread.messages || []) ++ [message]
 
-    thread
-    |> ChatThread.changeset(%{messages: messages, last_message_at: utc_now()})
-    |> Repo.update()
+        thread
+        |> ChatThread.changeset(%{messages: messages, last_message_at: utc_now()})
+        |> Repo.update()
+
+      nil ->
+        {:error, :not_found}
+    end
   end
 
   defp build_message(role, content, %Command{} = command) do

@@ -49,6 +49,7 @@ defmodule Contract.Runtime do
     :update_metadata,
     :set_contract_type,
     :edit_document,
+    :edit_text,
     :add_mark,
     :update_mark,
     :archive_document,

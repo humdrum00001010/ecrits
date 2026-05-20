@@ -23,6 +23,135 @@ defmodule Contract.MCP do
   alias Contract.SourceDocument
 
   def expanded_tool_descriptors do
+    agent_doc_tool_descriptors() ++ legacy_expanded_tool_descriptors()
+  end
+
+  # Agent-facing tool surface (the 6-tool MVP used by Contract.Agent.RunServer
+  # over an authenticated MCP route_ref). These are deliberately opinionated:
+  # the model gets short, positional args instead of having to construct full
+  # Command JSON via `document.submit_command`. See docs/plans for the
+  # full design rationale.
+  defp agent_doc_tool_descriptors do
+    [
+      %{
+        "name" => "doc.get",
+        "description" =>
+          "Return the current document as compact agent IR. Always call once at turn start before mutating. Use `since_revision` to short-circuit when nothing changed.",
+        "inputSchema" =>
+          object_schema(
+            %{"since_revision" => %{"type" => "integer", "minimum" => 0}},
+            []
+          )
+      },
+      %{
+        "name" => "doc.edit_text",
+        "description" =>
+          "Replace a character range inside one paragraph or table cell. `len=0` is pure insert, `text=\"\"` is pure delete, both nonzero is replace. For table cells, pass `cell_path` (controlIndex/cellIndex/cellParaIndex tuples) from doc.get. Pin `base_revision` to the value last seen.",
+        "inputSchema" =>
+          object_schema(
+            %{
+              "sec" => %{"type" => "integer", "minimum" => 0},
+              "para" => %{"type" => "integer", "minimum" => 0},
+              "off" => %{"type" => "integer", "minimum" => 0},
+              "len" => %{"type" => "integer", "minimum" => 0},
+              "text" => %{"type" => "string"},
+              "cell_path" => cell_path_schema(),
+              "base_revision" => %{"type" => "integer", "minimum" => 0}
+            },
+            ["sec", "para", "off", "len", "text"]
+          )
+      },
+      %{
+        "name" => "doc.insert_block",
+        "description" =>
+          "Insert a new block (paragraph, heading, list_item, or table) at sec:para. For heading, pass `level` 1–6. For table, pass `rows`/`cols` (and optional `header_row_count`) instead of `text`.",
+        "inputSchema" =>
+          object_schema(
+            %{
+              "sec" => %{"type" => "integer", "minimum" => 0},
+              "para" => %{"type" => "integer", "minimum" => 0},
+              "kind" => %{
+                "type" => "string",
+                "enum" => ["paragraph", "heading", "list_item", "table"]
+              },
+              "text" => %{"type" => "string"},
+              "level" => %{"type" => "integer", "minimum" => 1, "maximum" => 6},
+              "rows" => %{"type" => "integer", "minimum" => 1},
+              "cols" => %{"type" => "integer", "minimum" => 1},
+              "header_row_count" => %{"type" => "integer", "minimum" => 0},
+              "base_revision" => %{"type" => "integer", "minimum" => 0}
+            },
+            ["sec", "para", "kind"]
+          )
+      },
+      %{
+        "name" => "doc.delete_block",
+        "description" =>
+          "Delete the block (paragraph, heading, list_item, or table) at sec:para.",
+        "inputSchema" =>
+          object_schema(
+            %{
+              "sec" => %{"type" => "integer", "minimum" => 0},
+              "para" => %{"type" => "integer", "minimum" => 0},
+              "base_revision" => %{"type" => "integer", "minimum" => 0}
+            },
+            ["sec", "para"]
+          )
+      },
+      %{
+        "name" => "doc.edit_table",
+        "description" =>
+          "Structural table edits: insert or delete a row or column. For cell text edits use doc.edit_text with cell_path instead.",
+        "inputSchema" =>
+          object_schema(
+            %{
+              "sec" => %{"type" => "integer", "minimum" => 0},
+              "para" => %{"type" => "integer", "minimum" => 0},
+              "control_index" => %{"type" => "integer", "minimum" => 0},
+              "op" => %{
+                "type" => "string",
+                "enum" => ["row_insert", "row_delete", "col_insert", "col_delete"]
+              },
+              "at_row" => %{"type" => "integer", "minimum" => 0},
+              "at_col" => %{"type" => "integer", "minimum" => 0},
+              "base_revision" => %{"type" => "integer", "minimum" => 0}
+            },
+            ["sec", "para", "op"]
+          )
+      },
+      %{
+        "name" => "doc.set_field_value",
+        "description" =>
+          "Set the value of a tracked field (slot) by its field id from doc.get's `f` list. Server lowers to the right text edit using the field's tracked position.",
+        "inputSchema" =>
+          object_schema(
+            %{
+              "id" => string_schema(),
+              "value" => %{"type" => "string"},
+              "base_revision" => %{"type" => "integer", "minimum" => 0}
+            },
+            ["id", "value"]
+          )
+      }
+    ]
+  end
+
+  defp cell_path_schema do
+    %{
+      "type" => "array",
+      "items" => %{
+        "type" => "object",
+        "properties" => %{
+          "controlIndex" => %{"type" => "integer", "minimum" => 0},
+          "cellIndex" => %{"type" => "integer", "minimum" => 0},
+          "cellParaIndex" => %{"type" => "integer", "minimum" => 0}
+        },
+        "required" => ["controlIndex", "cellIndex", "cellParaIndex"]
+      }
+    }
+  end
+
+  defp legacy_expanded_tool_descriptors do
     [
       %{
         "name" => "document.open",
@@ -217,6 +346,86 @@ defmodule Contract.MCP do
   def read_resource(_ctx, _route_ref, _uri), do: {:error, :invalid_uri}
 
   @doc "Calls an MCP tool by name. Mutating document tools emit Commands."
+
+  # --- agent-facing doc.* tools (6-tool MVP) --------------------------------
+  # Real handlers for doc.get + doc.edit_text land in #116 (the vertical
+  # slice). The remaining four stay stubbed until #120.
+  def call_tool(%Context{} = ctx, route_ref, "doc.get" = tool, args) do
+    instrumented(route_ref, tool, args, fn ->
+      with :ok <- authorize_doc_mcp(route_ref),
+           {:ok, document_id} <- resolve_document_id(route_ref, args),
+           :ok <- authorize_route_ref_strict(route_ref, document_id),
+           :ok <- Gateway.authorize_document(ctx, document_id),
+           {:ok, %Runtime.State{} = state} <- Runtime.load(ctx, document_id) do
+        since = Map.get(args, "since_revision") || Map.get(args, :since_revision)
+
+        cond do
+          is_integer(since) and since >= state.revision ->
+            {:ok, %{"ok" => true, "unchanged" => true, "revision" => state.revision}}
+
+          true ->
+            compact =
+              state
+              |> Contract.MCP.Projection.to_agent_ir()
+              |> Contract.Agent.Prompt.IRRenderer.compact_map()
+
+            # Splice revision so the agent can pin base_revision on follow-up edits.
+            {:ok, Map.put(compact, "revision", state.revision)}
+        end
+      end
+    end)
+  end
+
+  def call_tool(_ctx, _route_ref, "doc.get", _args), do: {:error, :forbidden}
+
+  def call_tool(%Context{} = ctx, route_ref, "doc.edit_text" = tool, args) do
+    instrumented(route_ref, tool, args, fn ->
+      with :ok <- authorize_doc_mcp(route_ref),
+           {:ok, document_id} <- resolve_document_id(route_ref, args),
+           :ok <- authorize_route_ref_strict(route_ref, document_id),
+           {:ok, ops} <- edit_text_ops(args) do
+        run_id = route_ref && Map.get(route_ref, :agent_run_id)
+
+        command_args = %{
+          "kind" => "edit_text",
+          "document_id" => document_id,
+          "actor_type" => actor_type_for(route_ref),
+          "actor_id" => user_id(ctx) || (route_ref && Map.get(route_ref, :user_id)),
+          "agent_run_id" => run_id,
+          "base_revision" => Map.get(args, "base_revision") || Map.get(args, :base_revision),
+          "idempotency_key" => mcp_idempotency_key(run_id, "edit_text", args),
+          "payload" => %{"ops" => ops}
+        }
+
+        with {:ok, command} <- build_command(ctx, route_ref, command_args),
+             :ok <- authorize_command(ctx, route_ref, command),
+             {:ok, %Contract.Change{} = change} <- Runtime.apply(ctx, command) do
+          {:ok,
+           %{
+             "ok" => true,
+             "revision" => change.result_revision,
+             "applied" => "edit_text",
+             "change_id" => change.id
+           }}
+        end
+      end
+    end)
+  end
+
+  def call_tool(_ctx, _route_ref, "doc.edit_text", _args), do: {:error, :forbidden}
+
+  def call_tool(_ctx, _route_ref, "doc.insert_block", _args),
+    do: {:error, {:not_implemented, "doc.insert_block"}}
+
+  def call_tool(_ctx, _route_ref, "doc.delete_block", _args),
+    do: {:error, {:not_implemented, "doc.delete_block"}}
+
+  def call_tool(_ctx, _route_ref, "doc.edit_table", _args),
+    do: {:error, {:not_implemented, "doc.edit_table"}}
+
+  def call_tool(_ctx, _route_ref, "doc.set_field_value", _args),
+    do: {:error, {:not_implemented, "doc.set_field_value"}}
+
   def call_tool(ctx, route_ref, "document.open", args),
     do: call_tool(ctx, route_ref, "document.read", args)
 
@@ -812,6 +1021,234 @@ defmodule Contract.MCP do
 
   defp not_available(feature, reason),
     do: %{"status" => "not_available", "feature" => feature, "reason" => reason}
+
+  # --- agent doc.* helpers --------------------------------------------------
+
+  # Wraps a doc.* handler invocation with two PubSub broadcasts on
+  # `agent:#{run_id}`: a :tool_call_started before the handler runs, and a
+  # :tool_call_completed (or :tool_call_failed) after. This is what the
+  # chat-rail consumes to render tool_call cards — independent of OpenAI's
+  # SSE event vocabulary (which varies across model versions).
+  defp instrumented(route_ref, tool, args, fun) when is_function(fun, 0) do
+    run_id = route_ref && Map.get(route_ref, :agent_run_id)
+    thread_id = route_ref && Map.get(route_ref, :chat_thread_id)
+    tool_id = "#{tool}-#{System.unique_integer([:positive])}"
+
+    if is_binary(run_id) do
+      Phoenix.PubSub.broadcast(
+        Contract.PubSub,
+        "agent:#{run_id}",
+        {:tool_call_started, run_id,
+         %{
+           id: tool_id,
+           name: tool,
+           server_label: "contract-doc",
+           arguments: args
+         }}
+      )
+    end
+
+    result =
+      try do
+        fun.()
+      rescue
+        e -> {:error, {:exception, Exception.message(e)}}
+      end
+
+    {status, payload, summary} =
+      case result do
+        {:ok, output} -> {"completed", output, tool_call_summary(output)}
+        {:error, reason} -> {"failed", %{"error" => inspect(reason)}, short_error(reason)}
+      end
+
+    # Build the persistent operation record (same shape the rail's
+    # `operation_block` consumes; survives page reload via chat_threads).
+    operation = %{
+      "id" => tool_id,
+      "type" => "tool_call",
+      "name" => tool,
+      "tool_name" => tool,
+      "raw_name" => tool,
+      "server_label" => "contract-doc",
+      "title" => tool,
+      "status" => status,
+      "summary" => summary,
+      "agent_run_id" => run_id,
+      "details" => %{
+        "arguments" => args,
+        "output" => payload
+      }
+    }
+
+    # PubSub for live UI.
+    if is_binary(run_id) do
+      tag = if status == "completed", do: :tool_call_completed, else: :tool_call_failed
+      payload_msg = Map.merge(operation, %{"output" => payload, "reason" => payload["error"]})
+
+      Phoenix.PubSub.broadcast(
+        Contract.PubSub,
+        "agent:#{run_id}",
+        {tag, run_id, tool_id, payload_msg}
+      )
+    end
+
+    # Durable: write to chat_thread so the bubble re-renders on reload.
+    Contract.ChatThreads.append_tool_call_message(thread_id, operation)
+
+    result
+  end
+
+  defp tool_call_summary(%{"revision" => rev}) when is_integer(rev), do: "rev #{rev}"
+  defp tool_call_summary(%{"unchanged" => true, "revision" => rev}), do: "rev #{rev} (no change)"
+  defp tool_call_summary(%{"ok" => false, "error" => err}), do: to_string(err)
+  defp tool_call_summary(_), do: "ok"
+
+  defp short_error({:forbidden, reason}), do: "forbidden: #{reason}"
+  defp short_error({code, _}) when is_atom(code), do: Atom.to_string(code)
+  defp short_error(code) when is_atom(code), do: Atom.to_string(code)
+  defp short_error(_), do: "error"
+
+  # Strict gate for doc.* tools. Caller MUST hold a route_ref that:
+  #   (a) carries scope "agent_doc" (blocks slack/api tokens from escalating)
+  #   (b) refers to an agent_run that is still alive (token revocation —
+  #       once the RunServer GenServer terminates, the token stops being
+  #       honored even within its TTL). Tokens without agent_run_id (e.g.
+  #       hand-minted test tokens) skip the liveness check.
+  defp authorize_doc_mcp(%RouteRef{scopes: scopes} = ref) when is_list(scopes) do
+    with :ok <- check_agent_doc_scope(scopes),
+         :ok <- check_run_alive(ref) do
+      :ok
+    end
+  end
+
+  defp authorize_doc_mcp(_route_ref), do: {:error, {:forbidden, :no_route_ref}}
+
+  defp check_agent_doc_scope(scopes) do
+    if "agent_doc" in Enum.map(scopes, &to_string/1) do
+      :ok
+    else
+      {:error, {:forbidden, :missing_scope_agent_doc}}
+    end
+  end
+
+  defp check_run_alive(%RouteRef{agent_run_id: nil}), do: :ok
+
+  defp check_run_alive(%RouteRef{agent_run_id: run_id}) when is_binary(run_id) do
+    case Contract.Agent.RunServer.whereis(run_id) do
+      pid when is_pid(pid) -> :ok
+      _ -> {:error, {:forbidden, :run_not_active}}
+    end
+  end
+
+  # Stricter sibling of authorize_route_ref/2: refuses tokens that lack a
+  # document_id binding (the legacy clause treats `nil → :ok` as a god
+  # token; we never want that for doc.* mutation tools).
+  defp authorize_route_ref_strict(%RouteRef{document_id: doc_id}, doc_id)
+       when is_binary(doc_id),
+       do: :ok
+
+  defp authorize_route_ref_strict(%RouteRef{}, _doc_id),
+    do: {:error, {:forbidden, :route_ref_doc_mismatch}}
+
+  defp authorize_route_ref_strict(_route_ref, _doc_id),
+    do: {:error, {:forbidden, :no_route_ref}}
+
+  defp resolve_document_id(route_ref, args) do
+    explicit = Map.get(args, "document_id") || Map.get(args, :document_id)
+
+    cond do
+      is_binary(explicit) and explicit != "" ->
+        {:ok, explicit}
+
+      match?(%RouteRef{document_id: id} when is_binary(id), route_ref) ->
+        {:ok, route_ref.document_id}
+
+      true ->
+        {:error, :missing_document_id}
+    end
+  end
+
+  defp actor_type_for(%RouteRef{agent_run_id: id}) when is_binary(id), do: "agent"
+  defp actor_type_for(_), do: "user"
+
+  defp mcp_idempotency_key(nil, tool, args) do
+    "mcp-#{tool}-#{:erlang.phash2(args)}-#{System.unique_integer([:positive])}"
+  end
+
+  defp mcp_idempotency_key(run_id, tool, args) do
+    "mcp:#{run_id}:#{tool}:#{:erlang.phash2(args)}"
+  end
+
+  defp edit_text_ops(args) do
+    sec = fetch_int(args, "sec")
+    para = fetch_int(args, "para")
+    off = fetch_int(args, "off")
+    len = fetch_int(args, "len")
+    text = Map.get(args, "text") || Map.get(args, :text) || ""
+    cell_path = Map.get(args, "cell_path") || Map.get(args, :cell_path)
+
+    cond do
+      is_nil(sec) or is_nil(para) or is_nil(off) or is_nil(len) ->
+        {:error, {:invalid_params, "sec, para, off, len are required"}}
+
+      len < 0 ->
+        {:error, {:invalid_params, "len must be >= 0"}}
+
+      not is_binary(text) ->
+        {:error, {:invalid_params, "text must be a string"}}
+
+      true ->
+        ops =
+          []
+          |> maybe_prepend_delete(sec, para, off, len, cell_path)
+          |> maybe_prepend_insert(sec, para, off, text, cell_path)
+          |> Enum.reverse()
+
+        {:ok, ops}
+    end
+  end
+
+  defp maybe_prepend_delete(ops, _sec, _para, _off, 0, _cell_path), do: ops
+
+  defp maybe_prepend_delete(ops, sec, para, off, len, cell_path) do
+    [
+      compact(%{
+        "kind" => "delete_text",
+        "sec" => sec,
+        "para" => para,
+        "off" => off,
+        "len" => len,
+        "cell_path" => cell_path
+      })
+      | ops
+    ]
+  end
+
+  defp maybe_prepend_insert(ops, _sec, _para, _off, "", _cell_path), do: ops
+
+  defp maybe_prepend_insert(ops, sec, para, off, text, cell_path) do
+    [
+      compact(%{
+        "kind" => "insert_text",
+        "sec" => sec,
+        "para" => para,
+        "off" => off,
+        "text" => text,
+        "cell_path" => cell_path
+      })
+      | ops
+    ]
+  end
+
+  defp compact(map) when is_map(map),
+    do: :maps.filter(fn _k, v -> not is_nil(v) end, map)
+
+  defp fetch_int(args, key) do
+    case Map.get(args, key) || Map.get(args, String.to_atom(key)) do
+      n when is_integer(n) -> n
+      _ -> nil
+    end
+  end
 
   defp parse_custom_uri(uri, prefix) do
     rest = String.replace_prefix(uri, prefix, "")

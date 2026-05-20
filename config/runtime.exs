@@ -61,10 +61,10 @@ end
 # ---------------------------------------------------------------------------
 # Mailer — Swoosh SMTP, Worksmobile (port 465 implicit TLS), OTP-28 hardened
 # ---------------------------------------------------------------------------
-# Only configure SMTP when MAIL_HOST is present (prod/dev with .env).
-# `:dev` keeps Swoosh.Adapters.Local when env is missing; `:test` always
-# uses Swoosh.Adapters.Test (set in config/test.exs).
-if config_env() != :test and System.get_env("MAIL_HOST") not in [nil, ""] do
+# SMTP is `:prod`-only. `:dev` always uses Swoosh.Adapters.Local so that
+# `/dev/mailbox` works on a plain `mix phx.server` boot (even with MAIL_HOST
+# in .env). `:test` always uses Swoosh.Adapters.Test (set in config/test.exs).
+if config_env() == :prod and System.get_env("MAIL_HOST") not in [nil, ""] do
   config :contract, Contract.Mailer,
     adapter: Swoosh.Adapters.SMTP,
     relay: System.fetch_env!("MAIL_HOST"),
@@ -122,11 +122,16 @@ end
 # ---------------------------------------------------------------------------
 # OpenAI / Upstage / Korean Law MCP
 # ---------------------------------------------------------------------------
+# Model + effort are runtime-only so swapping them never trips the dev
+# `config.exs` compile reloader. The api_key block stays gated on the env
+# var being present (so test/CI without keys still boots cleanly).
+config :contract, :openai,
+  default_model: System.get_env("OPENAI_MODEL", "gpt-5.5"),
+  reasoning_effort: System.get_env("OPENAI_REASONING_EFFORT", "low")
+
 if System.get_env("OPENAI_API_KEY") not in [nil, ""] do
   config :contract, :openai,
-    api_key: System.fetch_env!("OPENAI_API_KEY"),
-    model: System.get_env("OPENAI_MODEL", "gpt-5-mini"),
-    reasoning_effort: System.get_env("OPENAI_REASONING_EFFORT", "high")
+    api_key: System.fetch_env!("OPENAI_API_KEY")
 end
 
 if System.get_env("UPSTAGE_API_KEY") not in [nil, ""] do

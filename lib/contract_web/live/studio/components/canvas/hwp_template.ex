@@ -24,6 +24,11 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplate do
       data-field-values={Jason.encode!(assigns[:field_values] || %{})}
       data-renderer="svg"
       data-role="standard-hwp-editor"
+      data-site-id={@site_id}
+      data-document-id={@document_id}
+      data-text-events={Jason.encode!(assigns[:text_events] || [])}
+      data-snapshot-url={assigns[:snapshot][:url]}
+      data-snapshot-revision={assigns[:snapshot][:revision]}
     >
       <p
         data-role="standard-hwp-status"

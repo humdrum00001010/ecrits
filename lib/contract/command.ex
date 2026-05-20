@@ -17,6 +17,7 @@ defmodule Contract.Command do
   # Command kinds that always require a `document_id` to be resolvable.
   @document_scoped_kinds [
     :edit_document,
+    :edit_text,
     :rename_document,
     :update_metadata,
     :set_contract_type,
@@ -51,6 +52,7 @@ defmodule Contract.Command do
         :update_metadata,
         :set_contract_type,
         :edit_document,
+        :edit_text,
         :add_mark,
         :update_mark,
         :source_claim_confirm,
