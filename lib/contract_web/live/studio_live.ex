@@ -1756,16 +1756,13 @@ defmodule ContractWeb.StudioLive do
 
                 <button
                   type="button"
-                  class="inline-flex h-7 items-center justify-center gap-1.5 rounded-md px-1.5 text-base-content/65 transition-colors hover:bg-base-200 hover:text-base-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error/70"
+                  class="inline-flex h-7 items-center justify-center rounded-md px-1.5 text-base-content/65 transition-colors hover:bg-base-200 hover:text-base-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error/70"
                   data-role="rhwp-next-edit-target"
                   aria-label={dgettext("studio", "다음 편집 항목")}
                   title={dgettext("studio", "다음 편집 항목")}
                   tabindex="0"
                 >
                   <.icon name="hero-arrow-down" class="size-3.5" />
-                  <kbd class="rounded bg-base-200 px-1 py-0.5 text-[10px] font-semibold leading-none text-base-content/60">
-                    Tab
-                  </kbd>
                 </button>
               </div>
 
