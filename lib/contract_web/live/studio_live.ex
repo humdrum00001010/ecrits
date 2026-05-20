@@ -1742,16 +1742,32 @@ defmodule ContractWeb.StudioLive do
                   }
                 </script>
 
-                <button
-                  type="button"
-                  class="inline-flex h-7 items-center justify-center rounded-md px-1.5 text-base-content/65 transition-colors hover:bg-base-200 hover:text-base-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error/70"
-                  data-role="rhwp-next-edit-target"
-                  aria-label={dgettext("studio", "다음 편집 항목")}
-                  title={dgettext("studio", "다음 편집 항목")}
-                  tabindex="0"
+                <div
+                  class="inline-flex h-7 w-7 flex-col items-stretch overflow-hidden rounded-md text-base-content/65 transition-colors hover:bg-base-200"
+                  role="group"
+                  aria-label={dgettext("studio", "편집 항목 이동")}
                 >
-                  <.icon name="hero-arrow-down" class="size-3.5" />
-                </button>
+                  <button
+                    type="button"
+                    class="flex h-1/2 items-center justify-center hover:text-base-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error/70"
+                    data-role="rhwp-prev-edit-target"
+                    aria-label={dgettext("studio", "이전 편집 항목")}
+                    title={dgettext("studio", "이전 편집 항목")}
+                    tabindex="0"
+                  >
+                    <.icon name="hero-chevron-up" class="size-3" />
+                  </button>
+                  <button
+                    type="button"
+                    class="flex h-1/2 items-center justify-center hover:text-base-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error/70"
+                    data-role="rhwp-next-edit-target"
+                    aria-label={dgettext("studio", "다음 편집 항목")}
+                    title={dgettext("studio", "다음 편집 항목")}
+                    tabindex="0"
+                  >
+                    <.icon name="hero-chevron-down" class="size-3" />
+                  </button>
+                </div>
               </div>
 
               <div class="inline-flex items-center">
