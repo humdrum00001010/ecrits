@@ -1745,35 +1745,46 @@ defmodule ContractWeb.StudioLive do
                   }
                 </script>
 
-                <div
-                  class="inline-flex h-7 w-7 flex-col items-stretch overflow-hidden rounded-md border border-base-300 text-base-content/70 transition-colors"
-                  role="group"
-                  aria-label={dgettext("studio", "편집 항목 이동")}
-                >
+                <div class="inline-flex items-center gap-1">
                   <div
-                    role="button"
-                    tabindex="0"
-                    data-role="rhwp-prev-edit-target"
-                    aria-label={dgettext("studio", "이전 편집 항목")}
-                    title={dgettext("studio", "이전 편집 항목")}
-                    class="flex h-1/2 w-full items-center justify-center cursor-pointer transition-colors hover:bg-base-200 hover:text-base-content"
+                    class="inline-flex h-7 w-7 flex-col items-stretch overflow-hidden rounded-md border border-base-300 text-base-content/70 transition-colors"
+                    role="group"
+                    aria-label={dgettext("studio", "편집 항목 이동")}
                   >
-                    <svg class="size-2.5 fill-none stroke-current" viewBox="0 0 10 10" aria-hidden="true">
-                      <path d="M2 6.5l3 -3 3 3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
-                    </svg>
+                    <div
+                      role="button"
+                      tabindex="0"
+                      data-role="rhwp-prev-edit-target"
+                      aria-label={dgettext("studio", "이전 편집 항목")}
+                      aria-keyshortcuts="Shift+Tab"
+                      title={dgettext("studio", "이전 편집 항목 (Shift+Tab)")}
+                      class="flex h-1/2 w-full items-center justify-center cursor-pointer transition-colors hover:bg-base-200 hover:text-base-content"
+                    >
+                      <svg class="size-2.5 fill-none stroke-current" viewBox="0 0 10 10" aria-hidden="true">
+                        <path d="M2 6.5l3 -3 3 3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                      </svg>
+                    </div>
+                    <div
+                      role="button"
+                      tabindex="0"
+                      data-role="rhwp-next-edit-target"
+                      aria-label={dgettext("studio", "다음 편집 항목")}
+                      aria-keyshortcuts="Tab"
+                      title={dgettext("studio", "다음 편집 항목 (Tab)")}
+                      class="flex h-1/2 w-full items-center justify-center cursor-pointer transition-colors hover:bg-base-200 hover:text-base-content"
+                    >
+                      <svg class="size-2.5 fill-none stroke-current" viewBox="0 0 10 10" aria-hidden="true">
+                        <path d="M2 3.5l3 3 3 -3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                      </svg>
+                    </div>
                   </div>
-                  <div
-                    role="button"
-                    tabindex="0"
-                    data-role="rhwp-next-edit-target"
-                    aria-label={dgettext("studio", "다음 편집 항목")}
-                    title={dgettext("studio", "다음 편집 항목")}
-                    class="flex h-1/2 w-full items-center justify-center cursor-pointer transition-colors hover:bg-base-200 hover:text-base-content"
+                  <kbd
+                    aria-hidden="true"
+                    class="hidden md:inline-flex items-center rounded border border-base-300 px-1 text-[10px] leading-none font-mono text-base-content/55 select-none"
+                    title={dgettext("studio", "이전 = Shift+Tab, 다음 = Tab")}
                   >
-                    <svg class="size-2.5 fill-none stroke-current" viewBox="0 0 10 10" aria-hidden="true">
-                      <path d="M2 3.5l3 3 3 -3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
-                    </svg>
-                  </div>
+                    Tab
+                  </kbd>
                 </div>
               </div>
 
