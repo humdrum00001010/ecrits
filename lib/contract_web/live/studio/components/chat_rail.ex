@@ -139,7 +139,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
         >
           <div
             data-role="chat-no-doc-message"
-            class="rounded-lg bg-base-100 border border-base-300 text-base-content text-sm px-3 py-2"
+            class="rounded-lg rounded-tl-sm bg-base-100 border border-base-300 text-base-content text-sm px-3 py-2"
           >
             <p class="mb-2">{dgettext("studio", "새 문서를 시작합니다. 어떻게 시작할까요?")}</p>
             <ol class="list-decimal list-inside space-y-1 marker:text-base-content/60">
@@ -219,11 +219,11 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
               :if={is_nil(msg_operation(msg))}
               class={[
                 "rounded-lg px-2 py-0.5 text-[13px] leading-snug whitespace-pre-wrap break-words",
-                msg_role(msg) == "user" && "bg-primary text-primary-content rounded-br-sm",
+                msg_role(msg) == "user" && "bg-primary text-primary-content rounded-tr-sm",
                 msg_role(msg) == "agent" && msg_transient?(msg) != "true" &&
-                  "bg-base-100 border border-base-300 text-base-content rounded-bl-sm",
+                  "bg-base-100 border border-base-300 text-base-content rounded-tl-sm",
                 msg_role(msg) == "agent" && msg_transient?(msg) == "true" &&
-                  "bg-base-100 border border-base-300 text-base-content/60 italic rounded-bl-sm"
+                  "bg-base-100 border border-base-300 text-base-content/60 italic rounded-tl-sm"
               ]}
             >
               {msg_body(msg)}
@@ -676,15 +676,6 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
   defp status_idle, do: dgettext("studio", "대기 중")
   defp status_busy, do: dgettext("studio", "응답 중…")
 
-  defp status_pill_class(:responding),
-    do: "bg-primary/10 text-primary"
-
-  defp status_pill_class(:error),
-    do: "bg-error/10 text-error"
-
-  defp status_pill_class(_),
-    do: "bg-base-200 text-base-content/60"
-
   # ----------------------------------------------------------------------------
   # Observer / persona helpers
   # ----------------------------------------------------------------------------
@@ -884,7 +875,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
   defp operation_label("export_status"), do: "내보내기"
   defp operation_label("conversion_plan"), do: "변환 계획"
 
-  defp operation_label(_type) when is_binary(_type), do: dgettext("studio", "작업")
+  defp operation_label(type) when is_binary(type), do: dgettext("studio", "작업")
 
   defp operation_label(_), do: "작업"
 
@@ -893,7 +884,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
   defp operation_status_label("proposed"), do: dgettext("studio", "제안됨")
   defp operation_status_label("pending"), do: dgettext("studio", "대기")
   defp operation_status_label("failed"), do: dgettext("studio", "실패")
-  defp operation_status_label(_status) when is_binary(_status), do: dgettext("studio", "진행 중")
+  defp operation_status_label(status) when is_binary(status), do: dgettext("studio", "진행 중")
   defp operation_status_label(_), do: dgettext("studio", "진행 중")
 
   defp source_claim_count_label(count), do: dgettext("studio", "추출값 %{count}개", count: count)

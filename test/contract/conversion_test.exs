@@ -89,12 +89,12 @@ defmodule Contract.ConversionTest do
   end
 
   describe "propose_fields/2" do
-    test "deterministic for all five shipped types" do
+    test "deterministic for all supported selectable types" do
       s = scope()
       d = build_source_doc(s, "nda_v1")
 
       for target <-
-            ~w(nda_v1 service_agreement_v1 supply_v1 employment_v1 franchise_v1) do
+            ~w(nda_v1 service_agreement_v1 employment_v1) do
         assert {:ok, plan} = Conversion.plan(s, d.id, target, [])
         assert {:ok, plans} = Conversion.propose_fields(s, plan)
         assert is_list(plans)

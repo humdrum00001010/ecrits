@@ -35,8 +35,6 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
 
   use ContractWeb, :live_component
 
-  alias Phoenix.LiveView.JS
-
   attr :id, :string, required: true
   attr :projection, :map, required: true
   attr :studio_state, :map, required: true
@@ -292,30 +290,6 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
     """
   end
 
-  attr :tab, :atom, required: true
-  attr :active, :atom, required: true
-  attr :target, :any, required: true
-  attr :label, :string, required: true
-
-  defp tab_button(assigns) do
-    ~H"""
-    <button
-      type="button"
-      role="tab"
-      aria-selected={to_string(@tab == @active)}
-      class={[
-        "px-3 py-2 text-xs border-b-2 -mb-px transition-colors",
-        @tab == @active && "border-base-content text-base-content font-medium",
-        @tab != @active && "border-transparent text-base-content/60 hover:text-base-content"
-      ]}
-      phx-click={JS.push("switch_tab", value: %{tab: Atom.to_string(@tab)}, target: @target)}
-      data-role={"preview-tab-#{@tab}"}
-    >
-      {@label}
-    </button>
-    """
-  end
-
   # --- Body tab: read-only document render -----------------------------------
 
   defp render_body(assigns) do
@@ -381,9 +355,13 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
     assigns = %{text: node[:content] || "", id: node[:id], ordered?: ordered?}
 
     if ordered? do
-      ~H|<ol class="preview-overlay__ol"><li id={"node-#{@id}"}>{@text}</li></ol>|
+      ~H|<ol class="preview-overlay__ol">
+  <li id={"node-#{@id}"}>{@text}</li>
+</ol>|
     else
-      ~H|<ul class="preview-overlay__ul"><li id={"node-#{@id}"}>{@text}</li></ul>|
+      ~H|<ul class="preview-overlay__ul">
+  <li id={"node-#{@id}"}>{@text}</li>
+</ul>|
     end
   end
 

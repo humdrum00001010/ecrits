@@ -42,9 +42,9 @@ defmodule Contract.Conversion.PlanCacheTest do
       assert [%FieldPlan{strategy: :copy_once}] = updated.field_plans
 
       # second put overwrites
-      replacement = build_plan(target: "supply_v1")
+      replacement = build_plan(target: "employment_v1")
       assert :ok = PlanCache.put(key, replacement)
-      assert {:ok, %Plan{target_type_key: "supply_v1"}} = PlanCache.get(key)
+      assert {:ok, %Plan{target_type_key: "employment_v1"}} = PlanCache.get(key)
     end
 
     test "missing keys return {:error, :not_found} on get/update" do

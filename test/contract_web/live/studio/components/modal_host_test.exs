@@ -180,16 +180,18 @@ defmodule ContractWeb.Live.Studio.Components.ModalHostTest do
           id: "modal-host",
           studio_state: %State{mode: :editing, type_picker_open?: true},
           current_scope: scope_for_user()
-        )
+      )
 
       {:ok, nda} = Contract.ContractTypes.get(nil, "nda_v1")
-      {:ok, franchise} = Contract.ContractTypes.get(nil, "franchise_v1")
       assert html =~ ~s(data-role="type-picker")
       # Korean name renders as the headline.
       assert html =~ nda.name_ko
-      assert html =~ franchise.name_ko
       # Technical key + version still surface as a secondary line.
       assert html =~ "nda_v1 · v#{nda.version}"
+      refute html =~ "franchise_chicken_v2024_12"
+      refute html =~ "franchise_v1"
+      refute html =~ "supply_v1"
+      refute html =~ "custom_v1"
     end
 
     test "initial_modal_param=\"export\" renders the export format picker" do

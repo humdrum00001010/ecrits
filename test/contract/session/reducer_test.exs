@@ -226,7 +226,7 @@ defmodule Contract.Session.ReducerTest do
           document_id: uuid(10),
           payload: %{
             "title" => "표준계약서",
-            "type_key" => "franchise_v1",
+            "type_key" => "service_agreement_v1",
             "nodes" => [
               %{"id" => "n1", "kind" => "paragraph", "content" => korean}
             ]
@@ -319,24 +319,75 @@ defmodule Contract.Session.ReducerTest do
       {:ok, input} = Reducer.compile(a, state)
       [op] = input.ops
       assert op.args.key == :metadata
-      assert op.args.value == %{client: "Acme", jurisdiction: "NY"}
+      assert op.args.value == %{"client" => "Acme", "jurisdiction" => "NY"}
+    end
+
+    test "incoming metadata replaces existing string/atom key equivalent" do
+      proj =
+        Map.put(Runtime.State.empty_projection(), :metadata, %{
+          :rhwp_field_values => %{"service_contract_name" => "atom-old"},
+          "rhwp_field_values" => %{"service_contract_name" => "old"}
+        })
+
+      state = new_state(projection: proj)
+
+      a =
+        action(:update_metadata,
+          payload: %{
+            "metadata" => %{
+              "rhwp_field_values" => %{
+                "payment_advance_ratio" => "15",
+                "service_contract_name" => "new"
+              }
+            }
+          }
+        )
+
+      {:ok, input} = Reducer.compile(a, state)
+      [op] = input.ops
+      refute Map.has_key?(op.args.value, :rhwp_field_values)
+
+      assert op.args.value["rhwp_field_values"] == %{
+               "payment_advance_ratio" => "15",
+               "service_contract_name" => "new"
+             }
     end
   end
 
   describe "compile/2 — set_contract_type" do
-    test "produces set_attr :type_key only (does not rewrite content)" do
-      state = new_state()
+    test "produces type change plus document-state reset ops" do
+      state =
+        new_state(
+          projection: %{
+            Runtime.State.empty_projection()
+            | metadata: %{
+                "rhwp_field_values" => %{"old" => "value"},
+                :rhwp_field_values => %{"atom-old" => "value"},
+                "notes" => "keep"
+              },
+              nodes: %{"n1" => %{id: "n1", kind: :paragraph, content: "old"}},
+              node_order: ["n1"],
+              fields: %{"f1" => %{id: "f1", value: "old"}},
+              marks: %{"m1" => %{id: "m1", intent: :flag, source: :user}},
+              refs: %{"r1" => %{id: "r1", source_node_id: "n1", target_id: "x"}}
+          }
+        )
+
       a = action(:set_contract_type, payload: %{"type_key" => "msa"})
 
       {:ok, input} = Reducer.compile(a, state)
-      assert [%Operation{op: :set_attr, args: %{key: :type_key, value: "msa"}}] = input.ops
+      assert [
+               %Operation{op: :set_attr, args: %{key: :type_key, value: "msa"}},
+               %Operation{op: :set_attr, args: %{key: :metadata, value: %{"notes" => "keep"}}},
+               %Operation{op: :set_attr, args: %{key: :nodes, value: %{}}},
+               %Operation{op: :set_attr, args: %{key: :node_order, value: []}},
+               %Operation{op: :set_attr, args: %{key: :fields, value: %{}}},
+               %Operation{op: :set_attr, args: %{key: :marks, value: %{}}},
+               %Operation{op: :set_attr, args: %{key: :refs, value: %{}}}
+             ] = input.ops
     end
 
-    test "validate/2 rejects :set_contract_type when the document already has a type_key" do
-      # 2026-05-18 owner directive: "유형은 새 문서일 때만 가능해야 하고,
-      # … 한번 결정되면 immutable". The initial set succeeds (state's
-      # type_key is nil); every subsequent attempt — same key or
-      # different — must fail at validate/2.
+    test "validate/2 allows replacing an existing type_key" do
       typed_state =
         new_state(
           projection: %{Runtime.State.empty_projection() | type_key: "service_agreement_v1"}
@@ -345,15 +396,35 @@ defmodule Contract.Session.ReducerTest do
       a = action(:set_contract_type, payload: %{"type_key" => "nda_v1"})
       {:ok, input} = Reducer.compile(a, typed_state)
 
-      assert {:error, {:type_key_immutable, _details}} = Reducer.validate(input, typed_state)
+      assert {:ok, :ok} = Reducer.validate(input, typed_state)
     end
 
-    test "validate/2 still allows :set_contract_type as the first assignment" do
-      blank_state = new_state()
-      a = action(:set_contract_type, payload: %{"type_key" => "service_agreement_v1"})
-      {:ok, input} = Reducer.compile(a, blank_state)
+    test "apply/2 changes type and clears document projection state" do
+      state =
+        new_state(
+          projection: %{
+            Runtime.State.empty_projection()
+            | type_key: "service_agreement_v1",
+              metadata: %{"rhwp_field_values" => %{"service_contract_name" => "old"}},
+              nodes: %{"n1" => %{id: "n1", kind: :paragraph, content: "old"}},
+              node_order: ["n1"],
+              fields: %{"f1" => %{id: "f1", value: "old"}},
+              marks: %{"m1" => %{id: "m1", intent: :flag, source: :user}},
+              refs: %{"r1" => %{id: "r1", source_node_id: "n1", target_id: "x"}}
+          }
+        )
 
-      assert {:ok, :ok} = Reducer.validate(input, blank_state)
+      {_input, new_state} =
+        action(:set_contract_type, payload: %{"type_key" => "employment_v1"})
+        |> run_pipeline(state)
+
+      assert new_state.projection.type_key == "employment_v1"
+      assert new_state.projection.metadata == %{}
+      assert new_state.projection.nodes == %{}
+      assert new_state.projection.node_order == []
+      assert new_state.projection.fields == %{}
+      assert new_state.projection.marks == %{}
+      assert new_state.projection.refs == %{}
     end
   end
 

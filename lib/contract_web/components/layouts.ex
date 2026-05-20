@@ -42,6 +42,12 @@ defmodule ContractWeb.Layouts do
   attr :page_title, :string, default: nil
   attr :current_document_id, :any, default: nil
 
+  attr :chrome, :string,
+    default: "app",
+    values: ~w(app landing),
+    doc:
+      "Navbar style: `app` (default, used by every LiveView — brand mark + 보관함 link + user_menu) or `landing` (marketing CTAs — only used by `/`)."
+
   attr :breadcrumbs, :list,
     default: [],
     doc: "optional navigation trail rendered between the navbar and main content"
@@ -53,8 +59,8 @@ defmodule ContractWeb.Layouts do
     <div class="drawer">
       <input id="mobile-nav-drawer" type="checkbox" class="drawer-toggle" />
 
-      <div class="drawer-content flex flex-col min-h-screen">
-        <.top_nav current_scope={@current_scope} />
+      <div class="drawer-content flex flex-col min-h-screen pt-[60px]">
+        <.top_nav current_scope={@current_scope} chrome={@chrome} />
 
         <Breadcrumbs.breadcrumbs :if={@current_scope} trail={@breadcrumbs || []} />
 
@@ -96,58 +102,51 @@ defmodule ContractWeb.Layouts do
   defp inner_class("split"), do: ""
 
   attr :current_scope, :map, default: nil
+  attr :chrome, :string, default: "app", values: ~w(app landing)
 
   @doc """
-  Top navigation. Renders a public set of links + Log in / Get started
-  when anonymous; switches to a Storage / persona / Settings / Log out
-  cluster once `@current_scope.user` is present.
+  Top navigation. The navbar intentionally keeps the same structure on
+  every page; auth state only swaps the right-side account actions.
   """
   def top_nav(assigns) do
     ~H"""
-    <header class="border-b border-base-200 bg-base-100/85 backdrop-blur sticky top-0 z-30">
-      <div class="mx-auto max-w-7xl flex flex-nowrap items-center gap-3 sm:gap-6 px-4 sm:px-6 lg:px-8 h-14">
+    <header class="topbar">
+      <div class="inline-flex min-w-0 items-center gap-6">
         <.link
           navigate={if signed_in?(@current_scope), do: ~p"/storage", else: ~p"/"}
-          class="inline-flex items-center gap-2 shrink-0 h-9"
-          aria-label={dgettext("layouts", "Contract Studio home")}
+          class="brand"
+          aria-label="계약기계"
         >
-          <Brand.wordmark size="base" />
+          <img src={~p"/assets/icons/brand-mark.svg"} alt="" class="brand__icon" />
+          <span>계약기계</span>
         </.link>
 
-        <div class="flex-1" />
+        <nav :if={signed_in?(@current_scope)} class="topbar__nav" aria-label="계약기계">
+          <.link navigate={~p"/storage"} class="is-active">
+            보관함
+          </.link>
+        </nav>
+      </div>
 
-        <div class="flex flex-nowrap items-center gap-2">
-          <.theme_toggle />
+      <div class="inline-flex items-center gap-3">
+        <.theme_toggle />
+        <.user_menu :if={signed_in?(@current_scope)} current_scope={@current_scope} />
 
-          <%= if signed_in?(@current_scope) do %>
-            <.link
-              href={~p"/users/log-out"}
-              method="delete"
-              class="btn btn-ghost btn-sm inline-flex items-center h-9 min-h-9 text-sm text-base-content/70 hover:text-base-content"
-            >
-              {dgettext("layouts", "Log out")}
-            </.link>
-          <% else %>
-            <.link
-              navigate={~p"/users/log-in"}
-              class="hidden sm:inline-flex btn btn-ghost btn-sm items-center h-9 min-h-9"
-            >
-              {dgettext("layouts", "Log in")}
-            </.link>
-            <.link
-              navigate={~p"/users/register"}
-              class="btn btn-primary btn-sm inline-flex items-center h-9 min-h-9"
-            >
-              {dgettext("layouts", "Register")}
-            </.link>
-          <% end %>
+        <div :if={!signed_in?(@current_scope)} class="inline-flex items-center gap-2">
+          <.link navigate={~p"/users/log-in"} class="btn btn-ghost btn-sm">
+            {dgettext("layouts", "Log in")}
+          </.link>
+          <.link navigate={~p"/users/register"} class="btn btn-primary btn-sm">
+            {dgettext("layouts", "Register")}
+          </.link>
         </div>
       </div>
     </header>
     """
   end
 
-  attr :current_scope, :map, required: true,
+  attr :current_scope, :map,
+    required: true,
     doc: "must contain `:user` with `:email`"
 
   @doc """
@@ -281,16 +280,24 @@ defmodule ContractWeb.Layouts do
   end
 
   @doc """
-  Site-wide footer. Just the maintainer's contact email — this is a
-  student project, not a company.
+  Site-wide footer with the same contact treatment as the landing page.
   """
   def site_footer(assigns) do
     ~H"""
     <footer class="border-t border-base-200 mt-24">
-      <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6 text-xs text-base-content/50">
-        <a href="mailto:ereignis@korea.ac.kr" class="hover:text-base-content">
-          ereignis@korea.ac.kr
-        </a>
+      <div class="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-6 text-xs text-base-content/55 sm:flex-row sm:items-start sm:justify-between sm:px-6 lg:px-8">
+        <p>Contract Studio · 비공개 베타 · 2026</p>
+
+        <div class="space-y-1" aria-label="문의">
+          <p class="font-semibold text-base-content/70">문의</p>
+          <ul class="space-y-1">
+            <li>
+              <a href="mailto:ereignis@korea.ac.kr" class="hover:text-base-content">
+                ereignis@korea.ac.kr
+              </a>
+            </li>
+          </ul>
+        </div>
       </div>
     </footer>
     """

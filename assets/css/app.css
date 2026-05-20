@@ -140,6 +140,10 @@ body {
   flex: 0 0 auto;
 }
 
+[data-theme="studio-dark"] .brand__icon {
+  filter: invert(1) brightness(1.18);
+}
+
 .topbar__nav {
   display: inline-flex;
   align-items: center;
@@ -773,6 +777,24 @@ body {
   pointer-events: none;
 }
 
+.document-card__thumb-page {
+  position: relative;
+  width: 72%;
+  height: 82%;
+  overflow: hidden;
+  border: 1px solid var(--cs-line);
+  border-radius: 8px;
+  background: var(--cs-paper, #fff);
+  box-shadow: 0 14px 34px rgb(15 23 42 / 12%);
+  transform: translateY(8px);
+  pointer-events: none;
+}
+
+.document-card__thumb-page--fallback {
+  display: flex;
+  align-items: flex-start;
+}
+
 .document-card__thumb-line {
   display: block;
   margin: 0 0 4px;
@@ -937,7 +959,9 @@ body {
 }
 
 .studio-live {
+  height: calc(100vh - 60px);
   min-height: calc(100vh - 60px);
+  overflow: hidden;
   padding-right: var(--chat-rail-width);
 }
 
@@ -983,7 +1007,10 @@ body[data-chat-rail-dragging="true"] {
 }
 
 .studio-document {
+  height: 100%;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background: transparent;
 }
 
@@ -1065,6 +1092,214 @@ body[data-chat-rail-dragging="true"] {
   color: var(--cs-ink);
   font-size: 15px;
   line-height: 1.78;
+  overflow: hidden;
+}
+
+.rhwp-hwp-fonts {
+  font-family: "HY신명조", "Noto Serif CJK KR", serif;
+}
+
+@font-face {
+  font-family: "HY신명조";
+  src:
+    local("HY신명조"),
+    url("/assets/fonts/hwp/NotoSerifCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "휴먼명조";
+  src:
+    local("휴먼명조"),
+    url("/assets/fonts/hwp/NotoSerifCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "한컴바탕";
+  src:
+    local("한컴바탕"),
+    local("함초롬바탕"),
+    url("/assets/fonts/hwp/NotoSerifCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "함초롬바탕";
+  src:
+    local("함초롬바탕"),
+    url("/assets/fonts/hwp/NotoSerifCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HCR Batang";
+  src:
+    local("HCR Batang"),
+    url("/assets/fonts/hwp/NotoSerifCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "바탕";
+  src:
+    local("Batang"),
+    local("바탕"),
+    url("/assets/fonts/hwp/NotoSerifCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Batang";
+  src:
+    local("Batang"),
+    url("/assets/fonts/hwp/NotoSerifCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HY중고딕";
+  src:
+    local("HY중고딕"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HY견고딕";
+  src:
+    local("HY견고딕"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HY헤드라인M";
+  src:
+    local("HY헤드라인M"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HY울릉도M";
+  src:
+    local("HY울릉도M"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "휴먼고딕";
+  src:
+    local("휴먼고딕"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "한컴돋움";
+  src:
+    local("한컴돋움"),
+    local("함초롬돋움"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "함초롬돋움";
+  src:
+    local("함초롬돋움"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HCR Dotum";
+  src:
+    local("HCR Dotum"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "돋움";
+  src:
+    local("Dotum"),
+    local("돋움"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Dotum";
+  src:
+    local("Dotum"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "굴림";
+  src:
+    local("Gulim"),
+    local("굴림"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Gulim";
+  src:
+    local("Gulim"),
+    url("/assets/fonts/hwp/NotoSansCJKkr-Regular.otf") format("opentype");
+  font-display: swap;
+}
+
+.rhwp-svg-page {
+  position: relative;
+  padding: 0;
+  background: #fff;
+}
+
+.rhwp-svg-page + .rhwp-svg-page {
+  border-top: 1px solid #d9d9d9;
+}
+
+.rhwp-svg-page::before {
+  content: "";
+  display: block;
+  height: 0;
+}
+
+.rhwp-canvas-page canvas {
+  max-width: 100%;
+}
+
+.rhwp-compare-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1px;
+  background: #d9d9d9;
+}
+
+.rhwp-compare-pane {
+  min-width: 0;
+  background: #fff;
+}
+
+.rhwp-ir-field-overlay--table.rhwp-ir-field-overlay--active {
+  z-index: 80;
+}
+
+.rhwp-table-structure-toolbar__popover:last-child .rhwp-table-structure-toolbar__menu {
+  right: 0;
+  left: auto;
+}
+
+.rhwp-table-structure-toolbar__popover--open .rhwp-table-structure-toolbar__menu,
+.rhwp-table-structure-toolbar__popover:focus-within .rhwp-table-structure-toolbar__menu {
+  display: block;
 }
 
 .editable-slot {

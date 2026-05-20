@@ -191,8 +191,7 @@ defmodule Contract.Session.Reducer do
   defp validate_op_shape(%Operation{op: :set_attr} = op, idx, state) do
     with :ok <-
            if(needs_target?(op), do: check_target_exists(op, idx, state), else: :ok),
-         :ok <- check_set_attr_node_kind(op, idx, state),
-         :ok <- check_type_key_immutability(op, idx, state) do
+         :ok <- check_set_attr_node_kind(op, idx, state) do
       :ok
     end
   end
@@ -249,30 +248,6 @@ defmodule Contract.Session.Reducer do
   end
 
   defp check_set_attr_node_kind(_op, _idx, _state), do: :ok
-
-  # Type-key immutability: 2026-05-18 owner directive — "유형은 새 문서일
-  # 때만 가능해야 하고, … 한번 결정되면 immutable". Once a document has a
-  # type_key, no subsequent set_attr op may change or clear it. The
-  # initial assignment at :create_document time passes because the
-  # state.projection.type_key is still nil; every later attempt fails.
-  defp check_type_key_immutability(
-         %Operation{op: :set_attr, target_type: :document, args: args},
-         idx,
-         %Runtime.State{projection: %{type_key: existing}}
-       )
-       when is_binary(existing) and existing != "" do
-    case args |> normalize_args() |> Map.get(:key) do
-      :type_key ->
-        {:error,
-         {:type_key_immutable,
-          index: idx, existing: existing, attempted: Map.get(normalize_args(args), :value)}}
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp check_type_key_immutability(_op, _idx, _state), do: :ok
 
   defp validate_table_attr(:column_widths, value, idx) do
     if is_list(value) and Enum.all?(value, &(is_integer(&1) and &1 > 0)) do
@@ -458,7 +433,11 @@ defmodule Contract.Session.Reducer do
   defp read_attr(:document, _id, :title, state), do: state.projection.title
   defp read_attr(:document, _id, :type_key, state), do: state.projection.type_key
   defp read_attr(:document, _id, :metadata, state), do: state.projection.metadata
+  defp read_attr(:document, _id, :nodes, state), do: state.projection.nodes
   defp read_attr(:document, _id, :node_order, state), do: state.projection.node_order
+  defp read_attr(:document, _id, :fields, state), do: state.projection.fields
+  defp read_attr(:document, _id, :marks, state), do: state.projection.marks
+  defp read_attr(:document, _id, :refs, state), do: state.projection.refs
   defp read_attr(:document, _id, :status, state), do: Map.get(state.projection.metadata, :status)
 
   defp read_attr(:document, _id, key, state) do
@@ -708,8 +687,20 @@ defmodule Contract.Session.Reducer do
       :metadata when is_map(value) ->
         Map.put(projection, :metadata, value)
 
+      :nodes when is_map(value) ->
+        Map.put(projection, :nodes, value)
+
       :node_order when is_list(value) ->
         Map.put(projection, :node_order, value)
+
+      :fields when is_map(value) ->
+        Map.put(projection, :fields, value)
+
+      :marks when is_map(value) ->
+        Map.put(projection, :marks, value)
+
+      :refs when is_map(value) ->
+        Map.put(projection, :refs, value)
 
       _ when is_atom(key) ->
         Map.update!(projection, :metadata, &Map.put(&1, key, value))
@@ -1006,7 +997,6 @@ defmodule Contract.Session.Reducer do
      }}
   end
 
-
   defp build_ops_and_marks(%Command{kind: :archive_document} = command, _state) do
     op = %Operation{
       op: :set_attr,
@@ -1046,7 +1036,7 @@ defmodule Contract.Session.Reducer do
   defp build_ops_and_marks(%Command{kind: :update_metadata} = command, state) do
     payload = normalize_payload(command.payload)
     incoming = Map.get(payload, :metadata, payload) |> coerce_metadata()
-    merged = Map.merge(state.projection.metadata || %{}, incoming)
+    merged = merge_metadata(state.projection.metadata || %{}, incoming)
 
     op = %Operation{
       op: :set_attr,
@@ -1058,18 +1048,21 @@ defmodule Contract.Session.Reducer do
     {[op], [], %{merged_metadata: merged}}
   end
 
-  defp build_ops_and_marks(%Command{kind: :set_contract_type} = command, _state) do
+  defp build_ops_and_marks(%Command{kind: :set_contract_type} = command, state) do
     payload = normalize_payload(command.payload)
     type_key = Map.get(payload, :type_key) || Map.get(payload, :new_type_key)
 
-    op = %Operation{
-      op: :set_attr,
-      target_type: :document,
-      target_id: command.document_id,
-      args: %{key: :type_key, value: type_key}
-    }
+    ops = [
+      document_attr_op(command.document_id, :type_key, type_key),
+      document_attr_op(command.document_id, :metadata, reset_contract_type_metadata(state)),
+      document_attr_op(command.document_id, :nodes, %{}),
+      document_attr_op(command.document_id, :node_order, []),
+      document_attr_op(command.document_id, :fields, %{}),
+      document_attr_op(command.document_id, :marks, %{}),
+      document_attr_op(command.document_id, :refs, %{})
+    ]
 
-    {[op], [], %{type_key: type_key}}
+    {ops, [], %{type_key: type_key, reset_document_state: true}}
   end
 
   defp build_ops_and_marks(%Command{kind: kind} = command, _state)
@@ -1268,6 +1261,23 @@ defmodule Contract.Session.Reducer do
           "Contract.Session.Reducer: unhandled Command.kind=#{inspect(kind)} in build_ops_and_marks/2"
   end
 
+  defp document_attr_op(document_id, key, value) do
+    %Operation{
+      op: :set_attr,
+      target_type: :document,
+      target_id: document_id,
+      args: %{key: key, value: value}
+    }
+  end
+
+  defp reset_contract_type_metadata(%Runtime.State{projection: %{metadata: metadata}})
+       when is_map(metadata) do
+    metadata
+    |> Map.drop([:rhwp_field_values, "rhwp_field_values"])
+  end
+
+  defp reset_contract_type_metadata(_state), do: %{}
+
   # ----------------------------------------------------------------------------
   # field + field-binding payload helpers (used by :create_document)
   # ----------------------------------------------------------------------------
@@ -1430,10 +1440,33 @@ defmodule Contract.Session.Reducer do
   defp coerce_metadata(nil), do: %{}
 
   defp coerce_metadata(map) when is_map(map) do
-    Map.new(map, fn {k, v} -> {atomize(k), v} end)
+    atom_keys =
+      map
+      |> Enum.filter(fn {key, _value} -> is_atom(key) end)
+      |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+
+    string_keys =
+      map
+      |> Enum.filter(fn {key, _value} -> is_binary(key) end)
+      |> Map.new()
+
+    other_keys =
+      map
+      |> Enum.reject(fn {key, _value} -> is_atom(key) or is_binary(key) end)
+      |> Map.new()
+
+    other_keys
+    |> Map.merge(atom_keys)
+    |> Map.merge(string_keys)
   end
 
   defp coerce_metadata(_), do: %{}
+
+  defp merge_metadata(current, incoming) do
+    current
+    |> coerce_metadata()
+    |> Map.merge(coerce_metadata(incoming))
+  end
 
   defp parse_ops(list) when is_list(list) do
     Enum.map(list, &parse_op/1)

@@ -156,7 +156,6 @@ defmodule ContractWeb.Live.Studio.Components.ChatCommandButtonTest do
       # the row contains the storage path somewhere in its phx-click attr.
       assert html =~ "/storage"
     end
-
   end
 
   # --- 4. Persona perms filter -----------------------------------------

@@ -23,7 +23,9 @@ defmodule Contract.ContractTypes do
   on — the underlying storage is an implementation detail.
   """
 
+  alias Contract.ContractTypes.DocumentType
   alias Contract.ContractTypes.TypeSpec
+  alias Contract.Repo
 
   @types_dir Application.app_dir(:contract, "priv/contract_types")
 
@@ -120,6 +122,88 @@ defmodule Contract.ContractTypes do
   end
 
   @doc """
+  Load the persisted RHWP matching book for a standard contract type.
+
+  Missing rows return an empty book; callers can let the frontend create and
+  stream the first trusted matching book for the type.
+  """
+  @spec get_matching_book(Contract.Types.ctx(), Contract.Types.contract_type_key()) ::
+          {:ok, map()}
+  def get_matching_book(ctx \\ nil, type_key)
+
+  def get_matching_book(_ctx, type_key) when is_binary(type_key) do
+    case ensure_document_type(type_key) do
+      {:ok, %DocumentType{default_matching_book: matching_book}} when is_map(matching_book) ->
+        {:ok, matching_book}
+
+      {:ok, %DocumentType{}} ->
+        {:ok, %{}}
+
+      {:error, _reason} ->
+        {:ok, %{}}
+    end
+  rescue
+    DBConnection.ConnectionError -> {:ok, %{}}
+    Postgrex.Error -> {:ok, %{}}
+  end
+
+  def get_matching_book(_ctx, _type_key), do: {:ok, %{}}
+
+  @doc """
+  Persist a trusted frontend RHWP matching book for a standard contract type.
+  """
+  @spec upsert_matching_book(Contract.Types.contract_type_key(), map()) ::
+          {:ok, DocumentType.t()} | {:error, term()}
+  def upsert_matching_book(type_key, matching_book)
+      when is_binary(type_key) and is_map(matching_book) do
+    with {:ok, %DocumentType{} = document_type} <- ensure_document_type(type_key) do
+      document_type
+      |> DocumentType.changeset(%{default_matching_book: matching_book})
+      |> Repo.update()
+    end
+  rescue
+    DBConnection.ConnectionError -> {:error, :db_unavailable}
+    Postgrex.Error -> {:error, :db_unavailable}
+  end
+
+  def upsert_matching_book(_type_key, _matching_book), do: {:error, :invalid_matching_book}
+
+  @doc """
+  Ensure an admin-managed `document_types` row exists for `type_key`.
+
+  Known TOML-backed types are inserted with their spec defaults. Unknown keys
+  are kept as legacy custom rows so older tests/imports that used ad-hoc
+  keys still have a valid belongs_to target.
+  """
+  @spec ensure_document_type(Contract.Types.contract_type_key() | nil) ::
+          {:ok, DocumentType.t() | nil} | {:error, term()}
+  def ensure_document_type(nil), do: {:ok, nil}
+  def ensure_document_type(""), do: {:ok, nil}
+
+  def ensure_document_type(type_key) when is_binary(type_key) do
+    case Repo.get_by(DocumentType, key: type_key) do
+      %DocumentType{} = document_type ->
+        {:ok, document_type}
+
+      nil ->
+        insert_document_type(type_key)
+    end
+  rescue
+    DBConnection.ConnectionError -> {:error, :db_unavailable}
+    Postgrex.Error -> {:error, :db_unavailable}
+  end
+
+  @spec document_type_id_for_key(Contract.Types.contract_type_key() | nil) ::
+          {:ok, Ecto.UUID.t() | nil} | {:error, term()}
+  def document_type_id_for_key(type_key) do
+    case ensure_document_type(type_key) do
+      {:ok, nil} -> {:ok, nil}
+      {:ok, %DocumentType{id: id}} -> {:ok, id}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
   Return all specs as a plain list. Convenience for tests and tooling
   that don't care about ordering or filtering.
   """
@@ -192,4 +276,76 @@ defmodule Contract.ContractTypes do
   defp normalise(nil), do: :any
   defp normalise(value) when is_atom(value), do: [value]
   defp normalise(value) when is_list(value), do: value
+
+  defp insert_document_type(type_key) do
+    %DocumentType{}
+    |> DocumentType.changeset(document_type_attrs(type_key))
+    |> Repo.insert()
+    |> case do
+      {:ok, %DocumentType{} = document_type} ->
+        {:ok, document_type}
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        case Repo.get_by(DocumentType, key: type_key) do
+          %DocumentType{} = document_type -> {:ok, document_type}
+          nil -> {:error, changeset}
+        end
+    end
+  end
+
+  defp document_type_attrs(type_key) do
+    case Map.fetch(@types, type_key) do
+      {:ok, %TypeSpec{} = spec} ->
+        %{
+          key: spec.key,
+          family: Atom.to_string(spec.family),
+          name_en: spec.name_en,
+          name_ko: spec.name_ko,
+          version: spec.version,
+          source: Atom.to_string(spec.source),
+          source_url: spec.source_url,
+          template_hwp_path: spec.template_hwp_path,
+          template_hwpx_path: spec.template_hwpx_path,
+          spec: type_spec_map(spec),
+          default_matching_book: %{}
+        }
+
+      :error ->
+        %{
+          key: type_key,
+          family: "other",
+          name_en: type_key,
+          version: "legacy",
+          source: "custom",
+          spec: %{},
+          default_matching_book: %{}
+        }
+    end
+  end
+
+  defp type_spec_map(%TypeSpec{} = spec) do
+    %{
+      "key" => spec.key,
+      "family" => Atom.to_string(spec.family),
+      "name_en" => spec.name_en,
+      "name_ko" => spec.name_ko,
+      "version" => spec.version,
+      "source" => Atom.to_string(spec.source),
+      "source_url" => spec.source_url,
+      "template_hwp_path" => spec.template_hwp_path,
+      "template_hwpx_path" => spec.template_hwpx_path,
+      "notes_en" => spec.notes_en,
+      "notes_ko" => spec.notes_ko,
+      "recommended_fields" =>
+        Enum.map(spec.recommended_fields, fn field ->
+          %{
+            "id" => field.id,
+            "label_en" => field.label_en,
+            "label_ko" => field.label_ko,
+            "kind" => Atom.to_string(field.kind)
+          }
+        end),
+      "compatible_with" => spec.compatible_with
+    }
+  end
 end

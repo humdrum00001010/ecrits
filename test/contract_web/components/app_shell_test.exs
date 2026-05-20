@@ -23,7 +23,9 @@ defmodule ContractWeb.Components.AppShellTest do
       assert html =~ ~s(class="app-shell")
       assert html =~ ~s(class="topbar")
       assert html =~ ~s(href="/")
+      # Brand wears the brand-mark SVG to the left of the wordmark.
       assert html =~ ~s(src="/assets/icons/brand-mark.svg")
+      assert html =~ ~s(class="brand__icon")
       assert html =~ "계약기계"
       assert html =~ ~s(href="/storage")
       assert html =~ "보관함"
@@ -62,6 +64,29 @@ defmodule ContractWeb.Components.AppShellTest do
       assert html =~ "lawyer@example.com"
       assert html =~ ~s(href="/users/settings")
       assert html =~ ~s(href="/users/log-out")
+
+      # 2026-05-18 owner directive: the brand link must take a signed-in
+      # user back to their library at /storage rather than the marketing
+      # landing page.
+      assert html =~ ~r/<a[^>]*href="\/storage"[^>]*class="brand"/u
+    end
+
+    test "anonymous brand link points to / (landing page)" do
+      inner_block = [
+        %{
+          __slot__: :inner_block,
+          inner_block: fn _, _ -> Phoenix.HTML.raw("") end
+        }
+      ]
+
+      html =
+        render_component(&AppShell.app_shell/1,
+          active: nil,
+          current_scope: nil,
+          inner_block: inner_block
+        )
+
+      assert html =~ ~r/<a[^>]*href="\/"[^>]*class="brand"/u
     end
 
     test "v33 icon source assets are tracked outside generated static assets" do

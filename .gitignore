@@ -26,7 +26,14 @@ erl_crash.dump
 contract-*.tar
 
 # Ignore assets that are produced by build tools.
-/priv/static/assets/
+# vendored rhwp 디렉토리는 별도 repo(/Users/phihu/rhwp)의 산출물이라 디렉토리
+# descent만 유지하고, 큰 바이너리(.wasm)는 따로 제외한다.
+/priv/static/assets/*
+!/priv/static/assets/rhwp/
+
+# 큰 바이너리 산출물(WASM 등)은 별도 repo의 빌드 결과라 contract 히스토리에
+# 넣지 않는다.
+*.wasm
 
 # Ignore digested assets cache.
 /priv/static/cache_manifest.json

@@ -10,11 +10,9 @@ defmodule ContractWeb.StorageLive do
   faded out at the bottom so the card never looks cropped.
 
     * Top row: `모든 문서` H1 + right-aligned actions —
-      `계약서 업로드` (secondary, opens OS file picker; auto-uploads
-      then runs Upstage + LLM refiner before navigating to the new
-      document) and `새 문서` (primary, navigates to `/studio` for the
-      blank-canvas / agent-discussion path).
-    * Tabs: `모든 문서` (active) / `즐겨찾기`.
+      `새 문서` (primary, links to `/studio` for the blank-canvas /
+      agent-discussion path). Storage never creates or uploads documents.
+    * Tabs: `모든 문서` only. No placeholder tabs.
     * Each card → `/documents/:id`. Overflow `⋮` menu hangs off the
       thumb's top-right corner with a single 삭제 action.
 
@@ -28,36 +26,18 @@ defmodule ContractWeb.StorageLive do
   """
   use ContractWeb, :live_view
 
-  alias Contract.Command
-  alias Contract.ContractTypes
   alias Contract.Documents
-  alias Contract.IO.Upstage
-  alias Contract.Runtime
   alias Contract.Store
 
   @preview_node_limit 6
   @preview_line_chars 38
-
-  # Sentinel type assigned to every uploaded private contract — the user
-  # picked "사설 계약서" in the new-document dropdown, the upload pipeline
-  # parses the file, and the resulting Document is created with this
-  # type_key so the rest of the app knows it came from upload rather
-  # than from a blank template.
-  @custom_type_key "custom_v1"
 
   @impl true
   def mount(_params, _session, socket) do
     socket =
       socket
       |> assign(:page_title, dgettext("storage", "Storage"))
-      |> assign(:active_tab, :all)
-      |> assign(:upload_busy?, false)
-      |> allow_upload(:contract_file,
-        accept: ~w(.pdf .docx .hwp .hwpx),
-        max_entries: 1,
-        max_file_size: 50_000_000,
-        auto_upload: true
-      )
+      |> assign(:selected_document_ids, MapSet.new())
       |> load_documents()
 
     {:ok, socket}
@@ -68,44 +48,12 @@ defmodule ContractWeb.StorageLive do
   # ---------------------------------------------------------------------------
 
   @impl true
-  def handle_event("new_document", params, socket) do
-    type_key = Map.get(params, "type_key")
-
-    scope = socket.assigns.current_scope
-
-    action = %Command{
-      kind: :create_document,
-      actor_type: :user,
-      actor_id: scope && scope.user && scope.user.id,
-      idempotency_key: Ecto.UUID.generate(),
-      payload:
-        %{"title" => dgettext("storage", "새 문서")}
-        |> maybe_put_type_key(type_key)
-    }
-
-    case Runtime.apply(scope, action) do
-      {:ok, %Contract.Change{document_id: document_id}} ->
-        {:noreply, push_navigate(socket, to: ~p"/documents/#{document_id}")}
-
-      {:error, reason} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           dgettext("storage", "문서를 만들 수 없습니다: %{reason}", reason: inspect(reason))
-         )}
-    end
-  end
-
-  def handle_event("switch_tab", %{"tab" => tab}, socket) when tab in ~w(all favorites) do
-    {:noreply, assign(socket, :active_tab, String.to_existing_atom(tab))}
-  end
-
   def handle_event("delete_document", %{"id" => id}, socket) do
     case Documents.archive(socket.assigns.current_scope, id) do
       {:ok, _doc} ->
         {:noreply,
          socket
+         |> deselect_document(id)
          |> load_documents()
          |> put_flash(:info, dgettext("storage", "문서를 삭제했습니다."))}
 
@@ -114,91 +62,73 @@ defmodule ContractWeb.StorageLive do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # Contract upload — selecting a file in the header auto-starts the upload.
-  # When the entry is `done?`, we consume it, run it through the Upstage +
-  # LLM refiner pipeline (`Upstage.import_upload/3`), persist via
-  # `Runtime.apply/2`, and push_navigate to the new document. Parsing
-  # blocks the LiveView for a few seconds — acceptable for a single-file
-  # flow; if it ever needs to scale, swap to a Task.async + flash hook.
-  # ---------------------------------------------------------------------------
+  def handle_event("toggle_select_document", %{"id" => id}, socket) do
+    selected_document_ids =
+      if MapSet.member?(socket.assigns.selected_document_ids, id) do
+        MapSet.delete(socket.assigns.selected_document_ids, id)
+      else
+        MapSet.put(socket.assigns.selected_document_ids, id)
+      end
 
-  def handle_event("contract_upload_validate", _params, socket) do
-    case socket.assigns.uploads.contract_file.entries do
-      [%{done?: true} = _entry | _] ->
-        {:noreply, finish_upload(socket)}
-
-      _ ->
-        {:noreply, socket}
-    end
+    {:noreply, assign(socket, :selected_document_ids, selected_document_ids)}
   end
 
-  def handle_event("cancel_upload", %{"ref" => ref}, socket) do
-    {:noreply, cancel_upload(socket, :contract_file, ref)}
+  def handle_event("toggle_select_all_documents", _params, socket) do
+    visible_ids = visible_document_ids(socket.assigns)
+
+    selected_document_ids =
+      if all_visible_selected?(socket.assigns) do
+        Enum.reduce(visible_ids, socket.assigns.selected_document_ids, &MapSet.delete(&2, &1))
+      else
+        Enum.reduce(visible_ids, socket.assigns.selected_document_ids, &MapSet.put(&2, &1))
+      end
+
+    {:noreply, assign(socket, :selected_document_ids, selected_document_ids)}
   end
 
-  defp finish_upload(socket) do
-    scope = socket.assigns.current_scope
-    owner_id = scope.user && scope.user.id
+  def handle_event("delete_selected_documents", _params, socket) do
+    selected_ids =
+      socket.assigns.selected_document_ids
+      |> MapSet.to_list()
+      |> Enum.filter(&document_visible?(&1, socket.assigns))
 
-    socket = assign(socket, :upload_busy?, true)
-
-    uploads =
-      consume_uploaded_entries(socket, :contract_file, fn %{path: path}, entry ->
-        dest =
-          Path.join(System.tmp_dir!(), "storage-upload-#{entry.uuid}-#{entry.client_name}")
-
-        File.cp!(path, dest)
-
-        {:ok,
-         %{
-           path: dest,
-           client_name: entry.client_name,
-           client_type: entry.client_type,
-           client_size: entry.client_size
-         }}
+    {deleted_ids, failed_ids} =
+      Enum.reduce(selected_ids, {[], []}, fn id, {deleted_ids, failed_ids} ->
+        case Documents.archive(socket.assigns.current_scope, id) do
+          {:ok, _doc} -> {[id | deleted_ids], failed_ids}
+          {:error, _} -> {deleted_ids, [id | failed_ids]}
+        end
       end)
 
-    case uploads do
-      [upload | _] ->
-        case import_uploaded_contract(scope, owner_id, upload) do
-          {:ok, document_id} ->
-            push_navigate(socket, to: ~p"/documents/#{document_id}")
+    socket =
+      socket
+      |> assign(
+        :selected_document_ids,
+        MapSet.difference(socket.assigns.selected_document_ids, MapSet.new(deleted_ids))
+      )
+      |> load_documents()
 
-          {:error, reason} ->
-            socket
-            |> assign(:upload_busy?, false)
-            |> put_flash(
-              :error,
-              dgettext("storage", "업로드 처리에 실패했습니다: %{reason}",
-                reason: inspect(reason)
-              )
-            )
-        end
+    socket =
+      cond do
+        deleted_ids == [] and failed_ids == [] ->
+          socket
 
-      [] ->
-        assign(socket, :upload_busy?, false)
-    end
-  end
+        failed_ids == [] ->
+          put_flash(
+            socket,
+            :info,
+            dgettext("storage", "%{count}개 문서를 삭제했습니다.", count: length(deleted_ids))
+          )
 
-  defp maybe_put_type_key(payload, key) when is_binary(key) and key != "",
-    do: Map.put(payload, "type_key", key)
-
-  defp maybe_put_type_key(payload, _), do: payload
-
-  defp import_uploaded_contract(scope, owner_id, upload) do
-    with {:ok, %Contract.Command{} = command} <- Upstage.import_upload(scope, owner_id, upload) do
-      # Stamp the upload with the sentinel "사설 계약서" type_key. This is
-      # the one and only place the custom type ever gets assigned —
-      # picking it in the new-document dropdown is what brings the user
-      # into this code path. Once persisted via `:create_document`, the
-      # Reducer's immutability guard prevents anyone from changing it.
-      command = %{command | payload: Map.put(command.payload, "type_key", @custom_type_key)}
-
-      with {:ok, %Contract.Change{document_id: document_id}} <- Runtime.apply(scope, command) do
-        {:ok, document_id}
+        true ->
+          put_flash(
+            socket,
+            :error,
+            dgettext("storage", "일부 문서를 삭제할 수 없습니다.")
+          )
       end
-    end
+
+    {:noreply, socket}
   end
 
   # ---------------------------------------------------------------------------
@@ -207,7 +137,22 @@ defmodule ContractWeb.StorageLive do
 
   defp load_documents(socket) do
     docs = list_all_documents(socket.assigns.current_scope)
-    assign(socket, :documents, docs)
+    visible_ids = docs |> Enum.map(& &1.document_id) |> MapSet.new()
+
+    socket
+    |> assign(:documents, docs)
+    |> assign(
+      :selected_document_ids,
+      MapSet.intersection(socket.assigns.selected_document_ids, visible_ids)
+    )
+  end
+
+  defp deselect_document(socket, id) do
+    assign(
+      socket,
+      :selected_document_ids,
+      MapSet.delete(socket.assigns.selected_document_ids, id)
+    )
   end
 
   defp list_all_documents(scope) do
@@ -295,163 +240,59 @@ defmodule ContractWeb.StorageLive do
     <Layouts.app flash={@flash} current_scope={@current_scope} variant="default">
       <main class="dashboard-v31 py-6 sm:py-10">
         <%!-- ------------------------------------------------------------ --%>
-        <%!-- Title row — H1 + a single 새 문서 ↓ dropdown. Picking a       --%>
-        <%!-- standard type creates a blank document with that type_key   --%>
-        <%!-- and navigates straight into Studio. Picking the last row    --%>
-        <%!-- ("사설 계약서 — 업로드 필요") triggers the hidden            --%>
-        <%!-- live_file_input, which auto-uploads, runs the file through  --%>
-        <%!-- Upstage + LLM refiner, and creates a document stamped with  --%>
-        <%!-- the `custom_v1` type_key. Either way, the type is decided   --%>
-        <%!-- at creation and is immutable afterwards.                    --%>
+        <%!-- Title row — H1 + a single action. 새 문서 is only a link to  --%>
+        <%!-- StudioLive; Storage must not create or upload documents.     --%>
         <%!-- ------------------------------------------------------------ --%>
         <header class="dashboard-v31__top">
           <h1 class="dashboard-v31__title">{dgettext("storage", "모든 문서")}</h1>
 
           <div class="dashboard-v31__actions">
-            <.form
-              for={%{}}
-              as={:upload}
-              id="storage-upload-form"
-              phx-change="contract_upload_validate"
-              data-role="dashboard-upload-form"
-              class="contents"
+            <.link
+              navigate={~p"/studio"}
+              class="dashboard-v31__btn dashboard-v31__btn--primary"
+              data-role="dashboard-new-document"
             >
-              <%!-- Hidden file input. The "사설 계약서" row in the picker --%>
-              <%!-- below uses <label for=...> to open it without          --%>
-              <%!-- needing JS.                                            --%>
-              <.live_file_input
-                upload={@uploads.contract_file}
-                class="sr-only"
-                data-role="dashboard-upload-input"
-              />
-            </.form>
-
-            <details
-              class="relative shrink-0"
-              data-role="dashboard-new-document-picker"
-            >
-              <summary
-                class={[
-                  "list-none dashboard-v31__btn dashboard-v31__btn--primary cursor-pointer inline-flex items-center gap-1",
-                  @upload_busy? && "opacity-60 pointer-events-none"
-                ]}
-                data-role="dashboard-new-document"
-                aria-busy={to_string(@upload_busy?)}
-              >
-                <%= if @upload_busy? do %>
-                  {dgettext("storage", "업로드 중…")}
-                <% else %>
-                  <span>{dgettext("storage", "새 문서")}</span>
-                  <.icon name="hero-chevron-down" class="size-3" />
-                <% end %>
-              </summary>
-              <div
-                class="absolute right-0 top-full mt-1 z-30 w-64 max-h-80 overflow-y-auto rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
-                role="menu"
-              >
-                <p class="px-3 py-1.5 text-xs uppercase tracking-wide text-base-content/40">
-                  {dgettext("storage", "표준 양식")}
-                </p>
-                <button
-                  :for={spec <- standard_type_specs()}
-                  type="button"
-                  role="menuitem"
-                  phx-click="new_document"
-                  phx-value-type_key={spec.key}
-                  class="block w-full text-left px-3 py-1.5 text-base-content hover:bg-base-200"
-                  data-role="dashboard-new-document-option"
-                  data-type-key={spec.key}
-                >
-                  {ContractTypes.display_name(spec)}
-                </button>
-
-                <div class="border-t border-base-200 my-1"></div>
-
-                <p class="px-3 py-1.5 text-xs uppercase tracking-wide text-base-content/40">
-                  {dgettext("storage", "기타")}
-                </p>
-                <label
-                  for={@uploads.contract_file.ref}
-                  class={[
-                    "block w-full text-left px-3 py-1.5 cursor-pointer hover:bg-base-200",
-                    @upload_busy? && "opacity-60 pointer-events-none"
-                  ]}
-                  data-role="dashboard-new-document-upload"
-                  role="menuitem"
-                >
-                  <div class="text-base-content">
-                    {dgettext("storage", "사설 계약서")}
-                  </div>
-                  <div class="text-xs text-base-content/50">
-                    {dgettext("storage", "PDF · DOCX · HWP · HWPX 업로드")}
-                  </div>
-                </label>
-              </div>
-            </details>
+              {dgettext("storage", "새 문서")}
+            </.link>
           </div>
         </header>
 
-        <%= if @uploads.contract_file.entries != [] do %>
-          <ul class="text-xs text-base-content/70" data-role="dashboard-upload-entries">
-            <li
-              :for={entry <- @uploads.contract_file.entries}
-              class="flex items-center gap-2"
+        <nav class="dashboard-v31__tabs flex flex-wrap items-center gap-2" role="tablist">
+          <div class="flex items-center gap-2">
+            <span
+              class="dashboard-v31__tab dashboard-v31__tab--active"
+              role="tab"
+              aria-selected="true"
             >
-              <span>{entry.client_name}</span>
-              <span>· {entry.progress}%</span>
-              <button
-                :if={!entry.done?}
-                type="button"
-                phx-click="cancel_upload"
-                phx-value-ref={entry.ref}
-                class="text-error"
-                aria-label={dgettext("storage", "업로드 취소")}
-              >
-                ×
-              </button>
-            </li>
-            <li
-              :for={
-                err <-
-                  Enum.flat_map(@uploads.contract_file.entries, &upload_errors(@uploads.contract_file, &1))
-              }
-              class="text-error"
-            >
-              {upload_error_label(err)}
-            </li>
-          </ul>
-        <% end %>
+              {dgettext("storage", "모든 문서")}
+            </span>
+          </div>
 
-        <%!-- ------------------------------------------------------------ --%>
-        <%!-- Tabs — visual filter only; the active tab governs the grid.  --%>
-        <%!-- ------------------------------------------------------------ --%>
-        <nav class="dashboard-v31__tabs" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={to_string(@active_tab == :all)}
-            phx-click="switch_tab"
-            phx-value-tab="all"
-            class={[
-              "dashboard-v31__tab",
-              @active_tab == :all && "dashboard-v31__tab--active"
-            ]}
-          >
-            {dgettext("storage", "모든 문서")}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={to_string(@active_tab == :favorites)}
-            phx-click="switch_tab"
-            phx-value-tab="favorites"
-            class={[
-              "dashboard-v31__tab",
-              @active_tab == :favorites && "dashboard-v31__tab--active"
-            ]}
-          >
-            {dgettext("storage", "즐겨찾기")}
-          </button>
+          <div class="ml-auto flex items-center self-center gap-2" data-role="document-selection-actions">
+            <button
+              type="button"
+              phx-click="toggle_select_all_documents"
+              disabled={visible_document_ids(assigns) == []}
+              class="btn btn-ghost btn-sm gap-2"
+            >
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm pointer-events-none"
+                checked={all_visible_selected?(assigns)}
+                aria-hidden="true"
+              />
+              <span>{dgettext("storage", "전체 선택")}</span>
+            </button>
+            <button
+              type="button"
+              phx-click="delete_selected_documents"
+              disabled={selected_visible_count(@selected_document_ids, assigns) == 0}
+              data-confirm={dgettext("storage", "선택한 문서를 삭제하시겠습니까?")}
+              class="btn btn-error btn-sm"
+            >
+              {dgettext("storage", "선택 삭제")}
+            </button>
+          </div>
         </nav>
 
         <%!-- ------------------------------------------------------------ --%>
@@ -461,14 +302,6 @@ defmodule ContractWeb.StorageLive do
         <%!-- via stopPropagation on the cell.                              --%>
         <%!-- ------------------------------------------------------------ --%>
         <%= cond do %>
-          <% @active_tab == :favorites -> %>
-            <section
-              id="favorites-empty"
-              class="dashboard-v31__empty"
-              data-role="dashboard-favorites-empty"
-            >
-              {dgettext("storage", "즐겨찾기한 문서가 아직 없습니다.")}
-            </section>
           <% @documents == [] -> %>
             <section
               id="documents-empty"
@@ -482,7 +315,11 @@ defmodule ContractWeb.StorageLive do
             </section>
           <% true -> %>
             <section id="document-grid" class="document-grid" data-role="document-grid">
-              <.document_card :for={doc <- @documents} document={doc} />
+              <.document_card
+                :for={doc <- @documents}
+                document={doc}
+                selected?={MapSet.member?(@selected_document_ids, doc.document_id)}
+              />
             </section>
         <% end %>
       </main>
@@ -501,12 +338,16 @@ defmodule ContractWeb.StorageLive do
   and uses a native `<details>` (no JS hook).
   """
   attr :document, :map, required: true
+  attr :selected?, :boolean, default: false
 
   def document_card(assigns) do
     ~H"""
     <article
       id={"document-card-#{@document.document_id}"}
-      class="document-card"
+      class={[
+        "document-card",
+        @selected? && "ring-2 ring-base-content/30"
+      ]}
       data-role="document-card"
     >
       <.link
@@ -516,55 +357,73 @@ defmodule ContractWeb.StorageLive do
       >
       </.link>
 
-      <div class="document-card__thumb" aria-hidden="true">
-        <%= case @document.preview_lines do %>
-          <% [] -> %>
-            <img
-              src={~p"/assets/icons/document.svg"}
-              alt=""
-              class="document-card__thumb-icon"
-            />
-          <% lines -> %>
-            <div class="document-card__thumb--lines">
-              <span
-                :for={line <- lines}
-                class={[
-                  "document-card__thumb-line",
-                  line.kind == :heading && "document-card__thumb-line--heading"
-                ]}
-              >
-                {line.text}
-              </span>
-            </div>
-            <div class="document-card__thumb-fade"></div>
-        <% end %>
-
+      <div class="document-card__thumb">
         <details
-          class="document-card__menu"
+          class="document-card__menu absolute right-3 top-3 z-30"
           data-role="document-card-menu"
           onclick="event.stopPropagation()"
         >
-          <summary
-            class="list-none inline-flex h-full w-full items-center justify-center cursor-pointer"
-            aria-label={dgettext("storage", "문서 메뉴")}
-          >⋮</summary>
-          <div
-            class="absolute right-0 top-9 z-20 w-40 rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
-            role="menu"
-          >
+          <summary class="grid h-8 w-8 cursor-pointer list-none place-items-center rounded-full border border-base-300 bg-base-100/90 text-base-content shadow-sm hover:bg-base-200">
+            ⋮
+          </summary>
+          <div class="absolute right-0 mt-2 w-28 rounded-box border border-base-200 bg-base-100 p-1 text-sm shadow-lg">
             <button
               type="button"
-              role="menuitem"
               phx-click="delete_document"
               phx-value-id={@document.document_id}
-              data-role="document-card-delete"
-              data-confirm={dgettext("storage", "이 문서를 삭제하시겠습니까?")}
-              class="block w-full text-left px-3 py-1.5 text-error hover:bg-error/10"
+              data-confirm={dgettext("storage", "문서를 삭제하시겠습니까?")}
+              class="w-full rounded-lg px-3 py-2 text-left text-error hover:bg-error/10"
             >
               {dgettext("storage", "삭제")}
             </button>
           </div>
         </details>
+
+        <button
+          type="button"
+          phx-click="toggle_select_document"
+          phx-value-id={@document.document_id}
+          aria-pressed={to_string(@selected?)}
+          aria-label={dgettext("storage", "문서 선택")}
+          class={[
+            "absolute left-3 top-3 z-20 grid h-8 w-8 place-items-center rounded-full border text-xs font-bold shadow-sm transition",
+            if(@selected?,
+              do: "border-base-content bg-base-content text-base-100",
+              else: "border-base-300 bg-base-100/90 text-transparent hover:text-base-content"
+            )
+          ]}
+        >
+          ✓
+        </button>
+
+        <%= case @document.preview_lines do %>
+          <% [] -> %>
+            <div
+              class="document-card__thumb-page document-card__thumb-page--fallback"
+              data-role="document-card-preview"
+            >
+              <div class="document-card__thumb--lines">
+                <span class="document-card__thumb-line document-card__thumb-line--heading">
+                  {@document.title}
+                </span>
+              </div>
+            </div>
+          <% lines -> %>
+            <div class="document-card__thumb-page" data-role="document-card-preview">
+              <div class="document-card__thumb--lines">
+                <span
+                  :for={line <- lines}
+                  class={[
+                    "document-card__thumb-line",
+                    line.kind == :heading && "document-card__thumb-line--heading"
+                  ]}
+                >
+                  {line.text}
+                </span>
+              </div>
+            </div>
+            <div class="document-card__thumb-fade"></div>
+        <% end %>
       </div>
 
       <div class="document-card__body relative z-10 pointer-events-none">
@@ -587,24 +446,24 @@ defmodule ContractWeb.StorageLive do
   defp format_date(%DateTime{} = t), do: Calendar.strftime(t, "%Y.%m.%d")
   defp format_date(%Date{} = d), do: Calendar.strftime(d, "%Y.%m.%d")
 
-  # Standard (non-sentinel) types for the new-document picker. The
-  # `custom_v1` "사설 계약서" type is reserved for upload-created
-  # documents and must NEVER be pickable as a blank-document seed —
-  # we filter it out here.
-  defp standard_type_specs do
-    ContractTypes.all()
-    |> Enum.reject(&(&1.key == @custom_type_key))
-    |> Enum.sort_by(& &1.key)
+  defp visible_document_ids(%{documents: documents}) do
+    Enum.map(documents, & &1.document_id)
   end
 
-  defp upload_error_label(:too_large),
-    do: dgettext("storage", "파일이 너무 큽니다 (최대 50MB)")
+  defp document_visible?(id, assigns) do
+    id in visible_document_ids(assigns)
+  end
 
-  defp upload_error_label(:not_accepted),
-    do: dgettext("storage", "지원하지 않는 형식입니다 (PDF · DOCX · HWP · HWPX)")
+  defp selected_visible_count(selected_document_ids, assigns) do
+    assigns
+    |> visible_document_ids()
+    |> Enum.count(&MapSet.member?(selected_document_ids, &1))
+  end
 
-  defp upload_error_label(:too_many_files),
-    do: dgettext("storage", "한 번에 한 파일만 업로드할 수 있습니다")
+  defp all_visible_selected?(assigns) do
+    visible_ids = visible_document_ids(assigns)
 
-  defp upload_error_label(other), do: to_string(other)
+    visible_ids != [] and
+      Enum.all?(visible_ids, &MapSet.member?(assigns.selected_document_ids, &1))
+  end
 end

@@ -53,6 +53,30 @@ defmodule Contract.SourceDocuments do
   def create_from_upload(%Context{}, _upload, _opts), do: {:error, :forbidden}
   def create_from_upload(_ctx, _upload, _opts), do: {:error, :forbidden}
 
+  @spec create_from_blob_ref(Context.t(), BlobRef.t(), map(), keyword()) ::
+          T.result({SourceDocument.t(), [SourceClaim.t()]})
+  def create_from_blob_ref(ctx, blob_ref, attrs, opts \\ [])
+
+  def create_from_blob_ref(
+        %Context{user: %{id: owner_id}} = ctx,
+        %BlobRef{} = blob_ref,
+        attrs,
+        opts
+      ) do
+    upload = %{
+      client_name: Map.get(attrs, "file_name") || Map.get(attrs, :file_name),
+      client_type: blob_ref.mime_type
+    }
+
+    with {:ok, %SourceDocument{} = source_document} <-
+           insert_source_document(owner_id, blob_ref, upload, opts) do
+      parse_inserted_source_document(ctx, source_document, blob_ref)
+    end
+  end
+
+  def create_from_blob_ref(%Context{}, _blob_ref, _attrs, _opts), do: {:error, :forbidden}
+  def create_from_blob_ref(_ctx, _blob_ref, _attrs, _opts), do: {:error, :forbidden}
+
   defp insert_source_document(owner_id, %BlobRef{} = blob_ref, upload, opts) do
     attrs = %{
       owner_id: owner_id,

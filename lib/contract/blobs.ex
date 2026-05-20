@@ -174,6 +174,66 @@ defmodule Contract.Blobs do
     do: r2_driver().presigned_url(key, opts)
 
   # ---------------------------------------------------------------------------
+  # direct upload — browser PUTs bytes to R2, server only records metadata.
+  # ---------------------------------------------------------------------------
+
+  @spec prepare_direct_upload(T.ctx() | nil, map(), keyword()) ::
+          {:ok, %{object_key: String.t(), upload_url: String.t()}} | {:error, term()}
+  def prepare_direct_upload(ctx, params, opts \\ []) when is_map(params) do
+    owner_id = owner_id_from_ctx(ctx)
+    blob_id = Ecto.UUID.generate()
+    title = param(params, "file_name") || "upload.bin"
+    byte_size = param(params, "byte_size") || 0
+    max_size = Keyword.get(opts, :max_file_size, 50_000_000)
+
+    cond do
+      is_nil(owner_id) ->
+        {:error, :forbidden}
+
+      byte_size > max_size ->
+        {:error, {:file_too_large, byte_size, max_size}}
+
+      true ->
+        info = %{title: title}
+        object_key = Keyword.get(opts, :key) || default_key(owner_id, blob_id, info)
+
+        with {:ok, upload_url} <- signed_url(ctx, object_key, method: :put, expires_in: 900) do
+          {:ok, %{object_key: object_key, upload_url: upload_url}}
+        end
+    end
+  end
+
+  @spec complete_direct_upload(T.ctx() | nil, map(), keyword()) :: T.result(BlobRef.t())
+  def complete_direct_upload(ctx, params, opts \\ []) when is_map(params) do
+    owner_id = owner_id_from_ctx(ctx)
+    object_key = param(params, "object_key")
+
+    cond do
+      not is_binary(owner_id) ->
+        {:error, :forbidden}
+
+      not valid_owner_key?(object_key, owner_id) ->
+        {:error, :invalid_object_key}
+
+      true ->
+        blob_id = Ecto.UUID.generate()
+        bucket = Keyword.get(opts, :bucket) || default_bucket()
+        kind = Keyword.get(opts, :kind, "source_upload")
+
+        insert_blob_ref(blob_id, %{
+          owner_id: owner_id,
+          bucket: bucket,
+          object_key: object_key,
+          mime_type: param(params, "mime_type") || "application/octet-stream",
+          size_bytes: param(params, "byte_size"),
+          sha256: param(params, "sha256"),
+          kind: kind,
+          metadata: %{"client_name" => param(params, "file_name")}
+        })
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # delete/2 — remove the object.
   # ---------------------------------------------------------------------------
 
@@ -261,6 +321,21 @@ defmodule Contract.Blobs do
 
   defp default_ext(""), do: "bin"
   defp default_ext(ext), do: String.downcase(ext)
+
+  defp valid_owner_key?(key, owner_id) when is_binary(key) and is_binary(owner_id),
+    do: String.starts_with?(key, "uploads/#{owner_id}/")
+
+  defp valid_owner_key?(_key, _owner_id), do: false
+
+  defp param(params, "byte_size"), do: Map.get(params, "byte_size") || Map.get(params, :byte_size)
+  defp param(params, "file_name"), do: Map.get(params, "file_name") || Map.get(params, :file_name)
+  defp param(params, "mime_type"), do: Map.get(params, "mime_type") || Map.get(params, :mime_type)
+
+  defp param(params, "object_key"),
+    do: Map.get(params, "object_key") || Map.get(params, :object_key)
+
+  defp param(params, "sha256"), do: Map.get(params, "sha256") || Map.get(params, :sha256)
+  defp param(_params, _key), do: nil
 
   defp default_bucket do
     case Application.get_env(:contract, :r2) do

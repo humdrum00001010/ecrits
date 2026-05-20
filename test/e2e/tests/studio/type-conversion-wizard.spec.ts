@@ -11,7 +11,7 @@ import {
  * Scenario 4 — type-conversion wizard. **WAVE 4 PENDING.**
  *
  * Lawyer triggers `:start_type_conversion` (via Cmd+K → "Set contract
- * type" → `franchise_v1`) → 3-step wizard renders (Plan → FieldStrategies
+ * type" → `service_agreement_v1`) → 3-step wizard renders (Plan → FieldStrategies
  * → CreateVariant) → walk through → new variant Document created with
  * field-migration lineage rows.
  *
@@ -60,7 +60,7 @@ test.describe('Scenario 4: type-conversion wizard @wave-4-pending', () => {
       // Type picker modal.
       const picker = page.locator('[data-role="type-picker"]').first();
       await expect(picker).toBeVisible();
-      await picker.getByText(/franchise_v1/i).first().click();
+      await picker.getByText(/service_agreement_v1/i).first().click();
 
       // Wizard steps: Plan → FieldStrategies → CreateVariant. Each step
       // has a "Next" button (or "다음" in Korean).
@@ -79,7 +79,7 @@ test.describe('Scenario 4: type-conversion wizard @wave-4-pending', () => {
       );
       const variant = docs.find((d) => d.id !== document.id);
       expect(variant).toBeTruthy();
-      expect(variant?.type_key).toMatch(/franchise/i);
+      expect(variant?.type_key).toBe('service_agreement_v1');
     });
   }
 });

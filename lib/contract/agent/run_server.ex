@@ -25,7 +25,8 @@ defmodule Contract.Agent.RunServer do
     :final_response,
     :task_ref,
     :stream_task_pid,
-    :test_pid
+    :test_pid,
+    stream_retries_left: 1
   ]
 
   # --- public API -------------------------------------------------------
@@ -124,7 +125,7 @@ defmodule Contract.Agent.RunServer do
       end
       |> maybe_put(:previous_response_id, Map.get(context, :previous_response_id))
 
-    case state.openai.stream_chat(params, []) do
+    case start_stream_with_retry(state.openai, params, _attempts_left = 2) do
       {:ok, %{stream: stream, task_pid: task_pid}} ->
         ref = consume_stream(stream)
         {:noreply, %{state | task_ref: ref, stream_task_pid: task_pid}}
@@ -133,6 +134,45 @@ defmodule Contract.Agent.RunServer do
         fail(state, reason)
     end
   end
+
+  # Single retry on transient OpenAI connection errors (the request body
+  # never reached the model, so it's safe to replay). Anything else —
+  # auth failure, validation error, rate limit envelope — fails fast.
+  # Backoff is 400ms, then 1.2s; total cap stays well under the 60s
+  # receive timeout we configure on the OpenaiEx client.
+  defp start_stream_with_retry(openai, params, attempts_left)
+       when attempts_left > 0 do
+    case openai.stream_chat(params, []) do
+      {:ok, _} = ok ->
+        ok
+
+      {:error, reason} ->
+        if transient_openai_error?(reason) and attempts_left > 1 do
+          Logger.warning(
+            "Agent stream_chat transient failure; retrying. reason=#{inspect(reason)}"
+          )
+
+          Process.sleep(if(attempts_left == 2, do: 400, else: 1_200))
+          start_stream_with_retry(openai, params, attempts_left - 1)
+        else
+          {:error, reason}
+        end
+    end
+  end
+
+  defp transient_openai_error?(%OpenaiEx.Error{message: msg}) when is_binary(msg) do
+    msg =~ ~r/(connection closed|timeout|econnreset|closed)/i
+  end
+
+  defp transient_openai_error?(%{__exception__: true} = e) do
+    e
+    |> Exception.message()
+    |> to_string()
+    |> String.downcase()
+    |> String.contains?(["connection closed", "timeout", "econnreset", "closed"])
+  end
+
+  defp transient_openai_error?(_), do: false
 
   @impl true
   def handle_call(:get_run, _from, state) do
@@ -175,7 +215,27 @@ defmodule Contract.Agent.RunServer do
     end
   end
 
-  def handle_info({:stream_error, reason}, state), do: fail(state, reason)
+  def handle_info({:stream_error, reason}, state) do
+    cond do
+      transient_openai_error?(reason) and state.stream_retries_left > 0 ->
+        Logger.warning("Agent stream mid-flight failure; retrying. reason=#{inspect(reason)}")
+
+        Process.sleep(800)
+
+        new_state = %{
+          state
+          | json_buffer: [],
+            task_ref: nil,
+            stream_task_pid: nil,
+            stream_retries_left: state.stream_retries_left - 1
+        }
+
+        {:noreply, new_state, {:continue, :start_stream}}
+
+      true ->
+        fail(state, reason)
+    end
+  end
 
   def handle_info(_msg, state), do: {:noreply, state}
 
@@ -228,9 +288,21 @@ defmodule Contract.Agent.RunServer do
 
   defp fail(state, reason) do
     new_run = %{state.run | status: :failed}
-    broadcast(state, {:agent_failed, state.run.id, reason})
+    broadcast(state, {:agent_failed, state.run.id, summarize_reason(reason)})
     {:stop, :normal, %{state | run: new_run}}
   end
+
+  # Strip the giant request body / API key out of OpenaiEx.Error before
+  # broadcasting — the LV renders the reason verbatim and we do NOT want
+  # the user's Bearer token landing in flash/toast text or browser
+  # devtools logs.
+  defp summarize_reason(%OpenaiEx.Error{} = err) do
+    {:openai_error,
+     %{message: err.message, status: err.status_code, code: err.code, type: err.type}}
+  end
+
+  defp summarize_reason(%{__exception__: true} = e), do: {:exception, Exception.message(e)}
+  defp summarize_reason(other), do: other
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

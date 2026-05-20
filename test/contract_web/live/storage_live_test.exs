@@ -41,40 +41,36 @@ defmodule ContractWeb.StorageLiveTest do
   describe "storage chrome (DESIGN.md §4)" do
     setup :register_and_log_in_user
 
-    test "renders top-row title plus 새 문서 dropdown with standard types + 사설 계약서",
+    test "renders top-row title plus a single 새 문서 link to Studio",
          %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/storage")
 
-      # H1 + single new-document picker (2026-05-18 directive). The
-      # picker carries one option per standard type plus a final
-      # "사설 계약서 (업로드 필요)" row that re-uses the hidden
-      # live_file_input. Heading stays `모든 문서`.
       assert html =~ "모든 문서"
       assert html =~ "새 문서"
-      assert html =~ "사설 계약서"
       assert html =~ ~s(data-role="dashboard-new-document")
-      assert html =~ ~s(data-role="dashboard-new-document-picker")
-      assert html =~ ~s(data-role="dashboard-new-document-upload")
-      assert html =~ ~s(data-role="dashboard-upload-input")
-      # The picker dropdown lists at least one standard type by display
-      # name (locale-aware; English `Untyped` is the placeholder for
-      # nil so it must NOT leak here).
-      assert html =~ ~s(data-role="dashboard-new-document-option")
-      # The dedicated free-standing 계약서 업로드 button is gone — the
-      # upload affordance now lives inside the dropdown only.
+      assert html =~ ~s(href="/studio")
+
+      refute html =~ "사설 계약서"
+      refute html =~ "계약서 업로드"
+      refute html =~ ~s(data-role="dashboard-new-document-picker")
+      refute html =~ ~s(data-role="dashboard-new-document-upload")
+      refute html =~ ~s(data-role="dashboard-upload-input")
+      refute html =~ ~s(data-role="dashboard-new-document-option")
       refute html =~ ~s(data-role="dashboard-upload-trigger")
-      # And the old `최근 문서` heading must not return.
+      refute html =~ ~s(phx-click="new_document")
+      refute html =~ ~s(phx-value-type_key)
       refute html =~ ~s(<h1 class="dashboard-v31__title">최근 문서)
     end
 
-    test "renders tabs row: 모든 문서 (active) / 즐겨찾기", %{conn: conn} do
+    test "does not render unimplemented 즐겨찾기 tab", %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/storage")
 
       assert html =~ "모든 문서"
-      assert html =~ "즐겨찾기"
       assert html =~ ~s(role="tablist")
-      # Active tab must announce itself via aria-selected="true".
       assert html =~ ~s(aria-selected="true")
+      assert html =~ ~s(data-role="document-selection-actions")
+      assert html =~ ~s(ml-auto flex items-center self-center gap-2)
+      refute html =~ "즐겨찾기"
     end
 
     test "renders the empty-state hint when the owner has no documents", %{conn: conn} do
@@ -102,6 +98,7 @@ defmodule ContractWeb.StorageLiveTest do
       assert html =~ "용역계약서 V1"
       # Card chrome
       assert html =~ "document-card__thumb"
+      assert html =~ ~s(data-role="document-card-preview")
       assert html =~ "document-card__title"
       assert html =~ "document-card__menu"
     end
@@ -147,21 +144,16 @@ defmodule ContractWeb.StorageLiveTest do
       assert html =~ ~s|onclick="event.stopPropagation()"|
     end
 
-    test "사설 계약서 option is a <label> wrapping the hidden live_file_input with PDF/DOCX/HWP accept",
+    test "does not render any upload affordance on Storage",
          %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/storage")
 
-      # The "사설 계약서" row inside the 새 문서 dropdown is a <label
-      # for=...> bound to the hidden live_file_input. Clicking it
-      # opens the OS file picker without any JS hook.
-      assert html =~ ~s(data-role="dashboard-new-document-upload")
-      assert html =~ ~s(data-role="dashboard-upload-input")
-      assert html =~ ~s(phx-change="contract_upload_validate")
-      # `accept` is encoded as a comma-separated MIME/ext list by
-      # live_file_input; we just pin one ext from each family.
-      assert html =~ ".pdf"
-      assert html =~ ".docx"
-      assert html =~ ".hwp"
+      refute html =~ "계약서 업로드"
+      refute html =~ "사설 계약서"
+      refute html =~ ~s(data-role="dashboard-new-document-upload")
+      refute html =~ ~s(data-role="dashboard-upload-trigger")
+      refute html =~ ~s(data-role="dashboard-upload-input")
+      refute html =~ ~s(phx-change="contract_upload_validate")
     end
   end
 
@@ -186,6 +178,7 @@ defmodule ContractWeb.StorageLiveTest do
       css = File.read!(@app_css)
 
       assert css =~ ".document-card__thumb--lines"
+      assert css =~ ".document-card__thumb-page"
       assert css =~ ".document-card__thumb-line"
       assert css =~ ".document-card__thumb-fade"
     end
@@ -212,49 +205,31 @@ defmodule ContractWeb.StorageLiveTest do
     end
   end
 
-  describe "new_document action (2026-05-18 directive)" do
+  describe "new document entry point" do
     setup :register_and_log_in_user
 
-    test "picking a standard type from the dropdown creates a blank document with that type_key and redirects",
+    test "새 문서 navigates to Studio and does not mint a document on Storage",
          %{conn: conn, scope: scope} do
       {:ok, lv, _html} = live(conn, ~p"/storage")
 
-      # Owner starts with zero documents.
       assert Documents.list_recent_for_scope(scope, 5) == []
 
-      # Pick the service_agreement_v1 row in the new-document dropdown.
       lv
-      |> element(~s([data-role="dashboard-new-document-option"][data-type-key="service_agreement_v1"]))
+      |> element(~s(a[data-role="dashboard-new-document"][href="/studio"]))
       |> render_click()
 
-      # Exactly one new document, stamped with the picked type_key.
-      assert [%{type_key: "service_agreement_v1"} = doc] =
-               Documents.list_recent_for_scope(scope, 5)
-
-      assert_redirect(lv, ~p"/documents/#{doc.id}")
-    end
-
-    test "사설 계약서 row in the dropdown does NOT mint a document by itself — it just opens the file picker",
-         %{conn: conn, scope: scope} do
-      {:ok, _lv, html} = live(conn, ~p"/storage")
-
-      # The label has no phx-click (so a stray click can't create a
-      # document); its only behavior is `<label for=upload-input>`,
-      # which the browser turns into a file-picker open.
-      assert html =~ ~s(data-role="dashboard-new-document-upload")
-      refute html =~ ~s(data-role="dashboard-new-document-upload" phx-click)
-
-      # No documents created until the user actually uploads a file.
       assert Documents.list_recent_for_scope(scope, 5) == []
+      assert_redirect(lv, ~p"/studio")
     end
 
-    test "custom_v1 (사설 계약서) sentinel is never offered as a blank-document seed",
+    test "standard type rows and custom upload rows are never offered on Storage",
          %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/storage")
 
-      # Dropdown option buttons must not include the custom sentinel —
-      # only the standard types are pickable for blank creation.
-      refute html =~ ~s(data-role="dashboard-new-document-option" data-type-key="custom_v1")
+      refute html =~ ~s(data-role="dashboard-new-document-option")
+      refute html =~ ~s(data-type-key="service_agreement_v1")
+      refute html =~ ~s(data-type-key="custom_v1")
+      refute html =~ ~s(data-role="dashboard-new-document-upload")
     end
   end
 
@@ -308,10 +283,7 @@ defmodule ContractWeb.StorageLiveTest do
     test "global navbar does NOT carry a `계약서 업로드` action", %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/storage")
 
-      # The navbar must not surface upload as an anchor/link — the
-      # affordance lives in the page header's action cluster (a label
-      # over a hidden file input), not in the navbar.
-      refute html =~ ~r/<a[^>]*>\s*계약서 업로드/u
+      refute html =~ "계약서 업로드"
     end
   end
 

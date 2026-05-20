@@ -184,5 +184,4 @@ defmodule ContractWeb.UserLive.Login do
      |> put_flash(:info, info)
      |> push_navigate(to: ~p"/users/log-in")}
   end
-
 end

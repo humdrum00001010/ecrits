@@ -558,8 +558,17 @@ defmodule Contract.Store do
   end
 
   @create_node_kinds [
-    :paragraph, :heading, :list, :list_item, :table, :caption,
-    :footer, :equation, :cell, :section, :field_ref
+    :paragraph,
+    :heading,
+    :list,
+    :list_item,
+    :table,
+    :caption,
+    :footer,
+    :equation,
+    :cell,
+    :section,
+    :field_ref
   ]
 
   defp coerce_create_node_kind(k) when is_atom(k), do: k

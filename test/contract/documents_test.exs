@@ -2,6 +2,7 @@ defmodule Contract.DocumentsTest do
   use Contract.DataCase, async: true
 
   alias Contract.Context
+  alias Contract.ContractTypes.DocumentType
   alias Contract.Documents
   alias Contract.Documents.Document
 
@@ -28,6 +29,7 @@ defmodule Contract.DocumentsTest do
       assert doc.owner_id == s.user.id
       assert doc.title == "T"
       assert doc.type_key == "nda_v1"
+      assert %DocumentType{key: "nda_v1"} = Repo.get(DocumentType, doc.document_type_id)
       refute Map.has_key?(Map.from_struct(doc), :matter_id)
     end
 
@@ -113,7 +115,27 @@ defmodule Contract.DocumentsTest do
 
       assert {:error, :forbidden} = Documents.archive(other, doc.id)
       assert {:ok, %Document{status: :archived}} = Documents.archive(owner, doc.id)
-      assert {:ok, %Document{type_key: "nda_v1"}} = Documents.set_type(owner, doc.id, "nda_v1")
+
+      assert {:ok, %Document{type_key: "nda_v1"} = doc} =
+               Documents.set_type(owner, doc.id, "nda_v1")
+
+      assert %DocumentType{key: "nda_v1"} = Repo.get(DocumentType, doc.document_type_id)
+    end
+
+    test "set_type/3 resets the persisted document state snapshot" do
+      owner = scope()
+
+      {:ok, doc} =
+        Documents.create(owner, %{
+          title: "Typed",
+          type_key: "service_agreement_v1",
+          state_snapshot: %{"metadata" => %{"rhwp_field_values" => %{"old" => "value"}}}
+        })
+
+      assert {:ok, %Document{type_key: "employment_v1", state_snapshot: %{}}} =
+               Documents.set_type(owner, doc.id, "employment_v1")
+
+      assert %Document{state_snapshot: %{}} = Repo.get!(Document, doc.id)
     end
 
     test "touch_revision/2 never decreases latest_revision" do

@@ -27,9 +27,9 @@ defmodule Contract.Workers.FtcSeedJobIntegrationTest do
 
   test "real-network seed run materializes a :template Document" do
     args = %{
-      "type_key" => "franchise_v1",
+      "type_key" => "service_agreement_v1",
       "source_url" => @ftc_landing_url,
-      "title" => "가맹사업 표준계약서 (live)"
+      "title" => "용역위탁 표준계약서 (live)"
     }
 
     assert :ok = perform_job(FtcSeedJob, args)
@@ -38,7 +38,8 @@ defmodule Contract.Workers.FtcSeedJobIntegrationTest do
              Repo.all(
                from d in Document,
                  where:
-                   d.owner_id == ^FtcSeedJob.system_user_id() and d.type_key == "franchise_v1"
+                   d.owner_id == ^FtcSeedJob.system_user_id() and
+                     d.type_key == "service_agreement_v1"
              )
   end
 end

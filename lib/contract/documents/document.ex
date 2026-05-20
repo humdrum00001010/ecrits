@@ -46,6 +46,7 @@ defmodule Contract.Documents.Document do
     field :owner_id, :binary_id
     field :title, :string
     field :type_key, :string
+    belongs_to :document_type, Contract.ContractTypes.DocumentType
 
     field :status, Ecto.Enum,
       values: [:draft, :importing, :editing, :reviewing, :export_ready, :archived],
@@ -82,6 +83,7 @@ defmodule Contract.Documents.Document do
       :owner_id,
       :title,
       :type_key,
+      :document_type_id,
       :status,
       :parent_document_id,
       :variant_of_change_id,
@@ -92,5 +94,6 @@ defmodule Contract.Documents.Document do
     ])
     |> validate_required([:owner_id, :title])
     |> validate_length(:title, min: 1, max: 300)
+    |> foreign_key_constraint(:document_type_id)
   end
 end

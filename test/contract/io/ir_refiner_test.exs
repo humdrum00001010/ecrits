@@ -95,7 +95,9 @@ defmodule Contract.IO.IRRefinerTest do
       end)
 
       assert {:ok, %{nodes_patch: [], fields: [], field_bindings: []}} =
-               IRRefiner.refine([%{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}])
+               IRRefiner.refine([
+                 %{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}
+               ])
     end
 
     test "5xx returns {:error, {:openai_http, ...}}", %{bypass: bypass} do
@@ -104,14 +106,18 @@ defmodule Contract.IO.IRRefinerTest do
       end)
 
       assert {:error, {:openai_http, 502, _}} =
-               IRRefiner.refine([%{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}])
+               IRRefiner.refine([
+                 %{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}
+               ])
     end
 
     test "transport failure returns {:error, {:openai_transport, _}}", %{bypass: bypass} do
       Bypass.down(bypass)
 
       assert {:error, {:openai_transport, _}} =
-               IRRefiner.refine([%{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}])
+               IRRefiner.refine([
+                 %{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}
+               ])
     end
 
     test "missing api_key returns {:error, :no_api_key} without contacting the network" do
@@ -126,7 +132,9 @@ defmodule Contract.IO.IRRefinerTest do
       on_exit(fn -> Application.put_env(:contract, :openai, original) end)
 
       assert {:error, :no_api_key} =
-               IRRefiner.refine([%{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}])
+               IRRefiner.refine([
+                 %{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}
+               ])
     end
 
     test "empty string api_key returns {:error, :no_api_key}" do
@@ -153,7 +161,9 @@ defmodule Contract.IO.IRRefinerTest do
       end)
 
       assert {:error, _} =
-               IRRefiner.refine([%{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}])
+               IRRefiner.refine([
+                 %{"id" => "node:0", "kind" => "paragraph", "content" => %{"text" => "x"}}
+               ])
     end
   end
 

@@ -53,18 +53,30 @@ defmodule ContractWeb.Components.AppShell do
     ~H"""
     <div class="app-shell">
       <header class="topbar">
-        <.link navigate={~p"/"} class="brand" aria-label="계약기계">
-          <img src={~p"/assets/icons/brand-mark.svg"} alt="" class="brand__icon" />
-          <span>계약기계</span>
-        </.link>
+        <div class="inline-flex min-w-0 items-center gap-6">
+          <%!-- Brand mark + wordmark. When signed in, the brand takes    --%>
+          <%!-- the user back to their library at /storage rather than    --%>
+          <%!-- the marketing landing. The `.brand` CSS class handles     --%>
+          <%!-- inline-flex alignment so the SVG mark sits on the text    --%>
+          <%!-- baseline.                                                  --%>
+          <.link
+            navigate={if brand_link_signed_in?(@current_scope), do: ~p"/storage", else: ~p"/"}
+            class="brand"
+            aria-label="계약기계"
+          >
+            <img src={~p"/assets/icons/brand-mark.svg"} alt="" class="brand__icon" />
+            <span>계약기계</span>
+          </.link>
 
-        <div class="inline-flex items-center gap-3">
           <nav class="topbar__nav" aria-label="계약기계">
             <.link navigate={~p"/storage"} class={[@active == "보관함" && "is-active"]}>
               보관함
             </.link>
           </nav>
+        </div>
 
+        <div class="inline-flex items-center gap-3">
+          <Layouts.theme_toggle />
           <Layouts.user_menu :if={@current_scope} current_scope={@current_scope} />
         </div>
       </header>
@@ -73,4 +85,7 @@ defmodule ContractWeb.Components.AppShell do
     </div>
     """
   end
+
+  defp brand_link_signed_in?(%{user: %{}}), do: true
+  defp brand_link_signed_in?(_), do: false
 end

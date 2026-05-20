@@ -6,20 +6,24 @@ defmodule Contract.ContractTypesTest do
   alias Contract.ContractTypes.TypeSpec
 
   describe "list/2" do
-    test "ships ≥5 specs (incl. 5 canonical keys), sorted by key, all %TypeSpec{}" do
+    test "ships supported specs, sorted by key, all %TypeSpec{}" do
       assert {:ok, specs} = ContractTypes.list()
 
       assert length(specs) == length(ContractTypes.__toml_paths__())
-      assert length(specs) >= 5
+      assert length(specs) >= 4
       assert Enum.all?(specs, &match?(%TypeSpec{}, &1))
 
       keys = specs |> Enum.map(& &1.key)
       key_set = MapSet.new(keys)
       assert keys == Enum.sort(keys)
 
-      for expected <- ~w(nda_v1 franchise_v1 service_agreement_v1 employment_v1 supply_v1) do
+      for expected <- ~w(nda_v1 service_agreement_v1 employment_v1 custom_v1) do
         assert expected in key_set, "missing canonical type #{expected}"
       end
+
+      refute "franchise_v1" in key_set
+      refute "franchise_chicken_v2024_12" in key_set
+      refute "supply_v1" in key_set
 
       # Accepts a ctx as first positional argument (SPEC §18 shape).
       assert {:ok, _} = ContractTypes.list(%{user_id: "u-123"})
@@ -158,13 +162,11 @@ defmodule Contract.ContractTypesTest do
 
     test "returns the locale-appropriate name and falls back when empty" do
       {:ok, nda} = ContractTypes.get(nil, "nda_v1")
-      {:ok, franchise} = ContractTypes.get(nil, "franchise_v1")
 
       # :ko locale → name_ko (struct + string-key form).
       Gettext.put_locale(ContractWeb.Gettext, "ko")
       assert nda.name_ko != nil and nda.name_ko != ""
       assert ContractTypes.display_name(nda) == nda.name_ko
-      assert ContractTypes.display_name("franchise_v1") == franchise.name_ko
       # Unknown string keys round-trip the key itself.
       assert ContractTypes.display_name("nonexistent_v999") == "nonexistent_v999"
 

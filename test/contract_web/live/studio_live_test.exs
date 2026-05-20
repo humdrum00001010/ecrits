@@ -1239,7 +1239,7 @@ defmodule ContractWeb.StudioLiveTest do
   describe "command_palette_picked → set_contract_type opens the type-picker" do
     setup :log_in_a_user
 
-    test "without type_key, opens the type-picker modal and lists all 5 contract types",
+    test "without type_key, opens the type-picker modal and lists the supported contract types",
          %{conn: conn} do
       conn =
         Plug.Conn.put_session(
@@ -1262,13 +1262,28 @@ defmodule ContractWeb.StudioLiveTest do
       assert html =~ ~s(data-modal="type_picker")
       assert html =~ ~s(data-role="type-picker-list")
 
-      # All 5 contract-type keys from the ContractTypes registry render
+      # All supported contract-type keys from the ContractTypes registry render
       # as rows. Sourcing from the registry keeps this list in sync with
       # priv/contract_types/*.toml.
       {:ok, specs} = Contract.ContractTypes.list()
-      assert length(specs) == 5
+      visible_specs = Enum.reject(specs, &(&1.source == :custom))
+      assert length(visible_specs) == 3
+      refute Enum.any?(specs, &(&1.key == "web_novel_v1"))
+      refute Enum.any?(specs, &(&1.key == "franchise_v1"))
+      refute Enum.any?(specs, &(&1.key == "franchise_chicken_v2024_12"))
+      refute Enum.any?(specs, &(&1.key == "supply_v1"))
+      refute html =~ ~s(data-type-key="web_novel_v1")
+      refute html =~ ~s(phx-value-type_key="web_novel_v1")
+      refute html =~ ~s(data-type-key="custom_v1")
+      refute html =~ ~s(phx-value-type_key="custom_v1")
+      refute html =~ ~s(data-type-key="franchise_v1")
+      refute html =~ ~s(phx-value-type_key="franchise_v1")
+      refute html =~ ~s(data-type-key="franchise_chicken_v2024_12")
+      refute html =~ ~s(phx-value-type_key="franchise_chicken_v2024_12")
+      refute html =~ ~s(data-type-key="supply_v1")
+      refute html =~ ~s(phx-value-type_key="supply_v1")
 
-      for %{key: key} <- specs do
+      for %{key: key} <- visible_specs do
         assert html =~ ~s(data-type-key="#{key}")
         assert html =~ ~s(phx-value-type_key="#{key}")
       end
@@ -1302,11 +1317,46 @@ defmodule ContractWeb.StudioLiveTest do
       html =
         render_hook(lv, "command_palette_picked", %{
           "kind" => "set_contract_type",
-          "type_key" => "franchise_v1"
+          "type_key" => "service_agreement_v1"
         })
 
       # No type-picker modal — the Action dispatched directly.
       refute html =~ ~s(data-role="type-picker")
+    end
+
+    test "type picker updates the current document projection after changing type",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      document_id = Ecto.UUID.generate()
+
+      assert {:ok, %Contract.Change{document_id: ^document_id}} =
+               Contract.Runtime.apply(scope, %Command{
+                 kind: :create_document,
+                 document_id: document_id,
+                 actor_type: :user,
+                 actor_id: user.id,
+                 base_revision: 0,
+                 payload: %{"title" => "typed", "type_key" => "employment_v1"}
+               })
+
+      {:ok, lv, _html} = live(conn, ~p"/studio/#{document_id}")
+      assert assigns(lv).projection.type_key == "employment_v1"
+      refute has_element?(lv, ~s(#document-type-picker button[phx-value-type_key="web_novel_v1"]))
+      refute has_element?(lv, ~s(#document-type-picker button[phx-value-type_key="franchise_v1"]))
+      refute has_element?(
+               lv,
+               ~s(#document-type-picker button[phx-value-type_key="franchise_chicken_v2024_12"])
+             )
+
+      refute has_element?(lv, ~s(#document-type-picker button[phx-value-type_key="supply_v1"]))
+
+      lv
+      |> element(~s(#document-type-picker button[phx-value-type_key="service_agreement_v1"]))
+      |> render_click()
+
+      assert assigns(lv).projection.type_key == "service_agreement_v1"
+      assert assigns(lv).rhwp_field_values == %{}
+      assert Repo.get!(Contract.Documents.Document, document_id).type_key == "service_agreement_v1"
     end
   end
 

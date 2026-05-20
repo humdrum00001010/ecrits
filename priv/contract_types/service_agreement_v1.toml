@@ -3,9 +3,10 @@ family = "services"
 name_en = "Professional Services Agreement"
 name_ko = "용역계약서"
 version = "1.0"
-source = "custom"
-source_url = ""
-compatible_with = ["nda_v1", "supply_v1"]
+source = "ftc"
+source_url = "https://www.ftc.go.kr/www/selectBbsNttView.do?bordCd=202&key=203&nttSn=11260"
+template_hwp_path = "/assets/standard_contracts/service_agreement_v1.hwp"
+compatible_with = ["nda_v1"]
 notes_en = "General professional / consulting services. Defines scope of work, deliverables, payment schedule, IP ownership, warranties, and limitation of liability."
 notes_ko = "일반 전문 용역계약. 용역의 범위, 납품물, 대가 지급, 지식재산권 귀속, 책임 한도를 정의합니다."
 

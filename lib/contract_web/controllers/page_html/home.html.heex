@@ -1,4 +1,4 @@
-<Layouts.app flash={@flash} current_scope={@current_scope} variant="default">
+<Layouts.app flash={@flash} current_scope={@current_scope} variant="default" chrome="landing">
   <%!--
     v0.5/design-landing — DESIGN.md §3 LandingLive surface.
 
@@ -80,13 +80,13 @@
         <article class="landing-v31__block">
           <p class="landing-v31__block-eyebrow">02</p>
           <h2 class="landing-v31__block-title">
-            {dgettext("landing", "StudioLive가 먼저 묻는 질문")}
+            {dgettext("landing", "AI가 먼저 확인하는 핵심 조건")}
           </h2>
           <hr class="landing-v31__block-rule" />
           <p class="landing-v31__block-caption">
             {dgettext(
               "landing",
-              "에이전트가 빠진 결정을 식별하고 맥락에 맞게 한 번에 하나씩 묻습니다."
+              "예: 납품일자, 검수 기준, 지체상금, 대금 지급일처럼 조항에 바로 들어갈 결정을 구체적으로 묻습니다."
             )}
           </p>
         </article>

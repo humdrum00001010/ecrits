@@ -95,6 +95,8 @@ defmodule ContractWeb.StudioLive do
   alias ContractWeb.Components.CommandPalette
   alias ContractWeb.Live.Studio.Components
 
+  @mobile_viewport_max_width 767
+
   @impl true
   def mount(params, _session, socket) do
     scope = socket.assigns.current_scope
@@ -111,7 +113,7 @@ defmodule ContractWeb.StudioLive do
           socket
           |> assign(:current_scope, scope)
           |> assign(:studio_state, studio_state)
-          |> assign(:projection, projection)
+          |> assign_projection(projection)
           |> assign(:current_document, current_document(scope, studio_state))
           |> assign(:breadcrumbs, breadcrumbs)
           |> assign(:page_title, page_title(scope))
@@ -127,11 +129,6 @@ defmodule ContractWeb.StudioLive do
           |> assign(:migration_target, nil)
           |> assign(:field_strategies, nil)
           |> assign(:last_pubsub_message_at, nil)
-          |> allow_upload(:document_upload,
-            accept: :any,
-            max_entries: 1,
-            max_file_size: 50_000_000
-          )
           |> stream_configure(:chat_messages, dom_id: &"chat-msg-#{&1.id}")
           |> then(fn s ->
             visible = ChatThreads.list_visible_messages(scope, studio_state)
@@ -153,7 +150,7 @@ defmodule ContractWeb.StudioLive do
           socket
           |> put_flash(:error, "Could not load Studio: #{inspect(reason)}")
           |> assign(:studio_state, %Contract.Studio.State{mode: :no_document})
-          |> assign(:projection, empty_projection())
+          |> assign_projection(empty_projection())
           |> assign(:current_document, nil)
           |> assign(:breadcrumbs, build_breadcrumbs(scope, nil, nil))
           |> assign(:page_title, "Studio")
@@ -169,11 +166,6 @@ defmodule ContractWeb.StudioLive do
           |> assign(:migration_target, nil)
           |> assign(:field_strategies, nil)
           |> assign(:last_pubsub_message_at, nil)
-          |> allow_upload(:document_upload,
-            accept: :any,
-            max_entries: 1,
-            max_file_size: 50_000_000
-          )
           |> stream_configure(:chat_messages, dom_id: &"chat-msg-#{&1.id}")
           |> stream(:chat_messages, [])
           |> stream_configure(:changes, dom_id: &"change-#{&1.id}")
@@ -192,7 +184,7 @@ defmodule ContractWeb.StudioLive do
 
   @impl true
   def handle_event("viewport_change", %{"w" => w}, socket) when is_integer(w) do
-    viewport = if w >= 1024, do: :desktop, else: :mobile
+    viewport = if w > @mobile_viewport_max_width, do: :desktop, else: :mobile
     {:noreply, assign(socket, :viewport, viewport)}
   end
 
@@ -201,6 +193,17 @@ defmodule ContractWeb.StudioLive do
       {n, _} -> handle_event("viewport_change", %{"w" => n}, socket)
       :error -> {:noreply, socket}
     end
+  end
+
+  def handle_event("filter_contract_types", %{"q" => query}, socket) when is_binary(query) do
+    {:noreply,
+     socket
+     |> assign(:contract_type_query, query)
+     |> assign(:contract_type_picker_open?, true)}
+  end
+
+  def handle_event("close_contract_type_picker", _params, socket) do
+    {:noreply, assign(socket, :contract_type_picker_open?, false)}
   end
 
   def handle_event("toggle_preview", _params, socket) do
@@ -420,7 +423,26 @@ defmodule ContractWeb.StudioLive do
   # ---------------------------------------------------------------------------
 
   def handle_event("agent_option_picked", %{"key" => "upload"}, socket) do
-    {:noreply, update_modal(socket, "upload", true)}
+    {:noreply, push_event(socket, "open-document-upload-picker", %{})}
+  end
+
+  def handle_event("set_contract_type", %{"type_key" => type_key}, socket)
+      when is_binary(type_key) do
+    current_type_key = projection_type_key(socket.assigns.projection)
+
+    cond do
+      is_nil(socket.assigns.studio_state.selected_document_id) ->
+        create_blank_document(socket, type_key)
+
+      is_nil(current_type_key) ->
+        handle_contract_event("set_contract_type", %{"type_key" => type_key}, socket)
+
+      current_type_key == type_key ->
+        {:noreply, socket}
+
+      true ->
+        handle_contract_event("set_contract_type", %{"type_key" => type_key}, socket)
+    end
   end
 
   def handle_event("agent_option_picked", %{"key" => "recent"}, socket) do
@@ -449,42 +471,48 @@ defmodule ContractWeb.StudioLive do
     {:noreply, socket}
   end
 
-  def handle_event("document.upload.validate", _params, socket) do
-    {:noreply, socket}
+  def handle_event("document.direct_upload.prepare", params, socket) do
+    case Contract.Blobs.prepare_direct_upload(socket.assigns.current_scope, params) do
+      {:ok, upload} -> {:reply, Map.put(upload, :ok, true), socket}
+      {:error, reason} -> {:reply, %{ok: false, error: inspect(reason)}, socket}
+    end
   end
 
-  def handle_event("document.upload", params, socket) do
-    uploads =
-      consume_uploaded_entries(socket, :document_upload, fn %{path: path}, entry ->
-        dest = Path.join(System.tmp_dir!(), "studio-upload-#{entry.uuid}-#{entry.client_name}")
-        File.cp!(path, dest)
+  def handle_event("document.direct_upload.complete", params, socket) do
+    opts =
+      []
+      |> maybe_put_opt(:document_id, socket.assigns.studio_state.selected_document_id)
+      |> maybe_put_opt(:chat_thread_id, socket.assigns.studio_state.chat_thread_id)
 
-        {:ok,
-         %{
-           path: dest,
-           client_name: entry.client_name,
-           client_type: entry.client_type,
-           client_size: entry.client_size
-         }}
-      end)
+    with {:ok, blob_ref} <-
+           Contract.Blobs.complete_direct_upload(socket.assigns.current_scope, params),
+         {:ok, {source_document, claims}} <-
+           Contract.SourceDocuments.create_from_blob_ref(
+             socket.assigns.current_scope,
+             blob_ref,
+             params,
+             opts
+           ) do
+      socket =
+        socket
+        |> handle_protocol_message({:source_document_parsed, source_document})
+        |> then(fn socket ->
+          handle_protocol_message(
+            {:source_interpretation_ready, source_document.id, claims},
+            socket
+          )
+        end)
 
-    params =
-      case uploads do
-        [upload | _] -> Map.put(params, "upload", upload)
-        [] -> params
-      end
+      socket =
+        Enum.reduce(List.wrap(claims), socket, fn claim, socket ->
+          handle_protocol_message({:source_claim_updated, claim}, socket)
+        end)
 
-    case event_to_command("document.upload", params, socket.assigns) do
-      {:ok, %Command{} = action} ->
-        socket =
-          socket
-          |> dispatch(action)
-          |> update_modal("upload", false)
-
-        {:noreply, socket}
-
+      {:reply, %{ok: true}, socket}
+    else
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Could not upload source: #{inspect(reason)}")}
+        {:reply, %{ok: false, error: inspect(reason)},
+         put_flash(socket, :error, "Could not upload source: #{inspect(reason)}")}
     end
   end
 
@@ -530,7 +558,49 @@ defmodule ContractWeb.StudioLive do
     end
   end
 
+  def handle_event(
+        "rhwp.matching_book.changed",
+        %{"contract_type_key" => type_key, "matching_book" => matching_book},
+        socket
+      )
+      when is_binary(type_key) and is_map(matching_book) do
+    if type_key == projection_type_key(socket.assigns.projection) do
+      case ContractTypes.upsert_matching_book(type_key, matching_book) do
+        {:ok, _row} -> {:noreply, assign(socket, :rhwp_matching_book, matching_book)}
+        {:error, _reason} -> {:noreply, socket}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event(
+        "rhwp.field_value.changed",
+        %{"field_id" => field_id, "value" => value},
+        socket
+      )
+      when is_binary(field_id) do
+    {:noreply, persist_rhwp_field_value(socket, field_id, stringify_rhwp_field_value(value))}
+  end
+
+  def handle_event("rhwp.keydown", %{"key" => "Tab"} = params, socket) do
+    {:noreply,
+     push_event(socket, "rhwp.keydown", %{
+       "key" => "Tab",
+       "shiftKey" => truthy_param?(Map.get(params, "shiftKey") || Map.get(params, "shift_key"))
+     })}
+  end
+
+  def handle_event("rhwp.keydown", _params, socket), do: {:noreply, socket}
+
   def handle_event(event, params, socket) do
+    handle_contract_event(event, params, socket)
+  end
+
+  defp truthy_param?(value) when value in [true, "true", 1, "1"], do: true
+  defp truthy_param?(_value), do: false
+
+  defp handle_contract_event(event, params, socket) do
     case event_to_command(event, params, socket.assigns) do
       {:ok, %Command{} = action} ->
         {:noreply, dispatch(socket, action)}
@@ -545,8 +615,9 @@ defmodule ContractWeb.StudioLive do
 
   # Helper: create a blank owner-scoped document through Runtime so both the
   # documents row and initial Change exist, then navigate document-first.
-  defp create_blank_document(socket) do
+  defp create_blank_document(socket, type_key \\ nil) do
     scope = socket.assigns.current_scope
+    title = blank_document_title(type_key)
 
     action = %Command{
       kind: :create_document,
@@ -554,7 +625,7 @@ defmodule ContractWeb.StudioLive do
       actor_id: scope && scope.user && scope.user.id,
       base_revision: 0,
       idempotency_key: generate_idempotency_key(),
-      payload: %{"title" => "새 문서"}
+      payload: %{"title" => title, "type_key" => type_key}
     }
 
     case Contract.Runtime.apply(scope, action) do
@@ -565,6 +636,12 @@ defmodule ContractWeb.StudioLive do
         {:noreply, put_flash(socket, :error, "문서 생성에 실패했습니다.")}
     end
   end
+
+  defp blank_document_title(type_key) when is_binary(type_key) and type_key != "" do
+    ContractTypes.display_name(type_key)
+  end
+
+  defp blank_document_title(_type_key), do: "새 계약서"
 
   # ----------------------------------------------------------------------------
   # handle_info/2
@@ -605,6 +682,7 @@ defmodule ContractWeb.StudioLive do
 
         socket
         |> assign(:studio_state, new_state)
+        |> assign(:current_document, current_document(scope, new_state))
         |> apply_submit_result(action, result)
         |> maybe_refresh_chat_messages(action, new_state)
 
@@ -665,6 +743,10 @@ defmodule ContractWeb.StudioLive do
     end)
   end
 
+  defp apply_submit_result(socket, %Command{kind: :set_contract_type}, %Contract.Change{}) do
+    reload_current_document(socket)
+  end
+
   defp apply_submit_result(socket, %Command{kind: kind}, %Contract.SourceClaim{} = claim)
        when kind in [
               :source_claim_confirm,
@@ -677,6 +759,22 @@ defmodule ContractWeb.StudioLive do
   end
 
   defp apply_submit_result(socket, _action, _result), do: socket
+
+  defp reload_current_document(socket) do
+    scope = socket.assigns.current_scope
+    state = socket.assigns.studio_state
+
+    case Studio.reload(scope, state) do
+      {:ok, {%Contract.Studio.State{} = new_state, projection}} ->
+        socket
+        |> assign(:studio_state, new_state)
+        |> assign_projection(projection)
+        |> assign(:current_document, current_document(scope, new_state))
+
+      {:error, _reason} ->
+        socket
+    end
+  end
 
   defp insert_source_document_failed(socket, source_document, reason) do
     source_id = protocol_id(source_document) || System.unique_integer([:positive])
@@ -932,7 +1030,7 @@ defmodule ContractWeb.StudioLive do
           new_state
           | last_seen_revision: revision || new_state.last_seen_revision
         })
-        |> assign(:projection, projection)
+        |> assign_projection(projection)
         |> assign(:current_document, current_document(socket.assigns.current_scope, new_state))
 
       {:error, _} ->
@@ -1249,7 +1347,7 @@ defmodule ContractWeb.StudioLive do
       {:ok, {new_state, projection}} ->
         socket
         |> assign(:studio_state, new_state)
-        |> assign(:projection, projection)
+        |> assign_projection(projection)
 
       {:error, _} ->
         socket
@@ -1349,6 +1447,7 @@ defmodule ContractWeb.StudioLive do
   @impl true
   def render(assigns) do
     ~H"""
+    <% standard_template = standard_template_spec(@projection) %>
     <%= if @viewport == :mobile do %>
       <%!--
       Mobile: full-bleed chat surface. Owner directive 2026-05-17:
@@ -1420,7 +1519,6 @@ defmodule ContractWeb.StudioLive do
           migration_plan_refined?={assigns[:migration_plan_refined?] || false}
           migration_target={assigns[:migration_target]}
           field_strategies={assigns[:field_strategies]}
-          document_upload={@uploads.document_upload}
           documents={Contract.Studio.list_documents(@current_scope)}
         />
 
@@ -1449,99 +1547,297 @@ defmodule ContractWeb.StudioLive do
             @chat_rail_hidden? && "!pr-0"
           ]}
         >
-            <%!-- Desktop: document canvas + right chat rail. No permanent Context Reservoir. --%>
-            <section class="studio-document flex min-w-0 flex-col">
-              <header
-                id="studio-document-header"
-                class="studio-document__bar justify-between"
-              >
-                <div class="inline-flex items-center gap-1 min-w-0">
-                <form
-                  phx-submit="rename_document"
-                  phx-change="rename_document"
-                  class="inline-flex items-center h-8"
-                  data-role="document-title-form"
-                >
-                  <% title_value = document_header_title(@current_document, @projection, @studio_state) %>
-                  <input
-                    type="text"
-                    name="title"
-                    value={title_value}
-                    size={title_input_size(title_value)}
-                    aria-label={dgettext("studio", "문서 제목")}
-                    placeholder={dgettext("studio", "제목을 입력하세요")}
-                    autocomplete="off"
-                    spellcheck="false"
-                    phx-debounce="400"
-                    class="h-8 leading-none cursor-text bg-transparent text-sm font-medium text-base-content px-2 py-0 rounded-md border border-base-300 hover:border-base-content/30 focus:border-base-content/50 focus:bg-base-100 outline-none focus:outline-none focus:ring-0 focus:shadow-none transition-colors"
-                    style="min-width: 0; width: auto;"
-                  />
-                </form>
-
-                <%!-- Contract-type field — READ-ONLY display.            --%>
-                <%!-- 2026-05-18 owner directive: the type is decided at  --%>
-                <%!-- creation (Storage's 새 문서 dropdown) and immutable --%>
-                <%!-- afterwards. The header just surfaces what was       --%>
-                <%!-- chosen; no in-place editing, no clearing.            --%>
-                <span
-                  class="inline-flex h-7 items-center px-2 rounded-md text-xs font-medium border border-base-300 text-base-content/70"
-                  data-role="document-type-summary"
-                  aria-label={dgettext("studio", "문서 타입")}
-                  title={ContractTypes.display_name(projection_type_key(@projection))}
-                >
-                  {ContractTypes.display_name(projection_type_key(@projection))}
-                </span>
-
-                <details :if={@other_documents != []} class="relative shrink-0" data-role="document-picker">
-                  <summary
-                    class="list-none inline-flex h-7 w-7 items-center justify-center rounded-md cursor-pointer text-base-content/60 hover:text-base-content hover:bg-base-200"
-                    aria-label={dgettext("studio", "다른 문서로 이동")}
+          <%!-- Desktop: document canvas + right chat rail. No permanent Context Reservoir. --%>
+          <section class="studio-document flex min-w-0 flex-col">
+            <header
+              id="studio-document-header"
+              class="studio-document__bar justify-between"
+            >
+              <div class="inline-flex items-center gap-1 min-w-0">
+                <div class="inline-flex min-w-0 items-center">
+                  <form
+                    id="studio-document-title-form"
+                    phx-submit="rename_document"
+                    phx-change="rename_document"
+                    class="relative inline-flex min-w-0 items-center h-8"
+                    data-role="document-title-form"
+                    phx-hook=".BlurTitleOnSubmit"
                   >
-                    <.icon name="hero-chevron-down" class="size-4" />
-                  </summary>
-                  <div
-                    class="absolute left-0 top-full mt-1 z-30 w-64 max-h-72 overflow-y-auto rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
-                    role="menu"
+                    <% title_value =
+                      document_header_title(@current_document, @projection, @studio_state) %>
+                    <input
+                      id="studio-document-title-input"
+                      type="text"
+                      name="title"
+                      value={title_value}
+                      size={title_input_size(title_value)}
+                      aria-label={dgettext("studio", "문서 제목")}
+                      placeholder={dgettext("studio", "새 계약서")}
+                      autocomplete="off"
+                      spellcheck="false"
+                      phx-debounce="400"
+                      class={[
+                        "relative z-10 h-7 w-[12rem] max-w-[34vw] leading-none cursor-text bg-transparent text-[13px] font-medium text-base-content px-1.5 py-0 border border-base-300 hover:z-20 hover:border-base-content/30 focus:z-20 focus:border-base-content/50 focus:bg-base-100 outline-none focus:outline-none focus:ring-0 focus:shadow-none transition-colors",
+                        @other_documents == [] && "rounded-md",
+                        @other_documents != [] && "rounded-l-md rounded-r-none"
+                      ]}
+                    />
+                  </form>
+                  <script :type={Phoenix.LiveView.ColocatedHook} name=".BlurTitleOnSubmit">
+                    export default {
+                      mounted() {
+                        this.titleInput = this.el.querySelector("input[name='title']")
+                        this.onSubmit = () => {
+                          setTimeout(() => this.titleInput?.blur(), 0)
+                          setTimeout(() => this.titleInput?.blur(), 120)
+                        }
+                        this.onKeyDown = event => {
+                          if (event.key === "Enter") this.onSubmit()
+                        }
+                        this.el.addEventListener("submit", this.onSubmit)
+                        this.titleInput?.addEventListener("keydown", this.onKeyDown)
+                      },
+                      destroyed() {
+                        this.el.removeEventListener("submit", this.onSubmit)
+                        this.titleInput?.removeEventListener("keydown", this.onKeyDown)
+                      }
+                    }
+                  </script>
+
+                  <details
+                    :if={@other_documents != []}
+                    class="relative shrink-0"
+                    data-role="document-picker"
                   >
-                    <.link
-                      :for={d <- @other_documents}
-                      navigate={~p"/studio/#{d.id}"}
-                      role="menuitem"
-                      class="block px-3 py-1.5 truncate text-base-content hover:bg-base-200"
-                      title={d.title}
+                    <summary
+                      class="relative z-0 list-none -ml-px inline-flex h-7 w-7 items-center justify-center rounded-r-md border border-base-300 bg-base-100 text-base-content/60 hover:z-30 hover:text-base-content hover:bg-base-200 cursor-pointer"
+                      aria-label={dgettext("studio", "다른 문서로 이동")}
                     >
-                      {d.title}
-                    </.link>
-                  </div>
-                </details>
+                      <.icon name="hero-chevron-down" class="size-4" />
+                    </summary>
+                    <div
+                      class="absolute left-0 top-full mt-1 z-30 w-64 max-h-72 overflow-y-auto rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
+                      role="menu"
+                    >
+                      <.link
+                        :for={d <- @other_documents}
+                        navigate={~p"/studio/#{d.id}"}
+                        role="menuitem"
+                        class="block px-3 py-1.5 truncate text-base-content hover:bg-base-200"
+                        title={d.title}
+                      >
+                        {d.title}
+                      </.link>
+                    </div>
+                  </details>
                 </div>
 
-                <div class="inline-flex items-center">
-                <details class="relative shrink-0" data-role="export-picker">
+                <details
+                  id="document-type-picker"
+                  class="relative shrink-0"
+                  data-role="document-type-picker"
+                  phx-hook=".CloseOnOutside"
+                  open={assigns[:contract_type_picker_open?] || false}
+                >
                   <summary
-                    class="list-none inline-flex h-8 items-center gap-1 px-2 rounded-md cursor-pointer text-base-content/70 hover:text-base-content hover:bg-base-200 text-sm transition-colors"
+                    class="list-none inline-flex h-7 items-center gap-1 px-2 rounded-md text-[13px] font-medium border border-base-300 text-base-content/70 hover:bg-base-200 hover:text-base-content cursor-pointer"
+                    aria-label={dgettext("studio", "문서 타입 선택")}
+                    title={ContractTypes.display_name(projection_type_key(@projection))}
+                  >
+                    <span data-role="document-type-summary">
+                      {ContractTypes.display_name(projection_type_key(@projection))}
+                    </span>
+                    <.icon name="hero-chevron-down" class="size-3" />
+                  </summary>
+                  <div
+                    class="absolute left-0 top-full mt-1 z-30 w-72 max-h-80 overflow-y-auto rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
+                    role="menu"
+                  >
+                    <label
+                      role="menuitem"
+                      class={[
+                        "flex w-full cursor-pointer items-center justify-between gap-3 px-3 py-2 text-left hover:bg-base-200",
+                        projection_type_key(@projection) == "custom_v1" &&
+                          "font-semibold text-base-content"
+                      ]}
+                    >
+                      <input
+                        id="document-direct-upload-input"
+                        type="file"
+                        accept=".pdf,.hwp,.hwpx,.docx"
+                        class="sr-only"
+                        phx-hook="DirectR2Upload"
+                        data-role="document-upload-file-input"
+                      />
+                      <span class="inline-flex items-center gap-2">
+                        <.icon name="hero-arrow-up-tray" class="size-4 text-base-content/50" />
+                        <span>{dgettext("studio", "갖고 있는 계약서가 있나요?")}</span>
+                      </span>
+                    </label>
+
+                    <div class="my-1 border-t border-base-200"></div>
+
+                    <.form
+                      for={%{"q" => assigns[:contract_type_query] || ""}}
+                      as={:search}
+                      phx-change="filter_contract_types"
+                      class="px-2 py-1"
+                    >
+                      <input
+                        type="search"
+                        name="q"
+                        value={assigns[:contract_type_query] || ""}
+                        placeholder={dgettext("studio", "표준양식 검색")}
+                        autocomplete="off"
+                        class="input input-sm input-bordered w-full"
+                      />
+                    </.form>
+
+                    <p class="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-base-content/40">
+                      {dgettext("studio", "표준양식")}
+                    </p>
+                    <button
+                      :for={spec <- contract_type_options(assigns[:contract_type_query] || "")}
+                      type="button"
+                      role="menuitem"
+                      phx-click="set_contract_type"
+                      phx-value-type_key={spec.key}
+                      class={[
+                        "flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left hover:bg-base-200",
+                        projection_type_key(@projection) == spec.key &&
+                          "font-semibold text-base-content"
+                      ]}
+                    >
+                      <span class="inline-flex items-center gap-2">
+                        <.icon
+                          name="hero-clipboard-document-list"
+                          class="size-4 text-base-content/50"
+                        />
+                        <span>{ContractTypes.display_name(spec)}</span>
+                      </span>
+                      <.icon
+                        :if={projection_type_key(@projection) == spec.key}
+                        name="hero-check"
+                        class="size-4"
+                      />
+                    </button>
+
+                    <p
+                      :if={contract_type_options(assigns[:contract_type_query] || "") == []}
+                      class="px-3 py-2 text-sm text-base-content/50"
+                    >
+                      {dgettext("studio", "검색 결과가 없습니다.")}
+                    </p>
+                  </div>
+                </details>
+                <script :type={Phoenix.LiveView.ColocatedHook} name=".CloseOnOutside">
+                  export default {
+                    mounted() {
+                      this.onPointerDown = event => {
+                        if (!this.el.open || this.el.contains(event.target)) return
+                        this.el.removeAttribute("open")
+                        this.pushEvent("close_contract_type_picker", {})
+                      }
+                      this.onKeyDown = event => {
+                        if (event.key !== "Escape" || !this.el.open) return
+                        this.el.removeAttribute("open")
+                        this.pushEvent("close_contract_type_picker", {})
+                        this.el.querySelector("summary")?.focus()
+                      }
+                      document.addEventListener("pointerdown", this.onPointerDown, true)
+                      document.addEventListener("keydown", this.onKeyDown, true)
+                    },
+                    destroyed() {
+                      document.removeEventListener("pointerdown", this.onPointerDown, true)
+                      document.removeEventListener("keydown", this.onKeyDown, true)
+                    }
+                  }
+                </script>
+
+                <button
+                  type="button"
+                  class="inline-flex h-7 items-center justify-center gap-1.5 rounded-md px-1.5 text-base-content/65 transition-colors hover:bg-base-200 hover:text-base-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error/70"
+                  data-role="rhwp-next-edit-target"
+                  aria-label={dgettext("studio", "다음 편집 항목")}
+                  title={dgettext("studio", "다음 편집 항목")}
+                  tabindex="0"
+                >
+                  <.icon name="hero-arrow-down" class="size-3.5" />
+                  <kbd class="rounded bg-base-200 px-1 py-0.5 text-[10px] font-semibold leading-none text-base-content/60">
+                    Tab
+                  </kbd>
+                </button>
+              </div>
+
+              <div class="inline-flex items-center">
+                <details
+                  id="studio-export-picker"
+                  class="relative shrink-0"
+                  data-role="export-picker"
+                  phx-hook=".CloseExportOnOutside"
+                >
+                  <summary
+                    class="inline-flex h-8 list-none items-center justify-center gap-1 rounded-md px-2 text-[13px] font-medium text-base-content/70 transition-colors cursor-pointer hover:bg-base-200 hover:text-base-content"
                     aria-label={dgettext("studio", "내보내기")}
                   >
                     <.icon name="hero-arrow-down-tray" class="size-4" />
-                    <span>{dgettext("studio", "내보내기")}</span>
+                    <span class="inline-flex h-4 items-center leading-none">
+                      {dgettext("studio", "내보내기")}
+                    </span>
                   </summary>
                   <div
                     class="absolute right-0 top-full mt-1 z-30 w-44 rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
                     role="menu"
                   >
                     <button
-                      :for={fmt <- ["pdf", "docx", "hwpx", "markdown"]}
                       type="button"
                       role="menuitem"
-                      phx-click="export.request"
-                      phx-value-format={fmt}
+                      data-role="rhwp-export-pdf"
                       class="flex w-full items-center justify-between px-3 py-1.5 text-base-content hover:bg-base-200"
                     >
-                      <span class="font-medium">{export_format_label(fmt)}</span>
-                      <span class="text-xs uppercase tracking-wide text-base-content/40">{fmt}</span>
+                      <span class="font-medium">{export_format_label("pdf")}</span>
+                      <span class="text-xs uppercase tracking-wide text-base-content/40">pdf</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-role="rhwp-export-hwpx"
+                      class="flex w-full items-center justify-between px-3 py-1.5 text-base-content hover:bg-base-200"
+                    >
+                      <span class="font-medium">{export_format_label("hwpx")}</span>
+                      <span class="text-xs uppercase tracking-wide text-base-content/40">hwpx</span>
                     </button>
                   </div>
                 </details>
+                <script :type={Phoenix.LiveView.ColocatedHook} name=".CloseExportOnOutside">
+                  export default {
+                    mounted() {
+                      this.close = () => this.el.removeAttribute("open")
+                      this.onPointerDown = event => {
+                        if (!this.el.open || this.el.contains(event.target)) return
+                        this.close()
+                      }
+                      this.onFocusIn = event => {
+                        if (!this.el.open || this.el.contains(event.target)) return
+                        this.close()
+                      }
+                      this.onKeyDown = event => {
+                        if (event.key !== "Escape" || !this.el.open) return
+                        this.close()
+                        this.el.querySelector("summary")?.focus()
+                      }
+                      document.addEventListener("pointerdown", this.onPointerDown, true)
+                      document.addEventListener("focusin", this.onFocusIn, true)
+                      document.addEventListener("keydown", this.onKeyDown, true)
+                    },
+                    destroyed() {
+                      document.removeEventListener("pointerdown", this.onPointerDown, true)
+                      document.removeEventListener("focusin", this.onFocusIn, true)
+                      document.removeEventListener("keydown", this.onKeyDown, true)
+                    }
+                  }
+                </script>
 
                 <button
                   type="button"
@@ -1556,15 +1852,29 @@ defmodule ContractWeb.StudioLive do
                   data-role="toggle-chat-rail"
                 >
                   <.icon
-                    name={if @chat_rail_hidden?, do: "hero-arrows-pointing-in", else: "hero-arrows-pointing-out"}
+                    name={
+                      if @chat_rail_hidden?,
+                        do: "hero-arrows-pointing-in",
+                        else: "hero-arrows-pointing-out"
+                    }
                     class="size-4"
                   />
                 </button>
-                </div>
-              </header>
+              </div>
+            </header>
 
-              <article class="contract-projection cs-document-text relative min-h-0 flex-1">
-                <div class="relative h-full min-h-0">
+            <article class="contract-projection cs-document-text relative min-h-0 flex-1">
+              <div class="relative h-full min-h-0">
+                <.live_component
+                  :if={standard_template}
+                  module={Components.Canvas.HwpTemplate}
+                  id="standard-hwp-template-canvas"
+                  spec={standard_template}
+                  matching_book={@rhwp_matching_book || %{}}
+                  field_values={@rhwp_field_values || %{}}
+                />
+
+                <%= if is_nil(standard_template) do %>
                   <.live_component
                     :if={@studio_state.mode == :reviewing}
                     module={Components.Canvas.Review}
@@ -1581,7 +1891,6 @@ defmodule ContractWeb.StudioLive do
                     studio_state={@studio_state}
                     projection={@projection}
                     current_scope={@current_scope}
-                    document_upload={@uploads.document_upload}
                   />
                   <.live_component
                     module={Components.MarksLayer}
@@ -1590,125 +1899,126 @@ defmodule ContractWeb.StudioLive do
                     studio_state={@studio_state}
                     viewport={@viewport}
                   />
-                </div>
-              </article>
-            </section>
+                <% end %>
+              </div>
+            </article>
+          </section>
 
-            <aside
-              :if={not @chat_rail_hidden?}
-              id="studio-chat-rail"
-              phx-hook=".RailResizer"
-              class="studio-rail fixed top-[60px] right-0 h-[calc(100vh-60px)] min-h-0 flex flex-col z-30"
-              style="width: var(--chat-rail-width, 380px);"
+          <aside
+            :if={not @chat_rail_hidden?}
+            id="studio-chat-rail"
+            phx-hook=".RailResizer"
+            class="studio-rail fixed top-[60px] right-0 h-[calc(100vh-60px)] min-h-0 flex flex-col z-30"
+            style="width: var(--chat-rail-width, 380px);"
+          >
+            <div
+              class="chat-rail-resizer"
+              data-role="chat-rail-resizer"
+              aria-hidden="true"
             >
-              <div
-                class="chat-rail-resizer"
-                data-role="chat-rail-resizer"
-                aria-hidden="true"
-              ></div>
-              <script :type={Phoenix.LiveView.ColocatedHook} name=".RailResizer">
-                export default {
-                  mounted() {
-                    const aside = this.el
-                    const handle = aside.querySelector('[data-role="chat-rail-resizer"]')
-                    if (!handle) return
+            </div>
+            <script :type={Phoenix.LiveView.ColocatedHook} name=".RailResizer">
+              export default {
+                mounted() {
+                  const aside = this.el
+                  const handle = aside.querySelector('[data-role="chat-rail-resizer"]')
+                  if (!handle) return
 
-                    const root = document.documentElement
-                    const storageKey = "cs:chat-rail-width"
-                    const MIN = 280
-                    const MAX = 720
+                  const root = document.documentElement
+                  const storageKey = "cs:chat-rail-width"
+                  const MIN = 280
+                  const MAX = 720
 
-                    const stored = localStorage.getItem(storageKey)
-                    if (stored) {
-                      const w = parseInt(stored, 10)
-                      if (!isNaN(w) && w >= MIN && w <= MAX) {
-                        root.style.setProperty("--chat-rail-width", w + "px")
-                      }
-                    }
-
-                    let startX = 0
-                    let startWidth = 0
-                    let dragging = false
-
-                    const onMove = (e) => {
-                      if (!dragging) return
-                      const x = e.touches ? e.touches[0].clientX : e.clientX
-                      const next = Math.min(MAX, Math.max(MIN, startWidth + (startX - x)))
-                      root.style.setProperty("--chat-rail-width", next + "px")
-                    }
-
-                    const onUp = () => {
-                      if (!dragging) return
-                      dragging = false
-                      handle.removeAttribute("data-dragging")
-                      document.body.removeAttribute("data-chat-rail-dragging")
-                      const current = parseInt(getComputedStyle(root).getPropertyValue("--chat-rail-width"), 10)
-                      if (!isNaN(current)) localStorage.setItem(storageKey, String(current))
-                      window.removeEventListener("mousemove", onMove)
-                      window.removeEventListener("mouseup", onUp)
-                      window.removeEventListener("touchmove", onMove)
-                      window.removeEventListener("touchend", onUp)
-                    }
-
-                    const onDown = (e) => {
-                      e.preventDefault()
-                      dragging = true
-                      startX = e.touches ? e.touches[0].clientX : e.clientX
-                      startWidth = aside.getBoundingClientRect().width
-                      handle.setAttribute("data-dragging", "true")
-                      document.body.setAttribute("data-chat-rail-dragging", "true")
-                      window.addEventListener("mousemove", onMove)
-                      window.addEventListener("mouseup", onUp)
-                      window.addEventListener("touchmove", onMove, { passive: false })
-                      window.addEventListener("touchend", onUp)
-                    }
-
-                    handle.addEventListener("mousedown", onDown)
-                    handle.addEventListener("touchstart", onDown, { passive: false })
-                    this._onDown = onDown
-                    this._handle = handle
-                  },
-                  destroyed() {
-                    if (this._handle && this._onDown) {
-                      this._handle.removeEventListener("mousedown", this._onDown)
-                      this._handle.removeEventListener("touchstart", this._onDown)
+                  const stored = localStorage.getItem(storageKey)
+                  if (stored) {
+                    const w = parseInt(stored, 10)
+                    if (!isNaN(w) && w >= MIN && w <= MAX) {
+                      root.style.setProperty("--chat-rail-width", w + "px")
                     }
                   }
+
+                  let startX = 0
+                  let startWidth = 0
+                  let dragging = false
+
+                  const onMove = (e) => {
+                    if (!dragging) return
+                    const x = e.touches ? e.touches[0].clientX : e.clientX
+                    const next = Math.min(MAX, Math.max(MIN, startWidth + (startX - x)))
+                    root.style.setProperty("--chat-rail-width", next + "px")
+                  }
+
+                  const onUp = () => {
+                    if (!dragging) return
+                    dragging = false
+                    handle.removeAttribute("data-dragging")
+                    document.body.removeAttribute("data-chat-rail-dragging")
+                    const current = parseInt(getComputedStyle(root).getPropertyValue("--chat-rail-width"), 10)
+                    if (!isNaN(current)) localStorage.setItem(storageKey, String(current))
+                    window.removeEventListener("mousemove", onMove)
+                    window.removeEventListener("mouseup", onUp)
+                    window.removeEventListener("touchmove", onMove)
+                    window.removeEventListener("touchend", onUp)
+                  }
+
+                  const onDown = (e) => {
+                    e.preventDefault()
+                    dragging = true
+                    startX = e.touches ? e.touches[0].clientX : e.clientX
+                    startWidth = aside.getBoundingClientRect().width
+                    handle.setAttribute("data-dragging", "true")
+                    document.body.setAttribute("data-chat-rail-dragging", "true")
+                    window.addEventListener("mousemove", onMove)
+                    window.addEventListener("mouseup", onUp)
+                    window.addEventListener("touchmove", onMove, { passive: false })
+                    window.addEventListener("touchend", onUp)
+                  }
+
+                  handle.addEventListener("mousedown", onDown)
+                  handle.addEventListener("touchstart", onDown, { passive: false })
+                  this._onDown = onDown
+                  this._handle = handle
+                },
+                destroyed() {
+                  if (this._handle && this._onDown) {
+                    this._handle.removeEventListener("mousedown", this._onDown)
+                    this._handle.removeEventListener("touchstart", this._onDown)
+                  }
                 }
-              </script>
-              <.live_component
-                module={Components.ChatRail}
-                id="chat-rail"
-                studio_state={@studio_state}
-                streams={%{chat_messages: @streams.chat_messages}}
-                current_scope={@current_scope}
-                grill_marks={@grill_marks}
-                grill_active?={@grill_active?}
-              />
-            </aside>
-
+              }
+            </script>
             <.live_component
-              module={Components.ModalHost}
-              id="modal-host"
+              module={Components.ChatRail}
+              id="chat-rail"
               studio_state={@studio_state}
+              streams={%{chat_messages: @streams.chat_messages}}
               current_scope={@current_scope}
-              projection={@projection}
-              reconcile_modal_open?={@reconcile_modal_open?}
-              reconcile_request={@reconcile_request}
-              migration_plan={@migration_plan}
-              migration_plan_refined?={assigns[:migration_plan_refined?] || false}
-              migration_target={assigns[:migration_target]}
-              field_strategies={assigns[:field_strategies]}
-              document_upload={@uploads.document_upload}
-              documents={Contract.Studio.list_documents(@current_scope)}
+              grill_marks={@grill_marks}
+              grill_active?={@grill_active?}
             />
+          </aside>
 
-            <.live_component
-              module={Components.ToastQueue}
-              id="toast-queue"
-              streams={%{toasts: @streams.toasts}}
-              viewport={@viewport}
-            />
+          <.live_component
+            module={Components.ModalHost}
+            id="modal-host"
+            studio_state={@studio_state}
+            current_scope={@current_scope}
+            projection={@projection}
+            reconcile_modal_open?={@reconcile_modal_open?}
+            reconcile_request={@reconcile_request}
+            migration_plan={@migration_plan}
+            migration_plan_refined?={assigns[:migration_plan_refined?] || false}
+            migration_target={assigns[:migration_target]}
+            field_strategies={assigns[:field_strategies]}
+            documents={Contract.Studio.list_documents(@current_scope)}
+          />
+
+          <.live_component
+            module={Components.ToastQueue}
+            id="toast-queue"
+            streams={%{toasts: @streams.toasts}}
+            viewport={@viewport}
+          />
         </main>
       </.app_shell>
       <CommandPalette.mount_if_live
@@ -1788,10 +2098,10 @@ defmodule ContractWeb.StudioLive do
 
   defp document_header_title(_document, _projection, %{selected_document_id: id})
        when is_binary(id),
-       do: "Document " <> String.slice(id, 0, 8)
+       do: ""
 
   defp document_header_title(_document, _projection, _state),
-    do: dgettext("studio", "No document selected")
+    do: ""
 
   # ContractTypes.display_name/1 accepts a string key, a TypeSpec, or
   # nil; the projection may be the empty-projection map (type_key: nil)
@@ -1802,20 +2112,153 @@ defmodule ContractWeb.StudioLive do
   defp projection_type_key(%{type_key: tk}) when is_binary(tk) and tk != "", do: tk
   defp projection_type_key(_), do: nil
 
-  defp document_status_label(%{status: status}) when is_binary(status) do
-    case status do
-      "draft" -> dgettext("studio", "초안")
-      "review" -> dgettext("studio", "검토 중")
-      "archived" -> dgettext("studio", "보관됨")
-      _ -> status
+  defp assign_projection(socket, projection) do
+    rhwp_field_values = rhwp_field_values_for_projection(projection)
+
+    socket
+    |> assign(:projection, projection)
+    |> assign(:rhwp_matching_book, rhwp_matching_book_for_projection(projection))
+    |> assign(:rhwp_field_values, rhwp_field_values)
+    |> assign(:rhwp_field_values_cache, rhwp_field_values)
+  end
+
+  defp rhwp_matching_book_for_projection(projection) do
+    with type_key when is_binary(type_key) <- projection_type_key(projection),
+         {:ok, matching_book} <- ContractTypes.get_matching_book(type_key) do
+      matching_book
+    else
+      _ -> %{}
     end
   end
 
-  defp document_status_label(_), do: dgettext("studio", "초안")
+  defp persist_rhwp_field_value(socket, field_id, value) do
+    field_id = String.trim(field_id)
+    state = socket.assigns.studio_state
+    document_id = state && state.selected_document_id
 
-  defp document_status_dot_modifier(%{status: "review"}), do: "status-dot--review"
-  defp document_status_dot_modifier(%{status: "archived"}), do: "status-dot--archived"
-  defp document_status_dot_modifier(_), do: "status-dot--draft"
+    cond do
+      field_id == "" or not is_binary(document_id) ->
+        socket
+
+      true ->
+        scope = socket.assigns.current_scope
+
+        field_values =
+          socket.assigns
+          |> cached_rhwp_field_values(scope, document_id)
+          |> Map.put(field_id, value)
+
+        action = %Command{
+          kind: :update_metadata,
+          actor_type: :user,
+          actor_id: scope && scope.user && scope.user.id,
+          document_id: document_id,
+          base_revision: nil,
+          idempotency_key: generate_idempotency_key(),
+          payload: %{"metadata" => %{"rhwp_field_values" => field_values}}
+        }
+
+        case Contract.Runtime.apply(scope, action) do
+          {:ok, %Contract.Change{}} ->
+            assign(socket, :rhwp_field_values_cache, field_values)
+
+          {:error, _reason} ->
+            socket
+        end
+    end
+  end
+
+  defp cached_rhwp_field_values(assigns, scope, document_id) do
+    case Map.get(assigns, :rhwp_field_values_cache) do
+      values when is_map(values) -> normalize_rhwp_field_values(values)
+      _ -> current_rhwp_field_values(scope, document_id, Map.get(assigns, :projection))
+    end
+  end
+
+  defp current_rhwp_field_values(scope, document_id, fallback_projection) do
+    case Contract.Runtime.load(scope, document_id) do
+      {:ok, %Contract.Runtime.State{projection: projection}} ->
+        rhwp_field_values_for_projection(projection)
+
+      _ ->
+        rhwp_field_values_for_projection(fallback_projection)
+    end
+  end
+
+  defp rhwp_field_values_for_projection(%{metadata: metadata}) when is_map(metadata),
+    do: rhwp_field_values_from_metadata(metadata)
+
+  defp rhwp_field_values_for_projection(%{"metadata" => metadata}) when is_map(metadata),
+    do: rhwp_field_values_from_metadata(metadata)
+
+  defp rhwp_field_values_for_projection(_projection), do: %{}
+
+  defp rhwp_field_values_from_metadata(metadata) when is_map(metadata) do
+    metadata
+    |> metadata_value(:rhwp_field_values)
+    |> normalize_rhwp_field_values()
+  end
+
+  defp metadata_value(metadata, key) when is_map(metadata) and is_atom(key) do
+    Map.get(metadata, key) || Map.get(metadata, Atom.to_string(key))
+  end
+
+  defp normalize_rhwp_field_values(values) when is_map(values) do
+    values
+    |> Enum.reduce(%{}, fn
+      {field_id, value}, acc when is_binary(field_id) and not is_nil(value) ->
+        Map.put(acc, field_id, stringify_rhwp_field_value(value))
+
+      {field_id, value}, acc when is_atom(field_id) and not is_nil(value) ->
+        Map.put(acc, Atom.to_string(field_id), stringify_rhwp_field_value(value))
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp normalize_rhwp_field_values(_values), do: %{}
+
+  defp stringify_rhwp_field_value(value) when is_binary(value), do: value
+  defp stringify_rhwp_field_value(nil), do: ""
+  defp stringify_rhwp_field_value(value), do: to_string(value)
+
+  defp standard_template_spec(projection) do
+    with type_key when is_binary(type_key) <- projection_type_key(projection),
+         {:ok, spec} <- ContractTypes.get(type_key),
+         path when is_binary(path) and path != "" <- template_path(spec) do
+      spec
+    else
+      _ -> nil
+    end
+  end
+
+  defp template_path(%{template_hwpx_path: path}) when is_binary(path) and path != "", do: path
+  defp template_path(%{template_hwp_path: path}) when is_binary(path) and path != "", do: path
+  defp template_path(_spec), do: nil
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp contract_type_options(query) when is_binary(query) do
+    normalized_query = query |> String.trim() |> String.downcase()
+
+    {:ok, specs} = ContractTypes.list()
+
+    specs
+    |> Enum.reject(&(&1.source == :custom))
+    |> Enum.filter(&contract_type_matches?(&1, normalized_query))
+  end
+
+  defp contract_type_matches?(_spec, ""), do: true
+
+  defp contract_type_matches?(spec, query) do
+    spec.key
+    |> Kernel.<>(" ")
+    |> Kernel.<>(ContractTypes.display_name(spec))
+    |> String.downcase()
+    |> String.contains?(query)
+  end
 
   defp canvas_module(:briefing), do: Components.Canvas.Briefing
   defp canvas_module(:editing), do: Components.Canvas.Editor

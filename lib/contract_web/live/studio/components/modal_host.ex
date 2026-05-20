@@ -312,7 +312,9 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
   defp type_picker_rows do
     {:ok, specs} = ContractTypes.list()
 
-    Enum.map(specs, fn spec ->
+    specs
+    |> Enum.reject(&(&1.source == :custom))
+    |> Enum.map(fn spec ->
       {ContractTypes.display_name(spec), spec.key, spec.version}
     end)
   end
@@ -1128,16 +1130,12 @@ defmodule ContractWeb.Live.Studio.Components.ModalHost do
             {dgettext("studio", "Type is set later by you or the agent.")}
           </p>
 
-          <%!-- Affordance to switch to the upload modal for users who
-                already have a PDF/HWPX/HWP file. The parent's
-                update_modal/3 maps `upload` onto
-                studio_state.upload_panel_open?. --%>
           <div class="mt-3">
             <button
               type="button"
               class="btn btn-ghost btn-xs"
-              phx-click="open_modal"
-              phx-value-modal="upload"
+              phx-click="agent_option_picked"
+              phx-value-key="upload"
               data-role="new-document-upload-link"
             >
               {dgettext("studio", "Upload from PDF/HWPX/HWP…")}

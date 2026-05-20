@@ -485,7 +485,6 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ ~s(phx-click="source_claim.unlink")
       assert html =~ ~s(phx-value-source_claim_id="claim-1")
     end
-
   end
 
   # ===========================================================================

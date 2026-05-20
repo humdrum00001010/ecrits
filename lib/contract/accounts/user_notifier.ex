@@ -166,6 +166,7 @@ defmodule Contract.Accounts.UserNotifier do
     line = "#E5E7EB"
     accent = "#1F6B48"
     accent_hover = "#2F7C58"
+    link_frame_attrs = email_link_frame_attrs()
 
     """
     <!DOCTYPE html>
@@ -184,14 +185,14 @@ defmodule Contract.Accounts.UserNotifier do
             </p>
 
             <p style="margin:0 0 24px;">
-              <a href="#{url}" style="display:inline-block; padding:11px 20px; background:#{accent}; color:#FFFFFF; font-size:14px; font-weight:600; text-decoration:none; border-radius:6px; border:1px solid #{accent_hover};">
+              <a href="#{url}"#{link_frame_attrs} style="display:inline-block; padding:11px 20px; background:#{accent}; color:#FFFFFF; font-size:14px; font-weight:600; text-decoration:none; border-radius:6px; border:1px solid #{accent_hover};">
                 #{link_text}
               </a>
             </p>
 
             <p style="margin:0 0 4px; font-size:12px; color:#{muted};">버튼이 동작하지 않으면 이 주소를 브라우저에 붙여넣으세요:</p>
             <p style="margin:0 0 0; font-size:12px;">
-              <a href="#{url}" style="color:#{accent}; word-break:break-all; text-decoration:underline;">#{url}</a>
+              <a href="#{url}"#{link_frame_attrs} style="color:#{accent}; word-break:break-all; text-decoration:underline;">#{url}</a>
             </p>
           </td>
         </tr>
@@ -206,5 +207,13 @@ defmodule Contract.Accounts.UserNotifier do
     </body>
     </html>
     """
+  end
+
+  defp email_link_frame_attrs do
+    if Application.get_env(:contract, :dev_routes, false) do
+      ""
+    else
+      ~s( target="_top" rel="noopener noreferrer")
+    end
   end
 end

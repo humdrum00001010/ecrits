@@ -26,7 +26,7 @@
 # this manifest carries the **landing URL** for each family and the
 # worker is expected to be re-run when an attachment 404s.
 #
-# The list below is hand-curated to match the five `franchise_v1`-style
+# The list below is hand-curated to match the FTC-backed TypeSpecs we
 # TypeSpecs we already ship in `priv/contract_types/`. New families
 # (e.g. employment) get added here once their TOML lands.
 #
@@ -44,18 +44,6 @@
 # verified by hand. See `docs/wave-5/ftc-urls.md` (TBD).
 
 [
-  %{
-    type_key: "franchise_v1",
-    source_url:
-      "https://www.ftc.go.kr/www/cop/bbs/selectBoardList.do?bbsId=BBSMSTR_000000002320&key=153",
-    title: "가맹사업 표준계약서"
-  },
-  %{
-    type_key: "supply_v1",
-    source_url:
-      "https://www.ftc.go.kr/www/cop/bbs/selectBoardList.do?bbsId=BBSMSTR_000000002320&key=153",
-    title: "하도급거래 표준계약서"
-  },
   %{
     type_key: "service_agreement_v1",
     source_url:

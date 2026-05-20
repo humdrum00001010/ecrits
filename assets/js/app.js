@@ -24,19 +24,77 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/contract"
 import topbar from "../vendor/topbar"
+import {Rhwp} from "./rhwp"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+
+const DirectR2Upload = {
+  mounted() {
+    this.el.addEventListener("change", event => this.upload(event))
+  },
+
+  async upload(event) {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    try {
+      topbar.show(300)
+
+      const prepare = await this.pushEventReply("document.direct_upload.prepare", {
+        file_name: file.name,
+        mime_type: file.type || "application/octet-stream",
+        byte_size: file.size,
+      })
+      if (!prepare?.ok) throw new Error(prepare?.error || "direct upload prepare failed")
+
+      const put = await fetch(prepare.upload_url, {
+        method: "PUT",
+        headers: {"content-type": file.type || "application/octet-stream"},
+        body: file,
+      })
+      if (!put.ok) throw new Error(`R2 upload failed: HTTP ${put.status}`)
+
+      const sha256 = await this.sha256Hex(file)
+      const complete = await this.pushEventReply("document.direct_upload.complete", {
+        object_key: prepare.object_key,
+        file_name: file.name,
+        mime_type: file.type || "application/octet-stream",
+        byte_size: file.size,
+        sha256,
+      })
+      if (!complete?.ok) throw new Error(complete?.error || "direct upload completion failed")
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error))
+    } finally {
+      event.target.value = ""
+      topbar.hide()
+    }
+  },
+
+  pushEventReply(event, payload) {
+    return new Promise(resolve => this.pushEvent(event, payload, resolve))
+  },
+
+  async sha256Hex(file) {
+    const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer())
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")
+  },
+}
 
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks},
+  hooks: {...colocatedHooks, Rhwp, DirectR2Upload},
 })
 
 // Show progress bar on live navigation and form submits
 topbar.config({barColors: {0: "#29d"}, shadowColor: "rgba(0, 0, 0, .3)"})
 window.addEventListener("phx:page-loading-start", _info => topbar.show(300))
 window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
+
+window.addEventListener("phx:open-document-upload-picker", () => {
+  document.querySelector("[data-role='document-upload-file-input']")?.click()
+})
 
 // connect if there are any LiveViews on the page
 liveSocket.connect()
@@ -81,4 +139,3 @@ if (process.env.NODE_ENV === "development") {
     window.liveReloader = reloader
   })
 }
-

@@ -16,6 +16,7 @@ defmodule Contract.Documents do
   import Ecto.Query
 
   alias Contract.Context
+  alias Contract.ContractTypes
   alias Contract.Documents.Document
   alias Contract.Repo
   alias Contract.Types, as: T
@@ -149,6 +150,7 @@ defmodule Contract.Documents do
       |> stringify_keys()
       |> Map.drop(["matter_id", "document_id"])
       |> Map.put("owner_id", user_id)
+      |> put_document_type_attrs()
 
     document = document_with_optional_id(attrs)
 
@@ -185,7 +187,7 @@ defmodule Contract.Documents do
   def set_type(%Context{} = scope, document_id, type_key) when is_binary(type_key) do
     with {:ok, doc} <- get(scope, document_id) do
       doc
-      |> Document.changeset(%{"type_key" => type_key})
+      |> Document.changeset(Map.merge(type_attrs(type_key), %{"state_snapshot" => %{}}))
       |> Repo.update()
     end
   end
@@ -229,9 +231,18 @@ defmodule Contract.Documents do
         true -> nil
       end
 
+    empty_snapshot = %{}
+
     from(d in Document,
       where: d.id == ^document_id,
-      update: [set: [type_key: ^cast, updated_at: ^now()]]
+      update: [
+        set: [
+          type_key: ^cast,
+          document_type_id: ^document_type_id(cast),
+          state_snapshot: ^empty_snapshot,
+          updated_at: ^now()
+        ]
+      ]
     )
     |> Repo.update_all([])
 
@@ -307,6 +318,28 @@ defmodule Contract.Documents do
   end
 
   def touch_revision(_, _), do: :ok
+
+  defp put_document_type_attrs(%{"type_key" => type_key} = attrs) do
+    Map.merge(attrs, type_attrs(type_key))
+  end
+
+  defp put_document_type_attrs(attrs), do: attrs
+
+  defp type_attrs(type_key) when is_binary(type_key) and type_key != "" do
+    %{"type_key" => type_key, "document_type_id" => document_type_id(type_key)}
+  end
+
+  defp type_attrs(_type_key), do: %{"type_key" => nil, "document_type_id" => nil}
+
+  defp document_type_id(nil), do: nil
+  defp document_type_id(""), do: nil
+
+  defp document_type_id(type_key) when is_binary(type_key) do
+    case ContractTypes.document_type_id_for_key(type_key) do
+      {:ok, id} -> id
+      {:error, _reason} -> nil
+    end
+  end
 
   # ----------------------------------------------------------------------------
   # search/2 — substring title search for the command palette

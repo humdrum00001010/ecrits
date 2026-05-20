@@ -149,8 +149,14 @@ defmodule Contract.IO.UpstageTest do
   describe "normalize_elements/1" do
     test "maps every Upstage category onto the right node kind (with paragraph fallback)" do
       cases =
-        [{"paragraph", :paragraph}, {"list", :list}, {"list_item", :list_item},
-         {"table", :table}, {"figure", :figure}, {"obscure-thing", :paragraph}] ++
+        [
+          {"paragraph", :paragraph},
+          {"list", :list},
+          {"list_item", :list_item},
+          {"table", :table},
+          {"figure", :figure},
+          {"obscure-thing", :paragraph}
+        ] ++
           for(level <- 1..6, do: {"heading#{level}", :heading})
 
       for {cat, kind} <- cases do

@@ -170,8 +170,8 @@ async function run(): Promise<void> {
     await openDocument(page);
 
     // eslint-disable-next-line no-console
-    console.log('Dispatching start_type_conversion → franchise_v1');
-    await dispatchStartTypeConversion(page, 'franchise_v1');
+    console.log('Dispatching start_type_conversion → service_agreement_v1');
+    await dispatchStartTypeConversion(page, 'service_agreement_v1');
     await waitForWizard(page);
     await page.waitForTimeout(500);
 
@@ -181,7 +181,7 @@ async function run(): Promise<void> {
     // so step 3's "Create variant" button is no longer disabled.
     const targetSelect = page.locator('[data-role="migration-target-select"]');
     if (await targetSelect.count() > 0) {
-      await targetSelect.selectOption('franchise_v1');
+      await targetSelect.selectOption('service_agreement_v1');
       await page.waitForTimeout(300);
     }
 

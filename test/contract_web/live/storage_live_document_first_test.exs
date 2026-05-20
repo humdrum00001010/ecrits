@@ -19,15 +19,28 @@ defmodule ContractWeb.StorageLiveDocumentFirstTest do
 
   setup :register_and_log_in_user
 
-  test "새 문서 navigates to /studio without minting a Document", %{
+  test "새 문서 is only a /studio entry point and never a document-type picker", %{
     conn: conn,
     scope: scope
   } do
-    {:ok, lv, _html} = live(conn, ~p"/storage")
+    {:ok, lv, html} = live(conn, ~p"/storage")
 
     assert Documents.list_recent_for_scope(scope, 5) == []
 
-    lv |> element(~s(button[data-role="dashboard-new-document"])) |> render_click()
+    assert html =~ ~s(data-role="dashboard-new-document")
+    assert html =~ ~s(href="/studio")
+
+    refute html =~ ~s(data-role="dashboard-new-document-picker")
+    refute html =~ ~s(data-role="dashboard-new-document-option")
+    refute html =~ ~s(data-role="dashboard-new-document-upload")
+    refute html =~ ~s(data-role="dashboard-upload-trigger")
+    refute html =~ ~s(data-role="dashboard-upload-input")
+    refute html =~ ~s(phx-click="new_document")
+    refute html =~ ~s(phx-change="contract_upload_validate")
+    refute html =~ ~s(phx-value-type_key)
+    refute html =~ "계약서 업로드"
+
+    lv |> element(~s(a[data-role="dashboard-new-document"][href="/studio"])) |> render_click()
 
     # The storage surface must NOT create a Document — that responsibility
     # moved to /studio's Canvas.Empty surface.

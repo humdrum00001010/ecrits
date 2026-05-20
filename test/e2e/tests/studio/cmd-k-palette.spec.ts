@@ -11,7 +11,8 @@ import { seedDocumentBundle } from '../../fixtures/seeds';
  * Scenario 6 — Cmd+K palette → set contract type.
  *
  * Open the command palette → type "set contract type" → Enter →
- * type-picker modal → pick `franchise_v1` → `documents.type_key` updates.
+ * type-picker modal → pick `service_agreement_v1` →
+ * `documents.type_key` updates.
  *
  * The Cmd+K palette is a desktop-only interaction (chord keyboard
  * shortcut). On mobile the equivalent is the chat-command button — per
@@ -89,18 +90,18 @@ test.describe('Scenario 6: Cmd+K palette (mobile: chat-command button)', () => {
       const picker = page.locator('[data-role="type-picker"]').first();
       await expect(picker).toBeVisible({ timeout: 5_000 });
 
-      // Pick franchise_v1.
-      await picker.getByText(/franchise_v1/i).first().click();
+      // Pick a supported standard type.
+      await picker.getByText(/service_agreement_v1/i).first().click();
 
       // Confirm the DB now shows the new type_key.
       const docs = await pollUntil(
         () => getDocuments(request),
         (rows) =>
           rows.some((d) => d.id === document.id && /franchise/i.test(d.type_key ?? '')),
-        { timeoutMs: 8_000, label: 'documents.type_key updated to franchise_v1' }
+        { timeoutMs: 8_000, label: 'documents.type_key updated to service_agreement_v1' }
       );
       const updated = docs.find((d) => d.id === document.id);
-      expect(updated?.type_key).toMatch(/franchise/i);
+      expect(updated?.type_key).toBe('service_agreement_v1');
     });
   }
 });

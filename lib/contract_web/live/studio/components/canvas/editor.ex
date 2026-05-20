@@ -74,7 +74,7 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Editor do
     ~H"""
     <div
       id={@id}
-      class="overflow-y-auto p-8 max-w-3xl mx-auto"
+      class="overflow-y-auto px-8 py-6 max-w-5xl mx-auto"
       data-stub="canvas-editor"
       data-mode="editing"
     >

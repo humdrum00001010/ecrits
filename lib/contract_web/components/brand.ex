@@ -12,19 +12,19 @@ defmodule ContractWeb.Brand do
   attr :size, :string, default: "base", values: ~w(sm base lg xl)
 
   @doc """
-  Renders the "Contract Studio" wordmark in Inter with a small emerald accent
-  dot. Designed to read as type, not graphic — so it composes inside dense
-  chrome (navbar, footer) without competing with the page.
+  Renders the "계약기계" wordmark in Inter. Text-only, no accent dot or
+  glyph — owner directive 2026-05-18 "no icon here". Designed to read
+  as type, not graphic — so it composes inside dense chrome (navbar,
+  footer) without competing with the page.
   """
   def wordmark(assigns) do
     ~H"""
     <span class={[
-      "inline-flex items-baseline gap-1 font-semibold tracking-tight chrome",
+      "inline-flex items-baseline font-semibold tracking-tight chrome",
       size_class(@size),
       @class
     ]}>
       <span>계약기계</span>
-      <span class="text-primary" aria-hidden="true">.</span>
     </span>
     """
   end

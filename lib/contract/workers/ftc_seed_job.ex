@@ -36,9 +36,9 @@ defmodule Contract.Workers.FtcSeedJob do
   ## Args
 
       %{
-        "type_key"   => "franchise_v1",
-        "source_url" => "https://www.ftc.go.kr/.../franchise.hwp",
-        "title"      => "가맹사업 표준계약서"
+        "type_key"   => "service_agreement_v1",
+        "source_url" => "https://www.ftc.go.kr/.../service.hwp",
+        "title"      => "용역위탁 표준계약서"
       }
 
   ## Failure handling

@@ -47,127 +47,14 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Empty do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :can_write?, can_write?(assigns.current_scope))
-
     ~H"""
     <div
       id={@id}
-      class="overflow-auto flex items-center justify-center"
+      class="min-h-0"
       data-stub="canvas-empty"
       data-role="canvas-empty"
     >
-      <div class="max-w-md mx-auto py-24 text-center">
-        <img
-          src={~p"/images/landing/dashboard-empty.png"}
-          alt={dgettext("studio", "An empty folder line drawing — no document selected.")}
-          class="mx-auto w-32 sm:w-40 h-auto object-contain opacity-90"
-          width="1024"
-          height="1024"
-          loading="lazy"
-        />
-
-        <div
-          :if={@can_write?}
-          class="mt-6 flex flex-col gap-3"
-          data-role="canvas-empty-actions"
-        >
-          <%!-- ------------------------------------------------------------ --%>
-          <%!-- 계약서 업로드 — inline dropzone, NOT a modal. The form fires --%>
-          <%!-- the existing document.upload / document.upload.validate     --%>
-          <%!-- events on the parent StudioLive, which routes them through  --%>
-          <%!-- the :upload_document Command → real Blobs/SourceDocuments    --%>
-          <%!-- pipeline.                                                    --%>
-          <%!-- ------------------------------------------------------------ --%>
-          <.form
-            :let={_f}
-            for={%{}}
-            as={:upload}
-            id={"#{@id}-upload-form"}
-            phx-submit="document.upload"
-            phx-change="document.upload.validate"
-            data-role="canvas-empty-upload-form"
-            class="text-left"
-          >
-            <label
-              :if={@document_upload}
-              for={@document_upload.ref}
-              class="studio-empty-upload__dropzone"
-              data-role="canvas-empty-upload-dropzone"
-            >
-              <.live_file_input
-                upload={@document_upload}
-                class="sr-only"
-                data-role="canvas-empty-upload-input"
-              />
-              <span class="studio-empty-upload__dropzone-text">
-                {dgettext("studio", "계약서 업로드")}
-              </span>
-              <span class="studio-empty-upload__dropzone-hint">
-                {dgettext("studio", "PDF · DOCX · HWP · HWPX")}
-              </span>
-            </label>
-
-            <ul
-              :if={@document_upload && @document_upload.entries != []}
-              class="studio-empty-upload__entries"
-            >
-              <li
-                :for={entry <- @document_upload.entries}
-                class="studio-empty-upload__entry"
-              >
-                <span class="studio-empty-upload__entry-name">{entry.client_name}</span>
-                <span class="studio-empty-upload__entry-progress">{entry.progress}%</span>
-              </li>
-            </ul>
-          </.form>
-
-          <%!-- ------------------------------------------------------------ --%>
-          <%!-- 빈 문서로 시작 / 최근 문서 열기 / 에이전트와 먼저 상의하기   --%>
-          <%!-- ------------------------------------------------------------ --%>
-          <div class="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm">
-            <button
-              type="button"
-              phx-click="agent_option_picked"
-              phx-value-key="blank"
-              class="link link-primary link-hover font-medium"
-              data-role="canvas-empty-new-document"
-            >
-              {dgettext("studio", "빈 문서로 시작")}
-            </button>
-            <span class="text-base-content/30" aria-hidden="true">·</span>
-            <button
-              type="button"
-              phx-click="agent_option_picked"
-              phx-value-key="recent"
-              class="link link-primary link-hover font-medium"
-              data-role="canvas-empty-recent"
-            >
-              {dgettext("studio", "최근 문서 열기")}
-            </button>
-            <span class="text-base-content/30" aria-hidden="true">·</span>
-            <button
-              type="button"
-              phx-click={JS.focus(to: "#chat-rail-textarea")}
-              class="link link-primary link-hover font-medium"
-              data-role="canvas-empty-discuss"
-            >
-              {dgettext("studio", "에이전트와 먼저 상의하기")}
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
     """
   end
-
-  # ---------------------------------------------------------------------------
-  # Persona perm check
-  #
-  # The :viewer persona has perms `[:read]`. Every other persona
-  # (:lawyer, :paralegal, :agent_supervised, :admin) carries `:write`. So
-  # "can use the inline create/import actions" maps to "has :write".
-  # ---------------------------------------------------------------------------
-
-  defp can_write?(%{perms: perms}) when is_list(perms), do: :write in perms
-  defp can_write?(_), do: false
 end
