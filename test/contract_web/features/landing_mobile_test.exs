@@ -26,7 +26,7 @@ defmodule ContractWeb.LandingMobileTest do
     session
     |> Wallaby.Browser.resize_window(375, 667)
     |> Wallaby.Browser.visit("/")
-    |> assert_has(Query.css(".landing-v31__block", count: 3))
+    |> assert_has(Query.css("[data-landing-block]", count: 3))
     |> assert_has(Query.css("#how-it-works"))
   end
 end

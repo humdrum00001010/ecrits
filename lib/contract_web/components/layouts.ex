@@ -110,33 +110,43 @@ defmodule ContractWeb.Layouts do
   """
   def top_nav(assigns) do
     ~H"""
-    <header class="topbar">
-      <div class="inline-flex min-w-0 items-center gap-6">
+    <header class="navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px] flex-nowrap border-b border-base-300 bg-base-200/90 supports-[backdrop-filter]:backdrop-blur-md px-7 max-md:px-4">
+      <div class="navbar-start gap-6 min-w-0">
         <.link
           navigate={if signed_in?(@current_scope), do: ~p"/storage", else: ~p"/"}
-          class="brand"
+          class="link link-hover inline-flex items-center gap-2 min-w-0 text-base-content text-sm font-semibold leading-none"
           aria-label="계약기계"
         >
-          <img src={~p"/assets/icons/brand-mark.svg"} alt="" class="brand__icon" />
-          <span>계약기계</span>
+          <img
+            src={~p"/assets/icons/brand-mark.svg"}
+            alt=""
+            class="block w-[22px] h-[22px] flex-none dark:invert dark:brightness-110"
+          />
+          <span class="inline-block leading-none">계약기계</span>
         </.link>
 
-        <nav :if={signed_in?(@current_scope)} class="topbar__nav" aria-label="계약기계">
-          <.link navigate={~p"/storage"} class="is-active">
-            보관함
-          </.link>
-        </nav>
+        <ul
+          :if={signed_in?(@current_scope)}
+          class="menu menu-horizontal p-0 text-[13px]"
+          aria-label="계약기계"
+        >
+          <li>
+            <.link navigate={~p"/storage"} class="font-semibold">
+              보관함
+            </.link>
+          </li>
+        </ul>
       </div>
 
-      <div class="inline-flex items-center gap-3">
+      <div class="navbar-end gap-3">
         <.theme_toggle />
         <.user_menu :if={signed_in?(@current_scope)} current_scope={@current_scope} />
 
         <div :if={!signed_in?(@current_scope)} class="inline-flex items-center gap-2">
-          <.link navigate={~p"/users/log-in"} class="btn btn-ghost btn-sm">
+          <.link navigate={~p"/users/log-in"} class="btn btn-ghost btn-sm h-9 min-h-9">
             {dgettext("layouts", "Log in")}
           </.link>
-          <.link navigate={~p"/users/register"} class="btn btn-primary btn-sm">
+          <.link navigate={~p"/users/register"} class="btn btn-primary btn-sm h-9 min-h-9">
             {dgettext("layouts", "Register")}
           </.link>
         </div>
@@ -162,7 +172,7 @@ defmodule ContractWeb.Layouts do
     ~H"""
     <details class="relative" data-role="user-menu">
       <summary
-        class="list-none inline-flex items-center justify-center h-9 w-9 rounded-full bg-base-200 text-base-content/80 hover:bg-base-300 hover:text-base-content cursor-pointer font-semibold text-sm chrome select-none"
+        class="list-none inline-flex items-center justify-center h-9 w-9 rounded-full bg-base-200 text-base-content/80 hover:bg-base-300 hover:text-base-content cursor-pointer font-semibold text-sm font-sans select-none"
         aria-label={dgettext("layouts", "Account menu for %{email}", email: @email)}
         title={@email}
       >
@@ -314,7 +324,7 @@ defmodule ContractWeb.Layouts do
 
   def flash_group(assigns) do
     ~H"""
-    <div id={@id} aria-live="polite">
+    <div id={@id} aria-live="polite" phx-hook=".SessionStaleToggle">
       <.flash kind={:info} flash={@flash} />
       <.flash kind={:error} flash={@flash} />
 
@@ -341,6 +351,43 @@ defmodule ContractWeb.Layouts do
         {dgettext("layouts", "Attempting to reconnect")}
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
+
+      <%!-- Same look as #client-error / #server-error above, but driven
+           by server-side push_event ("session-stale" / "session-recovered")
+           from Studio's `:session_stale` handler (lease/Session lifecycle —
+           NOT a WebSocket drop, which is what the two above cover). --%>
+      <.flash
+        id="session-stale"
+        kind={:error}
+        title={dgettext("layouts", "Reconnecting document session")}
+        hidden
+      >
+        {dgettext("layouts", "Attempting to reconnect")}
+        <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
+      </.flash>
+
+      <script :type={Phoenix.LiveView.ColocatedHook} name=".SessionStaleToggle">
+        export default {
+          mounted() {
+            const el = () => document.getElementById("session-stale")
+            this.onStale = () => {
+              const n = el(); if (!n) return
+              n.removeAttribute("hidden")
+              n.classList.remove("hidden")
+            }
+            this.onRecovered = () => {
+              const n = el(); if (!n) return
+              n.setAttribute("hidden", "")
+            }
+            window.addEventListener("phx:session-stale", this.onStale)
+            window.addEventListener("phx:session-recovered", this.onRecovered)
+          },
+          destroyed() {
+            if (this.onStale) window.removeEventListener("phx:session-stale", this.onStale)
+            if (this.onRecovered) window.removeEventListener("phx:session-recovered", this.onRecovered)
+          }
+        }
+      </script>
     </div>
     """
   end

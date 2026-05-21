@@ -32,9 +32,18 @@ defmodule Contract.Application do
          :default => [size: 10, count: 1, conn_max_idle_time: 30_000]
        }},
       {Oban, Application.fetch_env!(:contract, Oban)},
+      # ETS table owner for the /mcp per-bearer rate limiter. Starts before
+      # the endpoint so the table exists by the time the first request lands.
+      ContractWeb.Plug.RateLimitMCP.Bucket,
       ContractWeb.Endpoint,
       # Wave 1A2 Agent runtime: per-run GenServer registry + transient supervisor.
       {Registry, keys: :unique, name: Contract.Agent.Registry},
+      # Task #139 — scope-keyed registry so MCP doc.* handlers can look
+      # up the active run for a (user_id, document_id) without the run
+      # id appearing in the route_ref bearer. Duplicate keys allowed so
+      # two RunServers for the same scope can coexist briefly during
+      # turn handoff; lookup picks the most recently registered one.
+      {Registry, keys: :duplicate, name: Contract.Agent.ScopeRegistry},
       Contract.Agent.RunSupervisor,
       # Wave 2 Persistence runtime: per-document Session registry + transient supervisor.
       {Registry, keys: :unique, name: Contract.Session.Registry},

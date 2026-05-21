@@ -308,11 +308,13 @@ defmodule Contract.StudioTest do
                Contract.Gateway.verify_route_ref(s, token)
     end
 
-    test "embeds agent_run_id when present in opts" do
-      # Unclear behavior pin: SPEC.md §16 lists agent_run_id as a
-      # legal RouteRef payload field. Pin that Studio.route_ref/3
-      # propagates it through to the signed token so a downstream
-      # tool call can correlate back to the in-flight run.
+    test "does NOT embed agent_run_id in the signed token (task #139 — deterministic bearer)" do
+      # Task #139 — the route_ref bearer is intentionally deterministic
+      # per (user, doc, thread) so OpenAI's hosted MCP tools/list cache
+      # (keyed by bearer) hits across turns. `agent_run_id` is no
+      # longer part of the signed payload; it's reconstructed
+      # server-side at submit_change time via
+      # `Contract.Agent.RunServer.whereis_for_scope/2`.
       s = scope()
       {:ok, doc} = Documents.create(s, %{title: "Agent route_ref"})
       run_id = Ecto.UUID.generate()
@@ -320,8 +322,23 @@ defmodule Contract.StudioTest do
       assert {:ok, token} =
                Studio.route_ref(s, doc, purpose: "agent", agent_run_id: run_id)
 
-      assert {:ok, %RouteRef{agent_run_id: ^run_id}} =
+      assert {:ok, %RouteRef{agent_run_id: nil}} =
                Contract.Gateway.verify_route_ref(s, token)
+    end
+
+    test "two mints with the same scope produce byte-equal tokens" do
+      # Task #139 — bearer determinism is the whole point: OpenAI caches
+      # tools/list keyed by bearer, so a fresh token per turn busts the
+      # cache (~700ms cold rebuild on every first message).
+      s = scope()
+      {:ok, doc} = Documents.create(s, %{title: "Determinism doc"})
+      thread_id = Ecto.UUID.generate()
+
+      opts = [purpose: "agent_doc_mcp", scopes: ["agent_doc"], chat_thread_id: thread_id]
+
+      assert {:ok, token_a} = Studio.route_ref(s, doc, opts)
+      assert {:ok, token_b} = Studio.route_ref(s, doc, opts)
+      assert token_a == token_b
     end
 
     test "accepts a ChatThread and embeds chat_thread_id (no document_id)" do

@@ -5,7 +5,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
   Responsibilities:
 
     * Renders the streamed conversation (`@streams.chat_messages`) — both
-      user-authored messages and agent bubbles (streamed + completed).
+      user-authored messages and agent prose (streamed + completed).
     * Mounts the `GrillRail` sub-LiveComponent when the latest agent
       message has unresolved `mode: "grill"` ask-marks.
     * Owns the textarea + send button input footer.
@@ -68,7 +68,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
       data-layout={if @mobile?, do: "mobile", else: "desktop"}
       data-stub="chat-rail"
       class={[
-        "flex flex-col bg-base-200 text-base-content min-h-0 h-full w-full",
+        "group/chat flex flex-col bg-base-200 text-base-content min-h-0 h-full w-full",
         not @mobile? && "shrink-0 border-l border-base-300",
         @mobile? && "w-full flex-1 h-full"
       ]}
@@ -112,163 +112,194 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
         />
       </div>
 
-      <%!-- Streamed conversation. The wrapper uses `:has()` to hide the
-           welcome panel as soon as the stream contains a message. --%>
+      <%!-- Welcome panels (siblings of the stream so the stream can be a
+           pure phx-update="stream" container). Hidden via the `group/chat`
+           on the aside as soon as any chat-message appears in the stream. --%>
       <div
-        id={"#{@id}-scroll"}
-        data-role="chat-scroll"
-        class="flex-1 min-h-0 overflow-y-auto px-4 py-3 group/chat"
+        :if={not @no_document?}
+        id={"#{@id}-welcome"}
+        data-role="chat-welcome"
+        class="shrink-0 px-1.5 py-6 text-sm text-base-content/60 italic text-center group-has-[[data-role=chat-message]]/chat:hidden"
+      >
+        {dgettext(
+          "studio",
+          "에이전트에게 무엇이든 물어보세요 — 초안, 마크, 내보내기."
+        )}
+      </div>
+
+      <div
+        :if={@no_document?}
+        id={"#{@id}-no-doc-welcome"}
+        data-role="chat-no-doc-welcome"
+        class="shrink-0 px-1.5 py-2 group-has-[[data-role=chat-message]]/chat:hidden flex flex-col gap-3 max-w-[88%] self-start"
       >
         <div
-          :if={not @no_document?}
-          id={"#{@id}-welcome"}
-          data-role="chat-welcome"
-          class="text-sm text-base-content/60 italic text-center py-8 group-has-[[data-role=chat-message]]/chat:hidden"
+          data-role="chat-no-doc-message"
+          class="rounded-lg rounded-tl-sm bg-base-100 border border-base-300 text-base-content text-sm px-3 py-2"
         >
-          {dgettext(
-            "studio",
-            "에이전트에게 무엇이든 물어보세요 — 초안, 마크, 내보내기."
-          )}
-        </div>
+          <p class="mb-2">{dgettext("studio", "새 문서를 시작합니다. 어떻게 시작할까요?")}</p>
+          <ol class="list-decimal list-inside space-y-1 marker:text-base-content/60">
+            <li>
+              <strong>{dgettext("studio", "최근 문서 열기")}</strong>
+              <span class="text-base-content/70">
+                {dgettext("studio", " — 최근 작업한 문서로 이동")}
+              </span>
+            </li>
+            <li>
+              <strong>{dgettext("studio", "빈 계약서 만들기")}</strong>
+              <span class="text-base-content/70">
+                {dgettext("studio", " — 처음부터 작성")}
+              </span>
+            </li>
+            <li>
+              <strong>{dgettext("studio", "논의에서 시작")}</strong>
+              <span class="text-base-content/70">
+                {dgettext("studio", " — 사실관계, 거래 배경부터 정리한 뒤 초안")}
+              </span>
+            </li>
+            <li>
+              <strong>{dgettext("studio", "다른 문서에서 변형 만들기")}</strong>
+              <span class="text-base-content/70">
+                {dgettext("studio", " — 기존 문서의 유형 변환")}
+              </span>
+            </li>
+          </ol>
+          <p class="mt-2 text-base-content/70">
+            {dgettext("studio", "무엇으로 시작할까요?")}
+          </p>
 
-        <div
-          :if={@no_document?}
-          id={"#{@id}-no-doc-welcome"}
-          data-role="chat-no-doc-welcome"
-          class="group-has-[[data-role=chat-message]]/chat:hidden flex flex-col gap-3 max-w-[88%] self-start"
-        >
           <div
-            data-role="chat-no-doc-message"
-            class="rounded-lg rounded-tl-sm bg-base-100 border border-base-300 text-base-content text-sm px-3 py-2"
+            class="flex flex-wrap gap-2 mt-3"
+            data-role="chat-no-doc-options"
           >
-            <p class="mb-2">{dgettext("studio", "새 문서를 시작합니다. 어떻게 시작할까요?")}</p>
-            <ol class="list-decimal list-inside space-y-1 marker:text-base-content/60">
-              <li>
-                <strong>{dgettext("studio", "최근 문서 열기")}</strong>
-                <span class="text-base-content/70">
-                  {dgettext("studio", " — 최근 작업한 문서로 이동")}
-                </span>
-              </li>
-              <li>
-                <strong>{dgettext("studio", "빈 계약서 만들기")}</strong>
-                <span class="text-base-content/70">
-                  {dgettext("studio", " — 처음부터 작성")}
-                </span>
-              </li>
-              <li>
-                <strong>{dgettext("studio", "논의에서 시작")}</strong>
-                <span class="text-base-content/70">
-                  {dgettext("studio", " — 사실관계, 거래 배경부터 정리한 뒤 초안")}
-                </span>
-              </li>
-              <li>
-                <strong>{dgettext("studio", "다른 문서에서 변형 만들기")}</strong>
-                <span class="text-base-content/70">
-                  {dgettext("studio", " — 기존 문서의 유형 변환")}
-                </span>
-              </li>
-            </ol>
-            <p class="mt-2 text-base-content/70">
-              {dgettext("studio", "무엇으로 시작할까요?")}
-            </p>
-
-            <div
-              class="flex flex-wrap gap-2 mt-3"
-              data-role="chat-no-doc-options"
+            <button
+              :for={opt <- @start_options}
+              type="button"
+              phx-click="agent_option_picked"
+              phx-value-key={opt.key}
+              data-role="chat-no-doc-option"
+              data-option-key={opt.key}
+              class="btn btn-sm btn-ghost border border-base-300 rounded-full font-normal normal-case shadow-none hover:bg-base-200"
             >
-              <button
-                :for={opt <- @start_options}
-                type="button"
-                phx-click="agent_option_picked"
-                phx-value-key={opt.key}
-                data-role="chat-no-doc-option"
-                data-option-key={opt.key}
-                class="btn btn-sm btn-ghost border border-base-300 rounded-full font-normal normal-case shadow-none hover:bg-base-200"
-              >
-                {opt.label}
-              </button>
-            </div>
+              {opt.label}
+            </button>
           </div>
         </div>
+      </div>
 
-        <div
-          id={"#{@id}-stream"}
-          phx-update="stream"
-          data-role="chat-stream"
-          class="flex flex-col gap-4"
+      <%!-- Streamed conversation. Single scroll + stream container —
+           no inner wrapper. --%>
+      <div
+        id={"#{@id}-stream"}
+        phx-update="stream"
+        data-role="chat-stream"
+        class="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col items-stretch gap-3"
+      >
+        <article
+          :for={{dom_id, msg} <- @streams.chat_messages}
+          id={dom_id}
+          data-role="chat-message"
+          data-message-role={msg_role(msg)}
+          data-message-kind={msg_kind(msg)}
+          data-transient={msg_transient?(msg)}
+          phx-click={tool_call_toggle_event(msg)}
+          phx-keydown={tool_call_toggle_event(msg)}
+          phx-key={tool_call_toggle_key(msg)}
+          phx-value-operation_id={tool_call_toggle_operation_id(msg)}
+          phx-target={tool_call_toggle_target(msg, @myself)}
+          role={tool_call_toggle_role(msg)}
+          tabindex={tool_call_toggle_tabindex(msg)}
+          aria-expanded={tool_call_aria_expanded(@expanded_operation_ids, msg)}
+          aria-controls={tool_call_aria_controls(msg)}
+          class={[
+            "group/message relative flex flex-col items-stretch gap-0.5 w-full",
+            msg_role(msg) == "agent" && "self-start",
+            msg_kind(msg) == "reasoning" && "max-w-[92%]",
+            # Collapse the parent stream's gap-3 between adjacent agent-side
+            # articles so a tool_call row and the agent text that follows
+            # read as a single turn rather than two separate messages.
+            # Negative top margin on the *next* agent article cancels the
+            # gap. Applied via Tailwind's next-sibling variant on this
+            # element when it's an agent article.
+            msg_role(msg) == "agent" && "[&+[data-message-role=agent]]:!-mt-3",
+            tool_call_message?(msg) &&
+              "cursor-pointer focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-base-content/20"
+          ]}
         >
-          <article
-            :for={{dom_id, msg} <- @streams.chat_messages}
-            id={dom_id}
-            data-role="chat-message"
-            data-message-role={msg_role(msg)}
-            data-message-kind={msg_kind(msg)}
-            data-transient={msg_transient?(msg)}
+          <.operation_block
+            :if={msg_operation(msg)}
+            operation={msg_operation(msg)}
+            expanded={operation_expanded?(@expanded_operation_ids, msg, msg_operation(msg))}
+            target={@myself}
+          />
+          <%!-- Reasoning / "thinking" stream — dimmed italic prose,
+               no decoration except the leading sparkles glyph. --%>
+          <div
+            :if={is_nil(msg_operation(msg)) and msg_kind(msg) == "reasoning"}
+            data-role="agent-reasoning"
             class={[
-              "flex items-end gap-2",
-              msg_role(msg) == "user" && "max-w-[88%] self-end ml-auto flex-row-reverse",
-              msg_role(msg) == "agent" && "max-w-full self-stretch"
+              "flex items-start gap-2 text-[12px] whitespace-pre-wrap break-words",
+              "text-base-content/55 italic",
+              msg_transient?(msg) == "true" && "animate-pulse"
             ]}
           >
-            <.operation_block
-              :if={msg_operation(msg)}
-              operation={msg_operation(msg)}
-              expanded={operation_expanded?(@expanded_operation_ids, msg, msg_operation(msg))}
-              target={@myself}
-            />
-            <%!-- Reasoning / "thinking" bubble. Streaming summary from
-                 reasoning models. Dimmed italic w/ a thin left rail. --%>
-            <div
-              :if={is_nil(msg_operation(msg)) and msg_kind(msg) == "reasoning"}
-              data-role="agent-reasoning"
-              class={[
-                "flex items-start gap-2 pl-3 pr-2 py-1 text-[12px] leading-snug whitespace-pre-wrap break-words flex-1",
-                "text-base-content/55 italic border-l border-base-content/15",
-                msg_transient?(msg) == "true" && "animate-pulse"
-              ]}
-            >
-              <.icon name="hero-sparkles" class="size-3.5 shrink-0 mt-0.5 text-base-content/35" />
-              <span data-role="agent-reasoning-text" data-message-id={dom_id}>{msg_body(msg)}</span>
-            </div>
-
-            <%!-- User message: small pill, sharp top-right (chat tail). --%>
-            <div
-              :if={is_nil(msg_operation(msg)) and msg_kind(msg) != "reasoning"
-                   and msg_role(msg) == "user"}
-              class="px-3 py-1.5 bg-primary text-primary-content rounded-2xl rounded-tr-none text-[13px] leading-snug whitespace-pre-wrap break-words"
+            <.icon name="hero-sparkles" class="size-3.5 shrink-0 text-base-content/35" />
+            <span
+              data-role="agent-reasoning-text"
+              data-message-id={dom_id}
             >
               {msg_body(msg)}
-            </div>
+            </span>
+          </div>
 
-            <%!-- Agent message: NO bubble, Zed-style flat prose with
-                 a subtle left-rail accent. The inner `[data-role=
-                 agent-text]` span is the live-streaming target — token
-                 deltas land there via the `agent_text_append` push_event
-                 (see ChatInput hook). --%>
-            <div
-              :if={is_nil(msg_operation(msg)) and msg_kind(msg) != "reasoning"
-                   and msg_role(msg) == "agent"}
-              class={[
-                "flex-1 pl-3 py-0.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words",
-                "border-l-2",
-                msg_transient?(msg) == "true" &&
-                  "text-base-content/60 italic border-base-content/15",
-                msg_transient?(msg) != "true" &&
-                  "text-base-content border-primary/40"
-              ]}
-            >
-              <span data-role="agent-text" data-message-id={dom_id}>{msg_body(msg)}</span>
-            </div>
+          <%!-- User message: full-width rounded card (Codex CLI style).
+               Slightly elevated background distinguishes the input echo
+               from the agent's flat prose without needing a colored fill
+               or a chat-tail pill. --%>
+          <div
+            :if={
+              is_nil(msg_operation(msg)) and msg_kind(msg) != "reasoning" and
+                msg_role(msg) == "user"
+            }
+            class="w-full rounded-md bg-base-300/60 px-3 py-1.5 text-[13px] leading-snug whitespace-pre-wrap break-words text-base-content/95"
+          >
+            {msg_body(msg)}
+          </div>
 
-            <time
-              :if={not is_nil(msg_timestamp(msg)) and msg_kind(msg) != "reasoning"}
-              datetime={msg_timestamp(msg)}
-              class="text-[10px] text-base-content/35 shrink-0 pb-1 whitespace-nowrap"
-            >
-              {format_msg_time(msg_timestamp(msg))}
-            </time>
-          </article>
-        </div>
+          <%!-- Agent message: flat prose, no card. Sits flush at the
+               column edge like ChatGPT / Codex CLI. `agent-text` span is
+               the per-token append target; body is split on \n\n+ into
+               paragraph spans so paragraph breaks render with a real
+               gap instead of being collapsed into one block. --%>
+          <span
+            :if={
+              is_nil(msg_operation(msg)) and msg_kind(msg) != "reasoning" and
+                msg_role(msg) == "agent"
+            }
+            data-role="agent-text"
+            data-message-id={dom_id}
+            class={[
+              "block px-2 py-1.5 text-[14px] leading-relaxed break-words",
+              msg_transient?(msg) == "true" && "text-base-content/60 italic",
+              msg_transient?(msg) != "true" && "text-base-content"
+            ]}
+          >
+            <%= for para <- String.split(msg_body(msg) || "", ~r/\n{2,}/) do %>
+              <span class="block whitespace-pre-wrap [&:not(:last-child)]:mb-3">{para}</span>
+            <% end %>
+          </span>
+
+          <time
+            :if={
+              not is_nil(msg_timestamp(msg)) and msg_kind(msg) != "reasoning" and
+                is_nil(msg_operation(msg))
+            }
+            datetime={msg_timestamp(msg)}
+            class="text-[10px] text-base-content/35 self-end whitespace-nowrap"
+          >
+            {format_msg_time(msg_timestamp(msg))}
+          </time>
+        </article>
       </div>
 
       <%!-- Input footer — icon upload + message input + icon send.
@@ -286,18 +317,10 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
         ]}
         autocomplete="off"
       >
-        <div class="flex items-center gap-1 rounded-md border border-base-300 bg-base-100 pl-1 pr-1 focus-within:border-base-content/40 transition-colors">
-          <button
-            id={"#{@id}-upload"}
-            type="button"
-            data-role="chat-upload"
-            phx-click="agent_option_picked"
-            phx-value-key="upload"
-            class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded text-base-content/50 hover:text-base-content hover:bg-base-200 transition-colors"
-            aria-label={dgettext("studio", "파일 업로드")}
-          >
-            <.icon name="hero-paper-clip" class="size-4" />
-          </button>
+        <%!-- Codex-style composer: full-width textarea on top, a faint
+             meta row underneath (left = upload affordance, right = send
+             arrow). Mono placeholder reads as a CLI prompt. --%>
+        <div class="rounded-md border border-base-300 bg-base-100 focus-within:border-base-content/40 transition-colors">
           <label for={"#{@id}-textarea"} class="sr-only">
             {dgettext("studio", "메시지")}
           </label>
@@ -307,33 +330,48 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             rows="1"
             data-role="chat-textarea"
             data-autosize="true"
-            placeholder={dgettext("studio", "메시지를 입력하세요…")}
-            class="flex-1 min-w-0 h-9 max-h-32 px-2 py-2 bg-transparent border-0 text-sm text-base-content resize-none outline-none focus:outline-none focus:ring-0 focus:shadow-none"
+            placeholder={dgettext("studio", "메시지를 입력하세요 · Enter 보내기, Shift+Enter 줄바꿈")}
+            class="block w-full min-h-[2.25rem] max-h-40 px-3 pt-2 pb-1 bg-transparent border-0 text-[13px] leading-snug text-base-content placeholder:text-base-content/35 resize-none outline-none focus:outline-none focus:ring-0 focus:shadow-none"
           ></textarea>
-          <%= if @agent_status.key == :responding do %>
-            <button
-              id={"#{@id}-send"}
-              type="button"
-              phx-click="cancel_agent"
-              data-role="chat-stop"
-              data-action="stop"
-              class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded bg-base-content text-base-100 hover:bg-base-content/80 transition-colors"
-              aria-label={dgettext("studio", "중지")}
-            >
-              <.icon name="hero-stop" class="size-4" />
-            </button>
-          <% else %>
-            <button
-              id={"#{@id}-send"}
-              type="button"
-              data-role="chat-send"
-              data-action="send"
-              class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded text-base-content/50 hover:text-primary transition-colors"
-              aria-label={dgettext("studio", "보내기")}
-            >
-              <.icon name="hero-paper-airplane" class="size-4" />
-            </button>
-          <% end %>
+          <div class="flex items-center justify-between gap-2 px-2 pb-1.5 pt-0.5 text-[11px] text-base-content/45">
+            <div class="flex items-center gap-1">
+              <button
+                id={"#{@id}-upload"}
+                type="button"
+                data-role="chat-upload"
+                phx-click="agent_option_picked"
+                phx-value-key="upload"
+                class="inline-flex h-6 w-6 items-center justify-center rounded text-base-content/45 hover:text-base-content hover:bg-base-200 transition-colors"
+                aria-label={dgettext("studio", "파일 업로드")}
+              >
+                <.icon name="hero-paper-clip" class="size-3.5" />
+              </button>
+            </div>
+            <%= if @agent_status.key == :responding do %>
+              <button
+                id={"#{@id}-send"}
+                type="button"
+                phx-click="cancel_agent"
+                data-role="chat-stop"
+                data-action="stop"
+                class="inline-flex h-6 w-6 items-center justify-center rounded bg-base-content text-base-100 hover:bg-base-content/80 transition-colors"
+                aria-label={dgettext("studio", "중지")}
+              >
+                <.icon name="hero-stop" class="size-3.5" />
+              </button>
+            <% else %>
+              <button
+                id={"#{@id}-send"}
+                type="button"
+                data-role="chat-send"
+                data-action="send"
+                class="inline-flex h-6 w-6 items-center justify-center rounded text-base-content/45 hover:text-base-content transition-colors"
+                aria-label={dgettext("studio", "보내기")}
+              >
+                <.icon name="hero-paper-airplane" class="size-3.5" />
+              </button>
+            <% end %>
+          </div>
         </div>
       </form>
 
@@ -405,20 +443,37 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
 
             // Live token streaming: per-delta `agent_text_append` events
             // bypass LV's stream-diff cycle (which would batch successive
-            // stream_inserts into one render). We just look up the
-            // bubble's text span by data-message-id and append the piece.
+            // stream_inserts into one render). We split each piece on
+            // double-newlines so paragraph breaks land in their own
+            // child span (matching the SSR shape from chat_rail.ex), and
+            // get a controlled gap via `mb-1.5` instead of a full blank
+            // line from whitespace-pre-wrap.
             this.onAppend = (e) => {
               const id = e.detail && e.detail.message_id
               const piece = e.detail && e.detail.piece
               if (!id || !piece) return
-              const span = document.querySelector(
+              const container = document.querySelector(
                 `[data-role="agent-text"][data-message-id="${id}"]`
               )
-              if (span) span.appendChild(document.createTextNode(piece))
+              if (!container) return
+              const paraClass = "block whitespace-pre-wrap [&:not(:last-child)]:mb-1.5"
+              const mkPara = () => {
+                const s = document.createElement("span")
+                s.className = paraClass
+                container.appendChild(s)
+                return s
+              }
+              let current = container.lastElementChild || mkPara()
+              const parts = piece.split(/\n{2,}/)
+              current.appendChild(document.createTextNode(parts[0]))
+              for (let i = 1; i < parts.length; i++) {
+                current = mkPara()
+                current.appendChild(document.createTextNode(parts[i]))
+              }
             }
             window.addEventListener("phx:agent_text_append", this.onAppend)
 
-            // Same trick for the reasoning bubble. Without this, every
+            // Same trick for the reasoning stream. Without this, every
             // reasoning_summary delta (hundreds per turn) re-sent the
             // entire accumulated buffer through LV diffs and the text
             // arrived in big chunks instead of flowing.
@@ -433,12 +488,13 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
             }
             window.addEventListener("phx:agent_reasoning_append", this.onReasoningAppend)
 
-            // Sticky-bottom auto-scroll. Watches the chat-scroll container
-            // for ANY DOM change (stream_inserts, TextNode appends, etc.)
-            // and pulls the viewport to bottom — but only while the user
-            // is already pinned there. As soon as they scroll up to read
-            // earlier turns we stop forcing them back down.
-            this.scroller = document.querySelector('[data-role="chat-scroll"]')
+            // Sticky-bottom auto-scroll. Watches the chat-stream container
+            // (which is also the scrollable viewport) for ANY DOM change
+            // (stream_inserts, TextNode appends, etc.) and pulls the
+            // viewport to bottom — but only while the user is already
+            // pinned there. As soon as they scroll up to read earlier
+            // turns we stop forcing them back down.
+            this.scroller = document.querySelector('[data-role="chat-stream"]')
             if (this.scroller) {
               this.pinned = true
               const pinThreshold = 80
@@ -505,50 +561,70 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
 
     ~H"""
     <%= if @operation_type == "tool_call" do %>
-      <button
-        id={"tool-trace-#{@operation_id}"}
-        type="button"
-        phx-click="ui.toggle_expand"
-        phx-value-operation_id={@operation_id}
-        phx-target={@target}
-        data-role="tool-trace"
-        data-status={@operation_status}
-        class={[
-          "tool-trace flex w-full items-center gap-2 rounded-md border bg-base-100 px-3 py-1.5 text-left text-sm transition",
-          @operation_status == "running" &&
-            "border-base-300 bg-base-200/60 text-base-content/70 animate-pulse",
-          @operation_status == "completed" &&
-            "border-base-200 text-base-content/75 hover:border-base-300 hover:text-base-content",
-          @operation_status == "failed" &&
-            "border-error/30 bg-error/5 text-error"
-        ]}
-      >
-        <.icon
-          name={tool_trace_icon(@operation_status, @expanded)}
+      <%!-- Codex-style inline tool trace: tiny wrench glyph + dim
+           "Tool: <name>" label. No border, no background — reads as a
+           natural side-note in the conversation flow. A second
+           chevron button on the right appears on hover and toggles the
+           raw details panel underneath. --%>
+      <div class="group/trace relative flex w-full items-center gap-1">
+        <div
+          id={"tool-trace-#{@operation_id}"}
+          data-role="tool-trace"
+          data-status={@operation_status}
           class={[
-            "size-4 shrink-0",
-            @operation_status == "running" && "text-base-content/40",
-            @operation_status == "completed" && "text-success/70",
-            @operation_status == "failed" && "text-error"
+            "tool-trace inline-flex min-w-0 items-center gap-1.5 py-0.5 text-left text-[12px] leading-snug transition",
+            @operation_status == "running" &&
+              "text-base-content/45 animate-pulse",
+            @operation_status == "completed" &&
+              "text-base-content/55 hover:text-base-content/80",
+            @operation_status == "failed" && "text-error/80"
           ]}
-        />
-        <code class="min-w-0 flex-1 truncate font-mono text-[12px] text-base-content/85">
-          {@operation_title}
-        </code>
-        <span
-          :if={@operation_summary != ""}
-          class="shrink-0 text-[11px] text-base-content/50"
         >
-          {@operation_summary}
+          <.icon name="hero-wrench-screwdriver" class="size-3.5 shrink-0 opacity-70" />
+          <span class="truncate">
+            <span class="select-none">Tool: </span><span class="font-mono">{@operation_title}</span>
+            <span
+              :if={@operation_summary != ""}
+              data-role="tool-trace-summary"
+              class="ml-1 text-base-content/40"
+            >{@operation_summary}</span>
+          </span>
+        </div>
+        <span
+          :if={!@expanded}
+          id={"tool-trace-#{@operation_id}-expand"}
+          data-role="tool-trace-expand"
+          title={dgettext("studio", "펼치기")}
+          aria-hidden="true"
+          class={[
+            "absolute right-0 top-1/2 inline-flex size-6 -translate-y-1/2 items-center justify-center text-base-content/55 transition",
+            "opacity-0 hover:text-base-content focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-base-content/25",
+            "group-hover/message:opacity-100 group-hover/trace:opacity-100"
+          ]}
+        >
+          <.icon name="hero-chevron-down" class="size-3" />
         </span>
-      </button>
+      </div>
       <div
         :if={@expanded}
         id={"tool-trace-#{@operation_id}-details"}
         data-role="tool-trace-details"
-        class="border-t border-base-200 bg-base-50 px-3 py-2 text-xs text-base-content/70"
+        class="self-start w-full max-w-full"
       >
-        <pre class="whitespace-pre-wrap break-words leading-relaxed">{operation_details(@operation)}</pre>
+        <div class="rounded-md border border-base-300 bg-base-100 px-3 py-2 font-mono text-[11px] leading-relaxed text-base-content/60 shadow-sm">
+          <pre class="whitespace-pre-wrap break-words">{operation_details(@operation)}</pre>
+        </div>
+        <div data-role="tool-trace-collapse-row" class="flex h-0 justify-center overflow-visible">
+          <span
+            id={"tool-trace-#{@operation_id}-collapse"}
+            data-role="tool-trace-collapse"
+            title={dgettext("studio", "접기")}
+            aria-hidden="true"
+            class="inline-flex size-5 items-center justify-center text-base-content/55 transition hover:text-base-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-base-content/25"
+          >
+            <.icon name="hero-chevron-up" class="size-3" />
+          </span>
+        </div>
       </div>
     <% else %>
       <section
@@ -849,6 +925,62 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
   defp msg_operation(%{"operation" => operation}) when is_map(operation), do: operation
   defp msg_operation(_), do: nil
 
+  defp tool_call_message?(msg), do: match?(%{}, tool_call_operation(msg))
+
+  defp tool_call_toggle_event(msg) do
+    if tool_call_message?(msg), do: "ui.toggle_expand"
+  end
+
+  defp tool_call_toggle_key(msg) do
+    if tool_call_message?(msg), do: "Enter"
+  end
+
+  defp tool_call_toggle_operation_id(msg) do
+    case tool_call_operation(msg) do
+      nil -> nil
+      operation -> operation_id(operation)
+    end
+  end
+
+  defp tool_call_toggle_target(msg, target) do
+    if tool_call_message?(msg), do: target
+  end
+
+  defp tool_call_toggle_role(msg) do
+    if tool_call_message?(msg), do: "button"
+  end
+
+  defp tool_call_toggle_tabindex(msg) do
+    if tool_call_message?(msg), do: "0"
+  end
+
+  defp tool_call_aria_expanded(expanded_ids, msg) do
+    case tool_call_operation(msg) do
+      nil ->
+        nil
+
+      operation ->
+        if operation_expanded?(expanded_ids, msg, operation), do: "true", else: "false"
+    end
+  end
+
+  defp tool_call_aria_controls(msg) do
+    case tool_call_toggle_operation_id(msg) do
+      nil -> nil
+      operation_id -> "tool-trace-#{operation_id}-details"
+    end
+  end
+
+  defp tool_call_operation(msg) do
+    case msg_operation(msg) do
+      operation when is_map(operation) ->
+        if operation_type(operation) == "tool_call", do: operation
+
+      _ ->
+        nil
+    end
+  end
+
   defp operation_expanded?(expanded_ids, msg, operation) do
     operation_id = operation_id(operation)
     MapSet.member?(expanded_ids || MapSet.new(), operation_id) || msg_expanded?(msg)
@@ -1040,35 +1172,47 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
   defp msg_kind(%{kind: kind}) when is_binary(kind), do: kind
   defp msg_kind(_), do: "text"
 
-  defp tool_trace_icon("running", _), do: "hero-arrow-path"
-  defp tool_trace_icon("failed", _), do: "hero-exclamation-triangle"
-  defp tool_trace_icon(_, true), do: "hero-chevron-down"
-  defp tool_trace_icon(_, false), do: "hero-check"
-
   defp msg_body(%{body: body}) when is_binary(body), do: body
-  defp msg_body(%{result: %{body: body}}) when is_binary(body), do: body
-  defp msg_body(%{result: result}) when is_binary(result), do: result
-  defp msg_body(%{event: %{delta: delta}}) when is_binary(delta), do: delta
-  defp msg_body(%{event: %{body: body}}) when is_binary(body), do: body
-  defp msg_body(%{event: %{text: text}}) when is_binary(text), do: text
-  defp msg_body(%{event: text}) when is_binary(text), do: text
+  defp msg_body(%{body: body}) when is_binary(body), do: collapse_blanks(body)
+  defp msg_body(%{result: %{body: body}}) when is_binary(body), do: collapse_blanks(body)
+  defp msg_body(%{result: result}) when is_binary(result), do: collapse_blanks(result)
+  defp msg_body(%{event: %{delta: delta}}) when is_binary(delta), do: collapse_blanks(delta)
+  defp msg_body(%{event: %{body: body}}) when is_binary(body), do: collapse_blanks(body)
+  defp msg_body(%{event: %{text: text}}) when is_binary(text), do: collapse_blanks(text)
+  defp msg_body(%{event: text}) when is_binary(text), do: collapse_blanks(text)
   defp msg_body(_), do: ""
+
+  # `whitespace-pre-wrap` renders every `\n` as a literal line break,
+  # so the model's `\n\n` paragraph breaks read as a full empty line of
+  # line-height. Collapse runs of 2+ newlines to a single one to keep
+  # message density tight without losing paragraph boundaries.
+  defp collapse_blanks(text) when is_binary(text),
+    do: String.replace(text, ~r/\n{2,}/, "\n")
 
   defp msg_timestamp(%{timestamp: %DateTime{} = ts}), do: DateTime.to_iso8601(ts)
   defp msg_timestamp(%{timestamp: ts}) when is_binary(ts), do: ts
   defp msg_timestamp(_), do: nil
 
-  # Compact wall-time HH:MM for the bubble side-marker. Falls back to the
+  # Compact wall-time HH:MM for the message side-marker. Falls back to the
   # raw string if parsing fails so tests / non-iso inputs don't crash.
   defp format_msg_time(nil), do: ""
 
   defp format_msg_time(ts) when is_binary(ts) do
     case DateTime.from_iso8601(ts) do
-      {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
+      {:ok, dt, _} -> format_kst(dt)
       _ -> ts
     end
   end
 
-  defp format_msg_time(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M")
+  defp format_msg_time(%DateTime{} = dt), do: format_kst(dt)
   defp format_msg_time(_), do: ""
+
+  # Render in Korea Standard Time (UTC+9, no DST → safe to hard-shift
+  # without a tzdata dependency). Display-only — the underlying DateTime
+  # stays tagged UTC in the DB.
+  defp format_kst(%DateTime{} = dt) do
+    dt
+    |> DateTime.add(9 * 3600, :second)
+    |> Calendar.strftime("%Y/%m/%d %H:%M")
+  end
 end

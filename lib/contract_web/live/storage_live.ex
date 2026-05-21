@@ -238,18 +238,23 @@ defmodule ContractWeb.StorageLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} variant="default">
-      <main class="dashboard-v31 py-6 sm:py-10">
+      <main
+        data-storage="root"
+        class="flex flex-col gap-5 py-6 text-base-content sm:gap-7 sm:py-10"
+      >
         <%!-- ------------------------------------------------------------ --%>
         <%!-- Title row — H1 + a single action. 새 문서 is only a link to  --%>
         <%!-- StudioLive; Storage must not create or upload documents.     --%>
         <%!-- ------------------------------------------------------------ --%>
-        <header class="dashboard-v31__top">
-          <h1 class="dashboard-v31__title">{dgettext("storage", "모든 문서")}</h1>
+        <header class="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          <h1 class="m-0 text-[clamp(22px,4vw,28px)] font-semibold tracking-tight text-base-content">
+            {dgettext("storage", "모든 문서")}
+          </h1>
 
-          <div class="dashboard-v31__actions">
+          <div class="flex flex-wrap items-center gap-2">
             <.link
               navigate={~p"/studio"}
-              class="dashboard-v31__btn dashboard-v31__btn--primary"
+              class="btn btn-primary"
               data-role="dashboard-new-document"
             >
               {dgettext("storage", "새 문서")}
@@ -257,18 +262,20 @@ defmodule ContractWeb.StorageLive do
           </div>
         </header>
 
-        <nav class="dashboard-v31__tabs flex flex-wrap items-center gap-2" role="tablist">
+        <nav
+          class="tabs tabs-border flex flex-wrap items-center gap-2"
+          role="tablist"
+        >
           <div class="flex items-center gap-2">
-            <span
-              class="dashboard-v31__tab dashboard-v31__tab--active"
-              role="tab"
-              aria-selected="true"
-            >
+            <span class="tab tab-active" role="tab" aria-selected="true">
               {dgettext("storage", "모든 문서")}
             </span>
           </div>
 
-          <div class="ml-auto flex items-center self-center gap-2" data-role="document-selection-actions">
+          <div
+            class="ml-auto flex items-center self-center gap-2"
+            data-role="document-selection-actions"
+          >
             <button
               type="button"
               phx-click="toggle_select_all_documents"
@@ -305,7 +312,7 @@ defmodule ContractWeb.StorageLive do
           <% @documents == [] -> %>
             <section
               id="documents-empty"
-              class="dashboard-v31__empty"
+              class="alert bg-base-100 border border-dashed border-base-300 justify-center text-sm text-base-content/55"
               data-role="dashboard-documents-empty"
             >
               {dgettext(
@@ -314,7 +321,11 @@ defmodule ContractWeb.StorageLive do
               )}
             </section>
           <% true -> %>
-            <section id="document-grid" class="document-grid" data-role="document-grid">
+            <section
+              id="document-grid"
+              data-role="document-grid"
+              class="grid gap-[18px] [grid-template-columns:repeat(auto-fill,minmax(210px,1fr))] max-sm:grid-cols-1"
+            >
               <.document_card
                 :for={doc <- @documents}
                 document={doc}
@@ -345,7 +356,7 @@ defmodule ContractWeb.StorageLive do
     <article
       id={"document-card-#{@document.document_id}"}
       class={[
-        "document-card",
+        "card card-compact group relative grid grid-rows-[160px_auto] overflow-hidden border border-base-300 bg-base-100 text-base-content no-underline transition-all duration-150 hover:-translate-y-0.5 hover:border-base-content/30 hover:shadow-lg focus-within:outline focus-within:outline-2 focus-within:outline-primary focus-within:outline-offset-2 motion-reduce:transform-none motion-reduce:transition-none",
         @selected? && "ring-2 ring-base-content/30"
       ]}
       data-role="document-card"
@@ -357,9 +368,12 @@ defmodule ContractWeb.StorageLive do
       >
       </.link>
 
-      <div class="document-card__thumb">
+      <div
+        data-role="document-card-thumb"
+        class="relative grid place-items-center overflow-hidden border-b border-base-300 bg-base-100"
+      >
         <details
-          class="document-card__menu absolute right-3 top-3 z-30"
+          class="absolute right-2 top-2 z-30 inline-grid place-items-center"
           data-role="document-card-menu"
           onclick="event.stopPropagation()"
         >
@@ -399,36 +413,49 @@ defmodule ContractWeb.StorageLive do
         <%= case @document.preview_lines do %>
           <% [] -> %>
             <div
-              class="document-card__thumb-page document-card__thumb-page--fallback"
               data-role="document-card-preview"
+              class="relative w-[72%] h-[82%] flex items-start translate-y-2 overflow-hidden rounded-lg border border-base-300 bg-white shadow-[0_14px_34px_rgb(15_23_42/12%)] pointer-events-none"
             >
-              <div class="document-card__thumb--lines">
-                <span class="document-card__thumb-line document-card__thumb-line--heading">
+              <div
+                data-role="document-card-thumb-lines"
+                class="block w-full select-none pointer-events-none px-3.5 pt-3 text-left font-sans text-[10.5px] leading-snug text-base-content"
+              >
+                <span class="block first:mt-1.5 mb-1 overflow-hidden whitespace-nowrap text-ellipsis font-semibold text-[11.5px] opacity-[0.92]">
                   {@document.title}
                 </span>
               </div>
             </div>
           <% lines -> %>
-            <div class="document-card__thumb-page" data-role="document-card-preview">
-              <div class="document-card__thumb--lines">
+            <div
+              data-role="document-card-preview"
+              class="relative w-[72%] h-[82%] translate-y-2 overflow-hidden rounded-lg border border-base-300 bg-white shadow-[0_14px_34px_rgb(15_23_42/12%)] pointer-events-none"
+            >
+              <div
+                data-role="document-card-thumb-lines"
+                class="block select-none pointer-events-none px-3.5 pt-3 text-left font-sans text-[10.5px] leading-snug text-base-content"
+              >
                 <span
                   :for={line <- lines}
                   class={[
-                    "document-card__thumb-line",
-                    line.kind == :heading && "document-card__thumb-line--heading"
+                    "block mb-1 overflow-hidden whitespace-nowrap text-ellipsis opacity-[0.78] first:mt-0",
+                    line.kind == :heading && "font-semibold text-[11.5px] opacity-[0.92] mt-1.5"
                   ]}
                 >
                   {line.text}
                 </span>
               </div>
             </div>
-            <div class="document-card__thumb-fade"></div>
+            <div class="pointer-events-none absolute inset-x-0 bottom-0 h-[38px] bg-gradient-to-b from-transparent to-base-100"></div>
         <% end %>
       </div>
 
-      <div class="document-card__body relative z-10 pointer-events-none">
-        <h2 class="document-card__title">{@document.title}</h2>
-        <time class="document-card__updated">{format_date(@document.updated_at)}</time>
+      <div class="card-body relative z-10 gap-1.5 pointer-events-none">
+        <h2 class="card-title text-[15px] leading-snug">
+          {@document.title}
+        </h2>
+        <time class="text-xs text-base-content/45 tabular-nums">
+          {format_date(@document.updated_at)}
+        </time>
       </div>
     </article>
     """

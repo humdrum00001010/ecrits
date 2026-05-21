@@ -1110,6 +1110,7 @@ defmodule Contract.Session.Reducer do
 
   defp build_ops_and_marks(%Command{kind: :edit_text} = command, _state) do
     payload = normalize_payload(command.payload)
+
     ops =
       payload
       |> Map.get(:ops, [])

@@ -76,6 +76,13 @@ config :contract, :openai,
 config :contract, :mcp,
   public_base_url: System.get_env("MCP_PUBLIC_BASE_URL", "https://contract.cloudxyz.org")
 
+# Per-bearer rate limit for /mcp. Sanity cap, not fairness — see
+# `ContractWeb.Plug.RateLimitMCP`. Both knobs are runtime-readable so
+# config/runtime.exs or tests can override without recompiling.
+config :contract, ContractWeb.Plug.RateLimitMCP,
+  limit: 120,
+  window_ms: 60_000
+
 config :contract, :law_mcp,
   endpoint: System.get_env("LAW_MCP_URL", "https://korean-law-mcp.fly.dev/mcp"),
   oc: System.get_env("LAW_OC", "openapi")

@@ -130,8 +130,7 @@ config :contract, :openai,
   reasoning_effort: System.get_env("OPENAI_REASONING_EFFORT", "low")
 
 if System.get_env("OPENAI_API_KEY") not in [nil, ""] do
-  config :contract, :openai,
-    api_key: System.fetch_env!("OPENAI_API_KEY")
+  config :contract, :openai, api_key: System.fetch_env!("OPENAI_API_KEY")
 end
 
 if System.get_env("UPSTAGE_API_KEY") not in [nil, ""] do

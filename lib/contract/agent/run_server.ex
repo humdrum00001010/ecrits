@@ -12,8 +12,10 @@ defmodule Contract.Agent.RunServer do
   require Logger
 
   alias Contract.Agent
+  alias Contract.Context
 
   @registry Contract.Agent.Registry
+  @scope_registry Contract.Agent.ScopeRegistry
   @pubsub Contract.PubSub
 
   defstruct [
@@ -53,6 +55,33 @@ defmodule Contract.Agent.RunServer do
     end
   end
 
+  @doc """
+  Returns the most recently registered `{run_id, pid}` for the
+  `(user_id, document_id)` scope, or `nil` if no run is active.
+
+  Used by `Contract.MCP` to recover the per-turn `agent_run_id` from a
+  deterministic route_ref bearer that intentionally does NOT carry the
+  run id (task #139). Picks the freshest entry because two RunServers
+  can briefly coexist during turn handoff.
+  """
+  @spec whereis_for_scope(binary() | nil, binary() | nil) :: {binary(), pid()} | nil
+  def whereis_for_scope(user_id, document_id)
+      when is_binary(user_id) and is_binary(document_id) do
+    @scope_registry
+    |> Registry.lookup({user_id, document_id})
+    |> Enum.filter(fn {pid, _value} -> Process.alive?(pid) end)
+    |> Enum.max_by(
+      fn {_pid, %{registered_at: ts}} -> ts end,
+      fn -> nil end
+    )
+    |> case do
+      nil -> nil
+      {pid, %{run_id: run_id}} -> {run_id, pid}
+    end
+  end
+
+  def whereis_for_scope(_user_id, _document_id), do: nil
+
   def get_run(run_id) do
     case whereis(run_id) do
       nil -> {:error, :not_found}
@@ -76,6 +105,13 @@ defmodule Contract.Agent.RunServer do
     action = Keyword.fetch!(args, :action)
     test_pid = Keyword.get(args, :test_pid)
 
+    # Task #139 — register under the (user_id, document_id) scope so
+    # MCP doc.* handlers can recover the run id from a deterministic
+    # route_ref bearer. Skipped when either id is missing (test runs,
+    # legacy code paths) — those cases fall through to the
+    # actor_type=:user code path on the MCP side.
+    _ = register_scope(ctx, action, run.id)
+
     state = %__MODULE__{
       run: run,
       ctx: ctx,
@@ -86,6 +122,18 @@ defmodule Contract.Agent.RunServer do
 
     {:ok, state, {:continue, :start_stream}}
   end
+
+  defp register_scope(%Context{user: %{id: user_id}}, %{document_id: doc_id}, run_id)
+       when is_binary(user_id) and is_binary(doc_id) and is_binary(run_id) do
+    Registry.register(@scope_registry, {user_id, doc_id}, %{
+      run_id: run_id,
+      registered_at: System.monotonic_time()
+    })
+  rescue
+    _ -> :ok
+  end
+
+  defp register_scope(_ctx, _action, _run_id), do: :ok
 
   @impl true
   def handle_continue(:start_stream, state) do

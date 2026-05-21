@@ -56,19 +56,29 @@ defmodule Contract.GatewayTest do
       assert %DateTime{} = ref.expires_at
     end
 
-    test "TTL defaults to 1 hour, honours custom values, rejects non-positive" do
-      # default TTL
+    test "TTL is honoured as a lower bound, rejects non-positive" do
+      # Task #139 — the bearer is now deterministic per (user, doc,
+      # thread), which means `expires_at` in the payload is bucketed
+      # (day-aligned) so two mints in the same UTC day produce the
+      # same token bytes. We assert `expires_at` >= `now + ttl` and
+      # within ~1 day instead of an exact diff.
+      now_before = DateTime.utc_now()
+
+      # default TTL (1h)
       assert {:ok, default_token} = Gateway.issue_route_ref(@ctx, %{purpose: "default-ttl"})
 
-      assert {:ok, %RouteRef{issued_at: issued, expires_at: expires}} =
+      assert {:ok, %RouteRef{expires_at: default_expires}} =
                Gateway.verify_route_ref(@ctx, default_token)
 
-      assert DateTime.diff(expires, issued, :second) == 3_600
+      assert DateTime.compare(default_expires, DateTime.add(now_before, 3_600, :second)) in [
+               :gt,
+               :eq
+             ]
 
-      # custom TTL
+      # custom TTL — same lower-bound semantics
       assert {:ok, custom} = Gateway.issue_route_ref(@ctx, %{purpose: "ttl", ttl: 60})
-      assert {:ok, ref} = Gateway.verify_route_ref(@ctx, custom)
-      assert DateTime.diff(ref.expires_at, ref.issued_at, :second) == 60
+      assert {:ok, %RouteRef{expires_at: custom_expires}} = Gateway.verify_route_ref(@ctx, custom)
+      assert DateTime.compare(custom_expires, DateTime.add(now_before, 60, :second)) in [:gt, :eq]
 
       # invalid TTLs
       assert {:error, :invalid_ttl} = Gateway.issue_route_ref(@ctx, %{ttl: 0})

@@ -9,6 +9,28 @@ defmodule Contract.RouteRef do
   lookup.
 
   See SPEC.md §21 (Gateway).
+
+  ## Deterministic bearer per (user, doc, thread) — task #139
+
+  The `agent_run_id` field is **NOT** included in the signed payload
+  produced by `Contract.Gateway.issue_route_ref/2`. The bearer is
+  deterministic across all turns of the same `(user_id, document_id,
+  chat_thread_id)` triple so OpenAI's hosted MCP `tools/list` cache
+  (keyed by bearer) hits across turns instead of cold-rebuilding the
+  tool catalog every first message of every turn (~700ms).
+
+  The per-turn `agent_run_id` is reconstructed server-side at MCP
+  submit_change time by looking up the active `Contract.Agent.RunServer`
+  for `(user_id, document_id)` in `Contract.Agent.ScopeRegistry`. That
+  avoids leaking the run id through the token *and* keeps the change
+  row's `actor_type: :agent` / `agent_run_id` stamp truthful — the run
+  that's actually live is the one that gets credited.
+
+  The struct still carries `agent_run_id` for one purpose only: a tool
+  handler can populate it from the server-side lookup before passing
+  the (struct-shaped) RouteRef into `Contract.MCP.build_command/3` and
+  related helpers — i.e. it's a runtime field, never part of what the
+  client sees.
   """
 
   @type purpose :: String.t()

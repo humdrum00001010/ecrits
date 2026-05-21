@@ -164,7 +164,8 @@ defmodule Contract.Agent do
         [%{role: "user", content: action.message || ""}]
 
     # law_mcp_tool is auto-injected by Contract.IO.OpenAI.build_request, so
-    # we only contribute the run-scoped contract-doc tool here.
+    # we only contribute the run-scoped contract-doc tool here. Always
+    # attached — the prompt tells the model when not to call it.
     tools =
       case mint_doc_route_ref(ctx, action) do
         {:ok, bearer} ->
@@ -201,27 +202,25 @@ defmodule Contract.Agent do
 
   defp mint_doc_route_ref(ctx, %Command{
          document_id: doc_id,
-         agent_run_id: run_id,
          chat_thread_id: thread_id
        })
        when is_binary(doc_id) do
     user_id = if ctx, do: get_in(Map.from_struct(ctx), [:user, Access.key!(:id)]), else: nil
 
+    # Task #139 — deterministic bearer per (user_id, document_id,
+    # chat_thread_id). `agent_run_id` is NOT passed; the route_ref now
+    # encodes only the scope triple so that OpenAI's hosted MCP
+    # `tools/list` cache (keyed by bearer) hits across turns of the
+    # same thread. The per-turn run id is recovered server-side at
+    # submit_change time via `Contract.Agent.RunServer.whereis_for_scope/2`.
+    # Token revocation still works: MCP doc.* handlers refuse the call
+    # unless there's an active RunServer for the (user, doc) scope.
     Contract.Gateway.issue_route_ref(ctx, %{
       user_id: user_id,
       document_id: doc_id,
-      agent_run_id: run_id,
       chat_thread_id: thread_id,
       purpose: "agent_doc_mcp",
       scopes: ["agent_doc"],
-      # Bearer outlives a single run on purpose: token verification is
-      # statless, and run-aliveness is re-checked at the /mcp plug per
-      # request, so a 24h TTL is no looser than the 30m we had — it just
-      # spares us from minting a fresh token on every run. (Cross-run
-      # `tools/list` caching on OpenAI's hosted-MCP side still won't fire
-      # because every mint includes a fresh `issued_at` and a new
-      # `agent_run_id`; that requires the deterministic-bearer rework
-      # tracked separately.)
       ttl: 24 * 60 * 60
     })
   end

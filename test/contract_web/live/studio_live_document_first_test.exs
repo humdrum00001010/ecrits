@@ -28,7 +28,11 @@ defmodule ContractWeb.StudioLiveDocumentFirstTest do
 
     {:ok, lv, html} = live(conn, ~p"/studio/#{doc.id}")
 
-    assert html =~ ~s(class="studio-live)
+    # The studio main pane used to carry a `.studio-live` class; after
+    # the Tailwind utility migration we pin the surface via its #studio-root
+    # id and the inline phx-hook attribute.
+    assert html =~ ~s(id="studio-root")
+    assert html =~ ~s(phx-hook="ContractWeb.StudioLive.Viewport")
     assert html =~ "Studio v33 draft"
     assert :sys.get_state(lv.pid).socket.assigns.studio_state.selected_document_id == doc.id
   end
@@ -40,13 +44,15 @@ defmodule ContractWeb.StudioLiveDocumentFirstTest do
     {:ok, doc} = Documents.create(scope, %{title: "용역계약서", type_key: "nda_v1"})
 
     {:ok, lv, _html} = live(conn, ~p"/studio/#{doc.id}")
-    html = lv |> element(".studio-document") |> render()
+    html = lv |> element("#studio-document-header") |> render()
 
-    assert has_element?(lv, ".studio-document__bar")
+    # Title input lives in the document header bar (the former
+    # `.studio-document__bar` class is now Tailwind utilities).
+    assert has_element?(lv, "#studio-document-header")
     # The "수정 가능한 자리" pre-aggregated nav was removed in #34 —
     # editability is now communicated by inline coloring + input-like
     # UI in the document body itself, not by an upfront chip rail.
-    refute has_element?(lv, ".open-slots")
+    refute has_element?(lv, "[data-role='open-slots']")
     visible_text = visible_text(html)
     refute visible_text =~ "ledger"
     refute visible_text =~ "AI 수정"

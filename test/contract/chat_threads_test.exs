@@ -1,5 +1,5 @@
 defmodule Contract.ChatThreadsTest do
-  use Contract.DataCase, async: true
+  use Contract.DataCase, async: false
 
   alias Contract.ChatThread
   alias Contract.ChatThreads
@@ -98,6 +98,112 @@ defmodule Contract.ChatThreadsTest do
 
       assert {:ok, _thread, _command, message} = ChatThreads.persist_user_message(ctx, command)
       assert message["role"] == "user"
+    end
+  end
+
+  describe "concurrent append (race fix, #131)" do
+    # Regression: agent stream + user submit could double-write the same
+    # baseline `messages` value under read-modify-write, dropping a row.
+    # The fix is a Postgres-native jsonb[] array_append at the DB level.
+    # DataCase already puts the sandbox into `{:shared, self()}` because
+    # this module is `async: false`, so child Tasks inherit the
+    # connection without an extra checkout here.
+
+    test "50 concurrent append_tool_call_message calls keep every payload" do
+      owner_id = Ecto.UUID.generate()
+
+      {:ok, thread} =
+        Repo.insert(%ChatThread{
+          owner_id: owner_id,
+          document_id: nil,
+          title: "race",
+          status: "active",
+          messages: [],
+          last_message_at: DateTime.utc_now(:second)
+        })
+
+      payloads =
+        for i <- 1..50 do
+          %{
+            "id" => Ecto.UUID.generate(),
+            "type" => "tool_call",
+            "name" => "tool_#{i}",
+            "agent_run_id" => Ecto.UUID.generate(),
+            "seq" => i
+          }
+        end
+
+      payloads
+      |> Task.async_stream(
+        fn op -> ChatThreads.append_tool_call_message(thread.id, op) end,
+        max_concurrency: 50,
+        timeout: 15_000,
+        ordered: false
+      )
+      |> Stream.run()
+
+      reloaded = Repo.get!(ChatThread, thread.id)
+      assert length(reloaded.messages) == 50
+
+      stored_ids =
+        reloaded.messages
+        |> Enum.map(&(&1["operation"]["id"] || &1[:operation]["id"]))
+        |> MapSet.new()
+
+      expected_ids = payloads |> Enum.map(& &1["id"]) |> MapSet.new()
+      assert MapSet.equal?(stored_ids, expected_ids)
+    end
+
+    test "persist_user_message + append_tool_call_message interleaved retain every row" do
+      owner_id = Ecto.UUID.generate()
+      document_id = Ecto.UUID.generate()
+      ctx = Context.for_user(%Contract.Accounts.User{id: owner_id})
+
+      # Seed the thread via a single persist_user_message so subsequent
+      # append paths target the same row.
+      seed_cmd = %Command{
+        kind: :chat_message,
+        actor_type: :user,
+        actor_id: owner_id,
+        document_id: document_id,
+        message: "seed",
+        payload: %{}
+      }
+
+      assert {:ok, %ChatThread{id: thread_id}, _, _} =
+               ChatThreads.persist_user_message(ctx, seed_cmd)
+
+      tasks =
+        for i <- 1..25 do
+          Task.async(fn ->
+            user_cmd = %Command{
+              kind: :chat_message,
+              actor_type: :user,
+              actor_id: owner_id,
+              document_id: document_id,
+              chat_thread_id: thread_id,
+              message: "user_#{i}",
+              payload: %{}
+            }
+
+            ChatThreads.persist_user_message(ctx, user_cmd)
+
+            tool_op = %{
+              "id" => Ecto.UUID.generate(),
+              "type" => "tool_call",
+              "name" => "tool_#{i}",
+              "agent_run_id" => Ecto.UUID.generate()
+            }
+
+            ChatThreads.append_tool_call_message(thread_id, tool_op)
+          end)
+        end
+
+      Enum.each(tasks, &Task.await(&1, 15_000))
+
+      reloaded = Repo.get!(ChatThread, thread_id)
+      # 1 seed + 25 user appends + 25 tool appends = 51
+      assert length(reloaded.messages) == 51
     end
   end
 end

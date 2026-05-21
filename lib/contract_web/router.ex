@@ -29,8 +29,14 @@ defmodule ContractWeb.Router do
 
   # External MCP / Slack ingress pipeline. No CSRF, no session — MCP and
   # Slack are API-only. SPEC.md §4 / §21.
+  #
+  # Rate limit lives BEFORE the auth-checking MCPPlug so a flood of
+  # garbage bearers gets shed before doing route_ref Phoenix.Token verify
+  # (which is HMAC-SHA256 + base64 — cheap individually but death by
+  # 10k a second). Per-bearer bucket; missing bearer falls back to IP.
   pipeline :mcp do
     plug :accepts, ["json", "event-stream"]
+    plug ContractWeb.Plug.RateLimitMCP
   end
 
   # Playwright-only auth shim. Routes 404 at compile time in :prod because

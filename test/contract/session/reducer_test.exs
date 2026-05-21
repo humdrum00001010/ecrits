@@ -376,6 +376,7 @@ defmodule Contract.Session.ReducerTest do
       a = action(:set_contract_type, payload: %{"type_key" => "msa"})
 
       {:ok, input} = Reducer.compile(a, state)
+
       assert [
                %Operation{op: :set_attr, args: %{key: :type_key, value: "msa"}},
                %Operation{op: :set_attr, args: %{key: :metadata, value: %{"notes" => "keep"}}},

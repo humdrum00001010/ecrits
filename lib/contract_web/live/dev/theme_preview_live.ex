@@ -17,7 +17,7 @@ defmodule ContractWeb.Dev.ThemePreviewLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="min-h-screen bg-base-100 text-base-content p-6 chrome">
+    <div class="min-h-screen bg-base-100 text-base-content p-6 font-sans">
       <header class="flex items-center justify-between mb-6">
         <div>
           <h1 class="text-2xl font-semibold">계약기계 — theme preview</h1>
@@ -65,10 +65,10 @@ defmodule ContractWeb.Dev.ThemePreviewLive do
       <section class="card bg-base-100 border border-base-300 mb-8">
         <div class="card-body">
           <h2 class="card-title">Typography</h2>
-          <p class="chrome text-base">
+          <p class="font-sans text-base">
             <strong>Inter (chrome):</strong> The quick brown fox jumps over the lazy dog. 0123456789.
           </p>
-          <p class="contract-body mt-4">
+          <p class="font-mono text-[15px] leading-[1.65] mt-4">
             <strong>Iosevka (contract-body):</strong>
             제1조 (목적) 본 계약은 갑과 을 간의 권리·의무를 명확히 함을 목적으로 한다. — The
             quick brown fox jumps over the lazy dog. 0123456789.

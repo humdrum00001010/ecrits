@@ -1343,6 +1343,7 @@ defmodule ContractWeb.StudioLiveTest do
       assert assigns(lv).projection.type_key == "employment_v1"
       refute has_element?(lv, ~s(#document-type-picker button[phx-value-type_key="web_novel_v1"]))
       refute has_element?(lv, ~s(#document-type-picker button[phx-value-type_key="franchise_v1"]))
+
       refute has_element?(
                lv,
                ~s(#document-type-picker button[phx-value-type_key="franchise_chicken_v2024_12"])
@@ -1356,7 +1357,9 @@ defmodule ContractWeb.StudioLiveTest do
 
       assert assigns(lv).projection.type_key == "service_agreement_v1"
       assert assigns(lv).rhwp_field_values == %{}
-      assert Repo.get!(Contract.Documents.Document, document_id).type_key == "service_agreement_v1"
+
+      assert Repo.get!(Contract.Documents.Document, document_id).type_key ==
+               "service_agreement_v1"
     end
   end
 

@@ -20,12 +20,9 @@ defmodule ContractWeb.Components.AppShellTest do
           inner_block: inner_block
         )
 
-      assert html =~ ~s(class="app-shell")
-      assert html =~ ~s(class="topbar")
       assert html =~ ~s(href="/")
       # Brand wears the brand-mark SVG to the left of the wordmark.
       assert html =~ ~s(src="/assets/icons/brand-mark.svg")
-      assert html =~ ~s(class="brand__icon")
       assert html =~ "계약기계"
       assert html =~ ~s(href="/storage")
       assert html =~ "보관함"
@@ -34,7 +31,8 @@ defmodule ContractWeb.Components.AppShellTest do
       refute html =~ ~s(href="/dashboard")
       assert html =~ "shell-content"
       assert html =~ "문서 목록"
-      assert html =~ "is-active"
+      # Active surface marker → font-semibold weight + full-strength text color.
+      assert html =~ "text-base-content font-semibold"
       # 2026-05-17 owner directive: 스튜디오 state span removed from topbar.
       refute html =~ "스튜디오"
       refute html =~ "계약서 업로드"
@@ -67,8 +65,10 @@ defmodule ContractWeb.Components.AppShellTest do
 
       # 2026-05-18 owner directive: the brand link must take a signed-in
       # user back to their library at /storage rather than the marketing
-      # landing page.
-      assert html =~ ~r/<a[^>]*href="\/storage"[^>]*class="brand"/u
+      # landing page. The brand <a> carries the 계약기계 aria-label so we
+      # use that as the structural anchor instead of a since-migrated
+      # `.brand` class.
+      assert html =~ ~r/<a[^>]*href="\/storage"[^>]*aria-label="계약기계"/u
     end
 
     test "anonymous brand link points to / (landing page)" do
@@ -86,7 +86,7 @@ defmodule ContractWeb.Components.AppShellTest do
           inner_block: inner_block
         )
 
-      assert html =~ ~r/<a[^>]*href="\/"[^>]*class="brand"/u
+      assert html =~ ~r/<a[^>]*href="\/"[^>]*aria-label="계약기계"/u
     end
 
     test "v33 icon source assets are tracked outside generated static assets" do

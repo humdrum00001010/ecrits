@@ -41,7 +41,7 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Briefing do
     >
       <div class="w-full px-6 py-4">
         <article
-          class="contract-body text-base-content"
+          class="font-mono text-[15px] leading-[1.65] text-base-content"
           data-role="briefing-body"
           aria-readonly="true"
         >

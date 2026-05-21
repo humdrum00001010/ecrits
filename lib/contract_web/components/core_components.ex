@@ -167,13 +167,20 @@ defmodule ContractWeb.CoreComponents do
   def status_dot(assigns) do
     assigns =
       assign(assigns, :dot_class, [
-        "status-dot",
-        status_dot_modifier(assigns.status),
+        "inline-block w-2 h-2 flex-none rounded-full align-middle",
+        status_dot_bg(assigns.status),
+        # Keep the data attribute so legacy CSS-grep tests and external
+        # selectors can still target the status by name.
         assigns.class
       ])
 
     ~H"""
-    <span class={@dot_class} aria-hidden="true" {@rest}></span>
+    <span
+      class={@dot_class}
+      data-status={status_dot_modifier(@status)}
+      aria-hidden="true"
+      {@rest}
+    ></span>
     """
   end
 
@@ -182,6 +189,33 @@ defmodule ContractWeb.CoreComponents do
   defp status_dot_modifier(status) do
     "status-dot--#{status |> to_string() |> String.replace("_", "-")}"
   end
+
+  # Background-color utility per logical status. Maps each known status
+  # to a daisyUI semantic color so the chrome stays palette-driven.
+  defp status_dot_bg(nil), do: "bg-base-content/45"
+  defp status_dot_bg(:draft), do: "bg-base-content/45"
+  defp status_dot_bg("draft"), do: "bg-base-content/45"
+  defp status_dot_bg(:importing), do: "bg-info"
+  defp status_dot_bg("importing"), do: "bg-info"
+  defp status_dot_bg(:in_progress), do: "bg-info"
+  defp status_dot_bg("in-progress"), do: "bg-info"
+  defp status_dot_bg("in_progress"), do: "bg-info"
+  defp status_dot_bg(:editing), do: "bg-success"
+  defp status_dot_bg("editing"), do: "bg-success"
+  defp status_dot_bg(:ready), do: "bg-success"
+  defp status_dot_bg("ready"), do: "bg-success"
+  defp status_dot_bg(:export_ready), do: "bg-success"
+  defp status_dot_bg("export-ready"), do: "bg-success"
+  defp status_dot_bg("export_ready"), do: "bg-success"
+  defp status_dot_bg(:review), do: "bg-warning"
+  defp status_dot_bg("review"), do: "bg-warning"
+  defp status_dot_bg(:reviewing), do: "bg-warning"
+  defp status_dot_bg("reviewing"), do: "bg-warning"
+  defp status_dot_bg(:error), do: "bg-error"
+  defp status_dot_bg("error"), do: "bg-error"
+  defp status_dot_bg(:archived), do: "bg-base-300"
+  defp status_dot_bg("archived"), do: "bg-base-300"
+  defp status_dot_bg(_), do: "bg-base-content/45"
 
   @doc """
   Renders an input with label and error messages.

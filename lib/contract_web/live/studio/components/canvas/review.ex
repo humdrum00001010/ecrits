@@ -91,7 +91,7 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Review do
     >
       <div class="grid grid-cols-[1fr_320px] gap-8 p-8 max-w-[1400px] mx-auto">
         <%!-- Document body (read-only) --%>
-        <article class="contract-body min-w-0">
+        <article class="font-mono text-[15px] leading-[1.65] min-w-0">
           <header class="mb-6 pb-4 border-b border-base-300">
             <div class="text-xs uppercase tracking-wider text-base-content/60 font-sans mb-1">
               {dgettext("studio", "검토 모드 / Review")}

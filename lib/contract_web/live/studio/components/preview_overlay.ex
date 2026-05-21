@@ -273,8 +273,12 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
         data-viewport={Atom.to_string(@viewport)}
       >
         <div class={[
-          "preview-overlay__paper mx-auto bg-white",
-          @viewport == :mobile && "preview-overlay__paper--mobile"
+          "card mx-auto bg-base-100 text-base-content border border-base-300 rounded-sm shadow-sm",
+          "max-w-[816px] px-24 pt-24 pb-20 my-6 mb-12",
+          # Mobile-only override: full-bleed paper without the page metaphor.
+          "max-md:max-w-none max-md:w-full max-md:px-4 max-md:py-5 max-md:m-0 max-md:border-0 max-md:shadow-none",
+          @viewport == :mobile &&
+            "!max-w-none !w-full !px-4 !py-5 !m-0 !border-0 !shadow-none"
         ]}>
           <%= case @tab do %>
             <% :body -> %>
@@ -312,11 +316,11 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
 
     ~H"""
     <article
-      class="preview-overlay__body"
+      class="font-serif text-[14.67px] leading-[1.6] text-base-content"
       data-role="preview-body"
     >
       <%= if @ordered_nodes == [] do %>
-        <p class="preview-overlay__empty">
+        <p class="italic text-base-content/55">
           {dgettext("studio", "No document selected.")}
         </p>
       <% else %>
@@ -334,20 +338,20 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
 
     case level do
       1 ->
-        ~H|<h1 id={"node-#{@id}"} class="preview-overlay__h1">{@text}</h1>|
+        ~H|<h1 id={"node-#{@id}"} class="font-serif text-[37.33px] leading-[1.25] font-semibold mt-0 mb-3 text-base-content">{@text}</h1>|
 
       2 ->
-        ~H|<h2 id={"node-#{@id}"} class="preview-overlay__h2">{@text}</h2>|
+        ~H|<h2 id={"node-#{@id}"} class="font-serif text-[26.67px] leading-[1.3] font-semibold mt-6 mb-2.5 text-base-content">{@text}</h2>|
 
       _ ->
-        ~H|<h3 id={"node-#{@id}"} class="preview-overlay__h3">{@text}</h3>|
+        ~H|<h3 id={"node-#{@id}"} class="font-serif text-[21.33px] leading-[1.35] font-semibold mt-[18px] mb-2 text-base-content">{@text}</h3>|
     end
   end
 
   defp render_node(%{kind: :paragraph} = node) do
     assigns = %{text: node[:content] || "", id: node[:id]}
 
-    ~H|<p id={"node-#{@id}"} class="preview-overlay__p">{@text}</p>|
+    ~H|<p id={"node-#{@id}"} class="m-0 mb-3 whitespace-pre-wrap">{@text}</p>|
   end
 
   defp render_node(%{kind: :list_item} = node) do
@@ -355,11 +359,11 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
     assigns = %{text: node[:content] || "", id: node[:id], ordered?: ordered?}
 
     if ordered? do
-      ~H|<ol class="preview-overlay__ol">
+      ~H|<ol class="m-0 mb-3 pl-7 list-decimal">
   <li id={"node-#{@id}"}>{@text}</li>
 </ol>|
     else
-      ~H|<ul class="preview-overlay__ul">
+      ~H|<ul class="m-0 mb-3 pl-7 list-disc">
   <li id={"node-#{@id}"}>{@text}</li>
 </ul>|
     end
@@ -368,7 +372,7 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
   defp render_node(%{kind: :list} = node) do
     assigns = %{text: node[:content] || "", id: node[:id]}
 
-    ~H|<ul id={"node-#{@id}"} class="preview-overlay__ul">{@text}</ul>|
+    ~H|<ul id={"node-#{@id}"} class="m-0 mb-3 pl-7 list-disc">{@text}</ul>|
   end
 
   defp render_node(%{kind: :table} = node) do
@@ -376,10 +380,13 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
     assigns = %{rows: rows, id: node[:id]}
 
     ~H"""
-    <table id={"node-#{@id}"} class="preview-overlay__table">
+    <table id={"node-#{@id}"} class="border-collapse my-3 w-full">
       <tbody>
         <tr :for={row <- @rows}>
-          <td :for={cell <- row}>{cell}</td>
+          <td
+            :for={cell <- row}
+            class="border border-base-300 py-1.5 px-2.5 align-top"
+          >{cell}</td>
         </tr>
       </tbody>
     </table>
@@ -395,7 +402,7 @@ defmodule ContractWeb.Live.Studio.Components.PreviewOverlay do
       kind: Atom.to_string(node[:kind] || :unknown)
     }
 
-    ~H|<div id={"node-#{@id}"} class="preview-overlay__p" data-node-kind={@kind}>{@text}</div>|
+    ~H|<div id={"node-#{@id}"} class="m-0 mb-3 whitespace-pre-wrap" data-node-kind={@kind}>{@text}</div>|
   end
 
   # --- Marks tab: grouped by node, click-to-jump -----------------------------

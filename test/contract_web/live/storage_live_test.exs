@@ -59,7 +59,7 @@ defmodule ContractWeb.StorageLiveTest do
       refute html =~ ~s(data-role="dashboard-upload-trigger")
       refute html =~ ~s(phx-click="new_document")
       refute html =~ ~s(phx-value-type_key)
-      refute html =~ ~s(<h1 class="dashboard-v31__title">최근 문서)
+      refute html =~ "최근 문서"
     end
 
     test "does not render unimplemented 즐겨찾기 tab", %{conn: conn} do
@@ -93,14 +93,13 @@ defmodule ContractWeb.StorageLiveTest do
       {:ok, _lv, html} = live(conn, ~p"/storage")
 
       assert html =~ ~s(id="document-grid")
-      assert html =~ ~s(class="document-grid")
+      assert html =~ ~s(data-role="document-grid")
       assert html =~ ~s(data-role="document-card")
       assert html =~ "용역계약서 V1"
-      # Card chrome
-      assert html =~ "document-card__thumb"
+      # Card chrome — pinned via data-role markers (utilities don't grep)
+      assert html =~ ~s(data-role="document-card-thumb")
       assert html =~ ~s(data-role="document-card-preview")
-      assert html =~ "document-card__title"
-      assert html =~ "document-card__menu"
+      assert html =~ ~s(data-role="document-card-menu")
     end
 
     test "cards do NOT render a status label or status dot (2026-05-18 directive)",
@@ -113,7 +112,6 @@ defmodule ContractWeb.StorageLiveTest do
       {:ok, _lv, html} = live(conn, ~p"/storage")
 
       refute html =~ "status-dot--draft"
-      refute html =~ "document-card__meta"
       # The literal status strings should not appear inside any
       # rendered card body.
       cards_html = card_section(html)
@@ -160,27 +158,32 @@ defmodule ContractWeb.StorageLiveTest do
   describe "card styling (DESIGN §4 + feedback-review-adds-tests)" do
     setup :register_and_log_in_user
 
-    @app_css "assets/css/app.css"
+    test "card carries the hover-lift utility chain", %{conn: conn, scope: scope} do
+      {:ok, _doc} = Documents.create(scope, %{title: "hover-lift target"})
+      {:ok, _lv, html} = live(conn, ~p"/storage")
 
-    test "card has a hover rule that lifts the surface" do
-      css = File.read!(@app_css)
-      assert css =~ ".document-card:hover"
-      # Hover rule must lift the card and swap to the stronger border.
-      assert css =~ "border-color: var(--cs-line-strong)"
+      # Hover lift utility is wired inline; this pins that the card still
+      # has a visible hover behaviour (translate + border swap + shadow).
+      assert html =~ "hover:-translate-y-0.5"
+      assert html =~ "hover:border-base-content/30"
+      assert html =~ "hover:shadow-lg"
     end
 
-    test "card has a focus-visible outline rule" do
-      css = File.read!(@app_css)
-      assert css =~ ".document-card:focus-visible"
+    test "card focus carries an outline", %{conn: conn, scope: scope} do
+      {:ok, _doc} = Documents.create(scope, %{title: "focus target"})
+      {:ok, _lv, html} = live(conn, ~p"/storage")
+
+      assert html =~ "focus-within:outline"
+      assert html =~ "focus-within:outline-primary"
     end
 
-    test "preview-line styling exists for the thumb body" do
-      css = File.read!(@app_css)
+    test "preview thumb carries the data-role markers", %{conn: conn, scope: scope} do
+      {:ok, _doc} = Documents.create(scope, %{title: "preview markers"})
+      {:ok, _lv, html} = live(conn, ~p"/storage")
 
-      assert css =~ ".document-card__thumb--lines"
-      assert css =~ ".document-card__thumb-page"
-      assert css =~ ".document-card__thumb-line"
-      assert css =~ ".document-card__thumb-fade"
+      assert html =~ ~s(data-role="document-card-thumb")
+      assert html =~ ~s(data-role="document-card-preview")
+      assert html =~ ~s(data-role="document-card-thumb-lines")
     end
 
     test "renders ALL owner-scoped documents (not just a recent slice)", %{

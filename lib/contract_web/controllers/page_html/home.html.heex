@@ -1,75 +1,59 @@
 <Layouts.app flash={@flash} current_scope={@current_scope} variant="default" chrome="landing">
   <%!--
-    v0.5/design-landing — DESIGN.md §3 LandingLive surface.
-
-    Three-block right column + restrained Korean-primary copy. The
-    landing communicates ONE value: 프로젝트의 맥락을 계약 조항으로
-    구체화합니다. No product screenshots, no people, no 3D props, no
-    pipeline diagrams, no pricing block, no feature cards. The visual
-    system uses --cs-* tokens defined in assets/css/tokens.css and
-    surfaced through the .landing-v31 class block in app.css.
-
-    Westlaw silhouette test: this template intentionally has zero of
-    the banned `pop`-tier Tailwind utilities (oversized hero text,
-    heavy drop shadows, oversized corner radii, ultra-bold weight)
-    and no "Powered by AI / revolutionize / seamless" copy.
-
-    Korean is the primary language. PageController.home/2 pins the
-    Gettext locale to "ko" so dgettext("landing", …) resolves
-    through priv/gettext/ko/LC_MESSAGES/landing.po; the English
-    msgstrs are intentionally identical to the msgids so the en
-    fallback degrades to the Korean source until a translator fills
-    them in.
+    DESIGN.md §3 landing surface — Korean-primary three-block. Style lives in
+    Tailwind utilities here; the only CSS that still applies is the palette
+    tokens (--cs-*), the daisyUI theme, and the font registrations. Tests
+    locate this surface via data-landing="v31".
   --%>
-  <div class="landing-v31">
-    <section class="landing-v31__hero">
-      <div class="landing-v31__copy">
-        <p class="landing-v31__eyebrow">
+  <main data-landing="v31" class="mx-auto max-w-[1280px] pt-8 px-4 pb-14 text-base-content sm:pt-12 sm:px-6 sm:pb-[72px] lg:pt-16 lg:pb-24">
+    <section class="grid grid-cols-1 gap-12 items-start lg:grid-cols-[7fr_6fr] lg:gap-20">
+      <div>
+        <p class="m-0 mb-4 text-xs font-medium uppercase tracking-[0.18em] text-base-content/55 sm:mb-6">
           {dgettext("landing", "Contract Studio")}
         </p>
-        <h1 class="landing-v31__headline">
+        <h1 class="m-0 mb-5 font-serif font-medium leading-[1.2] tracking-[-0.01em] text-base-content break-keep text-[clamp(28px,5.2vw,48px)] sm:mb-7 sm:leading-[1.18]">
           {dgettext("landing", "프로젝트의 맥락을")}<br />
           {dgettext("landing", "계약 조항으로")}<br />
           {dgettext("landing", "구체화합니다.")}
         </h1>
-        <p class="landing-v31__lead">
+        <p class="m-0 mb-6 max-w-[36em] text-[15px] leading-7 text-base-content/55 break-keep sm:text-base sm:mb-9">
           {dgettext("landing", "Contract Studio는 계약서를 쓰기 전에")}<br />
           {dgettext("landing", "프로젝트가 실제로 어떻게 진행되는지 묻습니다.")}<br />
           {dgettext("landing", "그 답은 조항과 변경 이력으로 남습니다.")}
         </p>
-        <p class="landing-v31__cta-row">
+        <p class="m-0 flex flex-wrap items-center gap-6">
           <.link
             :if={@current_scope}
             navigate={~p"/storage"}
-            class="landing-v31__cta-primary"
+            class="btn btn-primary"
           >
             {dgettext("landing", "보관함 열기")}
           </.link>
           <.link
             :if={!@current_scope}
             navigate={~p"/users/log-in"}
-            class="landing-v31__cta-primary"
+            class="btn btn-primary"
           >
             {dgettext("landing", "보관함 열기")}
           </.link>
-          <a href="#how-it-works" class="landing-v31__cta-secondary">
+          <a href="#how-it-works" class="link link-hover">
             {dgettext("landing", "작동 방식 보기 →")}
           </a>
         </p>
       </div>
 
       <section
-        class="landing-v31__system"
+        class="flex flex-col gap-6"
         aria-label={dgettext("landing", "프로젝트 맥락을 계약 조항으로 구체화하는 흐름")}
         id="how-it-works"
       >
-        <article class="landing-v31__block">
-          <p class="landing-v31__block-eyebrow">01</p>
-          <h2 class="landing-v31__block-title">
+        <article data-landing-block class="card bg-base-100 border border-base-300 card-body break-keep">
+          <p class="m-0 mb-2.5 text-[11px] font-semibold tracking-[0.22em] text-base-content/55">01</p>
+          <h2 class="m-0 text-lg font-semibold leading-snug text-base-content break-keep">
             {dgettext("landing", "프로젝트 브리프")}
           </h2>
-          <hr class="landing-v31__block-rule" />
-          <p class="landing-v31__block-caption">
+          <div class="divider my-2"></div>
+          <p class="m-0 text-sm leading-relaxed text-base-content/55 break-keep">
             {dgettext(
               "landing",
               "계약 상대방, 거래 구조, 위험 수용도를 자연어로 정리합니다."
@@ -77,13 +61,13 @@
           </p>
         </article>
 
-        <article class="landing-v31__block">
-          <p class="landing-v31__block-eyebrow">02</p>
-          <h2 class="landing-v31__block-title">
+        <article data-landing-block class="card bg-base-100 border border-base-300 card-body break-keep">
+          <p class="m-0 mb-2.5 text-[11px] font-semibold tracking-[0.22em] text-base-content/55">02</p>
+          <h2 class="m-0 text-lg font-semibold leading-snug text-base-content break-keep">
             {dgettext("landing", "AI가 먼저 확인하는 핵심 조건")}
           </h2>
-          <hr class="landing-v31__block-rule" />
-          <p class="landing-v31__block-caption">
+          <div class="divider my-2"></div>
+          <p class="m-0 text-sm leading-relaxed text-base-content/55 break-keep">
             {dgettext(
               "landing",
               "예: 납품일자, 검수 기준, 지체상금, 대금 지급일처럼 조항에 바로 들어갈 결정을 구체적으로 묻습니다."
@@ -91,13 +75,13 @@
           </p>
         </article>
 
-        <article class="landing-v31__block">
-          <p class="landing-v31__block-eyebrow">03</p>
-          <h2 class="landing-v31__block-title">
+        <article data-landing-block class="card bg-base-100 border border-base-300 card-body break-keep">
+          <p class="m-0 mb-2.5 text-[11px] font-semibold tracking-[0.22em] text-base-content/55">03</p>
+          <h2 class="m-0 text-lg font-semibold leading-snug text-base-content break-keep">
             {dgettext("landing", "조항과 변경 이력으로 남김")}
           </h2>
-          <hr class="landing-v31__block-rule" />
-          <p class="landing-v31__block-caption">
+          <div class="divider my-2"></div>
+          <p class="m-0 text-sm leading-relaxed text-base-content/55 break-keep">
             {dgettext(
               "landing",
               "답변은 수정 범위에 연결되어 조항으로 반영되고, 변경 이력으로 보존됩니다."
@@ -107,8 +91,8 @@
       </section>
     </section>
 
-    <section class="landing-v31__footnote">
-      <p>{dgettext("landing", "비공개 베타. 초청제로 운영합니다.")}</p>
+    <section class="mt-16 pt-5 border-t border-base-300 text-xs text-base-content/55">
+      <p class="m-0">{dgettext("landing", "비공개 베타. 초청제로 운영합니다.")}</p>
     </section>
-  </div>
+  </main>
 </Layouts.app>

@@ -309,6 +309,13 @@ defmodule ContractWeb.StudioLive do
     document_id = socket.assigns.studio_state.selected_document_id
     ir = if is_map(params["ir"]), do: params["ir"], else: %{}
 
+    # Mirror the IR JSON into R2 next to the HWPX blob so doc.get can
+    # treat R2 as the single source of truth (HWPX = original, .ir.json =
+    # agent-IR projection). The DB `projection` column is kept as a hot
+    # cache + audit trail.
+    ir_key = ir_key_for(key)
+    _ = Contract.IO.R2.put(ir_key, Jason.encode!(ir), content_type: "application/json")
+
     %Contract.Snapshot{}
     |> Contract.Snapshot.changeset(%{
       document_id: document_id,
@@ -665,7 +672,6 @@ defmodule ContractWeb.StudioLive do
     handle_contract_event(event, params, socket)
   end
 
-
   defp handle_contract_event(event, params, socket) do
     case event_to_command(event, params, socket.assigns) do
       {:ok, %Command{} = action} ->
@@ -676,6 +682,16 @@ defmodule ContractWeb.StudioLive do
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Unknown action: #{inspect(reason)}")}
+    end
+  end
+
+  defp ir_key_for(hwpx_key) do
+    cond do
+      String.ends_with?(hwpx_key, ".hwpx") ->
+        String.replace_suffix(hwpx_key, ".hwpx", ".ir.json")
+
+      true ->
+        hwpx_key <> ".ir.json"
     end
   end
 
@@ -1165,7 +1181,6 @@ defmodule ContractWeb.StudioLive do
   def handle_protocol_message({:agent_stream, _agent_run_id, _stream_event}, socket),
     do: socket
 
-
   def handle_protocol_message({:agent_completed, agent_run_id, result}, socket) do
     body =
       case result do
@@ -1241,9 +1256,12 @@ defmodule ContractWeb.StudioLive do
     # push_event is the per-token live path. The JS ChatInput hook listens
     # for phx:agent_text_append and appends the piece into the bubble's
     # text span. No assigns mutated here → no diff → no throttle.
+    # Collapse `\n\n+` → `\n` here (same as msg_body/1 for persisted
+    # messages) so paragraph-break runs don't open big visual gaps under
+    # `whitespace-pre-wrap`.
     push_event(socket, "agent_text_append", %{
       message_id: "chat-msg-agent-#{agent_run_id}-streaming",
-      piece: piece
+      piece: String.replace(piece, ~r/\n{2,}/, "\n")
     })
   end
 
@@ -1257,6 +1275,7 @@ defmodule ContractWeb.StudioLive do
     socket =
       if first? do
         Process.put(key, true)
+
         bubble = %{
           id: "reasoning-#{agent_run_id}",
           agent_run_id: agent_run_id,
@@ -1460,11 +1479,11 @@ defmodule ContractWeb.StudioLive do
       when is_binary(document_id) do
     Process.send_after(self(), {:reconnect_attempt, document_id}, 500)
 
-    stream_insert(
-      socket,
-      :toasts,
-      build_toast(:warning, "Session lost", "Reconnecting…")
-    )
+    # Same UI as Phoenix's standard #client-error topbar — driven via the
+    # SessionStaleToggle hook in layouts.flash_group. We don't dump a
+    # warning toast for this because lease-stale auto-recovers behind the
+    # scenes and the toast was getting confused for a WebSocket drop.
+    push_event(socket, "session-stale", %{})
   end
 
   def handle_protocol_message({:session_recovered, document_id, revision}, socket)
@@ -1493,11 +1512,8 @@ defmodule ContractWeb.StudioLive do
           socket
       end
 
-    stream_insert(
-      socket,
-      :toasts,
-      build_toast(:info, "Session recovered", "Caught up to revision #{revision}.")
-    )
+    # Hide the topbar (counterpart to the push in :session_stale above).
+    push_event(socket, "session-recovered", %{revision: revision})
   end
 
   def handle_protocol_message({:reconnect_attempt, document_id}, socket)
@@ -1702,15 +1718,15 @@ defmodule ContractWeb.StudioLive do
           phx-hook=".Viewport"
           data-viewport="desktop"
           class={[
-            "studio-live min-h-[calc(100vh-60px)] w-full",
+            "h-[calc(100vh-60px)] min-h-[calc(100vh-60px)] w-full overflow-hidden pr-[var(--chat-rail-width)]",
             @chat_rail_hidden? && "!pr-0"
           ]}
         >
           <%!-- Desktop: document canvas + right chat rail. No permanent Context Reservoir. --%>
-          <section class="studio-document flex min-w-0 flex-col">
+          <section class="flex h-full min-w-0 min-h-0 flex-col overflow-hidden bg-transparent">
             <header
               id="studio-document-header"
-              class="studio-document__bar justify-between"
+              class="flex items-center justify-between gap-2.5 min-h-[58px] px-5 border-b border-base-300 bg-base-100 max-sm:flex-wrap max-sm:min-h-0 max-sm:px-4 max-sm:py-3"
             >
               <div class="inline-flex items-center gap-1 min-w-0">
                 <div class="inline-flex min-w-0 items-center">
@@ -1931,8 +1947,17 @@ defmodule ContractWeb.StudioLive do
                       title={dgettext("studio", "이전 편집 항목 (Shift+Tab)")}
                       class="flex h-1/2 w-full items-center justify-center cursor-pointer transition-colors hover:bg-base-200 hover:text-base-content"
                     >
-                      <svg class="size-2.5 fill-none stroke-current" viewBox="0 0 10 10" aria-hidden="true">
-                        <path d="M2 6.5l3 -3 3 3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                      <svg
+                        class="size-2.5 fill-none stroke-current"
+                        viewBox="0 0 10 10"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M2 6.5l3 -3 3 3"
+                          stroke-width="1.4"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        />
                       </svg>
                     </div>
                     <div
@@ -1944,8 +1969,17 @@ defmodule ContractWeb.StudioLive do
                       title={dgettext("studio", "다음 편집 항목 (Tab)")}
                       class="flex h-1/2 w-full items-center justify-center cursor-pointer transition-colors hover:bg-base-200 hover:text-base-content"
                     >
-                      <svg class="size-2.5 fill-none stroke-current" viewBox="0 0 10 10" aria-hidden="true">
-                        <path d="M2 3.5l3 3 3 -3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                      <svg
+                        class="size-2.5 fill-none stroke-current"
+                        viewBox="0 0 10 10"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M2 3.5l3 3 3 -3"
+                          stroke-width="1.4"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        />
                       </svg>
                     </div>
                   </div>
@@ -2053,7 +2087,7 @@ defmodule ContractWeb.StudioLive do
               </div>
             </header>
 
-            <article class="contract-projection cs-document-text relative min-h-0 flex-1">
+            <article class="relative m-0 p-0 border-0 bg-transparent shadow-none text-base-content text-[15px] leading-[1.78] overflow-hidden min-h-0 flex-1 font-sans max-sm:mx-3 max-sm:py-7 max-sm:px-5">
               <div class="relative h-full min-h-0">
                 <.live_component
                   :if={standard_template}
@@ -2102,11 +2136,17 @@ defmodule ContractWeb.StudioLive do
             :if={not @chat_rail_hidden?}
             id="studio-chat-rail"
             phx-hook=".RailResizer"
-            class="studio-rail fixed top-[60px] right-0 h-[calc(100vh-60px)] min-h-0 flex flex-col z-30"
+            class="fixed top-[60px] right-0 h-[calc(100vh-60px)] min-h-0 min-w-0 flex flex-col z-30 bg-base-100"
             style="width: var(--chat-rail-width, 380px);"
           >
             <div
-              class="chat-rail-resizer"
+              class={[
+                "absolute top-0 -left-1 w-2 h-full cursor-col-resize z-40 select-none touch-none",
+                "after:content-[''] after:absolute after:top-0 after:left-1/2 after:-translate-x-1/2",
+                "after:w-px after:h-full after:bg-base-300 after:transition-[background,width] after:duration-150",
+                "hover:after:w-0.5 hover:after:bg-base-content/30",
+                "data-[dragging=true]:after:w-0.5 data-[dragging=true]:after:bg-base-content/30"
+              ]}
               data-role="chat-rail-resizer"
               aria-hidden="true"
             >
@@ -2541,8 +2581,11 @@ defmodule ContractWeb.StudioLive do
   # publish 한 eventId 와 비교해서 echo 면 무시한다.
   defp push_rhwp_remote_text(socket, %Contract.Change{command_kind: "edit_text"} = change) do
     case change.payload |> List.wrap() |> Enum.flat_map(&change_payload_op_to_event/1) do
-      [] -> socket
-      ops -> push_event(socket, "rhwp:remote_text_ops", %{ops: ops, event_id: change.idempotency_key})
+      [] ->
+        socket
+
+      ops ->
+        push_event(socket, "rhwp:remote_text_ops", %{ops: ops, event_id: change.idempotency_key})
     end
   end
 
@@ -2819,7 +2862,6 @@ defmodule ContractWeb.StudioLive do
   end
 
   defp short_id(other), do: inspect(other)
-
 
   # ---------------------------------------------------------------------------
   # Auto-grill seed on cold document open. When the user lands on a document

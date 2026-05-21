@@ -86,7 +86,9 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.BriefingTest do
       assert html =~ ~s(data-role="briefing-badge")
 
       # Mono body present and node content rendered read-only.
-      assert html =~ "contract-body"
+      # The contract body now uses Tailwind utilities; pin the mono-font
+      # utility instead of the (since-migrated) `.contract-body` class.
+      assert html =~ "font-mono"
       assert html =~ "aria-readonly=\"true\""
       assert html =~ "Lessee agrees to pay rent on the 1st of each month."
 

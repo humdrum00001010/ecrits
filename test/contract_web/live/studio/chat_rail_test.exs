@@ -241,7 +241,7 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ "관찰 모드"
     end
 
-    test "no-document mode shows the 5-option agent welcome prompt (SPEC.md §10)" do
+    test "no-document mode shows the agent welcome prompt with start chips (SPEC.md §10)" do
       no_doc_state = %State{mode: :no_document, last_seen_revision: 0, agent_run_id: nil}
 
       html =
@@ -256,14 +256,16 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ ~s(data-role="chat-no-doc-welcome")
       refute html =~ ~s(data-role="chat-welcome")
 
-      # All 5 option labels are present.
-      assert html =~ "기존 계약서 업로드"
+      # The 4 welcome chip labels are present. "업로드" was moved out of the
+      # welcome list and into the input footer's paperclip icon button, so
+      # the welcome itself no longer surfaces an upload chip.
       assert html =~ "최근 문서 열기"
       assert html =~ "빈 계약서 만들기"
       assert html =~ "논의에서 시작"
       assert html =~ "다른 문서에서 변형 만들기"
 
-      # Each chip emits agent_option_picked with the right key.
+      # Each chip emits agent_option_picked with the right key. `upload` is
+      # still wired (via the paperclip icon button in the input footer).
       assert html =~ ~s(phx-click="agent_option_picked")
       assert html =~ ~s(phx-value-key="upload")
       assert html =~ ~s(phx-value-key="recent")
@@ -335,6 +337,11 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
                "found #{inspect(jamo_chars)}"
     end
 
+    # The Codex-style redesign dropped the chrome-on-top status pill — the
+    # send button itself toggles between paper-airplane (idle) and stop
+    # (responding) and acts as the visible status indicator. The
+    # `data-status="idle"/"responding"` markers no longer render.
+    @tag :skip
     test "agent status pill reflects studio_state.agent_run_id" do
       idle_html =
         render_component(ChatRail,
@@ -385,11 +392,15 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
           current_scope: lawyer_scope()
         )
 
-      assert html =~ ~s(id="operation-block-tool-search-1")
-      assert html =~ ~s(data-role="operation-block")
-      assert html =~ ~s(data-operation-type="tool_call")
-      assert html =~ ~s(data-operation-status="running")
+      # tool_call operations render as the compact v33 trace row (no
+      # `operation-block` section) — the surrounding chat-message article
+      # carries the operation_id + aria wiring, and the trace itself has a
+      # stable id + data-status.
+      assert html =~ ~s(id="tool-trace-tool-search-1")
+      assert html =~ ~s(data-role="tool-trace")
+      assert html =~ ~s(data-status="running")
       assert html =~ "law.search"
+      assert html =~ "Searching statutes"
     end
 
     test "source interpretation block renders parse summary and proposed claims" do
@@ -435,10 +446,12 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
 
       assert html =~ ~s(data-role="source-interpretation-block")
       assert html =~ "Counterparty draft"
-      assert html =~ "2 claims"
-      assert html =~ "effective_date"
+      # Claim count + field-kind labels are rendered as localized strings,
+      # not as the raw `summary`/`proposed_kind` values.
+      assert html =~ "추출값 2개"
+      assert html =~ "효력 발생일"
       assert html =~ "2026-01-01"
-      assert html =~ "party_a"
+      assert html =~ "갑"
     end
 
     test "source claim block renders anchors and supervision controls" do
@@ -474,7 +487,8 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
         )
 
       assert html =~ ~s(data-role="source-claim-block")
-      assert html =~ "effective_date"
+      # The field-kind is rendered as a localized label, not the raw key.
+      assert html =~ "효력 발생일"
       assert html =~ "2026-01-01"
       assert html =~ "0.91"
       assert html =~ "Effective Date: 2026-01-01"
@@ -484,6 +498,43 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ ~s(phx-click="source_claim.link_to_document")
       assert html =~ ~s(phx-click="source_claim.unlink")
       assert html =~ ~s(phx-value-source_claim_id="claim-1")
+    end
+
+    test "agent prose starts at the left edge of the chat stream" do
+      html =
+        render_component(ChatRail,
+          id: "chat-rail",
+          studio_state: default_state(),
+          streams: %{
+            chat_messages: [
+              {"chat-msg-agent-left",
+               %{
+                 id: "agent-left",
+                 role: :agent,
+                 result: %{body: "왼쪽에서 시작해야 합니다."},
+                 transient?: false
+               }}
+            ]
+          },
+          current_scope: lawyer_scope()
+        )
+
+      agent_text =
+        html
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.query(~s([data-role="agent-text"][data-message-id="chat-msg-agent-left"]))
+
+      # Agent prose is split into one paragraph span per `\n\n` chunk, so the
+      # rendered text picks up surrounding whitespace from the wrapper layout.
+      assert agent_text |> LazyHTML.text() |> String.trim() == "왼쪽에서 시작해야 합니다."
+
+      [class] =
+        agent_text
+        |> LazyHTML.parent_node()
+        |> LazyHTML.attribute("class")
+
+      assert class =~ "self-start"
+      refute class =~ "self-center"
     end
   end
 
@@ -559,16 +610,20 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       refute html =~ ~s(data-transient="true")
     end
 
-    test "case 5 — phx-submit on the form emits chat.submit with the body",
+    test "case 5 — colocated hook pushes chat.submit with the body",
          %{conn: conn} do
       {:ok, lv, _html} =
         live_isolated(conn, WrapperLive,
           session: %{"scope" => lawyer_scope(), "test_pid" => self()}
         )
 
+      # The form no longer carries `phx-submit` — the colocated `.ChatInput`
+      # hook is the only path that fires `chat.submit`. We simulate the hook
+      # by pushing the event directly through the form element (which is the
+      # node bearing `phx-hook`).
       lv
-      |> form("#chat-rail-form", %{"message" => "hi agent"})
-      |> render_submit()
+      |> element("#chat-rail-form")
+      |> render_hook("chat.submit", %{"message" => "hi agent"})
 
       assert_receive {:captured, "chat.submit", %{"message" => "hi agent"}}
     end
@@ -607,11 +662,13 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
 
       # The form is wired to the colocated `.ChatInput` hook (LV 1.1
       # expands `.ChatInput` to the fully-qualified module path at
-      # compile time) and carries `phx-submit="chat.submit"` as the
-      # no-JS fallback.
+      # compile time). There is no `phx-submit` — the hook is the
+      # single source of truth for sending so we never double-fire on
+      # mobile when the user taps the send button while the textarea is
+      # focused.
       assert html =~ ~s(id="chat-rail-form")
       assert html =~ ~s(phx-hook="ContractWeb.Live.Studio.Components.ChatRail.ChatInput")
-      assert html =~ ~s(phx-submit="chat.submit")
+      refute html =~ ~s(phx-submit="chat.submit")
 
       # The textarea has the data-role that the hook uses to delegate
       # keydown/input events from the form.
@@ -625,14 +682,13 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
                html
              )
 
-      # The fallback path: typing into the textarea + submitting the
-      # form dispatches chat.submit with the message body. This is the
-      # same event the delegated click handler in the hook pushes — so
-      # asserting the form-level wire is intact pins the contract that
-      # the rest of the system (StudioLive.event_to_command) expects.
+      # Simulate the hook firing `chat.submit` — this is the same event
+      # the delegated click handler pushes — so asserting the form-level
+      # wire is intact pins the contract that the rest of the system
+      # (StudioLive.event_to_command) expects.
       lv
-      |> form("#chat-rail-form", %{"message" => "from mobile"})
-      |> render_submit()
+      |> element("#chat-rail-form")
+      |> render_hook("chat.submit", %{"message" => "from mobile"})
 
       assert_receive {:captured, "chat.submit", %{"message" => "from mobile"}}
     end
@@ -681,16 +737,17 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
 
       html = render(lv)
       assert html =~ ~s(data-role="evidence-block")
-      assert html =~ ~s(data-provider="law_mcp.search_law")
       assert html =~ "민법 제390조"
-      assert html =~ "Korea Law MCP"
+      # `source: "Korea Law MCP"` is rendered as the localized "법령 검색
+      # 결과" label, not as the raw provider string.
+      assert html =~ "법령 검색 결과"
       assert html =~ "2026-05-17T12:00:00Z"
       assert html =~ ~s(data-role="evidence-attach")
       assert html =~ ~s(phx-click="evidence.attach")
       assert html =~ ~s(phx-value-evidence_snapshot_id="11111111-1111-1111-1111-111111111111")
     end
 
-    test "ui.toggle_expand toggles an operation block", %{conn: conn} do
+    test "ui.toggle_expand toggles a non-tool operation block", %{conn: conn} do
       {:ok, lv, _html} =
         live_isolated(conn, WrapperLive, session: %{"scope" => lawyer_scope()})
 
@@ -700,12 +757,12 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
           id: "op-toggle-1",
           role: :agent,
           operation: %{
-            id: "tool-toggle-1",
-            type: "tool_call",
-            title: "law.search",
+            id: "export-toggle-1",
+            type: "export_status",
+            title: "PDF export",
             status: "completed",
-            summary: "Found 2 clauses",
-            details: %{"citations" => ["상법 제542조"]}
+            summary: "Ready",
+            details: %{"filename" => "contract.pdf"}
           },
           expanded?: false,
           transient?: false
@@ -713,17 +770,99 @@ defmodule ContractWeb.Live.Studio.Components.ChatRailTest do
       })
 
       html = render(lv)
-      assert html =~ ~s(id="operation-block-tool-toggle-1")
-      assert html =~ ~s(id="operation-block-tool-toggle-1-toggle")
+      assert html =~ ~s(id="operation-block-export-toggle-1")
+      assert html =~ ~s(id="operation-block-export-toggle-1-toggle")
       refute html =~ ~s(data-role="operation-details")
 
       html =
         lv
-        |> element("#operation-block-tool-toggle-1-toggle")
+        |> element("#operation-block-export-toggle-1-toggle")
         |> render_click()
 
       assert html =~ ~s(data-role="operation-details")
-      assert html =~ "상법 제542조"
+      assert html =~ "contract.pdf"
+    end
+
+    test "tool call trace uses the whole message article as expand and collapse boundary", %{
+      conn: conn
+    } do
+      {:ok, lv, _html} =
+        live_isolated(conn, WrapperLive, session: %{"scope" => lawyer_scope()})
+
+      send(lv.pid, {
+        :insert,
+        %{
+          id: "tool-hover-msg",
+          role: :agent,
+          operation: %{
+            id: "tool-hover-1",
+            type: "tool_call",
+            title: "doc.get",
+            status: "completed",
+            details: %{"since_revision" => 0}
+          },
+          transient?: false
+        }
+      })
+
+      html = render(lv)
+      assert html =~ ~s(id="chat-msg-tool-hover-msg")
+      assert has_element?(lv, "#chat-msg-tool-hover-msg[phx-click='ui.toggle_expand']")
+      refute has_element?(lv, "#chat-msg-tool-hover-msg[class*='rounded']")
+      refute has_element?(lv, "#chat-msg-tool-hover-msg[class*='hover:bg']")
+
+      assert has_element?(
+               lv,
+               "#chat-msg-tool-hover-msg[phx-value-operation_id='tool-hover-1']"
+             )
+
+      assert has_element?(
+               lv,
+               "#tool-trace-tool-hover-1-expand[data-role='tool-trace-expand']:not([phx-click])"
+             )
+
+      refute has_element?(lv, "#tool-trace-tool-hover-1-expand[class*='bg-']")
+
+      refute html =~ "pr-7"
+
+      assert has_element?(
+               lv,
+               "#tool-trace-tool-hover-1-expand .hero-chevron-down"
+             )
+
+      refute has_element?(lv, "[data-role='tool-trace-collapse']")
+
+      html =
+        lv
+        |> element("#chat-msg-tool-hover-msg")
+        |> render_click()
+
+      assert html =~ ~s(id="tool-trace-tool-hover-1-details")
+      assert html =~ ~s(data-role="tool-trace-details")
+      assert html =~ "since_revision"
+
+      assert has_element?(
+               lv,
+               "#tool-trace-tool-hover-1-collapse[data-role='tool-trace-collapse']:not([phx-click])"
+             )
+
+      assert has_element?(lv, "[data-role='tool-trace-collapse-row']")
+      refute has_element?(lv, "[data-role='tool-trace-collapse-row'][class*='mt-']")
+      assert has_element?(lv, "[data-role='tool-trace-collapse-row'][class*='h-0']")
+
+      refute has_element?(lv, "#tool-trace-tool-hover-1-collapse[class*='bg-']")
+
+      assert has_element?(
+               lv,
+               "#tool-trace-tool-hover-1-collapse .hero-chevron-up"
+             )
+
+      html =
+        lv
+        |> element("#chat-msg-tool-hover-msg")
+        |> render_click()
+
+      refute html =~ ~s(data-role="tool-trace-details")
     end
   end
 end

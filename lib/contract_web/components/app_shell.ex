@@ -51,31 +51,43 @@ defmodule ContractWeb.Components.AppShell do
 
   def app_shell(assigns) do
     ~H"""
-    <div class="app-shell">
-      <header class="topbar">
-        <div class="inline-flex min-w-0 items-center gap-6">
-          <%!-- Brand mark + wordmark. When signed in, the brand takes    --%>
-          <%!-- the user back to their library at /storage rather than    --%>
-          <%!-- the marketing landing. The `.brand` CSS class handles     --%>
-          <%!-- inline-flex alignment so the SVG mark sits on the text    --%>
-          <%!-- baseline.                                                  --%>
+    <div class="min-h-screen pt-[60px] text-base-content bg-base-200">
+      <header class="navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px] flex-nowrap border-b border-base-300 bg-base-200/90 supports-[backdrop-filter]:backdrop-blur-md px-7 max-md:px-4">
+        <div class="navbar-start gap-6 min-w-0">
+          <%!-- Brand mark + wordmark. When signed in, the brand takes
+               the user back to their library at /storage rather than the
+               marketing landing. --%>
           <.link
             navigate={if brand_link_signed_in?(@current_scope), do: ~p"/storage", else: ~p"/"}
-            class="brand"
+            class="link link-hover inline-flex items-center gap-2 min-w-0 text-base-content text-sm font-semibold leading-none"
             aria-label="계약기계"
           >
-            <img src={~p"/assets/icons/brand-mark.svg"} alt="" class="brand__icon" />
-            <span>계약기계</span>
+            <img
+              src={~p"/assets/icons/brand-mark.svg"}
+              alt=""
+              class="block w-[22px] h-[22px] flex-none dark:invert dark:brightness-110"
+            />
+            <span class="inline-block leading-none">계약기계</span>
           </.link>
 
-          <nav class="topbar__nav" aria-label="계약기계">
-            <.link navigate={~p"/storage"} class={[@active == "보관함" && "is-active"]}>
-              보관함
-            </.link>
-          </nav>
+          <ul class="menu menu-horizontal p-0 text-[13px]" aria-label="계약기계">
+            <li>
+              <.link
+                navigate={~p"/storage"}
+                class={[
+                  if(@active == "보관함",
+                    do: "text-base-content font-semibold",
+                    else: "text-base-content/55 font-medium"
+                  )
+                ]}
+              >
+                보관함
+              </.link>
+            </li>
+          </ul>
         </div>
 
-        <div class="inline-flex items-center gap-3">
+        <div class="navbar-end gap-3">
           <Layouts.theme_toggle />
           <Layouts.user_menu :if={@current_scope} current_scope={@current_scope} />
         </div>

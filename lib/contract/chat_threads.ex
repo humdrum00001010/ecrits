@@ -231,21 +231,30 @@ defmodule Contract.ChatThreads do
     |> Repo.insert()
   end
 
-  # Re-read the row each time to minimize the race window between
-  # `MCP.instrumented/4` (which fires from N parallel /mcp handler
-  # processes) and the final assistant message append from RunServer.
-  # Some lost-write potential remains under heavy concurrency — see #131
-  # for a future atomic array_append implementation.
+  # Atomic append via Postgres `array_append` on the jsonb[] column.
+  # The agent stream and a concurrent user submit can hit the same row in
+  # overlapping transactions; read-modify-write would lose one of the
+  # writes (#131). The fragment below runs inside a single UPDATE so the
+  # row's `messages` column is mutated atomically by Postgres.
   defp append_message(%ChatThread{id: thread_id}, message) do
-    case Repo.get(ChatThread, thread_id) do
-      %ChatThread{} = thread ->
-        messages = (thread.messages || []) ++ [message]
+    now = utc_now()
 
-        thread
-        |> ChatThread.changeset(%{messages: messages, last_message_at: utc_now()})
-        |> Repo.update()
+    query =
+      from t in ChatThread,
+        where: t.id == ^thread_id,
+        update: [
+          set: [
+            messages: fragment("array_append(?, ?)", t.messages, ^message),
+            last_message_at: ^now,
+            updated_at: ^now
+          ]
+        ]
 
-      nil ->
+    case Repo.update_all(query, []) do
+      {1, _} ->
+        {:ok, Repo.get!(ChatThread, thread_id)}
+
+      {0, _} ->
         {:error, :not_found}
     end
   end

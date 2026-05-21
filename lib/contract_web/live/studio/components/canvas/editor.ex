@@ -289,7 +289,7 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.Editor do
 
       <div
         id={"#{@id}-body"}
-        class="contract-body"
+        class="font-mono text-[15px] leading-[1.65]"
         phx-hook=".Editable"
         data-can-write={to_string(@can_write?)}
         data-can-revoke={to_string(@can_revoke?)}

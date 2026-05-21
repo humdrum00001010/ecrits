@@ -179,7 +179,6 @@ defmodule Contract.Gateway do
     ttl = Map.get(attrs, :ttl) || Map.get(attrs, "ttl") || @default_ttl
     user_id = Map.get(attrs, :user_id) || Map.get(attrs, "user_id") || user_id(ctx)
     chat_thread_id = Map.get(attrs, :chat_thread_id) || Map.get(attrs, "chat_thread_id")
-    agent_run_id = Map.get(attrs, :agent_run_id) || Map.get(attrs, "agent_run_id")
     base_revision = Map.get(attrs, :base_revision) || Map.get(attrs, "base_revision")
 
     cond do
@@ -192,25 +191,58 @@ defmodule Contract.Gateway do
 
       true ->
         with :ok <- authorize_route_ref_issue(ctx, document_id) do
+          # NOTE: `agent_run_id`, `issued_at`, and the live wall-clock
+          # `expires_at` are intentionally NOT part of the signed payload.
+          # The bearer must be deterministic per
+          # (user_id, document_id, chat_thread_id) so OpenAI's hosted MCP
+          # `tools/list` cache (keyed by bearer) hits across agent turns
+          # instead of rebuilding the catalog every first message of the
+          # turn (~700ms). The per-turn run id is reconstructed
+          # server-side at submit_change time via the
+          # `Contract.Agent.ScopeRegistry`. Token revocation still works:
+          # MCP doc.* handlers refuse the call unless there's an active
+          # RunServer for the route_ref's (user, doc) scope. See
+          # `Contract.RouteRef` and task #139 for the design write-up.
+          #
+          # `Phoenix.Token.sign` normally embeds `signed_at` into the
+          # token (its key-derivation nonce), which would alone defeat
+          # determinism. We pin it to 0 and pin verify's max_age to
+          # :infinity. Expiry is enforced by our own day-aligned
+          # `expires_at` in the payload so the bearer is stable across
+          # turns within the same UTC day.
           now = DateTime.utc_now()
-          expires = DateTime.add(now, ttl, :second)
+          expires_at = day_aligned_expiry(now, ttl)
 
           payload = %{
             document_id: document_id,
             user_id: user_id,
             chat_thread_id: chat_thread_id,
-            agent_run_id: agent_run_id,
             base_revision: base_revision,
             purpose: to_string(purpose),
-            issued_at: DateTime.to_iso8601(now),
-            expires_at: DateTime.to_iso8601(expires),
+            expires_at: DateTime.to_iso8601(expires_at),
             scopes: Enum.map(scopes, &to_string/1)
           }
 
-          token = Phoenix.Token.sign(endpoint(), @salt, payload, max_age: ttl)
+          token = Phoenix.Token.sign(endpoint(), @salt, payload, signed_at: 0)
           {:ok, token}
         end
     end
+  end
+
+  # Round expiry up to a day boundary >= `now + ttl` so two mints of the
+  # same (user, doc, thread) within the same UTC day produce byte-equal
+  # tokens. For default ttl=3600 the bucket is "end of today UTC"; for
+  # ttl > 86400 we keep rounding to the day after `now + ttl`.
+  defp day_aligned_expiry(%DateTime{} = now, ttl) when is_integer(ttl) and ttl > 0 do
+    target = DateTime.add(now, ttl, :second)
+
+    {:ok, midnight} =
+      target
+      |> DateTime.to_date()
+      |> Date.add(1)
+      |> DateTime.new(~T[00:00:00], "Etc/UTC")
+
+    midnight
   end
 
   @doc """
@@ -228,11 +260,12 @@ defmodule Contract.Gateway do
   def verify_route_ref(_ctx, ""), do: {:error, :missing}
 
   def verify_route_ref(_ctx, token) when is_binary(token) do
-    # We let Phoenix.Token do age enforcement against the signed_at marker.
+    # `max_age: :infinity` because the bearer's `signed_at` is pinned to 0
+    # for determinism (see `issue_route_ref/2` notes). Expiration is
+    # enforced explicitly via the payload's `expires_at` below.
     case Phoenix.Token.verify(endpoint(), @salt, token, max_age: :infinity) do
       {:ok, %{} = payload} ->
-        with {:ok, issued_at} <- parse_iso(Map.get(payload, :issued_at)),
-             {:ok, expires_at} <- parse_iso(Map.get(payload, :expires_at)) do
+        with {:ok, expires_at} <- parse_iso(Map.get(payload, :expires_at)) do
           if DateTime.compare(DateTime.utc_now(), expires_at) == :gt do
             {:error, :expired}
           else
@@ -241,10 +274,16 @@ defmodule Contract.Gateway do
                document_id: Map.get(payload, :document_id),
                user_id: Map.get(payload, :user_id),
                chat_thread_id: Map.get(payload, :chat_thread_id),
-               agent_run_id: Map.get(payload, :agent_run_id),
+               # Never embedded in the token; reconstructed server-side
+               # at submit_change time by `Contract.Agent.ScopeRegistry`
+               # lookup. See `Contract.RouteRef` moduledoc.
+               agent_run_id: nil,
                base_revision: Map.get(payload, :base_revision),
                purpose: Map.get(payload, :purpose),
-               issued_at: issued_at,
+               # `issued_at` is no longer in the payload; we backfill
+               # with `expires_at - 1 day` so any consumer reading the
+               # field still gets a sensible DateTime.
+               issued_at: DateTime.add(expires_at, -86_400, :second),
                expires_at: expires_at,
                scopes: Map.get(payload, :scopes, [])
              }}

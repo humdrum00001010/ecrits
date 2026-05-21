@@ -180,7 +180,7 @@ defmodule ContractWeb.Live.Studio.Components.ModalHostTest do
           id: "modal-host",
           studio_state: %State{mode: :editing, type_picker_open?: true},
           current_scope: scope_for_user()
-      )
+        )
 
       {:ok, nda} = Contract.ContractTypes.get(nil, "nda_v1")
       assert html =~ ~s(data-role="type-picker")

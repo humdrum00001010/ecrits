@@ -149,6 +149,174 @@ defmodule Contract.MCPTest do
     end
   end
 
+  describe "call_tool/4 — agent doc.* mutation tools" do
+    setup do
+      owner = scope()
+      doc_id = create_doc(owner, title: "Agent Doc Tools")
+      route_ref = doc_mcp_route_ref(owner, doc_id)
+      {:ok, owner: owner, doc_id: doc_id, route_ref: route_ref}
+    end
+
+    test "doc.insert_block lowers paragraph into insert_paragraph + insert_text", %{
+      owner: owner,
+      doc_id: doc_id,
+      route_ref: route_ref
+    } do
+      args = %{
+        "sec" => 0,
+        "para" => 0,
+        "kind" => "paragraph",
+        "text" => "Hello from MCP"
+      }
+
+      assert {:ok, %{"ok" => true, "applied" => "insert_block", "revision" => rev}} =
+               MCP.call_tool(owner, route_ref, "doc.insert_block", args)
+
+      assert is_integer(rev) and rev >= 2
+
+      [change] = changes_for(doc_id) |> Enum.filter(&(&1.command_kind == "edit_text"))
+      kinds = change.payload |> Enum.map(&Map.get(&1, "op"))
+      assert "insert_paragraph" in kinds
+      assert "insert_text" in kinds
+    end
+
+    test "doc.insert_block rejects kind=table (no rhwp create-table op yet)", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      args = %{"sec" => 0, "para" => 0, "kind" => "table", "rows" => 2, "cols" => 2}
+
+      assert {:error, {:not_supported, _}} =
+               MCP.call_tool(owner, route_ref, "doc.insert_block", args)
+    end
+
+    test "doc.delete_block lowers to merge_paragraph", %{
+      owner: owner,
+      doc_id: doc_id,
+      route_ref: route_ref
+    } do
+      args = %{"sec" => 0, "para" => 3}
+
+      assert {:ok, %{"ok" => true, "applied" => "delete_block", "revision" => rev}} =
+               MCP.call_tool(owner, route_ref, "doc.delete_block", args)
+
+      assert is_integer(rev)
+
+      [change] = changes_for(doc_id) |> Enum.filter(&(&1.command_kind == "edit_text"))
+      assert [%{"op" => "merge_paragraph"}] = change.payload
+    end
+
+    test "doc.delete_block refuses para=0 (no predecessor to merge into)", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      assert {:error, {:invalid_params, _}} =
+               MCP.call_tool(owner, route_ref, "doc.delete_block", %{"sec" => 0, "para" => 0})
+    end
+
+    test "doc.edit_table lowers row_insert into table_row_insert", %{
+      owner: owner,
+      doc_id: doc_id,
+      route_ref: route_ref
+    } do
+      args = %{
+        "sec" => 0,
+        "para" => 2,
+        "control_index" => 0,
+        "op" => "row_insert",
+        "at_row" => 1
+      }
+
+      assert {:ok, %{"ok" => true, "applied" => "edit_table", "revision" => rev}} =
+               MCP.call_tool(owner, route_ref, "doc.edit_table", args)
+
+      assert is_integer(rev)
+
+      [change] = changes_for(doc_id) |> Enum.filter(&(&1.command_kind == "edit_text"))
+      assert [%{"op" => "table_row_insert", "args" => op_args}] = change.payload
+      assert op_args["at_row"] == 1
+      assert op_args["control_index"] == 0
+    end
+
+    test "doc.set_field_value lowers to delete+insert at the field's tracked position", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      doc_id = doc_with_tracked_field(owner)
+      route_ref = %{route_ref | document_id: doc_id}
+
+      args = %{"id" => "field-1", "value" => "Acme Corp"}
+
+      assert {:ok, %{"ok" => true, "applied" => "set_field_value", "revision" => _rev}} =
+               MCP.call_tool(owner, route_ref, "doc.set_field_value", args)
+
+      [change] = changes_for(doc_id) |> Enum.filter(&(&1.command_kind == "edit_text"))
+      kinds = change.payload |> Enum.map(&Map.get(&1, "op"))
+      assert "delete_text" in kinds
+      assert "insert_text" in kinds
+    end
+
+    test "doc.set_field_value 404s on unknown field id", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      assert {:error, {:not_found, _}} =
+               MCP.call_tool(owner, route_ref, "doc.set_field_value", %{
+                 "id" => "no-such-field",
+                 "value" => "anything"
+               })
+    end
+
+    # auth rejections — one per tool: route_ref without :agent_doc scope
+    # should be rebuffed at authorize_doc_mcp/1 before any DB work.
+    test "doc.insert_block rejects route_ref missing :agent_doc scope", %{
+      owner: owner,
+      doc_id: doc_id
+    } do
+      assert {:error, {:forbidden, :missing_scope_agent_doc}} =
+               MCP.call_tool(owner, weak_route_ref(doc_id), "doc.insert_block", %{
+                 "sec" => 0,
+                 "para" => 0,
+                 "kind" => "paragraph"
+               })
+    end
+
+    test "doc.delete_block rejects route_ref missing :agent_doc scope", %{
+      owner: owner,
+      doc_id: doc_id
+    } do
+      assert {:error, {:forbidden, :missing_scope_agent_doc}} =
+               MCP.call_tool(owner, weak_route_ref(doc_id), "doc.delete_block", %{
+                 "sec" => 0,
+                 "para" => 1
+               })
+    end
+
+    test "doc.edit_table rejects route_ref missing :agent_doc scope", %{
+      owner: owner,
+      doc_id: doc_id
+    } do
+      assert {:error, {:forbidden, :missing_scope_agent_doc}} =
+               MCP.call_tool(owner, weak_route_ref(doc_id), "doc.edit_table", %{
+                 "sec" => 0,
+                 "para" => 0,
+                 "op" => "row_insert",
+                 "at_row" => 0
+               })
+    end
+
+    test "doc.set_field_value rejects route_ref missing :agent_doc scope", %{
+      owner: owner,
+      doc_id: doc_id
+    } do
+      assert {:error, {:forbidden, :missing_scope_agent_doc}} =
+               MCP.call_tool(owner, weak_route_ref(doc_id), "doc.set_field_value", %{
+                 "id" => "field-1",
+                 "value" => "x"
+               })
+    end
+  end
+
   describe "initialize/1" do
     test "returns MCP capabilities for tools and resources" do
       assert %{"protocolVersion" => _, "serverInfo" => server, "capabilities" => caps} =
@@ -176,6 +344,78 @@ defmodule Contract.MCPTest do
 
     assert {:ok, %Change{}} = Runtime.apply(ctx, action)
     doc_id
+  end
+
+  # Build a document whose projection has a tracked field with a `position`
+  # rich enough that doc.set_field_value can lower it into a text edit. The
+  # field-position info rides on a stub rhwp Snapshot row (the production
+  # path — the legacy create_document path only stores opaque field attrs).
+  defp doc_with_tracked_field(%Context{} = ctx) do
+    doc_id = create_doc(ctx, title: "Tracked Field Doc")
+
+    {:ok, _} =
+      %Contract.Snapshot{}
+      |> Contract.Snapshot.changeset(%{
+        document_id: doc_id,
+        revision: 1,
+        r2_key: "documents/#{doc_id}/snapshots/1.hwpx",
+        projection: %{
+          "title" => "Tracked Field Doc",
+          "contract_type" => "nda_v1",
+          "sections" => [
+            %{
+              "idx" => 0,
+              "paragraphs" => [
+                %{"idx" => 0, "text" => "Header"},
+                %{"idx" => 1, "text" => "Old Co"}
+              ]
+            }
+          ],
+          "fields" => [
+            %{
+              "id" => "field-1",
+              "label" => "party_name",
+              "kind" => "text",
+              "position" => %{
+                "sec" => 0,
+                "para" => 1,
+                "off_start" => 0,
+                "off_end" => 6
+              },
+              "value" => "Old Co"
+            }
+          ]
+        }
+      })
+      |> Repo.insert()
+
+    doc_id
+  end
+
+  defp doc_mcp_route_ref(%Context{} = ctx, doc_id) do
+    %RouteRef{
+      document_id: doc_id,
+      user_id: ctx.user.id,
+      purpose: "agent_doc_mcp",
+      scopes: ["agent_doc"],
+      issued_at: DateTime.utc_now(),
+      expires_at: DateTime.utc_now() |> DateTime.add(3600, :second)
+    }
+  end
+
+  defp weak_route_ref(doc_id) do
+    %RouteRef{
+      document_id: doc_id,
+      purpose: "mcp-test",
+      scopes: ["read", "write"],
+      issued_at: DateTime.utc_now(),
+      expires_at: DateTime.utc_now() |> DateTime.add(3600, :second)
+    }
+  end
+
+  defp changes_for(doc_id) do
+    import Ecto.Query
+    Repo.all(from c in Change, where: c.document_id == ^doc_id, order_by: [asc: c.result_revision])
   end
 
   defp insert_source(%Context{} = ctx, attrs) do
