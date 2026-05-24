@@ -14,27 +14,19 @@ defmodule Contract.Agent.Prompt.IRRenderer do
   """
 
   @schema_prompt """
-  쪽 IR 인코딩:
-    p (paragraphs):
-      body  → [sec, para, text]
-      table → [sec, para, "T", control_idx, rows, cols, cells]
-              cells: [[row, col, cell_idx, cell_para_idx, text], ...]
-    f (fields):
-      [id, label, kind, pos, value]
-      pos = [sec, para, parent_para, cell_path, off_start, off_end]
-      cell_path = [[controlIndex, cellIndex, cellParaIndex], ...] or null
-      parent_para / cell_path / off_* 은 사용 안 하면 null.
+  쪽 IR 인코딩 (doc.find / doc.read / doc.get):
+    doc.get → {revision, d (title), t (type_key), counts: {sec, para}, outline, f (fields)}
+              outline: [[sec, para, level, text], ...]  (heading 만)
+              level: 0=title row (para=-1), 1=장/절, 2=조, 3=항
 
-  응답 ops schema (JSON only):
-    {"rationale": "<1-2문장>",
-     "ops": [{"kind": <insert_text|delete_text|insert_paragraph|merge_paragraph|
-                       table_row_insert|table_row_delete|
-                       table_column_insert|table_column_delete|table_delete>,
-              "sec": int, "para": int, "parent_para": int?,
-              "cell_path": [{"controlIndex": int, "cellIndex": int, "cellParaIndex": int}, ...]?,
-              "off": int,
-              "text": str?, "count": int?, "len": int?,
-              "at_row": int?, "at_col": int?, "control_index": int?}]}
+    doc.find → {revision, total, hits}
+              hits: [[sec, para, off, len, before, match, after, kind], ...]
+
+    doc.read → {revision, paragraphs, next_para?}
+              paragraphs: [[sec, para, kind, text], ...]  body 그대로
+
+    f (fields):
+      [id, label, kind, value]
   """
 
   @spec schema_prompt() :: String.t()

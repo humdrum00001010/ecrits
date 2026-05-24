@@ -334,7 +334,138 @@ defmodule Contract.MCPTest do
                })
     end
 
-    test "doc.get lets the agent re-fetch and continue same-paragraph field edits after offsets shift",
+    test "doc.get returns slim metadata + heading outline, NOT the full paragraph list", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      doc_id = doc_with_clauses(owner)
+      route_ref = %{route_ref | document_id: doc_id}
+
+      assert {:ok, payload} = MCP.call_tool(owner, route_ref, "doc.get", %{})
+
+      assert payload["ok"] == true
+      assert payload["d"] == "Clauses Doc"
+      assert payload["t"] == "nda_v1"
+
+      # Counts present and accurate.
+      assert is_map(payload["counts"])
+      assert payload["counts"]["sec"] == 1
+      assert payload["counts"]["para"] == 5
+
+      # Outline includes the title (level 0) + 제1조 / 제2조 (level 2).
+      outline = payload["outline"]
+      assert is_list(outline)
+      assert [0, -1, 0, "Clauses Doc"] in outline
+      assert Enum.any?(outline, fn [_, _, _, t] -> String.starts_with?(t, "제1조") end)
+      assert Enum.any?(outline, fn [_, _, _, t] -> String.starts_with?(t, "제2조") end)
+
+      # CRITICAL: no flat paragraph list — that's what doc.read is for.
+      refute Map.has_key?(payload, "p")
+
+      # Fields surface as a compact list (id/label/kind/value tuples).
+      assert is_list(payload["f"])
+    end
+
+    test "doc.find returns positional hits with surrounding context", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      doc_id = doc_with_clauses(owner)
+      route_ref = %{route_ref | document_id: doc_id}
+
+      assert {:ok, %{"ok" => true, "total" => total, "hits" => hits, "revision" => _}} =
+               MCP.call_tool(owner, route_ref, "doc.find", %{"needle" => "갑"})
+
+      assert total >= 1
+      assert is_list(hits)
+      [first | _] = hits
+      assert [_sec, _para, _off, _len, _before, "갑", _after, _kind] = first
+    end
+
+    test "doc.find respects limit", %{owner: owner, route_ref: route_ref} do
+      doc_id = doc_with_clauses(owner)
+      route_ref = %{route_ref | document_id: doc_id}
+
+      assert {:ok, %{"total" => total, "hits" => hits}} =
+               MCP.call_tool(owner, route_ref, "doc.find", %{"needle" => "을", "limit" => 1})
+
+      assert length(hits) == 1
+      assert total >= 1
+    end
+
+    test "doc.find returns empty hits when needle is missing", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      doc_id = doc_with_clauses(owner)
+      route_ref = %{route_ref | document_id: doc_id}
+
+      assert {:ok, %{"total" => 0, "hits" => []}} =
+               MCP.call_tool(owner, route_ref, "doc.find", %{"needle" => "이런문구는없음"})
+    end
+
+    test "doc.find rejects when `needle` is missing", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      assert {:error, {:invalid_params, _}} =
+               MCP.call_tool(owner, route_ref, "doc.find", %{})
+    end
+
+    test "doc.read returns a paragraph slice with section coordinates", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      doc_id = doc_with_clauses(owner)
+      route_ref = %{route_ref | document_id: doc_id}
+
+      assert {:ok, %{"ok" => true, "paragraphs" => paragraphs}} =
+               MCP.call_tool(owner, route_ref, "doc.read", %{
+                 "sec" => 0,
+                 "from" => 0,
+                 "to" => 1
+               })
+
+      assert length(paragraphs) == 2
+      assert [[0, 0, _, "Clauses Doc"], [0, 1, _, _]] = paragraphs
+    end
+
+    test "doc.read with a single `para` returns just that paragraph", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      doc_id = doc_with_clauses(owner)
+      route_ref = %{route_ref | document_id: doc_id}
+
+      assert {:ok, %{"paragraphs" => [[0, 2, _, text]]}} =
+               MCP.call_tool(owner, route_ref, "doc.read", %{"sec" => 0, "para" => 2})
+
+      assert String.starts_with?(text, "제1조")
+    end
+
+    test "doc.read paginates via next_para when limit is hit", %{
+      owner: owner,
+      route_ref: route_ref
+    } do
+      doc_id = doc_with_clauses(owner)
+      route_ref = %{route_ref | document_id: doc_id}
+
+      assert {:ok, %{"paragraphs" => first_page, "next_para" => 2}} =
+               MCP.call_tool(owner, route_ref, "doc.read", %{
+                 "sec" => 0,
+                 "from" => 0,
+                 "limit" => 2
+               })
+
+      assert length(first_page) == 2
+    end
+
+    test "doc.read rejects when `sec` is missing", %{owner: owner, route_ref: route_ref} do
+      assert {:error, {:invalid_params, _}} =
+               MCP.call_tool(owner, route_ref, "doc.read", %{"para" => 0})
+    end
+
+    test "doc.get + doc.read let the agent re-fetch and continue same-paragraph field edits after offsets shift",
          %{
            owner: owner,
            route_ref: route_ref
@@ -342,19 +473,16 @@ defmodule Contract.MCPTest do
       doc_id = doc_with_same_paragraph_tracked_fields(owner)
       route_ref = %{route_ref | document_id: doc_id}
 
-      assert {:ok,
-              %{
-                "revision" => base_rev,
-                "p" => [[0, 0, "Header"], [0, 1, "AAA BBB"]],
-                "f" => fields
-              }} =
+      assert {:ok, %{"revision" => base_rev}} =
                MCP.call_tool(owner, route_ref, "doc.get", %{})
 
-      assert ["party-a", "party_a", "text", [0, 1, nil, nil, 0, 3], "AAA"] =
-               compact_field(fields, "party-a")
+      assert {:ok,
+              %{"paragraphs" => [[0, 0, _, "Header"], [0, 1, _, "AAA BBB"]]}} =
+               MCP.call_tool(owner, route_ref, "doc.read", %{"sec" => 0, "from" => 0, "to" => 1})
 
-      assert ["party-b", "party_b", "text", [0, 1, nil, nil, 4, 7], "BBB"] =
-               compact_field(fields, "party-b")
+      assert {:ok, %{"f" => fields}} = MCP.call_tool(owner, route_ref, "doc.get", %{})
+      assert ["party-a", "party_a", "text", "AAA"] = compact_field(fields, "party-a")
+      assert ["party-b", "party_b", "text", "BBB"] = compact_field(fields, "party-b")
 
       assert {:ok, %{"revision" => first_rev}} =
                MCP.call_tool(owner, route_ref, "doc.set_field_value", %{
@@ -370,19 +498,14 @@ defmodule Contract.MCPTest do
                  "base_revision" => base_rev
                })
 
-      assert {:ok,
-              %{
-                "revision" => ^first_rev,
-                "p" => [[0, 0, "Header"], [0, 1, "ALPHA BBB"]],
-                "f" => fields
-              }} =
+      assert {:ok, %{"revision" => ^first_rev, "f" => fields}} =
                MCP.call_tool(owner, route_ref, "doc.get", %{})
 
-      assert ["party-a", "party_a", "text", [0, 1, nil, nil, 0, 5], "ALPHA"] =
-               compact_field(fields, "party-a")
+      assert {:ok, %{"paragraphs" => [[0, 1, _, "ALPHA BBB"]]}} =
+               MCP.call_tool(owner, route_ref, "doc.read", %{"sec" => 0, "para" => 1})
 
-      assert ["party-b", "party_b", "text", [0, 1, nil, nil, 6, 9], "BBB"] =
-               compact_field(fields, "party-b")
+      assert ["party-a", "party_a", "text", "ALPHA"] = compact_field(fields, "party-a")
+      assert ["party-b", "party_b", "text", "BBB"] = compact_field(fields, "party-b")
 
       assert {:ok, %{"revision" => second_rev}} =
                MCP.call_tool(owner, route_ref, "doc.set_field_value", %{
@@ -391,19 +514,14 @@ defmodule Contract.MCPTest do
                  "base_revision" => first_rev
                })
 
-      assert {:ok,
-              %{
-                "revision" => ^second_rev,
-                "p" => [[0, 0, "Header"], [0, 1, "ALPHA OMEGA"]],
-                "f" => fields
-              }} =
+      assert {:ok, %{"revision" => ^second_rev, "f" => fields}} =
                MCP.call_tool(owner, route_ref, "doc.get", %{})
 
-      assert ["party-a", "party_a", "text", [0, 1, nil, nil, 0, 5], "ALPHA"] =
-               compact_field(fields, "party-a")
+      assert {:ok, %{"paragraphs" => [[0, 1, _, "ALPHA OMEGA"]]}} =
+               MCP.call_tool(owner, route_ref, "doc.read", %{"sec" => 0, "para" => 1})
 
-      assert ["party-b", "party_b", "text", [0, 1, nil, nil, 6, 11], "OMEGA"] =
-               compact_field(fields, "party-b")
+      assert ["party-a", "party_a", "text", "ALPHA"] = compact_field(fields, "party-a")
+      assert ["party-b", "party_b", "text", "OMEGA"] = compact_field(fields, "party-b")
     end
 
     test "doc.get returns inline compact IR even when an R2 URL can be presigned", %{
@@ -427,21 +545,22 @@ defmodule Contract.MCPTest do
                MCP.call_tool(owner, route_ref, "doc.get", %{})
 
       assert is_integer(rev)
-      assert is_list(payload["p"])
+      assert is_list(payload["outline"])
+      assert is_map(payload["counts"])
 
       # URL can still be present as optional metadata/debug context, but
-      # the agent must not need another fetch to read the document.
+      # the agent reads paragraphs via doc.read, not via this URL.
       if url = payload["ir_url"] do
         assert is_binary(url)
         assert String.contains?(url, ".ir.json")
       end
     end
 
-    test "doc.get still returns inline IR when R2 presign fails", %{
+    test "doc.get returns metadata even when R2 presign fails", %{
       owner: owner,
       route_ref: route_ref
     } do
-      # Stub that returns an error on presign so inline document access
+      # Stub that returns an error on presign so metadata access
       # does not depend on R2 URL generation.
       defmodule R2PresignFailStub do
         def put(_, _, _ \\ []), do: {:ok, %{key: "x", etag: "y"}}
@@ -457,7 +576,8 @@ defmodule Contract.MCPTest do
       assert {:ok, %{"ok" => true, "revision" => _rev} = payload} =
                MCP.call_tool(owner, route_ref, "doc.get", %{})
 
-      assert is_list(payload["p"])
+      assert is_list(payload["outline"])
+      assert is_map(payload["counts"])
       refute Map.has_key?(payload, "ir_url")
     end
 
@@ -481,10 +601,10 @@ defmodule Contract.MCPTest do
 
       refute Repo.get_by(Contract.Snapshot, document_id: doc_id)
 
-      assert {:ok, %{"ok" => true, "p" => p} = payload} =
+      assert {:ok, %{"ok" => true} = payload} =
                MCP.call_tool(owner, route_ref, "doc.get", %{})
 
-      assert is_list(p)
+      assert is_list(payload["outline"])
       refute Map.has_key?(payload, "ir_url")
       refute Repo.get_by(Contract.Snapshot, document_id: doc_id)
     end
@@ -533,11 +653,13 @@ defmodule Contract.MCPTest do
         })
         |> Repo.insert()
 
-      assert {:ok, %{"ir_url" => url, "p" => p}} = MCP.call_tool(owner, route_ref, "doc.get", %{})
+      assert {:ok, %{"ir_url" => url, "outline" => outline, "counts" => counts}} =
+               MCP.call_tool(owner, route_ref, "doc.get", %{})
 
       assert is_binary(url)
       assert String.contains?(url, ".ir.json")
-      assert is_list(p)
+      assert is_list(outline)
+      assert counts["para"] == 1
     end
 
     test "doc.get short-circuits when since_revision >= revision", %{
@@ -629,6 +751,43 @@ defmodule Contract.MCPTest do
     }
 
     assert {:ok, %Change{}} = Runtime.apply(ctx, action)
+    doc_id
+  end
+
+  # A doc whose snapshot has a title row, an opening blurb, and two clauses
+  # (제1조 / 제2조) with body text — exercises the find/read/outline trio.
+  defp doc_with_clauses(%Context{} = ctx) do
+    doc_id = create_doc(ctx, title: "Clauses Doc")
+
+    {:ok, _} =
+      %Contract.RhwpSnapshot.Record{}
+      |> Contract.RhwpSnapshot.Record.changeset(%{
+        document_id: doc_id,
+        revision: 1,
+        r2_key: "documents/#{doc_id}/snapshots/1.hwp",
+        ir_r2_key: "documents/#{doc_id}/snapshots/1.ir.json",
+        format: "hwp",
+        content_type: "application/x-hwp",
+        projection: %{
+          "title" => "Clauses Doc",
+          "contract_type" => "nda_v1",
+          "sections" => [
+            %{
+              "idx" => 0,
+              "paragraphs" => [
+                %{"idx" => 0, "text" => "Clauses Doc"},
+                %{"idx" => 1, "text" => "갑과 을이 다음과 같이 합의한다."},
+                %{"idx" => 2, "text" => "제1조 (목적) 본 계약은 갑의 업무를 정한다."},
+                %{"idx" => 3, "text" => "갑은 을에게 정해진 비용을 지급한다."},
+                %{"idx" => 4, "text" => "제2조 (기간) 본 계약의 유효 기간은 1년으로 한다."}
+              ]
+            }
+          ],
+          "fields" => []
+        }
+      })
+      |> Repo.insert()
+
     doc_id
   end
 

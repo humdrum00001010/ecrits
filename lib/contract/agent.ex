@@ -138,8 +138,12 @@ defmodule Contract.Agent do
   @mcp_tools_addendum """
   도구 — contract-doc MCP:
 
-    * `doc.get` — 현재 문서 IR 읽기 (revision + 단락 `p` + 필드 `f`)
-    * `doc.edit_text` — paragraph/cell 안 글자 구간 교체
+    * `doc.get` — 메타데이터 + heading-level outline (모든 단락 X). 반환:
+      `{revision, d (title), t (type_key), counts: {sec, para}, outline: [[sec, para, level, text]], f (fields)}`.
+    * `doc.find(needle, limit?, context?)` — 문자열 검색. 알고 있는 텍스트로 위치를 잡을 때 **doc.get 보다 먼저 호출**.
+      각 hit: `[sec, para, off, len, before, match, after, kind]` — sec/para/off/match 를 그대로 `doc.edit_text` 인자로 넘기면 글자 수 셀 일 없음.
+    * `doc.read(sec, para? | from?/to?, limit?)` — paragraph 슬라이스. find 결과 주변 컨텍스트 확인, 또는 outline 에서 클릭해서 들어가는 용도.
+    * `doc.edit_text` — paragraph/cell 안 글자 구간 교체. `match` (지울 원문) 권장.
     * `doc.insert_block` — paragraph/heading/list_item/table 삽입
     * `doc.delete_block` — block 제거
     * `doc.edit_table` — 표의 row/col 구조 변경
@@ -147,13 +151,14 @@ defmodule Contract.Agent do
 
   사용 흐름:
 
-    1. 편집 작업이 필요하면 도구를 호출하기 전에 `doc.get` 으로 현재 상태와 revision 을 한 번 읽으세요.
-    2. 변경 도구를 호출할 때 `base_revision` 을 마지막으로 본 revision 으로 고정하세요. 충돌이 나면 `doc.get` 으로 다시 읽고 재시도하세요.
-    3. 모든 편집을 마친 뒤 사용자에게 무엇을 했는지 짧은 한국어 문장으로 보고하세요 (예: "0번 단락 끝에 '[X]' 를 박았습니다."). 도구를 호출하지 않았다면 그 사실을 굳이 언급하지 말고 자연스럽게 답하세요.
+    1. 편집 대상 문구를 알고 있으면 **`doc.find(needle)` 을 먼저** 호출하세요. doc.get 으로 전체 문서를 끌어오지 마세요 — 단락 수가 수백 개 단위입니다.
+    2. find 가 hit 을 돌려주면 `(sec, para, off, match)` 를 그대로 `doc.edit_text` 에 넘기세요. `base_revision` 은 find 응답의 `revision`.
+    3. 위치를 더 확인해야 하면 `doc.read(sec, para or from/to)` 로 좁은 슬라이스만 읽으세요.
+    4. 문서 구조가 궁금하면 `doc.get` 의 outline 을 보세요 — heading 만 들어 있어 한 눈에 들어옵니다.
+    5. 모든 편집을 마친 뒤 사용자에게 한 줄 보고 (예: "제3조 둘째 줄에서 '갑'을 '원사업자'로 바꿨습니다.").
   """
 
   defp build_regular_context(ctx, %Command{} = action) do
-    snapshot = fetch_snapshot(ctx, action.document_id)
     history = fetch_history(ctx, action)
 
     # Plain Korean text reply. No JSON envelope coupling — the user-message
@@ -178,13 +183,19 @@ defmodule Contract.Agent do
           []
       end
 
+    # Task #143 — the full document IR no longer ships in the
+    # instructions string. The agent fetches it on demand via
+    # `doc.get`, which now returns compact IR inline in the MCP tool
+    # output. The IRRenderer schema prompt stays so the agent knows how
+    # to parse that payload.
     system_prompt =
       [
         @grill_system_prompt,
         @mcp_tools_addendum,
         Contract.Agent.Prompt.IRRenderer.schema_prompt(),
-        "CURRENT_DOCUMENT_IR:\n" <> Jason.encode!(snapshot)
+        document_context_note(action.document_id)
       ]
+      |> Enum.reject(&is_nil/1)
       |> Enum.join("\n\n")
 
     frame = %{
@@ -196,6 +207,17 @@ defmodule Contract.Agent do
     }
 
     {:ok, frame}
+  end
+
+  # Tiny system-note that pins the current document_id so the agent
+  # knows which IR to fetch. Returns nil for non-document contexts so
+  # the join doesn't leak an empty section header.
+  defp document_context_note(nil), do: nil
+
+  defp document_context_note(doc_id) when is_binary(doc_id) do
+    "현재 문서 ID: #{doc_id}\n" <>
+      "본문 IR이 필요하면 contract-doc MCP의 `doc.get` 도구를 호출하세요. " <>
+      "응답 본문에서 직접 `revision`, `p`, `f` 등을 읽으세요."
   end
 
   defp mint_doc_route_ref(_ctx, %Command{document_id: nil}), do: {:error, :no_document}
@@ -453,17 +475,10 @@ defmodule Contract.Agent do
     end
   end
 
-  # Real IR fetch via the Store + IRRenderer. Falls back to an empty
-  # placeholder when ctx/doc resolution fails so the agent run still
-  # starts (it can call doc.get over MCP to retry once tools are wired).
-  defp fetch_snapshot(_ctx, nil), do: %{"p" => [], "f" => []}
-
-  defp fetch_snapshot(ctx, document_id) when is_binary(document_id) do
-    case Contract.MCP.Projection.load_agent_ir(ctx, document_id) do
-      {:ok, ir} -> Contract.Agent.Prompt.IRRenderer.compact_map(ir)
-      {:error, _} -> %{"p" => [], "f" => []}
-    end
-  end
+  # Task #143 — `fetch_snapshot/2` is gone. The agent reads compact IR via
+  # `doc.get` over MCP instead of having it spliced into every
+  # `instructions` string. This still avoids paying that token cost on
+  # turns that do not need the document body.
 
   # Wave-3 owns the chat store; until it lands, return an empty history.
   defp fetch_history(ctx, %Command{} = action), do: ChatThreads.history_for_agent(ctx, action)

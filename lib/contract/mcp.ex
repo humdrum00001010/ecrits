@@ -36,11 +36,41 @@ defmodule Contract.MCP do
       %{
         "name" => "doc.get",
         "description" =>
-          "Returns the current compact agent IR inline, including `revision`, paragraph list `p`, fields `f`, and any editable table/cell coordinates. Pin `since_revision` to the last `revision` you received to short-circuit when nothing changed.",
+          "Returns the document's metadata + a heading-level outline only — NOT every paragraph. Shape: `{revision, d (title), t (type_key), counts: {sec, para}, outline: [[sec, para, level, text], ...], f (fields), ir_url (presigned R2 fallback for full-IR dumps)}`. Use `doc.find` to locate a substring and `doc.read` to fetch paragraph slices. Pin `since_revision` to short-circuit when nothing changed.",
         "inputSchema" =>
           object_schema(
             %{"since_revision" => %{"type" => "integer", "minimum" => 0}},
             []
+          )
+      },
+      %{
+        "name" => "doc.find",
+        "description" =>
+          "Search the document for `needle` (literal substring; no regex). Returns up to `limit` hits with ±`context` characters of surrounding text and the positional triple `(sec, para, off)` plus the literal `match` substring — feed those straight back into `doc.edit_text` (no character counting). Hit shape: `[sec, para, off, len, before, match, after, kind]`. Result: `{revision, total, hits}`. Prefer this over `doc.get` when you know what text you're hunting for; it avoids slurping the entire document.",
+        "inputSchema" =>
+          object_schema(
+            %{
+              "needle" => %{"type" => "string", "minLength" => 1},
+              "limit" => %{"type" => "integer", "minimum" => 1, "maximum" => 100},
+              "context" => %{"type" => "integer", "minimum" => 0, "maximum" => 200}
+            },
+            ["needle"]
+          )
+      },
+      %{
+        "name" => "doc.read",
+        "description" =>
+          "Read paragraphs in a section by index. Pass `sec` plus either `para` (single paragraph) or `from`/`to` for a contiguous range (both inclusive). At most `limit` paragraphs come back; if more remain, `next_para` carries the index to resume from. Paragraph shape: `[sec, para, kind, text]`. Use after `doc.find` to inspect surrounding context, or after `doc.get` outline to drill into a section.",
+        "inputSchema" =>
+          object_schema(
+            %{
+              "sec" => %{"type" => "integer", "minimum" => 0},
+              "para" => %{"type" => "integer", "minimum" => 0},
+              "from" => %{"type" => "integer", "minimum" => 0},
+              "to" => %{"type" => "integer", "minimum" => 0},
+              "limit" => %{"type" => "integer", "minimum" => 1, "maximum" => 200}
+            },
+            ["sec"]
           )
       },
       %{
@@ -411,6 +441,64 @@ defmodule Contract.MCP do
 
   def call_tool(_ctx, _route_ref, "doc.get", _args), do: {:error, :forbidden}
 
+  def call_tool(%Context{} = ctx, route_ref, "doc.find" = tool, args) do
+    route_ref = resolve_agent_run_id(route_ref)
+
+    instrumented(route_ref, tool, args, fn ->
+      with :ok <- authorize_doc_mcp(route_ref),
+           {:ok, document_id} <- resolve_document_id(route_ref, args),
+           :ok <- authorize_route_ref_strict(route_ref, document_id),
+           :ok <- Gateway.authorize_document(ctx, document_id),
+           {:ok, needle} <- fetch_required_string(args, "needle"),
+           {:ok, %Runtime.State{} = state} <- Runtime.load(ctx, document_id) do
+        limit = fetch_int(args, "limit") || 20
+        context = fetch_int(args, "context") || 30
+
+        %{total: total, hits: hits} =
+          Contract.MCP.Projection.find(state, needle, limit: limit, context: context)
+
+        {:ok, %{"ok" => true, "revision" => state.revision, "total" => total, "hits" => hits}}
+      end
+    end)
+  end
+
+  def call_tool(_ctx, _route_ref, "doc.find", _args), do: {:error, :forbidden}
+
+  def call_tool(%Context{} = ctx, route_ref, "doc.read" = tool, args) do
+    route_ref = resolve_agent_run_id(route_ref)
+
+    instrumented(route_ref, tool, args, fn ->
+      with :ok <- authorize_doc_mcp(route_ref),
+           {:ok, document_id} <- resolve_document_id(route_ref, args),
+           :ok <- authorize_route_ref_strict(route_ref, document_id),
+           :ok <- Gateway.authorize_document(ctx, document_id),
+           {:ok, sec} <- fetch_required_int(args, "sec"),
+           {:ok, %Runtime.State{} = state} <- Runtime.load(ctx, document_id) do
+        opts =
+          []
+          |> maybe_put_opt(:para, fetch_int(args, "para"))
+          |> maybe_put_opt(:from, fetch_int(args, "from"))
+          |> maybe_put_opt(:to, fetch_int(args, "to"))
+          |> maybe_put_opt(:limit, fetch_int(args, "limit"))
+
+        %{paragraphs: paragraphs, next_para: next} =
+          Contract.MCP.Projection.read(state, sec, opts)
+
+        payload =
+          %{
+            "ok" => true,
+            "revision" => state.revision,
+            "paragraphs" => paragraphs
+          }
+
+        payload = if is_nil(next), do: payload, else: Map.put(payload, "next_para", next)
+        {:ok, payload}
+      end
+    end)
+  end
+
+  def call_tool(_ctx, _route_ref, "doc.read", _args), do: {:error, :forbidden}
+
   def call_tool(%Context{} = ctx, route_ref, "doc.edit_text" = tool, args) do
     # Task #139 — resolve the per-turn run id from the scope registry
     # since the route_ref bearer no longer carries it. The resolved id
@@ -701,7 +789,20 @@ defmodule Contract.MCP do
   # A presigned R2 URL is still useful as metadata/debug context when it
   # is cheap to produce, but it must never be the only document body.
   defp build_doc_get_response(%Runtime.State{} = state) do
-    payload = compact_doc_get_payload(state)
+    ir = Contract.MCP.Projection.to_agent_ir(state)
+
+    payload = %{
+      "ok" => true,
+      "revision" => state.revision,
+      "d" => ir["title"],
+      "t" => ir["contract_type"],
+      "counts" => %{
+        "sec" => length(ir["sections"] || []),
+        "para" => Contract.MCP.Projection.paragraph_count(ir)
+      },
+      "outline" => Contract.MCP.Projection.outline(ir),
+      "f" => compact_fields(ir["fields"] || [])
+    }
 
     case ensure_snapshot_ir_url(state) do
       {:ok, url} ->
@@ -711,20 +812,20 @@ defmodule Contract.MCP do
         require Logger
 
         Logger.debug(
-          "doc.get: presign unavailable (#{inspect(reason)}); returning inline IR only"
+          "doc.get: presign unavailable (#{inspect(reason)}); returning metadata-only payload"
         )
 
         {:ok, payload}
     end
   end
 
-  defp compact_doc_get_payload(%Runtime.State{} = state),
-    do:
-      state
-      |> Contract.MCP.Projection.to_agent_ir()
-      |> Contract.Agent.Prompt.IRRenderer.compact_map()
-      |> Map.put("revision", state.revision)
-      |> Map.put("ok", true)
+  defp compact_fields(fields) when is_list(fields) do
+    Enum.map(fields, fn f ->
+      [f["id"], f["label"], f["kind"], f["value"] || ""]
+    end)
+  end
+
+  defp compact_fields(_), do: []
 
   # Returns a metadata/debug presigned GET URL for the .ir.json blob
   # backing an existing rhwp snapshot. This must never create a snapshot
@@ -1460,6 +1561,23 @@ defmodule Contract.MCP do
       _ -> nil
     end
   end
+
+  defp fetch_required_int(args, key) do
+    case fetch_int(args, key) do
+      n when is_integer(n) -> {:ok, n}
+      _ -> {:error, {:invalid_params, "#{key} (integer) is required"}}
+    end
+  end
+
+  defp fetch_required_string(args, key) do
+    case Map.get(args, key) || Map.get(args, String.to_atom(key)) do
+      s when is_binary(s) and s != "" -> {:ok, s}
+      _ -> {:error, {:invalid_params, "#{key} (non-empty string) is required"}}
+    end
+  end
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   # All four doc.* mutation tools below ride the same :edit_text Command kind —
   # the Reducer streams every rhwp text op (insert_text/delete_text/
