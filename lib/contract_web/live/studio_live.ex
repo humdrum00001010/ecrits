@@ -2496,11 +2496,28 @@ defmodule ContractWeb.StudioLive do
     end
   end
 
+  # Two shapes reach this converter:
+  #   * Fresh in-memory Change from Store.append broadcast — atom keys, atom op
+  #   * Reloaded Change from Postgres JSONB — string keys, string op
+  # The client only sees the post-JSON shape, so we normalize args + kind to
+  # strings here. Without the atom clause, the broadcast path's push_event
+  # was silently skipped and remote edits never reached the canvas live.
+  defp change_payload_op_to_event(%{op: op, args: args}) when is_map(args) do
+    [args |> stringify_keys() |> Map.put("kind", to_string(op))]
+  end
+
   defp change_payload_op_to_event(%{"op" => op, "args" => args}) when is_map(args) do
     [Map.put(args, "kind", op)]
   end
 
   defp change_payload_op_to_event(_), do: []
+
+  defp stringify_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), v}
+      {k, v} -> {k, v}
+    end)
+  end
 
   # envelope body(camelCase) → op map(snake_case). nil 필드는 자동 drop.
   # siteId/eventId 는 actor_id / idempotency_key 로 row 에 이미 있으므로 args 미포함.
