@@ -69,7 +69,7 @@ defmodule ContractWeb.Plug.RateLimitMCP.Bucket do
   def init(_opts) do
     # `:public` so any plug invocation (across any scheduler) can write
     # without round-tripping through this process. `read_concurrency` /
-  # `write_concurrency` because every `/mcp` request touches it.
+    # `write_concurrency` because every `/mcp` request touches it.
     :ets.new(@table, [
       :named_table,
       :public,

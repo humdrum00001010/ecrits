@@ -10,6 +10,7 @@ defmodule Contract.MCP do
   import Ecto.Query
 
   alias Contract.Change
+  alias Contract.Agent.Document, as: AgentDocument
   alias Contract.Command
   alias Contract.Context
   alias Contract.Documents
@@ -26,7 +27,7 @@ defmodule Contract.MCP do
     agent_doc_tool_descriptors() ++ legacy_expanded_tool_descriptors()
   end
 
-  # Agent-facing tool surface (the 6-tool MVP used by Contract.Agent.RunServer
+  # Agent-facing tool surface (the 6-tool MVP used by Contract.Agent.Document
   # over an authenticated MCP route_ref). These are deliberately opinionated:
   # the model gets short, positional args instead of having to construct full
   # Command JSON via `document.submit_command`. See docs/plans for the
@@ -418,7 +419,7 @@ defmodule Contract.MCP do
   # Real handlers for doc.get + doc.edit_text land in #116 (the vertical
   # slice). The remaining four stay stubbed until #120.
   def call_tool(%Context{} = ctx, route_ref, "doc.get" = tool, args) do
-    route_ref = resolve_agent_run_id(route_ref)
+    route_ref = resolve_agent_run_id(route_ref, args)
 
     instrumented(route_ref, tool, args, fn ->
       with :ok <- authorize_doc_mcp(route_ref),
@@ -442,7 +443,7 @@ defmodule Contract.MCP do
   def call_tool(_ctx, _route_ref, "doc.get", _args), do: {:error, :forbidden}
 
   def call_tool(%Context{} = ctx, route_ref, "doc.find" = tool, args) do
-    route_ref = resolve_agent_run_id(route_ref)
+    route_ref = resolve_agent_run_id(route_ref, args)
 
     instrumented(route_ref, tool, args, fn ->
       with :ok <- authorize_doc_mcp(route_ref),
@@ -465,7 +466,7 @@ defmodule Contract.MCP do
   def call_tool(_ctx, _route_ref, "doc.find", _args), do: {:error, :forbidden}
 
   def call_tool(%Context{} = ctx, route_ref, "doc.read" = tool, args) do
-    route_ref = resolve_agent_run_id(route_ref)
+    route_ref = resolve_agent_run_id(route_ref, args)
 
     instrumented(route_ref, tool, args, fn ->
       with :ok <- authorize_doc_mcp(route_ref),
@@ -500,42 +501,22 @@ defmodule Contract.MCP do
   def call_tool(_ctx, _route_ref, "doc.read", _args), do: {:error, :forbidden}
 
   def call_tool(%Context{} = ctx, route_ref, "doc.edit_text" = tool, args) do
-    # Task #139 — resolve the per-turn run id from the scope registry
-    # since the route_ref bearer no longer carries it. The resolved id
-    # is splatted onto the struct (in-memory only, never re-signed) so
-    # downstream helpers (instrumented/4, build_command/3) see a
-    # uniform shape regardless of whether they're called by an agent
-    # turn or by a legacy non-agent caller.
-    route_ref = resolve_agent_run_id(route_ref)
+    route_ref = resolve_agent_run_id(route_ref, args)
 
     instrumented(route_ref, tool, args, fn ->
       with :ok <- authorize_doc_mcp(route_ref),
            {:ok, document_id} <- resolve_document_id(route_ref, args),
            :ok <- authorize_route_ref_strict(route_ref, document_id),
-           {:ok, ops} <- edit_text_ops(args) do
-        run_id = route_ref && Map.get(route_ref, :agent_run_id)
+           :ok <- Gateway.authorize_document(ctx, document_id),
+           {:ok, %Runtime.State{} = state} <- Runtime.load(ctx, document_id) do
+        case existing_mcp_change(route_ref, document_id, args, "edit_text") do
+          {:ok, payload} ->
+            {:ok, payload}
 
-        command_args = %{
-          "kind" => "edit_text",
-          "document_id" => document_id,
-          "actor_type" => actor_type_for(route_ref),
-          "actor_id" => user_id(ctx) || (route_ref && Map.get(route_ref, :user_id)),
-          "agent_run_id" => run_id,
-          "base_revision" => Map.get(args, "base_revision") || Map.get(args, :base_revision),
-          "idempotency_key" => mcp_idempotency_key(run_id, "edit_text", args),
-          "payload" => %{"ops" => ops}
-        }
-
-        with {:ok, command} <- build_command(ctx, route_ref, command_args),
-             :ok <- authorize_command(ctx, route_ref, command),
-             {:ok, %Contract.Change{} = change} <- Runtime.apply(ctx, command) do
-          {:ok,
-           %{
-             "ok" => true,
-             "revision" => change.result_revision,
-             "applied" => "edit_text",
-             "change_id" => change.id
-           }}
+          :miss ->
+            with {:ok, ops} <- edit_text_ops(args, state) do
+              submit_edit_text(ctx, route_ref, document_id, args, ops, "edit_text")
+            end
         end
       end
     end)
@@ -544,7 +525,7 @@ defmodule Contract.MCP do
   def call_tool(_ctx, _route_ref, "doc.edit_text", _args), do: {:error, :forbidden}
 
   def call_tool(%Context{} = ctx, route_ref, "doc.insert_block" = tool, args) do
-    route_ref = resolve_agent_run_id(route_ref)
+    route_ref = resolve_agent_run_id(route_ref, args)
 
     instrumented(route_ref, tool, args, fn ->
       with :ok <- authorize_doc_mcp(route_ref),
@@ -559,7 +540,7 @@ defmodule Contract.MCP do
   def call_tool(_ctx, _route_ref, "doc.insert_block", _args), do: {:error, :forbidden}
 
   def call_tool(%Context{} = ctx, route_ref, "doc.delete_block" = tool, args) do
-    route_ref = resolve_agent_run_id(route_ref)
+    route_ref = resolve_agent_run_id(route_ref, args)
 
     instrumented(route_ref, tool, args, fn ->
       with :ok <- authorize_doc_mcp(route_ref),
@@ -574,7 +555,7 @@ defmodule Contract.MCP do
   def call_tool(_ctx, _route_ref, "doc.delete_block", _args), do: {:error, :forbidden}
 
   def call_tool(%Context{} = ctx, route_ref, "doc.edit_table" = tool, args) do
-    route_ref = resolve_agent_run_id(route_ref)
+    route_ref = resolve_agent_run_id(route_ref, args)
 
     instrumented(route_ref, tool, args, fn ->
       with :ok <- authorize_doc_mcp(route_ref),
@@ -589,7 +570,7 @@ defmodule Contract.MCP do
   def call_tool(_ctx, _route_ref, "doc.edit_table", _args), do: {:error, :forbidden}
 
   def call_tool(%Context{} = ctx, route_ref, "doc.set_field_value" = tool, args) do
-    route_ref = resolve_agent_run_id(route_ref)
+    route_ref = resolve_agent_run_id(route_ref, args)
 
     instrumented(route_ref, tool, args, fn ->
       with :ok <- authorize_doc_mcp(route_ref),
@@ -1365,10 +1346,9 @@ defmodule Contract.MCP do
 
   # Strict gate for doc.* tools. Caller MUST hold a route_ref that:
   #   (a) carries scope "agent_doc" (blocks slack/api tokens from escalating)
-  #   (b) refers to an agent_run that is still alive (token revocation —
-  #       once the RunServer GenServer terminates, the token stops being
-  #       honored even within its TTL). Tokens without agent_run_id (e.g.
-  #       hand-minted test tokens) skip the liveness check.
+  #   (b) resolves to an Agent.Document attempt that is still alive. Nil
+  #       agent_run_id is not accepted for this agent-owned surface; public
+  #       and legacy document tools keep their existing non-agent behavior.
   defp authorize_doc_mcp(%RouteRef{scopes: scopes} = ref) when is_list(scopes) do
     with :ok <- check_agent_doc_scope(scopes),
          :ok <- check_run_alive(ref) do
@@ -1386,21 +1366,49 @@ defmodule Contract.MCP do
     end
   end
 
-  # Task #139 — when the bearer is deterministic per (user, doc,
-  # thread) it no longer carries an `agent_run_id`. `resolve_agent_run_id/1`
-  # (called once at the head of every doc.* handler) splats the run id
-  # onto the struct if a RunServer is alive for the (user_id,
-  # document_id) scope. If the splat populated `agent_run_id`, we
-  # require the lookup result to still be valid (covers token
-  # revocation when a run completes); if it didn't, the bearer is
-  # treated as a non-agent caller — the change gets stamped
-  # `actor_type: :user` by `actor_type_for/1` and the audit trail
-  # stays truthful. Hand-minted test tokens that never had an
-  # `agent_run_id` skip the check the same way they used to.
-  defp check_run_alive(%RouteRef{agent_run_id: nil}), do: :ok
+  defp check_run_alive(%RouteRef{agent_run_id: nil}),
+    do: {:error, {:forbidden, :run_not_active}}
+
+  defp check_run_alive(%RouteRef{
+         agent_run_id: run_id,
+         agent_run_id_source: :client_arg,
+         user_id: user_id,
+         document_id: document_id
+       })
+       when is_binary(run_id) and is_binary(user_id) and is_binary(document_id) do
+    case AgentDocument.active_attempt(user_id, document_id) do
+      {:ok, %{run_id: ^run_id}} -> :ok
+      _ -> {:error, {:forbidden, :run_not_active}}
+    end
+  end
+
+  defp check_run_alive(%RouteRef{agent_run_id_source: :client_arg}),
+    do: {:error, {:forbidden, :run_not_active}}
+
+  defp check_run_alive(%RouteRef{
+         agent_run_id: run_id,
+         user_id: user_id,
+         document_id: document_id
+       })
+       when is_binary(run_id) and is_binary(user_id) and is_binary(document_id) do
+    case AgentDocument.active_attempt(user_id, document_id) do
+      {:ok, %{run_id: ^run_id}} ->
+        :ok
+
+      {:ok, %{run_id: _other_run_id}} ->
+        {:error, {:forbidden, :run_not_active}}
+
+      nil ->
+        check_run_registered(run_id)
+    end
+  end
 
   defp check_run_alive(%RouteRef{agent_run_id: run_id}) when is_binary(run_id) do
-    case Contract.Agent.RunServer.whereis(run_id) do
+    check_run_registered(run_id)
+  end
+
+  defp check_run_registered(run_id) do
+    case AgentDocument.whereis(run_id) do
       pid when is_pid(pid) -> :ok
       _ -> {:error, {:forbidden, :run_not_active}}
     end
@@ -1437,29 +1445,31 @@ defmodule Contract.MCP do
   defp actor_type_for(%RouteRef{agent_run_id: id}) when is_binary(id), do: "agent"
   defp actor_type_for(_), do: "user"
 
-  # Task #139 — the route_ref bearer is deterministic per (user, doc,
-  # thread) and intentionally carries no agent_run_id (so OpenAI's
-  # hosted MCP tools/list caches across turns). Resolve the per-turn
-  # run id from the scope registry and splat it onto the struct so the
-  # rest of the MCP pipeline (instrumented/4, build_command/3) keeps
-  # the same shape it always had. The route_ref struct mutation here
-  # is purely in-memory — the signed token is never re-issued.
-  #
-  # When the ref doesn't carry user_id + document_id (eg hand-minted
-  # test tokens or non-agent purposes), or no run is active for that
-  # scope, leave the struct untouched: the actor_type_for/1 fallback
-  # then stamps :user, and downstream auth gates handle the rest.
-  defp resolve_agent_run_id(%RouteRef{agent_run_id: id} = ref) when is_binary(id), do: ref
+  # Task #139/#181 — the route_ref bearer is deterministic per (user, doc,
+  # thread) and intentionally carries no agent_run_id, preserving hosted MCP
+  # tools/list caching across turns. Do not rebind nil bearers to the active
+  # attempt. A caller-supplied run id is only copied into the runtime struct so
+  # check_run_alive/1 can prove it belongs to this route_ref's user/document.
+  defp resolve_agent_run_id(%RouteRef{} = ref, args) do
+    cond do
+      is_binary(ref.agent_run_id) ->
+        ref
 
-  defp resolve_agent_run_id(%RouteRef{user_id: user_id, document_id: doc_id} = ref)
-       when is_binary(user_id) and is_binary(doc_id) do
-    case Contract.Agent.RunServer.whereis_for_scope(user_id, doc_id) do
-      {run_id, _pid} when is_binary(run_id) -> %{ref | agent_run_id: run_id}
-      _ -> ref
+      is_binary(requested_agent_run_id(args)) ->
+        %{ref | agent_run_id: requested_agent_run_id(args), agent_run_id_source: :client_arg}
+
+      true ->
+        ref
     end
   end
 
-  defp resolve_agent_run_id(other), do: other
+  defp resolve_agent_run_id(other, _args), do: other
+
+  defp requested_agent_run_id(args) when is_map(args) do
+    Map.get(args, "agent_run_id") || Map.get(args, :agent_run_id)
+  end
+
+  defp requested_agent_run_id(_args), do: nil
 
   defp mcp_idempotency_key(nil, tool, args) do
     "mcp-#{tool}-#{:erlang.phash2(args)}-#{System.unique_integer([:positive])}"
@@ -1469,7 +1479,34 @@ defmodule Contract.MCP do
     "mcp:#{run_id}:#{tool}:#{:erlang.phash2(args)}"
   end
 
-  defp edit_text_ops(args) do
+  defp existing_mcp_change(%RouteRef{agent_run_id: run_id}, document_id, args, applied)
+       when is_binary(run_id) and is_binary(document_id) do
+    key = mcp_idempotency_key(run_id, applied, args)
+
+    case Repo.get_by(Change, document_id: document_id, idempotency_key: key) do
+      %Change{command_kind: "edit_text"} = change ->
+        {:ok, mcp_change_payload(change, applied)}
+
+      %Change{command_kind: :edit_text} = change ->
+        {:ok, mcp_change_payload(change, applied)}
+
+      _ ->
+        :miss
+    end
+  end
+
+  defp existing_mcp_change(_route_ref, _document_id, _args, _applied), do: :miss
+
+  defp mcp_change_payload(%Change{} = change, applied) do
+    %{
+      "ok" => true,
+      "revision" => change.result_revision,
+      "applied" => applied,
+      "change_id" => change.id
+    }
+  end
+
+  defp edit_text_ops(args, %Runtime.State{} = state) do
     sec = fetch_int(args, "sec")
     para = fetch_int(args, "para")
     off = fetch_int(args, "off")
@@ -1502,13 +1539,37 @@ defmodule Contract.MCP do
         {:error, {:invalid_params, "text must be a string"}}
 
       true ->
-        ops =
-          []
-          |> maybe_prepend_delete(sec, para, off, len, cell_path)
-          |> maybe_prepend_insert(sec, para, off, text, cell_path)
-          |> Enum.reverse()
+        with :ok <- validate_match_at_position(state, sec, para, off, match, cell_path) do
+          ops =
+            []
+            |> maybe_prepend_delete(sec, para, off, len, cell_path)
+            |> maybe_prepend_insert(sec, para, off, text, cell_path)
+            |> Enum.reverse()
 
-        {:ok, ops}
+          {:ok, ops}
+        end
+    end
+  end
+
+  defp validate_match_at_position(_state, _sec, _para, _off, match, _cell_path)
+       when not is_binary(match) or match == "",
+       do: :ok
+
+  defp validate_match_at_position(_state, _sec, _para, _off, _match, [_ | _cell_path]),
+    do: :ok
+
+  defp validate_match_at_position(%Runtime.State{} = state, sec, para, off, match, _cell_path) do
+    case Contract.MCP.Projection.read(state, sec, para: para) do
+      %{paragraphs: [[^sec, ^para, _kind, text]]} when is_binary(text) ->
+        if String.slice(text, off, String.length(match)) == match do
+          :ok
+        else
+          {:error,
+           {:invalid_params, "match is not present at sec=#{sec}, para=#{para}, off=#{off}"}}
+        end
+
+      _ ->
+        {:error, {:invalid_params, "paragraph not found at sec=#{sec}, para=#{para}"}}
     end
   end
 
@@ -1523,6 +1584,7 @@ defmodule Contract.MCP do
         "kind" => "delete_text",
         "sec" => sec,
         "para" => para,
+        "parent_para" => maybe_parent_para(para, cell_path),
         "off" => off,
         "len" => len,
         "cell_path" => cell_path,
@@ -1543,6 +1605,7 @@ defmodule Contract.MCP do
         "kind" => "insert_text",
         "sec" => sec,
         "para" => para,
+        "parent_para" => maybe_parent_para(para, cell_path),
         "off" => off,
         "text" => text,
         "cell_path" => cell_path,
@@ -1554,6 +1617,9 @@ defmodule Contract.MCP do
 
   defp compact(map) when is_map(map),
     do: :maps.filter(fn _k, v -> not is_nil(v) end, map)
+
+  defp maybe_parent_para(para, cell_path) when is_list(cell_path) and cell_path != [], do: para
+  defp maybe_parent_para(_para, _cell_path), do: nil
 
   defp fetch_int(args, key) do
     case Map.get(args, key) || Map.get(args, String.to_atom(key)) do
@@ -1599,7 +1665,8 @@ defmodule Contract.MCP do
       "payload" => %{"ops" => ops}
     }
 
-    with {:ok, command} <- build_command(ctx, route_ref, command_args),
+    with :ok <- validate_doc_text_ops(ops),
+         {:ok, command} <- build_command(ctx, route_ref, command_args),
          :ok <- authorize_command(ctx, route_ref, command),
          {:ok, %Contract.Change{} = change} <- Runtime.apply(ctx, command) do
       {:ok,
@@ -1610,6 +1677,124 @@ defmodule Contract.MCP do
          "change_id" => change.id
        }}
     end
+  end
+
+  defp validate_doc_text_ops([]),
+    do: {:error, {:invalid_params, "document mutation produced no text operations"}}
+
+  defp validate_doc_text_ops(ops) when is_list(ops) do
+    ops
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {op, idx}, _acc ->
+      case validate_doc_text_op(op, idx) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_doc_text_ops(_ops),
+    do: {:error, {:invalid_params, "document mutation operations must be a list"}}
+
+  defp validate_doc_text_op(op, idx) when is_map(op) do
+    case text_op_value(op, :kind) do
+      "insert_text" ->
+        with :ok <- require_text_position(op, idx),
+             :ok <- require_non_negative_int(op, :off, idx),
+             :ok <- require_non_empty_text(op, :text, idx) do
+          :ok
+        end
+
+      "delete_text" ->
+        with :ok <- require_text_position(op, idx),
+             :ok <- require_non_negative_int(op, :off, idx),
+             :ok <- require_positive_text_count(op, idx) do
+          :ok
+        end
+
+      "insert_paragraph" ->
+        with :ok <- require_non_negative_int(op, :sec, idx),
+             :ok <- require_non_negative_int(op, :para, idx),
+             :ok <- require_non_negative_int(op, :off, idx) do
+          :ok
+        end
+
+      "merge_paragraph" ->
+        with :ok <- require_non_negative_int(op, :sec, idx),
+             :ok <- require_non_negative_int(op, :para, idx) do
+          :ok
+        end
+
+      kind when kind in ["table_row_insert", "table_row_delete"] ->
+        with :ok <- require_table_position(op, idx),
+             :ok <- require_non_negative_int(op, :at_row, idx) do
+          :ok
+        end
+
+      kind when kind in ["table_column_insert", "table_column_delete"] ->
+        with :ok <- require_table_position(op, idx),
+             :ok <- require_non_negative_int(op, :at_col, idx) do
+          :ok
+        end
+
+      "table_delete" ->
+        require_table_position(op, idx)
+
+      kind ->
+        {:error, {:invalid_params, "unsupported document text op at #{idx}: #{inspect(kind)}"}}
+    end
+  end
+
+  defp validate_doc_text_op(_op, idx),
+    do: {:error, {:invalid_params, "document text op at #{idx} must be a map"}}
+
+  defp require_text_position(op, idx) do
+    with :ok <- require_non_negative_int(op, :sec, idx),
+         :ok <- require_non_negative_int(op, :para, idx) do
+      :ok
+    end
+  end
+
+  defp require_table_position(op, idx) do
+    with :ok <- require_non_negative_int(op, :sec, idx),
+         :ok <- require_non_negative_int(op, :parent_para, idx),
+         :ok <- require_non_negative_int(op, :control_index, idx) do
+      :ok
+    end
+  end
+
+  defp require_non_negative_int(op, key, idx) do
+    case text_op_value(op, key) do
+      value when is_integer(value) and value >= 0 ->
+        :ok
+
+      _ ->
+        {:error, {:invalid_params, "#{key} must be a non-negative integer at op #{idx}"}}
+    end
+  end
+
+  defp require_non_empty_text(op, key, idx) do
+    case text_op_value(op, key) do
+      value when is_binary(value) and value != "" ->
+        :ok
+
+      _ ->
+        {:error, {:invalid_params, "#{key} must be a non-empty string at op #{idx}"}}
+    end
+  end
+
+  defp require_positive_text_count(op, idx) do
+    case text_op_value(op, :count) || text_op_value(op, :len) do
+      value when is_integer(value) and value > 0 ->
+        :ok
+
+      _ ->
+        {:error, {:invalid_params, "delete_text count must be a positive integer at op #{idx}"}}
+    end
+  end
+
+  defp text_op_value(op, key) when is_map(op) and is_atom(key) do
+    Map.get(op, Atom.to_string(key)) || Map.get(op, key)
   end
 
   defp insert_block_ops(args) do
@@ -1757,8 +1942,8 @@ defmodule Contract.MCP do
 
       true ->
         case lookup_field_position(state, id) do
-          {:ok, pos} ->
-            {:ok, field_position_to_edit_ops(pos, value, id)}
+          {:ok, pos, current_value} ->
+            {:ok, field_position_to_edit_ops(pos, value, id, current_value)}
 
           :error ->
             {:error, {:not_found, "field #{id} not found in projection"}}
@@ -1777,15 +1962,15 @@ defmodule Contract.MCP do
       nil ->
         :error
 
-      %{"position" => pos} when is_map(pos) and map_size(pos) > 0 ->
-        {:ok, pos}
+      %{"position" => pos} = field when is_map(pos) and map_size(pos) > 0 ->
+        {:ok, pos, Map.get(field, "value") || Map.get(field, :value)}
 
       _ ->
         :error
     end
   end
 
-  defp field_position_to_edit_ops(pos, value, field_id) do
+  defp field_position_to_edit_ops(pos, value, field_id, current_value) do
     sec = Map.get(pos, "sec") || Map.get(pos, :sec)
 
     para =
@@ -1793,15 +1978,28 @@ defmodule Contract.MCP do
         Map.get(pos, "para") || Map.get(pos, :para)
 
     off_start = Map.get(pos, "off_start") || Map.get(pos, :off_start) || 0
-    off_end = Map.get(pos, "off_end") || Map.get(pos, :off_end) || off_start
+    off_end = Map.get(pos, "off_end") || Map.get(pos, :off_end)
     cell_path = Map.get(pos, "cell_path") || Map.get(pos, :cell_path)
-    len = max(off_end - off_start, 0)
+    len = field_delete_len(off_start, off_end, current_value)
 
     []
     |> maybe_prepend_delete(sec, para, off_start, len, cell_path, field_id)
     |> maybe_prepend_insert(sec, para, off_start, value, cell_path, field_id)
     |> Enum.reverse()
   end
+
+  defp field_delete_len(off_start, off_end, current_value)
+       when is_integer(off_start) and is_integer(off_end) and off_end > off_start,
+       do: max(off_end - off_start, current_value_len(current_value))
+
+  defp field_delete_len(_off_start, _off_end, current_value)
+       when is_binary(current_value) and current_value != "",
+       do: String.length(current_value)
+
+  defp field_delete_len(_off_start, _off_end, _current_value), do: 0
+
+  defp current_value_len(value) when is_binary(value) and value != "", do: String.length(value)
+  defp current_value_len(_value), do: 0
 
   defp parse_custom_uri(uri, prefix) do
     rest = String.replace_prefix(uri, prefix, "")

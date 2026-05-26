@@ -97,10 +97,33 @@ defmodule ContractWeb.MCP.MCPPlugTest do
       assert resp.status == 200
       {:ok, env} = Jason.decode(resp.resp_body)
       assert env["id"] == 99
-      assert env["result"]["protocolVersion"] == "2024-11-05"
+      # No `protocolVersion` in the request → server advertises the
+      # newest version it implements (2025-03-26, Streamable HTTP).
+      assert env["result"]["protocolVersion"] == "2025-03-26"
       assert env["result"]["serverInfo"]["name"] == "contract-studio"
       assert is_map(env["result"]["capabilities"]["tools"])
       assert is_map(env["result"]["capabilities"]["resources"])
+    end
+
+    test "echoes client's protocolVersion when supported", %{conn: conn} do
+      {:ok, token} = Gateway.issue_route_ref(@ctx, %{purpose: "init"})
+
+      # Older client (still on 2024-11-05) — we negotiate down.
+      resp =
+        jsonrpc_call(conn, token, 1, "initialize", %{"protocolVersion" => "2024-11-05"})
+
+      {:ok, env} = Jason.decode(resp.resp_body)
+      assert env["result"]["protocolVersion"] == "2024-11-05"
+    end
+
+    test "falls back to newest version on unknown protocolVersion", %{conn: conn} do
+      {:ok, token} = Gateway.issue_route_ref(@ctx, %{purpose: "init"})
+
+      resp =
+        jsonrpc_call(conn, token, 1, "initialize", %{"protocolVersion" => "9999-99-99"})
+
+      {:ok, env} = Jason.decode(resp.resp_body)
+      assert env["result"]["protocolVersion"] == "2025-03-26"
     end
   end
 

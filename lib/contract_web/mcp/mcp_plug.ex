@@ -45,12 +45,34 @@ defmodule ContractWeb.MCP.MCPPlug do
 
   @impl true
   def call(conn, _opts) do
+    log_request(conn)
+
     case ensure_bearer(conn) do
       {:ok, conn, token_kind, principal} ->
         handle(conn, token_kind, principal)
 
       :error ->
         send_unauthorized(conn)
+    end
+  end
+
+  # Diagnostic log so we can correlate OpenAI's hosted-MCP fetches with
+  # the response we ship back. Logs at :info because the volume is low —
+  # one per agent turn for tools/list (more if the cache misses).
+  defp log_request(conn) do
+    accept = conn |> get_req_header("accept") |> Enum.at(0, "")
+    ua = conn |> get_req_header("user-agent") |> Enum.at(0, "")
+    method_param = peek_method(conn)
+    require Logger
+    Logger.info("MCP req method=#{method_param} accept=#{accept} ua=#{ua}")
+  end
+
+  defp peek_method(conn) do
+    body = Map.get(conn.assigns, :mcp_raw_body, "")
+
+    case Jason.decode(body) do
+      {:ok, %{"method" => m}} -> m
+      _ -> "<unknown>"
     end
   end
 

@@ -317,7 +317,7 @@ defmodule Contract.MCP.Projection do
 
         {window, rest} = Enum.split(candidates, limit)
         rows = Enum.map(window, &paragraph_row(sec, &1))
-        next = if rest == [], do: nil, else: (hd(rest)["idx"] || 0)
+        next = if rest == [], do: nil, else: hd(rest)["idx"] || 0
         %{paragraphs: rows, next_para: next}
     end
   end
@@ -571,7 +571,7 @@ defmodule Contract.MCP.Projection do
   defp refresh_field_values(%{"fields" => fields, "sections" => sections} = ir) do
     fields =
       Enum.map(fields || [], fn field ->
-        case field_text(sections, map_value(field, "position")) do
+        case field_text(sections, map_value(field, "position"), field) do
           nil -> field
           value -> Map.put(field, "value", value)
         end
@@ -582,7 +582,7 @@ defmodule Contract.MCP.Projection do
 
   defp refresh_field_values(ir), do: ir
 
-  defp field_text(sections, pos) when is_map(pos) do
+  defp field_text(sections, pos, field) when is_map(pos) do
     with true <- map_value(pos, "cell_path") in [nil, []],
          sec when is_integer(sec) <- map_value(pos, "sec"),
          para when is_integer(para) <- map_value(pos, "para"),
@@ -591,13 +591,29 @@ defmodule Contract.MCP.Projection do
          text when is_binary(text) <- paragraph_text(sections, sec, para) do
       start_off = clamp(start_off, 0, String.length(text))
       end_off = clamp(end_off, start_off, String.length(text))
-      String.slice(text, start_off, end_off - start_off)
+      ranged_value = String.slice(text, start_off, end_off - start_off)
+      full_value_at_start(text, start_off, field) || ranged_value
     else
       _ -> nil
     end
   end
 
-  defp field_text(_sections, _pos), do: nil
+  defp field_text(_sections, _pos, _field), do: nil
+
+  defp full_value_at_start(text, start_off, field) do
+    value = map_value(field, "value")
+
+    cond do
+      not is_binary(value) or value == "" ->
+        nil
+
+      String.slice(text, start_off, String.length(value)) == value ->
+        value
+
+      true ->
+        nil
+    end
+  end
 
   defp paragraph_text(sections, sec, para) do
     Enum.find_value(sections || [], fn section ->
@@ -636,5 +652,4 @@ defmodule Contract.MCP.Projection do
       {:ok, to_agent_ir(state)}
     end
   end
-
 end

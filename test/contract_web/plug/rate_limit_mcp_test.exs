@@ -27,6 +27,7 @@ defmodule ContractWeb.Plug.RateLimitMCPTest do
     )
 
     RateLimitMCP.reset()
+
     on_exit(fn ->
       Application.put_env(:contract, @plug_app_key, original)
       RateLimitMCP.reset()
