@@ -111,7 +111,7 @@ defmodule Contract.IO.IRRefiner do
         format: %{
           type: "json_schema",
           name: "ir_refinement",
-          strict: false,
+          strict: true,
           schema: json_schema()
         }
       }
@@ -219,7 +219,7 @@ defmodule Contract.IO.IRRefiner do
       "properties" => %{
         "kind" => %{"type" => "string"},
         "content" => %{"type" => "string"},
-        "attrs" => %{"type" => ["object", "null"]}
+        "attrs" => patch_attrs_schema()
       }
     }
 
@@ -251,7 +251,7 @@ defmodule Contract.IO.IRRefiner do
                   nil
                 ]
               },
-              "attrs" => %{"type" => ["object", "null"]},
+              "attrs" => patch_attrs_schema(),
               "with" => %{
                 "type" => ["array", "null"],
                 "items" => patch_with_node_schema
@@ -340,6 +340,49 @@ defmodule Contract.IO.IRRefiner do
       nodes_patch: List.wrap(map["nodes_patch"]),
       fields: List.wrap(map["fields"]),
       field_bindings: List.wrap(map["field_bindings"])
+    }
+  end
+
+  defp patch_attrs_schema do
+    %{
+      "anyOf" => [
+        %{"type" => "null"},
+        %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => [],
+          "properties" => %{}
+        },
+        %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => ["level"],
+          "properties" => %{
+            "level" => %{"type" => "integer", "minimum" => 1, "maximum" => 6}
+          }
+        },
+        %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => ["number"],
+          "properties" => %{"number" => %{"type" => "string"}}
+        },
+        %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => ["ordered"],
+          "properties" => %{"ordered" => %{"type" => "boolean"}}
+        },
+        %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => ["ordered", "number"],
+          "properties" => %{
+            "ordered" => %{"type" => "boolean"},
+            "number" => %{"type" => "string"}
+          }
+        }
+      ]
     }
   end
 
