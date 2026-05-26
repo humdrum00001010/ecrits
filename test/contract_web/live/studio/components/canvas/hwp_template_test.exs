@@ -15,6 +15,13 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplateTest do
         },
         matching_book: %{},
         field_values: %{},
+        editable_spec_candidates: [
+          %{
+            contractTypeKey: "service_agreement_v1",
+            documentPath: "/assets/standard_contracts/service_agreement_v1.hwp",
+            specPath: "/assets/standard_contracts/service_agreement_v1.editables.json"
+          }
+        ],
         site_id: "user:test",
         document_id: "doc-1",
         text_events: [],
@@ -35,5 +42,7 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplateTest do
     assert html =~ ~s(data-snapshot-lamport="9")
     assert html =~ ~s(data-snapshot-candidates=)
     assert html =~ ~s(/documents/doc-1/rhwp-snapshots/216.hwpx)
+    assert html =~ ~s(data-editable-spec-candidates=)
+    assert html =~ ~s(service_agreement_v1.editables.json)
   end
 end

@@ -84,7 +84,13 @@ defmodule ContractWeb.StudioLiveDocumentFirstTest do
     assert html =~ ~s(class="tool-trace)
     assert html =~ "답변을 수정 범위에 연결함"
     assert html =~ "제8조 1항"
-    refute html =~ "contract_ir.patch.apply"
+
+    collapsed_trace =
+      lv
+      |> element("#tool-trace-tool-agent-run-1-tool-1")
+      |> render()
+
+    refute collapsed_trace =~ "contract_ir.patch.apply"
     refute html =~ "Tool call"
   end
 

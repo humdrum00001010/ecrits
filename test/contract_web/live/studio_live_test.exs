@@ -9,6 +9,7 @@ defmodule ContractWeb.StudioLiveTest do
   alias Contract.ChatThread
   alias Contract.Command
   alias Contract.Repo
+  alias Contract.RhwpSnapshot.Record, as: RhwpSnapshotRecord
   alias Contract.SourceClaim
   alias Contract.SourceDocument
   alias Contract.Studio.State
@@ -96,6 +97,50 @@ defmodule ContractWeb.StudioLiveTest do
       assert assigns.studio_state.selected_document_id == doc.id
     end
 
+    test "snapshot upload refreshes the current snapshot assigns and hook attributes", %{
+      conn: conn,
+      user: user
+    } do
+      old_drivers = Application.get_env(:contract, :io_drivers, [])
+
+      Application.put_env(
+        :contract,
+        :io_drivers,
+        Keyword.put(old_drivers, :r2, Contract.IO.R2Stub)
+      )
+
+      Contract.IO.R2Stub.reset()
+
+      on_exit(fn ->
+        Application.put_env(:contract, :io_drivers, old_drivers)
+        Contract.IO.R2Stub.reset()
+      end)
+
+      scope = Contract.Context.for_user(user)
+      document_id = create_typed_document!(scope, "Snapshot freshness")
+      update_document_metadata!(scope, document_id, 1)
+      insert_rhwp_snapshot!(document_id, 1)
+
+      {:ok, lv, html} = live(conn, ~p"/documents/#{document_id}")
+
+      assert html =~ ~s(data-snapshot-revision="1")
+      assert :sys.get_state(lv.pid).socket.assigns.rhwp_snapshot.revision == 1
+      assert {:ok, 2} = Contract.Store.latest_revision(document_id)
+
+      html =
+        render_hook(lv, "rhwp.snapshot.upload", %{
+          "bytes_base64" => Base.encode64("new-native-hwp"),
+          "format" => "hwp",
+          "ir" => %{"metadata" => %{"lamport_max" => 268}}
+        })
+
+      assigns = :sys.get_state(lv.pid).socket.assigns
+      assert assigns.rhwp_snapshot.revision == 2
+      assert [%{revision: 2}, %{revision: 1}] = assigns.rhwp_snapshot_candidates
+      assert html =~ ~s(data-snapshot-revision="2")
+      assert html =~ ~s(/documents/#{document_id}/rhwp-snapshots/2.hwp)
+    end
+
     test "mounts at /studio (no params) with no document",
          %{conn: conn} do
       {:ok, lv, _html} = live(conn, ~p"/studio")
@@ -103,6 +148,54 @@ defmodule ContractWeb.StudioLiveTest do
       assigns = :sys.get_state(lv.pid).socket.assigns
       assert assigns.current_document_id == nil
       assert assigns.studio_state.selected_document_id == nil
+    end
+
+    test "empty /studio canvas offers type choices that start a typed document",
+         %{conn: conn, user: user} do
+      conn =
+        Plug.Conn.put_session(
+          conn,
+          :user_perms,
+          ~w(read write commit revoke export type_change agent_run)a
+        )
+
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      assert has_element?(lv, ~s([data-role="canvas-empty-type-picker"]))
+      assert has_element?(lv, ~s([data-role="canvas-empty-upload-action"]), "계약서 업로드")
+
+      lv
+      |> element(~s([data-role="canvas-empty-upload-action"]))
+      |> render_click()
+
+      assert_push_event(lv, "open-document-upload-picker", %{}, 500)
+
+      {:ok, specs} = Contract.ContractTypes.list()
+      visible_specs = Enum.reject(specs, &(&1.source == :custom))
+
+      for spec <- visible_specs do
+        assert has_element?(
+                 lv,
+                 ~s([data-role="canvas-empty-type-option"][phx-value-type_key="#{spec.key}"]),
+                 Contract.ContractTypes.display_name(spec)
+               )
+      end
+
+      first_spec = hd(visible_specs)
+
+      lv
+      |> element(
+        ~s([data-role="canvas-empty-type-option"][phx-value-type_key="#{first_spec.key}"])
+      )
+      |> render_click()
+
+      [doc] =
+        user
+        |> Contract.Context.for_user()
+        |> Contract.Documents.list_recent_for_scope(1)
+
+      assert doc.type_key == first_spec.key
+      assert_redirect(lv, "/studio/#{doc.id}")
     end
 
     test "DocumentScope threads :user_perms from session onto current_scope.perms (lawyer-style) and unlocks Canvas.Empty actions",
@@ -116,12 +209,10 @@ defmodule ContractWeb.StudioLiveTest do
       {:ok, lv, html} = live(conn, ~p"/studio")
 
       assert :sys.get_state(lv.pid).socket.assigns.current_scope.perms == lawyer_perms
-      # Per 2026-05-17 owner directive, the empty state hosts the four
-      # onboarding affordances: upload + blank + recent + discuss.
-      assert html =~ "빈 문서로 시작"
+      assert html =~ "계약 유형 선택"
       assert html =~ "계약서 업로드"
-      assert html =~ "최근 문서 열기"
-      assert html =~ "에이전트와 먼저 상의하기"
+      assert html =~ ~s(data-role="canvas-empty-type-picker")
+      assert html =~ ~s(data-role="canvas-empty-upload-action")
     end
 
     test "without :user_perms in session, current_scope.perms is nil and Canvas.Empty actions are hidden",
@@ -143,41 +234,19 @@ defmodule ContractWeb.StudioLiveTest do
       assert html =~ ~s(data-stub="toast-queue")
     end
 
-    test "no-document chat.submit persists a ChatThread message and reloads it", %{
+    test "no-document chat form is visible but does not submit without a selected document", %{
       conn: conn,
       user: user
     } do
-      stub_agent_response("I can help frame the discussion before a draft exists.")
-
       {:ok, lv, _html} = live(conn, ~p"/studio")
 
-      message = "Let us discuss a distribution agreement before drafting."
+      assert has_element?(lv, "#chat-rail-form")
+      refute has_element?(lv, "#chat-rail-form[phx-submit]")
 
-      html =
-        lv
-        |> form("#chat-rail-form", %{"message" => message})
-        |> render_submit()
-
-      assert html =~ message
-
-      thread =
-        Repo.one!(
-          from t in ChatThread,
-            where: t.owner_id == ^user.id and is_nil(t.document_id),
-            order_by: [desc: t.inserted_at],
-            limit: 1
-        )
-
-      assert [%{"role" => "user", "content" => ^message, "id" => message_id}] =
-               Enum.take(thread.messages, 1)
-
-      assert is_binary(message_id)
-      assert thread.last_message_at
-
-      {:ok, _reloaded_lv, reloaded_html} = live(conn, ~p"/studio")
-
-      assert reloaded_html =~ message
-      assert reloaded_html =~ ~s(id="chat-msg-#{message_id}")
+      refute Repo.exists?(
+               from t in ChatThread,
+                 where: t.owner_id == ^user.id and is_nil(t.document_id)
+             )
     end
 
     # Wave 4 bugfix #6 — Playwright Scenario 6 selector contract.
@@ -230,8 +299,11 @@ defmodule ContractWeb.StudioLiveTest do
          %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/studio")
 
-      # Top navbar lives inside Layouts.app — sticky header at top.
-      assert html =~ "backdrop-blur sticky top-0 z-30"
+      # Top navbar lives inside Layouts.app — fixed header at top.
+      assert html =~
+               "navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px]"
+
+      assert html =~ "supports-[backdrop-filter]:backdrop-blur-md"
       # Studio document header (Document / title / Dashboard link) is present.
       assert html =~ ~s(id="studio-document-header")
       # Desktop root has the calc-based height (not fixed inset-0).
@@ -265,7 +337,8 @@ defmodule ContractWeb.StudioLiveTest do
 
       assert html =~ ~s(data-viewport="desktop")
       assert html =~ ~s(id="studio-document-header")
-      assert html =~ "backdrop-blur sticky top-0 z-30"
+      assert html =~ "navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px]"
+      assert html =~ "supports-[backdrop-filter]:backdrop-blur-md"
       refute html =~ ~s(fixed inset-0)
     end
   end
@@ -395,26 +468,21 @@ defmodule ContractWeb.StudioLiveTest do
   describe "agent_option_picked (no-document quick-start, SPEC.md §10)" do
     setup :log_in_a_user
 
-    test "renders the 5-option no-document welcome at /studio (no doc selected)",
+    test "renders main empty-screen creation actions and no ChatRail no-doc dialog at /studio",
          %{conn: conn} do
       {:ok, _lv, html} = live(conn, ~p"/studio")
 
-      assert html =~ ~s(data-role="chat-no-doc-welcome")
-      # All 5 chip keys are present.
-      assert html =~ ~s(phx-value-key="upload")
-      assert html =~ ~s(phx-value-key="recent")
-      assert html =~ ~s(phx-value-key="blank")
-      assert html =~ ~s(phx-value-key="draft_from_discussion")
-      assert html =~ ~s(phx-value-key="variant_from_other")
+      assert html =~ ~s(data-role="canvas-empty-type-picker")
+      assert html =~ ~s(data-role="canvas-empty-upload-action")
+      refute html =~ ~s(data-role="chat-no-doc-welcome")
     end
 
-    test "upload option opens the upload modal", %{conn: conn} do
+    test "upload option pushes the document upload picker event", %{conn: conn} do
       {:ok, lv, _html} = live(conn, ~p"/studio")
-      assert :sys.get_state(lv.pid).socket.assigns.studio_state.upload_panel_open? == false
 
       _ = render_hook(lv, "agent_option_picked", %{"key" => "upload"})
 
-      assert :sys.get_state(lv.pid).socket.assigns.studio_state.upload_panel_open? == true
+      assert_push_event(lv, "open-document-upload-picker", %{}, 500)
     end
 
     test "recent option opens the document-picker modal", %{conn: conn} do
@@ -1203,7 +1271,7 @@ defmodule ContractWeb.StudioLiveTest do
       html = render(lv)
       assert html =~ ~s(id="operation-block-source-#{source_id}-interpretation")
       assert html =~ ~s(data-operation-status="ready")
-      assert html =~ "2 claims"
+      assert html =~ "추출값 2개"
 
       send(lv.pid, {:source_claim_updated, %{id: "claim-1", status: :confirmed}})
       html = render(lv)
@@ -1410,15 +1478,20 @@ defmodule ContractWeb.StudioLiveTest do
       end
     end
 
-    test "with a type_key, dispatches the set_contract_type Action (no modal)",
+    test "with a type_key, does not replace an already typed document",
          %{conn: conn, user: user} do
       scope = Contract.Context.for_user(user)
+      document_id = Ecto.UUID.generate()
 
-      {:ok, doc} =
-        Contract.Documents.create(scope, %{
-          "title" => "src",
-          "type_key" => "nda_v1"
-        })
+      assert {:ok, %Contract.Change{document_id: ^document_id}} =
+               Contract.Runtime.apply(scope, %Command{
+                 kind: :create_document,
+                 document_id: document_id,
+                 actor_type: :user,
+                 actor_id: user.id,
+                 base_revision: 0,
+                 payload: %{"title" => "typed", "type_key" => "employment_v1"}
+               })
 
       conn =
         Plug.Conn.put_session(
@@ -1427,13 +1500,8 @@ defmodule ContractWeb.StudioLiveTest do
           ~w(read write commit revoke export type_change)a
         )
 
-      {:ok, lv, _html} = live(conn, ~p"/studio")
-
-      send_state(lv, %State{
-        selected_document_id: doc.id,
-        mode: :editing,
-        last_seen_revision: 0
-      })
+      {:ok, lv, _html} = live(conn, ~p"/studio/#{document_id}")
+      assert assigns(lv).projection.type_key == "employment_v1"
 
       html =
         render_hook(lv, "command_palette_picked", %{
@@ -1441,11 +1509,12 @@ defmodule ContractWeb.StudioLiveTest do
           "type_key" => "service_agreement_v1"
         })
 
-      # No type-picker modal — the Action dispatched directly.
       refute html =~ ~s(data-role="type-picker")
+      assert assigns(lv).projection.type_key == "employment_v1"
+      assert Repo.get!(Contract.Documents.Document, document_id).type_key == "employment_v1"
     end
 
-    test "type picker updates the current document projection after changing type",
+    test "typed document header renders an immutable type badge without replacement rows",
          %{conn: conn, user: user} do
       scope = Contract.Context.for_user(user)
       document_id = Ecto.UUID.generate()
@@ -1462,46 +1531,75 @@ defmodule ContractWeb.StudioLiveTest do
 
       {:ok, lv, _html} = live(conn, ~p"/studio/#{document_id}")
       assert assigns(lv).projection.type_key == "employment_v1"
-      refute has_element?(lv, ~s(#document-type-picker button[phx-value-type_key="web_novel_v1"]))
-      refute has_element?(lv, ~s(#document-type-picker button[phx-value-type_key="franchise_v1"]))
 
-      refute has_element?(
+      assert has_element?(
                lv,
-               ~s(#document-type-picker button[phx-value-type_key="franchise_chicken_v2024_12"])
+               ~s(#document-type-badge[data-role="document-type-badge"]),
+               Contract.ContractTypes.display_name("employment_v1")
              )
 
-      refute has_element?(lv, ~s(#document-type-picker button[phx-value-type_key="supply_v1"]))
+      refute has_element?(lv, ~s(#document-type-picker))
+      refute has_element?(lv, ~s([data-role="document-type-picker"]))
+      refute has_element?(lv, ~s(button[phx-click="set_contract_type"]))
+    end
 
-      lv
-      |> element(~s(#document-type-picker button[phx-value-type_key="service_agreement_v1"]))
-      |> render_click()
+    test "set_contract_type event leaves an already typed document unchanged",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      document_id = Ecto.UUID.generate()
 
-      assert assigns(lv).projection.type_key == "service_agreement_v1"
-      assert assigns(lv).rhwp_field_values == %{}
+      assert {:ok, %Contract.Change{document_id: ^document_id}} =
+               Contract.Runtime.apply(scope, %Command{
+                 kind: :create_document,
+                 document_id: document_id,
+                 actor_type: :user,
+                 actor_id: user.id,
+                 base_revision: 0,
+                 payload: %{"title" => "typed", "type_key" => "employment_v1"}
+               })
 
-      assert Repo.get!(Contract.Documents.Document, document_id).type_key ==
-               "service_agreement_v1"
+      {:ok, lv, _html} = live(conn, ~p"/documents/#{document_id}")
+      assert assigns(lv).projection.type_key == "employment_v1"
+
+      assert has_element?(
+               lv,
+               ~s(#document-type-badge[data-role="document-type-badge"]),
+               Contract.ContractTypes.display_name("employment_v1")
+             )
+
+      html = render_hook(lv, "set_contract_type", %{"type_key" => "service_agreement_v1"})
+
+      assert html =~ Contract.ContractTypes.display_name("employment_v1")
+      assert assigns(lv).projection.type_key == "employment_v1"
+      assert Repo.get!(Contract.Documents.Document, document_id).type_key == "employment_v1"
+
+      assert has_element?(
+               lv,
+               ~s(#document-type-badge[data-role="document-type-badge"]),
+               Contract.ContractTypes.display_name("employment_v1")
+             )
     end
   end
 
   # ---------------------------------------------------------------------------
   # Document-pivot breadcrumb shape (SPEC.md 2026-05-15).
   #
-  # The Studio trail is now 2-level: `Dashboard > Document.title` (or
-  # `Dashboard > Studio` when no document is loaded). The Matter level
+  # The Studio trail is now 2-level: `Storage > Document.title` (or
+  # `Storage > Studio` when no document is loaded). The Matter level
   # is gone from the breadcrumbs — Matter is internal context.
   # ---------------------------------------------------------------------------
   describe "Document-pivot — Studio breadcrumb trail is 2-level" do
     setup :log_in_a_user
 
-    test "mounting /studio (no document) gives a 2-crumb trail: Dashboard > Studio",
+    test "mounting /studio (no document) gives a 2-crumb trail: Storage > Studio",
          %{conn: conn} do
       {:ok, lv, _html} = live(conn, ~p"/studio")
 
       trail = :sys.get_state(lv.pid).socket.assigns.breadcrumbs
 
       assert length(trail) == 2
-      assert Enum.at(trail, 0).label == "Dashboard"
+      assert Enum.at(trail, 0).label == "Storage"
+      assert Enum.at(trail, 0).navigate == "/storage"
       assert Enum.at(trail, 1).label == "Studio"
       assert Enum.at(trail, 1).current? == true
 
@@ -1510,7 +1608,7 @@ defmodule ContractWeb.StudioLiveTest do
       refute Enum.any?(trail, &(&1.label == "Matter"))
     end
 
-    test "mounting a document route gives Dashboard > Document breadcrumbs", %{
+    test "mounting a document route gives Storage > Document breadcrumbs", %{
       conn: conn,
       user: user
     } do
@@ -1521,7 +1619,8 @@ defmodule ContractWeb.StudioLiveTest do
       trail = :sys.get_state(lv.pid).socket.assigns.breadcrumbs
 
       assert length(trail) == 2
-      assert Enum.at(trail, 0).label == "Dashboard"
+      assert Enum.at(trail, 0).label == "Storage"
+      assert Enum.at(trail, 0).navigate == "/storage"
       assert Enum.at(trail, 1).label == "Breadcrumb draft"
       refute Enum.any?(trail, &(&1.label == "Matter"))
     end
@@ -1530,23 +1629,6 @@ defmodule ContractWeb.StudioLiveTest do
   # ---------------------------------------------------------------------------
   # helpers
   # ---------------------------------------------------------------------------
-
-  defp stub_agent_response(message) do
-    payload =
-      Jason.encode!(%{
-        "mode" => "grill",
-        "questions" => [],
-        "ops" => [],
-        "marks" => [],
-        "message" => message
-      })
-
-    Contract.IO.OpenAIMock
-    |> stub(:stream_chat, fn _params, _opts ->
-      stream = [%{type: "response.output_text.delta", data: %{"delta" => payload}}]
-      {:ok, %{stream: stream, task_pid: self()}}
-    end)
-  end
 
   defp stub_blocking_agent_stream(parent, chunks \\ []) do
     Contract.IO.OpenAIMock
@@ -1703,6 +1785,49 @@ defmodule ContractWeb.StudioLiveTest do
 
     {:ok, %Contract.Change{}} = Contract.Runtime.apply(scope, command)
     doc
+  end
+
+  defp create_typed_document!(scope, title) do
+    document_id = Ecto.UUID.generate()
+
+    command = %Command{
+      kind: :create_document,
+      actor_type: :user,
+      actor_id: scope.user.id,
+      document_id: document_id,
+      base_revision: 0,
+      idempotency_key: "create-typed-#{document_id}",
+      payload: %{"title" => title, "type_key" => "nda_v1"}
+    }
+
+    {:ok, %Contract.Change{}} = Contract.Runtime.apply(scope, command)
+    document_id
+  end
+
+  defp update_document_metadata!(scope, document_id, base_revision) do
+    command = %Command{
+      kind: :update_metadata,
+      actor_type: :user,
+      actor_id: scope.user.id,
+      document_id: document_id,
+      base_revision: base_revision,
+      idempotency_key: "snapshot-freshness-metadata-#{Ecto.UUID.generate()}",
+      payload: %{"metadata" => %{"snapshot_test" => true}}
+    }
+
+    {:ok, %Contract.Change{}} = Contract.Runtime.apply(scope, command)
+  end
+
+  defp insert_rhwp_snapshot!(document_id, revision) do
+    Repo.insert!(%RhwpSnapshotRecord{
+      document_id: document_id,
+      revision: revision,
+      format: "hwp",
+      content_type: "application/x-hwp",
+      r2_key: "documents/#{document_id}/snapshots/#{revision}.hwp",
+      ir_r2_key: "documents/#{document_id}/snapshots/#{revision}.ir.json",
+      projection: %{"revision" => revision}
+    })
   end
 
   defp seed_thread_with_user_message(user, document, message_text) do

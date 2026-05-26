@@ -22,6 +22,7 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplate do
       data-document-name={template_name(@spec)}
       data-matching-book={Jason.encode!(assigns[:matching_book] || %{})}
       data-field-values={Jason.encode!(assigns[:field_values] || %{})}
+      data-editable-spec-candidates={Jason.encode!(assigns[:editable_spec_candidates] || [])}
       data-renderer="svg"
       data-role="standard-hwp-editor"
       data-site-id={@site_id}

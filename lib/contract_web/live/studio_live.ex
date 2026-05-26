@@ -118,20 +118,10 @@ defmodule ContractWeb.StudioLive do
           |> assign(:chat_rail_hidden?, false)
           |> assign(:other_documents, list_other_documents(scope, studio_state))
           |> then(fn s ->
-            snapshot_candidates =
-              load_rhwp_snapshot_candidates(
-                studio_state.selected_document_id,
-                rhwp_snapshot_format(projection)
-              )
-
-            snapshot = List.first(snapshot_candidates)
-
-            s
-            |> assign(:rhwp_snapshot, snapshot)
-            |> assign(:rhwp_snapshot_candidates, snapshot_candidates)
-            |> assign(
-              :rhwp_text_events,
-              load_rhwp_text_events(studio_state.selected_document_id, 0)
+            assign_rhwp_snapshot_state(
+              s,
+              studio_state.selected_document_id,
+              rhwp_snapshot_format(projection)
             )
           end)
           |> assign(:reconcile_modal_open?, false)
@@ -308,6 +298,8 @@ defmodule ContractWeb.StudioLive do
          {:ok, bytes} <- Base.decode64(encoded),
          {:ok, snapshot} <-
            Contract.RhwpSnapshot.upload_and_commit(document_id, revision, bytes, ir, format) do
+      socket = assign_rhwp_snapshot_state(socket, document_id, snapshot.format)
+
       {:reply,
        %{
          ok: true,
@@ -344,26 +336,8 @@ defmodule ContractWeb.StudioLive do
       when kind in ["set_contract_type", "document.type.set"] do
     case Map.get(params, "type_key") do
       type_key when is_binary(type_key) and type_key != "" ->
-        # User has a type_key — dispatch as a normal set_contract_type Command,
-        # then close the type-picker if it was open (so picking a row in the
-        # modal completes the round-trip).
-        case event_to_command(
-               "set_contract_type",
-               Map.put(params, "type_key", type_key),
-               socket.assigns
-             ) do
-          {:ok, %Command{} = action} ->
-            socket =
-              socket
-              |> dispatch(action)
-              |> put_state_flag(:type_picker_open?, false)
-
-            {:noreply, socket}
-
-          {:error, reason} ->
-            {:noreply,
-             put_flash(socket, :error, "Could not set contract type: #{inspect(reason)}")}
-        end
+        {:noreply, socket} = handle_event("set_contract_type", %{"type_key" => type_key}, socket)
+        {:noreply, put_state_flag(socket, :type_picker_open?, false)}
 
       _ ->
         # No type_key → open the type-picker modal. Driven by a flag on
@@ -561,7 +535,7 @@ defmodule ContractWeb.StudioLive do
         {:noreply, socket}
 
       true ->
-        handle_contract_event("set_contract_type", %{"type_key" => type_key}, socket)
+        {:noreply, reject_contract_type_replacement(socket)}
     end
   end
 
@@ -705,6 +679,13 @@ defmodule ContractWeb.StudioLive do
 
   def handle_event(event, params, socket) do
     handle_contract_event(event, params, socket)
+  end
+
+  defp reject_contract_type_replacement(socket) do
+    socket
+    |> assign(:contract_type_picker_open?, false)
+    |> put_state_flag(:type_picker_open?, false)
+    |> put_flash(:error, dgettext("studio", "문서 타입은 선택 후 변경할 수 없습니다."))
   end
 
   defp handle_contract_event(event, params, socket) do
@@ -1912,127 +1893,142 @@ defmodule ContractWeb.StudioLive do
                   </details>
                 </div>
 
-                <details
-                  id="document-type-picker"
-                  class="relative shrink-0"
-                  data-role="document-type-picker"
-                  phx-hook=".CloseOnOutside"
-                  open={assigns[:contract_type_picker_open?] || false}
-                >
-                  <summary
-                    class="list-none inline-flex h-7 items-center gap-1 px-2 rounded-md text-[13px] font-medium border border-base-300 text-base-content/70 hover:bg-base-200 hover:text-base-content cursor-pointer"
-                    aria-label={dgettext("studio", "문서 타입 선택")}
+                <%= if projection_type_key(@projection) do %>
+                  <span
+                    id="document-type-badge"
+                    data-role="document-type-badge"
+                    class="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-base-300 bg-base-100 px-2 text-[13px] font-medium text-base-content/70"
+                    aria-label={dgettext("studio", "문서 타입")}
                     title={ContractTypes.display_name(projection_type_key(@projection))}
                   >
+                    <.icon name="hero-document-text" class="size-3.5 text-base-content/45" />
                     <span data-role="document-type-summary">
                       {ContractTypes.display_name(projection_type_key(@projection))}
                     </span>
-                    <.icon name="hero-chevron-down" class="size-3" />
-                  </summary>
-                  <div
-                    class="absolute left-0 top-full mt-1 z-30 w-72 max-h-80 overflow-y-auto rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
-                    role="menu"
+                  </span>
+                <% else %>
+                  <details
+                    id="document-type-picker"
+                    class="relative shrink-0"
+                    data-role="document-type-picker"
+                    phx-hook=".CloseOnOutside"
+                    open={assigns[:contract_type_picker_open?] || false}
                   >
-                    <label
-                      role="menuitem"
-                      class={[
-                        "flex w-full cursor-pointer items-center justify-between gap-3 px-3 py-2 text-left hover:bg-base-200",
-                        projection_type_key(@projection) == "custom_v1" &&
-                          "font-semibold text-base-content"
-                      ]}
+                    <summary
+                      class="list-none inline-flex h-7 items-center gap-1 px-2 rounded-md text-[13px] font-medium border border-base-300 text-base-content/70 hover:bg-base-200 hover:text-base-content cursor-pointer"
+                      aria-label={dgettext("studio", "문서 타입 선택")}
+                      title={ContractTypes.display_name(projection_type_key(@projection))}
                     >
-                      <input
-                        id="document-direct-upload-input"
-                        type="file"
-                        accept=".pdf,.hwp,.hwpx,.docx"
-                        class="sr-only"
-                        phx-hook="DirectR2Upload"
-                        data-role="document-upload-file-input"
-                      />
-                      <span class="inline-flex items-center gap-2">
-                        <.icon name="hero-arrow-up-tray" class="size-4 text-base-content/50" />
-                        <span>{dgettext("studio", "갖고 있는 계약서가 있나요?")}</span>
+                      <span data-role="document-type-summary">
+                        {ContractTypes.display_name(projection_type_key(@projection))}
                       </span>
-                    </label>
-
-                    <div class="my-1 border-t border-base-200"></div>
-
-                    <.form
-                      for={%{"q" => assigns[:contract_type_query] || ""}}
-                      as={:search}
-                      phx-change="filter_contract_types"
-                      class="px-2 py-1"
+                      <.icon name="hero-chevron-down" class="size-3" />
+                    </summary>
+                    <div
+                      class="absolute left-0 top-full mt-1 z-30 w-72 max-h-80 overflow-y-auto rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
+                      role="menu"
                     >
-                      <input
-                        type="search"
-                        name="q"
-                        value={assigns[:contract_type_query] || ""}
-                        placeholder={dgettext("studio", "표준양식 검색")}
-                        autocomplete="off"
-                        class="input input-sm input-bordered w-full"
-                      />
-                    </.form>
-
-                    <p class="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-base-content/40">
-                      {dgettext("studio", "표준양식")}
-                    </p>
-                    <button
-                      :for={spec <- contract_type_options(assigns[:contract_type_query] || "")}
-                      type="button"
-                      role="menuitem"
-                      phx-click="set_contract_type"
-                      phx-value-type_key={spec.key}
-                      class={[
-                        "flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left hover:bg-base-200",
-                        projection_type_key(@projection) == spec.key &&
-                          "font-semibold text-base-content"
-                      ]}
-                    >
-                      <span class="inline-flex items-center gap-2">
-                        <.icon
-                          name="hero-clipboard-document-list"
-                          class="size-4 text-base-content/50"
+                      <label
+                        role="menuitem"
+                        class={[
+                          "flex w-full cursor-pointer items-center justify-between gap-3 px-3 py-2 text-left hover:bg-base-200",
+                          projection_type_key(@projection) == "custom_v1" &&
+                            "font-semibold text-base-content"
+                        ]}
+                      >
+                        <input
+                          id="document-direct-upload-input"
+                          type="file"
+                          accept=".pdf,.hwp,.hwpx,.docx"
+                          class="sr-only"
+                          phx-hook="DirectR2Upload"
+                          data-role="document-upload-file-input"
                         />
-                        <span>{ContractTypes.display_name(spec)}</span>
-                      </span>
-                      <.icon
-                        :if={projection_type_key(@projection) == spec.key}
-                        name="hero-check"
-                        class="size-4"
-                      />
-                    </button>
+                        <span class="inline-flex items-center gap-2">
+                          <.icon name="hero-arrow-up-tray" class="size-4 text-base-content/50" />
+                          <span>{dgettext("studio", "갖고 있는 계약서가 있나요?")}</span>
+                        </span>
+                      </label>
 
-                    <p
-                      :if={contract_type_options(assigns[:contract_type_query] || "") == []}
-                      class="px-3 py-2 text-sm text-base-content/50"
-                    >
-                      {dgettext("studio", "검색 결과가 없습니다.")}
-                    </p>
-                  </div>
-                </details>
-                <script :type={Phoenix.LiveView.ColocatedHook} name=".CloseOnOutside">
-                  export default {
-                    mounted() {
-                      this.onPointerDown = event => {
-                        if (!this.el.open || this.el.contains(event.target)) return
-                        this.el.removeAttribute("open")
-                        this.pushEvent("close_contract_type_picker", {})
+                      <div class="my-1 border-t border-base-200"></div>
+
+                      <.form
+                        for={%{"q" => assigns[:contract_type_query] || ""}}
+                        as={:search}
+                        phx-change="filter_contract_types"
+                        class="px-2 py-1"
+                      >
+                        <input
+                          type="search"
+                          name="q"
+                          value={assigns[:contract_type_query] || ""}
+                          placeholder={dgettext("studio", "표준양식 검색")}
+                          autocomplete="off"
+                          class="input input-sm input-bordered w-full"
+                        />
+                      </.form>
+
+                      <p class="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-base-content/40">
+                        {dgettext("studio", "표준양식")}
+                      </p>
+                      <button
+                        :for={spec <- contract_type_options(assigns[:contract_type_query] || "")}
+                        type="button"
+                        role="menuitem"
+                        phx-click="set_contract_type"
+                        phx-value-type_key={spec.key}
+                        class={[
+                          "flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left hover:bg-base-200",
+                          projection_type_key(@projection) == spec.key &&
+                            "font-semibold text-base-content"
+                        ]}
+                      >
+                        <span class="inline-flex items-center gap-2">
+                          <.icon
+                            name="hero-clipboard-document-list"
+                            class="size-4 text-base-content/50"
+                          />
+                          <span>{ContractTypes.display_name(spec)}</span>
+                        </span>
+                        <.icon
+                          :if={projection_type_key(@projection) == spec.key}
+                          name="hero-check"
+                          class="size-4"
+                        />
+                      </button>
+
+                      <p
+                        :if={contract_type_options(assigns[:contract_type_query] || "") == []}
+                        class="px-3 py-2 text-sm text-base-content/50"
+                      >
+                        {dgettext("studio", "검색 결과가 없습니다.")}
+                      </p>
+                    </div>
+                  </details>
+                  <script :type={Phoenix.LiveView.ColocatedHook} name=".CloseOnOutside">
+                    export default {
+                      mounted() {
+                        this.onPointerDown = event => {
+                          if (!this.el.open || this.el.contains(event.target)) return
+                          this.el.removeAttribute("open")
+                          this.pushEvent("close_contract_type_picker", {})
+                        }
+                        this.onKeyDown = event => {
+                          if (event.key !== "Escape" || !this.el.open) return
+                          this.el.removeAttribute("open")
+                          this.pushEvent("close_contract_type_picker", {})
+                          this.el.querySelector("summary")?.focus()
+                        }
+                        document.addEventListener("pointerdown", this.onPointerDown, true)
+                        document.addEventListener("keydown", this.onKeyDown, true)
+                      },
+                      destroyed() {
+                        document.removeEventListener("pointerdown", this.onPointerDown, true)
+                        document.removeEventListener("keydown", this.onKeyDown, true)
                       }
-                      this.onKeyDown = event => {
-                        if (event.key !== "Escape" || !this.el.open) return
-                        this.el.removeAttribute("open")
-                        this.pushEvent("close_contract_type_picker", {})
-                        this.el.querySelector("summary")?.focus()
-                      }
-                      document.addEventListener("pointerdown", this.onPointerDown, true)
-                      document.addEventListener("keydown", this.onKeyDown, true)
-                    },
-                    destroyed() {
-                      document.removeEventListener("pointerdown", this.onPointerDown, true)
-                      document.removeEventListener("keydown", this.onKeyDown, true)
                     }
-                  }
-                </script>
+                  </script>
+                <% end %>
 
                 <div class="inline-flex items-center gap-1">
                   <div
@@ -2191,6 +2187,52 @@ defmodule ContractWeb.StudioLive do
 
             <article class="relative m-0 p-0 border-0 bg-transparent shadow-none text-base-content text-[15px] leading-[1.78] overflow-hidden min-h-0 flex-1 font-sans max-sm:mx-3 max-sm:py-7 max-sm:px-5">
               <div class="relative h-full min-h-0">
+                <div
+                  :if={is_nil(@studio_state.selected_document_id)}
+                  id="canvas-empty-type-picker"
+                  data-stub="canvas-empty"
+                  data-role="canvas-empty-type-picker"
+                  class="flex h-full min-h-0 items-center justify-center px-6 py-8"
+                >
+                  <div class="w-full max-w-2xl">
+                    <div class="mb-3 flex items-center justify-between gap-3">
+                      <h2 class="text-sm font-semibold text-base-content">
+                        {dgettext("studio", "계약 유형 선택")}
+                      </h2>
+                      <span class="text-xs text-base-content/50">
+                        {dgettext("studio", "새 문서")}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      phx-click="agent_option_picked"
+                      phx-value-key="upload"
+                      data-role="canvas-empty-upload-action"
+                      class="mb-3 inline-flex min-h-9 items-center gap-2 rounded-md border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-base-content/75 transition-colors hover:border-base-content/30 hover:bg-base-200 hover:text-base-content"
+                    >
+                      <.icon name="hero-arrow-up-tray" class="size-4 text-base-content/45" />
+                      <span>{dgettext("studio", "계약서 업로드")}</span>
+                    </button>
+                    <div class="grid gap-2 sm:grid-cols-2">
+                      <button
+                        :for={spec <- contract_type_options("")}
+                        type="button"
+                        phx-click="set_contract_type"
+                        phx-value-type_key={spec.key}
+                        data-role="canvas-empty-type-option"
+                        class="group flex min-h-11 items-center justify-between gap-3 rounded-md border border-base-300 bg-base-100 px-3 py-2 text-left text-sm text-base-content/80 transition-colors hover:border-base-content/30 hover:bg-base-200 hover:text-base-content"
+                      >
+                        <span class="min-w-0 truncate font-medium">
+                          {ContractTypes.display_name(spec)}
+                        </span>
+                        <.icon
+                          name="hero-arrow-right"
+                          class="size-4 shrink-0 text-base-content/35 transition-colors group-hover:text-base-content/60"
+                        />
+                      </button>
+                    </div>
+                  </div>
+                </div>
                 <.live_component
                   :if={standard_template}
                   module={Components.Canvas.HwpTemplate}
@@ -2198,6 +2240,7 @@ defmodule ContractWeb.StudioLive do
                   spec={standard_template}
                   matching_book={@rhwp_matching_book || %{}}
                   field_values={@rhwp_field_values || %{}}
+                  editable_spec_candidates={editable_spec_candidates()}
                   site_id={"user:#{@current_scope.user.id}"}
                   document_id={@studio_state.selected_document_id}
                   text_events={@rhwp_text_events}
@@ -2549,6 +2592,45 @@ defmodule ContractWeb.StudioLive do
   defp template_path(%{template_hwpx_path: path}) when is_binary(path) and path != "", do: path
   defp template_path(_spec), do: nil
 
+  defp editable_spec_candidates do
+    case ContractTypes.list() do
+      {:ok, specs} ->
+        specs
+        |> Enum.map(&editable_spec_candidate/1)
+        |> Enum.reject(&is_nil/1)
+
+      _ ->
+        []
+    end
+  end
+
+  defp editable_spec_candidate(spec) do
+    with template_path when is_binary(template_path) <- template_path(spec),
+         spec_path when is_binary(spec_path) <- editable_spec_path(template_path),
+         true <- editable_spec_file_exists?(spec_path) do
+      %{
+        contractTypeKey: spec.key,
+        documentPath: template_path,
+        specPath: spec_path
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp editable_spec_path(template_path) when is_binary(template_path) do
+    Regex.replace(~r/\.(hwp|hwpx)$/i, template_path, ".editables.json")
+  end
+
+  defp editable_spec_file_exists?("/" <> path) do
+    :contract
+    |> :code.priv_dir()
+    |> Path.join("static/#{path}")
+    |> File.exists?()
+  end
+
+  defp editable_spec_file_exists?(_path), do: false
+
   defp rhwp_snapshot_format(projection) do
     projection
     |> standard_template_spec()
@@ -2602,8 +2684,21 @@ defmodule ContractWeb.StudioLive do
     %{
       url: "/documents/#{document_id}/rhwp-snapshots/#{rev}.#{format}",
       revision: rev,
-      lamport: snapshot_lamport(projection)
+      lamport: snapshot_lamport(projection),
+      contractTypeKey: snapshot_contract_type_key(projection),
+      templatePath: snapshot_template_path(projection)
     }
+  end
+
+  defp assign_rhwp_snapshot_state(socket, document_id, format) do
+    snapshot_candidates = load_rhwp_snapshot_candidates(document_id, format)
+    snapshot = List.first(snapshot_candidates)
+    text_base_revision = if snapshot, do: snapshot.revision, else: 0
+
+    socket
+    |> assign(:rhwp_snapshot, snapshot)
+    |> assign(:rhwp_snapshot_candidates, snapshot_candidates)
+    |> assign(:rhwp_text_events, load_rhwp_text_events(document_id, text_base_revision))
   end
 
   defp snapshot_lamport(projection) when is_map(projection) do
@@ -2624,6 +2719,25 @@ defmodule ContractWeb.StudioLive do
   end
 
   defp normalize_snapshot_lamport(_value), do: nil
+
+  defp snapshot_contract_type_key(projection) when is_map(projection) do
+    projection
+    |> metadata_value(:contract_type)
+    |> normalize_snapshot_string()
+  end
+
+  defp snapshot_contract_type_key(_projection), do: nil
+
+  defp snapshot_template_path(projection) when is_map(projection) do
+    projection
+    |> metadata_value(:template_path)
+    |> normalize_snapshot_string()
+  end
+
+  defp snapshot_template_path(_projection), do: nil
+
+  defp normalize_snapshot_string(value) when is_binary(value) and value != "", do: value
+  defp normalize_snapshot_string(_value), do: nil
 
   # Two shapes reach this converter:
   #   * Fresh in-memory Change from Store.append broadcast — atom keys, atom op
