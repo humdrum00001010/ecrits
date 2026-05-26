@@ -3,11 +3,8 @@ defmodule Contract.Agent do
   Semantic interpreter. Agent resolves targets; backend validates returned
   IDs.
 
-  This module is a thin façade — actual run state lives in
-  `Contract.Agent.RunServer` (one GenServer per run, supervised by
-  `Contract.Agent.RunSupervisor`). The agent ships the "grill me" skill:
-  on the first turn of an ambiguous request it emits clarifying questions
-  as marks instead of edits.
+  This module is a prompt and decoder compatibility namespace. Runtime
+  ownership lives at `Contract.Agent.Document`.
 
   See SPEC.md §20, §24 and `/tmp/wave1-research.md` for the verified
   OpenAI Responses + Korean Law MCP shapes.
@@ -16,8 +13,6 @@ defmodule Contract.Agent do
   alias Contract.ChatThreads
   alias Contract.Command
   alias Contract.Agent.Run
-  alias Contract.Agent.RunServer
-  alias Contract.Agent.RunSupervisor
   alias Contract.Types, as: T
 
   @grill_system_prompt """
@@ -86,38 +81,16 @@ defmodule Contract.Agent do
   # --- public API -------------------------------------------------------
 
   @spec start(T.ctx(), Command.t()) :: {:ok, Run.t()} | {:error, term()}
-  def start(ctx, %Command{kind: kind} = action)
+  def start(_ctx, %Command{kind: kind})
       when kind in [:chat_message, :start_type_conversion] do
-    run = %Run{
-      id: Ecto.UUID.generate(),
-      document_id: action.document_id,
-      triggered_by_action_id: action.payload["action_id"] || action.idempotency_key,
-      status: :running,
-      turn_index: 0,
-      message: action.message,
-      inserted_at: utc_now(),
-      updated_at: utc_now()
-    }
-
-    args = [
-      run_id: run.id,
-      run: run,
-      ctx: ctx,
-      action: action,
-      test_pid: action.payload["test_pid"]
-    ]
-
-    case RunSupervisor.start_run(args) do
-      {:ok, _pid} -> {:ok, run}
-      {:error, {:already_started, _}} -> {:ok, run}
-      {:error, reason} -> {:error, reason}
-    end
+    {:error, {:stale_runtime_entrypoint, __MODULE__, Contract.Agent.Document}}
   end
 
   def start(_ctx, %Command{kind: kind}), do: {:error, {:unsupported_action, kind}}
 
   @spec cancel(T.ctx(), T.agent_run_id()) :: {:ok, Run.t()} | {:error, term()}
-  def cancel(_ctx, run_id), do: RunServer.cancel(run_id)
+  def cancel(_ctx, _run_id),
+    do: {:error, {:stale_runtime_entrypoint, __MODULE__, Contract.Agent.Document}}
 
   @doc """
   Assembles the system prompt, conversation history, MCP tool list, and
@@ -222,25 +195,27 @@ defmodule Contract.Agent do
 
   defp mint_doc_route_ref(_ctx, %Command{document_id: nil}), do: {:error, :no_document}
 
-  defp mint_doc_route_ref(ctx, %Command{
-         document_id: doc_id,
-         chat_thread_id: thread_id
-       })
+  defp mint_doc_route_ref(
+         ctx,
+         %Command{
+           document_id: doc_id,
+           chat_thread_id: thread_id
+         } = action
+       )
        when is_binary(doc_id) do
     user_id = if ctx, do: get_in(Map.from_struct(ctx), [:user, Access.key!(:id)]), else: nil
 
-    # Task #139 — deterministic bearer per (user_id, document_id,
-    # chat_thread_id). `agent_run_id` is NOT passed; the route_ref now
-    # encodes only the scope triple so that OpenAI's hosted MCP
-    # `tools/list` cache (keyed by bearer) hits across turns of the
-    # same thread. The per-turn run id is recovered server-side at
-    # submit_change time via `Contract.Agent.RunServer.whereis_for_scope/2`.
-    # Token revocation still works: MCP doc.* handlers refuse the call
-    # unless there's an active RunServer for the (user, doc) scope.
+    # Task #181 — hosted doc.* calls must carry the current semantic run
+    # without asking the model to invent an `agent_run_id` argument. The
+    # default route_ref mint path stays deterministic for cacheable callers,
+    # but an Agent.Document attempt opts into a run-bound payload so stale
+    # attempts cannot be rebound to whatever run becomes active later.
     Contract.Gateway.issue_route_ref(ctx, %{
       user_id: user_id,
       document_id: doc_id,
       chat_thread_id: thread_id,
+      agent_run_id: action.agent_run_id,
+      bind_agent_run_id: is_binary(action.agent_run_id),
       purpose: "agent_doc_mcp",
       scopes: ["agent_doc"],
       ttl: 24 * 60 * 60
@@ -482,6 +457,4 @@ defmodule Contract.Agent do
 
   # Wave-3 owns the chat store; until it lands, return an empty history.
   defp fetch_history(ctx, %Command{} = action), do: ChatThreads.history_for_agent(ctx, action)
-
-  defp utc_now, do: DateTime.utc_now() |> DateTime.truncate(:second)
 end

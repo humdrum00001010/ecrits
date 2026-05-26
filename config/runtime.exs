@@ -127,7 +127,7 @@ end
 # var being present (so test/CI without keys still boots cleanly).
 config :contract, :openai,
   default_model: System.get_env("OPENAI_MODEL", "gpt-5.5"),
-  reasoning_effort: System.get_env("OPENAI_REASONING_EFFORT", "low")
+  reasoning_effort: System.get_env("OPENAI_REASONING_EFFORT", "medium")
 
 if System.get_env("OPENAI_API_KEY") not in [nil, ""] do
   config :contract, :openai, api_key: System.fetch_env!("OPENAI_API_KEY")

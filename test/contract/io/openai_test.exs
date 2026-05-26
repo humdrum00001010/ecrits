@@ -48,6 +48,19 @@ defmodule Contract.IO.OpenAITest do
     end
   end
 
+  describe "contract_doc_mcp_tool/1" do
+    test "allows the read tools referenced by the document-editing prompt" do
+      Application.put_env(:contract, :mcp, public_base_url: "http://localhost:4000")
+
+      tool = OpenAI.contract_doc_mcp_tool("route-ref-token")
+
+      assert "doc.get" in tool.allowed_tools
+      assert "doc.find" in tool.allowed_tools
+      assert "doc.read" in tool.allowed_tools
+      assert "doc.edit_text" in tool.allowed_tools
+    end
+  end
+
   describe "one_shot/2" do
     test "POSTs Responses-API payload with auth + model + reasoning + law MCP tool", %{
       bypass: bypass

@@ -13,24 +13,22 @@ defmodule Contract.RouteRef do
   ## Deterministic bearer per (user, doc, thread) — task #139
 
   The `agent_run_id` field is **NOT** included in the signed payload
-  produced by `Contract.Gateway.issue_route_ref/2`. The bearer is
-  deterministic across all turns of the same `(user_id, document_id,
-  chat_thread_id)` triple so OpenAI's hosted MCP `tools/list` cache
-  (keyed by bearer) hits across turns instead of cold-rebuilding the
-  tool catalog every first message of every turn (~700ms).
+  produced by the default `Contract.Gateway.issue_route_ref/2` path. That
+  bearer is deterministic across all turns of the same `(user_id,
+  document_id, chat_thread_id)` triple so cacheable MCP `tools/list`
+  callers can reuse the catalog instead of cold-rebuilding it.
 
-  The per-turn `agent_run_id` is reconstructed server-side at MCP
-  submit_change time by looking up the active `Contract.Agent.RunServer`
-  for `(user_id, document_id)` in `Contract.Agent.ScopeRegistry`. That
-  avoids leaking the run id through the token *and* keeps the change
-  row's `actor_type: :agent` / `agent_run_id` stamp truthful — the run
-  that's actually live is the one that gets credited.
+  The per-turn `agent_run_id` is never reconstructed from whatever run
+  happens to be active later. A nil-agent bearer remains nil and doc.*
+  handlers reject it. If a handler receives a caller-supplied run id, it
+  must prove that id is the active `Contract.Agent.Document` attempt for
+  the same `(user_id, document_id)` before stamping a change.
 
-  The struct still carries `agent_run_id` for one purpose only: a tool
-  handler can populate it from the server-side lookup before passing
-  the (struct-shaped) RouteRef into `Contract.MCP.build_command/3` and
-  related helpers — i.e. it's a runtime field, never part of what the
-  client sees.
+  A current `Contract.Agent.Document` attempt may explicitly opt into a
+  run-bound route_ref payload. That token is no longer the deterministic
+  list-cache bearer; it exists so hosted `doc.*` calls can prove the
+  semantic run identity without relying on the model to pass an
+  undocumented `agent_run_id` tool argument.
   """
 
   @type purpose :: String.t()
@@ -40,6 +38,7 @@ defmodule Contract.RouteRef do
           user_id: binary() | nil,
           chat_thread_id: binary() | nil,
           agent_run_id: binary() | nil,
+          agent_run_id_source: atom() | nil,
           base_revision: integer() | nil,
           purpose: purpose(),
           issued_at: DateTime.t(),
@@ -52,6 +51,7 @@ defmodule Contract.RouteRef do
     :user_id,
     :chat_thread_id,
     :agent_run_id,
+    :agent_run_id_source,
     :base_revision,
     :purpose,
     :issued_at,

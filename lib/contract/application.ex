@@ -36,15 +36,11 @@ defmodule Contract.Application do
       # the endpoint so the table exists by the time the first request lands.
       ContractWeb.Plug.RateLimitMCP.Bucket,
       ContractWeb.Endpoint,
-      # Wave 1A2 Agent runtime: per-run GenServer registry + transient supervisor.
-      {Registry, keys: :unique, name: Contract.Agent.Registry},
-      # Task #139 — scope-keyed registry so MCP doc.* handlers can look
-      # up the active run for a (user_id, document_id) without the run
-      # id appearing in the route_ref bearer. Duplicate keys allowed so
-      # two RunServers for the same scope can coexist briefly during
-      # turn handoff; lookup picks the most recently registered one.
-      {Registry, keys: :duplicate, name: Contract.Agent.ScopeRegistry},
-      Contract.Agent.RunSupervisor,
+      # Agent runtime: one process per document scope, with per-run lookup
+      # for PubSub/cancel/MCP handoff.
+      {Registry, keys: :unique, name: Contract.Agent.Document.Registry},
+      {Registry, keys: :unique, name: Contract.Agent.Document.RunRegistry},
+      Contract.Agent.DocumentSupervisor,
       # Wave 2 Persistence runtime: per-document Session registry + transient supervisor.
       {Registry, keys: :unique, name: Contract.Session.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Contract.Session.Supervisor},

@@ -342,27 +342,39 @@ defmodule Contract.RuntimeTest do
   end
 
   describe "apply/2 → :chat_message" do
-    test "delegates to Contract.Agent.start/2" do
-      # The Agent.RunServer will eagerly call the OpenAI driver via
-      # handle_continue; provide a no-op expectation so the run can spin
-      # up without exploding. We don't care about agent output here, only
-      # that Runtime routes :chat_message to Agent.start/2.
+    test "persists the user message and routes through Contract.Agent.Document" do
+      parent = self()
+
       Contract.IO.OpenAIMock
-      |> stub(:stream_chat, fn _params, _opts ->
-        {:ok, %{stream: Stream.into([], []), task_pid: self()}}
+      |> expect(:stream_chat, fn _params, _opts ->
+        send(parent, :runtime_agent_stream_started)
+
+        stream = [
+          %{
+            type: "response.output_text.delta",
+            data: %{"type" => "response.output_text.delta", "delta" => "done"}
+          }
+        ]
+
+        {:ok, %{stream: stream, task_pid: self()}}
       end)
+
+      document_id = Ecto.UUID.generate()
 
       action = %Command{
         kind: :chat_message,
-        document_id: Ecto.UUID.generate(),
+        document_id: document_id,
         actor_type: :user,
-        message: "hi"
+        message: "hi",
+        payload: %{"test_pid" => self()}
       }
 
       assert {:ok, %Contract.Agent.Run{} = run} = Runtime.apply(@ctx, action)
-
-      # Defensive cleanup
-      _ = Contract.Agent.cancel(@ctx, run.id)
+      assert run.document_id == document_id
+      assert run.owner_id == @ctx.user.id
+      assert_receive :runtime_agent_stream_started, 1_000
+      assert_receive {:agent_completed, run_id, %Command{message: "done"}}, 1_000
+      assert run_id == run.id
     end
   end
 

@@ -87,5 +87,25 @@ defmodule Contract.RouteRefTest do
 
       assert {:ok, %RouteRef{agent_run_id: nil}} = Gateway.verify_route_ref(s, token)
     end
+
+    test "agent run id is embedded only when the mint explicitly binds it" do
+      s = scope()
+      {:ok, doc} = Documents.create(s, %{title: "Run-bound route ref"})
+      run_id = Ecto.UUID.generate()
+
+      assert {:ok, token} =
+               Gateway.issue_route_ref(s, %{
+                 user_id: s.user.id,
+                 document_id: doc.id,
+                 chat_thread_id: Ecto.UUID.generate(),
+                 agent_run_id: run_id,
+                 bind_agent_run_id: true,
+                 purpose: "agent_doc_mcp",
+                 scopes: ["agent_doc"]
+               })
+
+      assert {:ok, %RouteRef{agent_run_id: ^run_id, agent_run_id_source: :route_ref}} =
+               Gateway.verify_route_ref(s, token)
+    end
   end
 end

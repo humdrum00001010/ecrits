@@ -100,6 +100,8 @@ defmodule Contract.IO.OpenAI do
 
   @contract_doc_allowed_tools ~w(
     doc.get
+    doc.find
+    doc.read
     doc.edit_text
     doc.insert_block
     doc.delete_block
@@ -200,12 +202,12 @@ defmodule Contract.IO.OpenAI do
       |> Map.put_new(:model, cfg[:default_model] || "gpt-5-mini")
       |> Map.put_new(:reasoning, %{
         effort: cfg[:reasoning_effort] || "high",
-        # `auto` opts into `response.reasoning_summary_text.delta` events so
-        # the chat rail can render a "Thinking…" stream while the model is
-        # in its silent reasoning phase. Without this the API runs the same
-        # reasoning but emits no summary, leaving the UI blank during the
-        # 5–15s TTFT gap that high-effort gpt-5 has.
-        summary: "auto"
+        # `detailed` (rather than `auto`) forces the API to stream
+        # `response.reasoning_summary_text.delta` events on every call —
+        # including short replies where `auto` would skip the summary.
+        # Without a summary stream the chat-rail's Thinking… disclosure
+        # stays empty for the 5–15s TTFT gap on high-effort gpt-5.
+        summary: "detailed"
       })
       |> Map.put(:tools, tools)
 

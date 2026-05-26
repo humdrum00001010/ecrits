@@ -180,9 +180,14 @@ defmodule Contract.Gateway do
     user_id = Map.get(attrs, :user_id) || Map.get(attrs, "user_id") || user_id(ctx)
     chat_thread_id = Map.get(attrs, :chat_thread_id) || Map.get(attrs, "chat_thread_id")
     base_revision = Map.get(attrs, :base_revision) || Map.get(attrs, "base_revision")
+    agent_run_id = Map.get(attrs, :agent_run_id) || Map.get(attrs, "agent_run_id")
+
+    bind_agent_run_id? =
+      truthy?(Map.get(attrs, :bind_agent_run_id) || Map.get(attrs, "bind_agent_run_id"))
 
     cond do
-      contains_pid_or_ref?(document_id) or contains_pid_or_ref?(purpose) or
+      contains_pid_or_ref?(document_id) or contains_pid_or_ref?(agent_run_id) or
+        contains_pid_or_ref?(purpose) or
           contains_pid_or_ref?(scopes) ->
         {:error, :pid_in_attrs}
 
@@ -191,18 +196,17 @@ defmodule Contract.Gateway do
 
       true ->
         with :ok <- authorize_route_ref_issue(ctx, document_id) do
-          # NOTE: `agent_run_id`, `issued_at`, and the live wall-clock
+          # NOTE: by default `agent_run_id`, `issued_at`, and the live wall-clock
           # `expires_at` are intentionally NOT part of the signed payload.
           # The bearer must be deterministic per
           # (user_id, document_id, chat_thread_id) so OpenAI's hosted MCP
           # `tools/list` cache (keyed by bearer) hits across agent turns
           # instead of rebuilding the catalog every first message of the
-          # turn (~700ms). The per-turn run id is reconstructed
-          # server-side at submit_change time via the
-          # `Contract.Agent.ScopeRegistry`. Token revocation still works:
-          # MCP doc.* handlers refuse the call unless there's an active
-          # RunServer for the route_ref's (user, doc) scope. See
-          # `Contract.RouteRef` and task #139 for the design write-up.
+          # turn (~700ms). A nil-run bearer is not rebound to a later
+          # active attempt; doc.* handlers only accept an explicit run id
+          # after proving it is the active `Contract.Agent.Document`
+          # attempt for the route_ref's (user, doc) scope. See
+          # `Contract.RouteRef` for the design write-up.
           #
           # `Phoenix.Token.sign` normally embeds `signed_at` into the
           # token (its key-derivation nonce), which would alone defeat
@@ -213,15 +217,17 @@ defmodule Contract.Gateway do
           now = DateTime.utc_now()
           expires_at = day_aligned_expiry(now, ttl)
 
-          payload = %{
-            document_id: document_id,
-            user_id: user_id,
-            chat_thread_id: chat_thread_id,
-            base_revision: base_revision,
-            purpose: to_string(purpose),
-            expires_at: DateTime.to_iso8601(expires_at),
-            scopes: Enum.map(scopes, &to_string/1)
-          }
+          payload =
+            %{
+              document_id: document_id,
+              user_id: user_id,
+              chat_thread_id: chat_thread_id,
+              base_revision: base_revision,
+              purpose: to_string(purpose),
+              expires_at: DateTime.to_iso8601(expires_at),
+              scopes: Enum.map(scopes, &to_string/1)
+            }
+            |> maybe_put_bound_agent_run_id(agent_run_id, bind_agent_run_id?)
 
           token = Phoenix.Token.sign(endpoint(), @salt, payload, signed_at: 0)
           {:ok, token}
@@ -274,10 +280,9 @@ defmodule Contract.Gateway do
                document_id: Map.get(payload, :document_id),
                user_id: Map.get(payload, :user_id),
                chat_thread_id: Map.get(payload, :chat_thread_id),
-               # Never embedded in the token; reconstructed server-side
-               # at submit_change time by `Contract.Agent.ScopeRegistry`
-               # lookup. See `Contract.RouteRef` moduledoc.
-               agent_run_id: nil,
+               agent_run_id: Map.get(payload, :agent_run_id),
+               agent_run_id_source:
+                 if(is_binary(Map.get(payload, :agent_run_id)), do: :route_ref, else: nil),
                base_revision: Map.get(payload, :base_revision),
                purpose: Map.get(payload, :purpose),
                # `issued_at` is no longer in the payload; we backfill
@@ -301,6 +306,17 @@ defmodule Contract.Gateway do
   end
 
   def verify_route_ref(_ctx, _), do: {:error, :invalid}
+
+  defp maybe_put_bound_agent_run_id(payload, agent_run_id, true) when is_binary(agent_run_id) do
+    Map.put(payload, :agent_run_id, agent_run_id)
+  end
+
+  defp maybe_put_bound_agent_run_id(payload, _agent_run_id, _bind?), do: payload
+
+  defp truthy?(true), do: true
+  defp truthy?("true"), do: true
+  defp truthy?("1"), do: true
+  defp truthy?(_), do: false
 
   # ----------------------------------------------------------------------------
   # mcp_tool/3

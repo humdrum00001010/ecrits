@@ -19,7 +19,7 @@ defmodule Contract.Runtime do
       :restore_document            → ensure_session → Session.commit
       :duplicate_document          → ensure_session → Session.commit
       :agent_change                → ensure_session → Session.commit
-      :chat_message                → Contract.Agent.start
+      :chat_message                → Contract.Agent.Document.start
       :start_type_conversion       → Contract.Conversion.plan/4
       :set_field_migration_strategy→ Contract.Conversion.set_field_strategy/4
       :create_converted_variant    → Contract.Conversion.create_variant/2
@@ -135,7 +135,7 @@ defmodule Contract.Runtime do
   def apply(ctx, %Command{kind: :chat_message} = action) do
     with {:ok, _thread, persisted_action, _message} <-
            ChatThreads.persist_user_message(ctx, action) do
-      Contract.Agent.start(ctx, persisted_action)
+      Contract.Agent.Document.start(ctx, persisted_action)
     end
   end
 
