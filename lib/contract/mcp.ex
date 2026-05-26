@@ -37,7 +37,7 @@ defmodule Contract.MCP do
       %{
         "name" => "doc.get",
         "description" =>
-          "Returns the document's metadata + a heading-level outline only — NOT every paragraph. Shape: `{revision, d (title), t (type_key), counts: {sec, para}, outline: [[sec, para, level, text], ...], f (fields), ir_url (presigned R2 fallback for full-IR dumps)}`. Use `doc.find` to locate a substring and `doc.read` to fetch paragraph slices. Pin `since_revision` to short-circuit when nothing changed.",
+          "Returns the document's metadata, outline, fields, and revision only — NOT every paragraph. Shape: `{revision, d (title), t (type_key), counts: {sec, para}, outline: [[sec, para, level, text], ...], f (fields)}`. Use this to inspect field ids before slot-like edits. Use `doc.find` to locate a substring and `doc.read` to fetch paragraph slices. Pin `since_revision` to short-circuit when nothing changed.",
         "inputSchema" =>
           object_schema(
             %{"since_revision" => %{"type" => "integer", "minimum" => 0}},
@@ -47,7 +47,7 @@ defmodule Contract.MCP do
       %{
         "name" => "doc.find",
         "description" =>
-          "Search the document for `needle` (literal substring; no regex). Returns up to `limit` hits with ±`context` characters of surrounding text and the positional triple `(sec, para, off)` plus the literal `match` substring — feed those straight back into `doc.edit_text` (no character counting). Hit shape: `[sec, para, off, len, before, match, after, kind]`. Result: `{revision, total, hits}`. Prefer this over `doc.get` when you know what text you're hunting for; it avoids slurping the entire document.",
+          "Search the document for `needle` (literal substring; no regex). Use when you already know target text. Returns up to `limit` hits with ±`context` characters of surrounding text and the positional triple `(sec, para, off)` plus the literal `match` substring — feed those straight back into `doc.edit_text` (no character counting). Hit shape: `[sec, para, off, len, before, match, after, kind]`. Result: `{revision, total, hits}`. Prefer this over `doc.get` for locating known text; use `doc.get` for metadata, outline, fields, and revision.",
         "inputSchema" =>
           object_schema(
             %{
@@ -77,7 +77,7 @@ defmodule Contract.MCP do
       %{
         "name" => "doc.edit_text",
         "description" =>
-          "Replace a character range inside one paragraph or table cell. STRONGLY PREFER passing `match` (the exact substring you intend to remove, copied verbatim from doc.get) over a numeric `len` — the server measures `match`'s length itself, so you cannot miscount Korean syllables, surrogate pairs, brackets, or whitespace. Use `len` only when you must delete by count (e.g. pure trailing delete). `match=\"\"` and `len=0` mean pure insert; `text=\"\"` means pure delete. For table cells, pass `cell_path` (controlIndex/cellIndex/cellParaIndex tuples) from doc.get. Pin `base_revision` to the value last seen.",
+          "Replace a character range inside one paragraph or table cell. STRONGLY PREFER passing `match` (the exact substring you intend to remove, copied verbatim from doc.get/doc.find/doc.read) over a numeric `len` — the server measures `match`'s length itself, so you cannot miscount Korean syllables, surrogate pairs, brackets, or whitespace. For slot-like date/period edits, use `doc.set_field_value` when a field id exists; if you must use `doc.edit_text`, replace the full exact existing value or paragraph, not only a label prefix. Use `len` only when you must delete by count (e.g. pure trailing delete). `match=\"\"` and `len=0` mean pure insert; `text=\"\"` means pure delete. For table cells, pass `cell_path` (controlIndex/cellIndex/cellParaIndex tuples) from doc.get. Pin `base_revision` to the value last seen.",
         "inputSchema" =>
           object_schema(
             %{
@@ -163,7 +163,7 @@ defmodule Contract.MCP do
       %{
         "name" => "doc.set_field_value",
         "description" =>
-          "Set the value of a tracked field (slot) by its field id from doc.get's `f` list. Server lowers to the right text edit using the field's tracked position.",
+          "Set the value of a tracked field (slot) by its field id from doc.get's `f` list. For any slot-like date/period edit where a field id exists, prefer this over `doc.edit_text`. Server lowers to the right text edit using the field's tracked position.",
         "inputSchema" =>
           object_schema(
             %{
@@ -514,7 +514,8 @@ defmodule Contract.MCP do
             {:ok, payload}
 
           :miss ->
-            with {:ok, ops} <- edit_text_ops(args, state) do
+            with :ok <- Contract.MCP.Projection.validate_text_edit_basis(state),
+                 {:ok, ops} <- edit_text_ops(args, state) do
               submit_edit_text(ctx, route_ref, document_id, args, ops, "edit_text")
             end
         end
@@ -767,37 +768,22 @@ defmodule Contract.MCP do
   # Agent-facing doc.get response. The compact IR is inline because the
   # hosted MCP tool call result is the model context; the model does not
   # get a general-purpose HTTP fetch just because a tool returns a URL.
-  # A presigned R2 URL is still useful as metadata/debug context when it
-  # is cheap to produce, but it must never be the only document body.
   defp build_doc_get_response(%Runtime.State{} = state) do
     ir = Contract.MCP.Projection.to_agent_ir(state)
 
-    payload = %{
-      "ok" => true,
-      "revision" => state.revision,
-      "d" => ir["title"],
-      "t" => ir["contract_type"],
-      "counts" => %{
-        "sec" => length(ir["sections"] || []),
-        "para" => Contract.MCP.Projection.paragraph_count(ir)
-      },
-      "outline" => Contract.MCP.Projection.outline(ir),
-      "f" => compact_fields(ir["fields"] || [])
-    }
-
-    case ensure_snapshot_ir_url(state) do
-      {:ok, url} ->
-        {:ok, Map.put(payload, "ir_url", url)}
-
-      {:error, reason} ->
-        require Logger
-
-        Logger.debug(
-          "doc.get: presign unavailable (#{inspect(reason)}); returning metadata-only payload"
-        )
-
-        {:ok, payload}
-    end
+    {:ok,
+     %{
+       "ok" => true,
+       "revision" => state.revision,
+       "d" => ir["title"],
+       "t" => ir["contract_type"],
+       "counts" => %{
+         "sec" => length(ir["sections"] || []),
+         "para" => Contract.MCP.Projection.paragraph_count(ir)
+       },
+       "outline" => Contract.MCP.Projection.outline(ir),
+       "f" => compact_fields(ir["fields"] || [])
+     }}
   end
 
   defp compact_fields(fields) when is_list(fields) do
@@ -807,38 +793,6 @@ defmodule Contract.MCP do
   end
 
   defp compact_fields(_), do: []
-
-  # Returns a metadata/debug presigned GET URL for the .ir.json blob
-  # backing an existing rhwp snapshot. This must never create a snapshot
-  # row: `doc.get` already returns inline IR, and fake visual rows break
-  # the browser-side persistence path.
-  defp ensure_snapshot_ir_url(%Runtime.State{document_id: doc_id}) do
-    r2 = r2_driver()
-
-    case Contract.RhwpSnapshot.latest_for_document(doc_id) do
-      %Contract.RhwpSnapshot.Record{ir_r2_key: ir_key} when is_binary(ir_key) ->
-        # 10-minute TTL — long enough for trace/debug inspection, short
-        # enough that a leaked URL doesn't keep the IR readable indefinitely.
-        case r2.presigned_url(ir_key, method: :get, expires_in: 600) do
-          {:ok, url} when is_binary(url) ->
-            {:ok, url}
-
-          other ->
-            {:error, {:presign_failed, other}}
-        end
-
-      %Contract.RhwpSnapshot.Record{} ->
-        {:error, :no_r2_key}
-
-      nil ->
-        {:error, :no_snapshot}
-    end
-  end
-
-  defp r2_driver do
-    Application.get_env(:contract, :io_drivers, [])
-    |> Keyword.get(:r2, Contract.IO.R2)
-  end
 
   defp read_document_resource(ctx, route_ref, document_id, kind, uri)
        when kind in @document_resource_kinds do

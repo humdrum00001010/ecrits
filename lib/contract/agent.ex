@@ -25,7 +25,7 @@ defmodule Contract.Agent do
     * 편집 요청이라도 의도가 모호하면 먼저 한두 문장의 명확화 질문을 하세요. 추측으로 편집하지 마세요.
 
   편집을 할 때:
-    * 먼저 `doc.get` 으로 현재 IR + revision 을 한 번 읽으세요.
+    * Use `doc.get` for metadata, outline, fields, and revision. Use `doc.find` when you already know target text and need an edit position.
     * 변경 도구에 `base_revision` 을 마지막 본 값으로 고정하세요.
     * 충돌이 나면 `doc.get` 으로 재조회 후 한 번만 재시도하세요.
     * 마치고 나서 무엇을 했는지 한두 문장으로 보고하세요 (예: "0번 단락 끝에 '[X]' 를 박았습니다.").
@@ -111,24 +111,25 @@ defmodule Contract.Agent do
   @mcp_tools_addendum """
   도구 — contract-doc MCP:
 
-    * `doc.get` — 메타데이터 + heading-level outline (모든 단락 X). 반환:
+    * `doc.get` — metadata, outline, fields, and revision (모든 단락 X). 반환:
       `{revision, d (title), t (type_key), counts: {sec, para}, outline: [[sec, para, level, text]], f (fields)}`.
-    * `doc.find(needle, limit?, context?)` — 문자열 검색. 알고 있는 텍스트로 위치를 잡을 때 **doc.get 보다 먼저 호출**.
+    * `doc.find(needle, limit?, context?)` — 문자열 검색. Use `doc.find` when you already know target text.
       각 hit: `[sec, para, off, len, before, match, after, kind]` — sec/para/off/match 를 그대로 `doc.edit_text` 인자로 넘기면 글자 수 셀 일 없음.
     * `doc.read(sec, para? | from?/to?, limit?)` — paragraph 슬라이스. find 결과 주변 컨텍스트 확인, 또는 outline 에서 클릭해서 들어가는 용도.
-    * `doc.edit_text` — paragraph/cell 안 글자 구간 교체. `match` (지울 원문) 권장.
+    * `doc.edit_text` — paragraph/cell 안 글자 구간 교체. `match` (지울 원문) 권장. If used for a slot-like date/period edit, replace the full exact existing value or paragraph, not only a label prefix.
     * `doc.insert_block` — paragraph/heading/list_item/table 삽입
     * `doc.delete_block` — block 제거
     * `doc.edit_table` — 표의 row/col 구조 변경
-    * `doc.set_field_value` — 슬롯 (필드 id) 값 갱신
+    * `doc.set_field_value` — 슬롯 (필드 id) 값 갱신. For any slot-like date/period edit where a field id exists in `doc.get`'s `f`, prefer `doc.set_field_value` over `doc.edit_text`.
 
   사용 흐름:
 
-    1. 편집 대상 문구를 알고 있으면 **`doc.find(needle)` 을 먼저** 호출하세요. doc.get 으로 전체 문서를 끌어오지 마세요 — 단락 수가 수백 개 단위입니다.
+    1. 필드/슬롯 여부나 revision 이 필요하면 `doc.get` 으로 metadata, outline, fields, and revision 을 확인하세요. 이미 편집 대상 문구를 알고 있으면 **`doc.find(needle)`** 로 위치를 잡으세요.
     2. find 가 hit 을 돌려주면 `(sec, para, off, match)` 를 그대로 `doc.edit_text` 에 넘기세요. `base_revision` 은 find 응답의 `revision`.
-    3. 위치를 더 확인해야 하면 `doc.read(sec, para or from/to)` 로 좁은 슬라이스만 읽으세요.
-    4. 문서 구조가 궁금하면 `doc.get` 의 outline 을 보세요 — heading 만 들어 있어 한 눈에 들어옵니다.
-    5. 모든 편집을 마친 뒤 사용자에게 한 줄 보고 (예: "제3조 둘째 줄에서 '갑'을 '원사업자'로 바꿨습니다.").
+    3. 기간/날짜/금액/당사자 같은 슬롯 값 변경이고 `f` 에 field id 가 있으면 `doc.edit_text` 대신 `doc.set_field_value` 를 우선 사용하세요.
+    4. `doc.edit_text` 로 슬롯처럼 보이는 값을 고칠 때는 기존 값/문단 전체를 정확히 `match` 로 잡아 교체하세요. 라벨 접두어만 바꾸지 마세요.
+    5. 위치를 더 확인해야 하면 `doc.read(sec, para or from/to)` 로 좁은 슬라이스만 읽으세요.
+    6. 모든 편집을 마친 뒤 사용자에게 한 줄 보고 (예: "제3조 둘째 줄에서 '갑'을 '원사업자'로 바꿨습니다.").
   """
 
   defp build_regular_context(ctx, %Command{} = action) do

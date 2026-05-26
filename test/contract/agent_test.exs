@@ -213,6 +213,24 @@ defmodule Contract.AgentTest do
       refute frame.system =~ "GET"
     end
 
+    test "instructions prefer fields for slot edits and full-value text replacement" do
+      action = %Command{
+        kind: :chat_message,
+        actor_type: :user,
+        message: "change the contract period",
+        document_id: Ecto.UUID.generate()
+      }
+
+      assert {:ok, frame} = Agent.build_context(nil, action)
+
+      assert frame.system =~ "slot-like date/period edit"
+      assert frame.system =~ "prefer `doc.set_field_value`"
+      assert frame.system =~ "replace the full exact existing value or paragraph"
+      assert frame.system =~ "not only a label prefix"
+      assert frame.system =~ "Use `doc.get` for metadata, outline, fields, and revision"
+      assert frame.system =~ "Use `doc.find` when you already know target text"
+    end
+
     test "instructions omit the document-context note for nil document_id" do
       action = %Command{
         kind: :chat_message,

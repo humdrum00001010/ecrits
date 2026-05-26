@@ -44,6 +44,22 @@ defmodule Contract.MCPTest do
       assert "collab.ask_user" in names
       assert "collab.fetch_slack_context" in names
     end
+
+    test "document edit tool descriptions guard slot-like value edits" do
+      assert %{"tools" => tools} = MCP.list_tools(%Context{}, nil)
+
+      edit_text = Enum.find(tools, &(&1["name"] == "doc.edit_text"))
+      set_field_value = Enum.find(tools, &(&1["name"] == "doc.set_field_value"))
+      get = Enum.find(tools, &(&1["name"] == "doc.get"))
+      find = Enum.find(tools, &(&1["name"] == "doc.find"))
+
+      assert edit_text["description"] =~ "replace the full exact existing value or paragraph"
+      assert edit_text["description"] =~ "not only a label prefix"
+      assert set_field_value["description"] =~ "slot-like date/period edit"
+      assert set_field_value["description"] =~ "prefer this over `doc.edit_text`"
+      assert get["description"] =~ "metadata, outline, fields, and revision"
+      assert find["description"] =~ "when you already know target text"
+    end
   end
 
   describe "list_resources/2 and read_resource/3" do
@@ -557,6 +573,103 @@ defmodule Contract.MCPTest do
       assert changes_for(doc_id) |> Enum.map(& &1.id) == before_change_ids
     end
 
+    test "doc.edit_text rejects when the target projection basis is marked incomplete",
+         %{
+           owner: owner,
+           route_ref: route_ref
+         } do
+      doc_id = doc_with_text(owner, "abc")
+      route_ref = %{route_ref | document_id: doc_id}
+
+      snap = Repo.get_by!(Contract.RhwpSnapshot.Record, document_id: doc_id, revision: 1)
+
+      snap
+      |> Ecto.Changeset.change(
+        projection: Map.put(snap.projection, "basis", %{"status" => "incomplete"})
+      )
+      |> Repo.update!()
+
+      before_change_ids = changes_for(doc_id) |> Enum.map(& &1.id)
+
+      result =
+        MCP.call_tool(owner, route_ref, "doc.edit_text", %{
+          "sec" => 0,
+          "para" => 0,
+          "off" => 0,
+          "match" => "abc",
+          "text" => "updated",
+          "base_revision" => 1
+        })
+
+      assert {:error, {:invalid_params, message}} = result
+      assert message =~ "projection basis"
+      refute match?({:ok, %{"revision" => _, "change_id" => _}}, result)
+      assert changes_for(doc_id) |> Enum.map(& &1.id) == before_change_ids
+    end
+
+    test "doc.edit_text rejects a same-revision snapshot that is missing committed text ops",
+         %{
+           owner: owner,
+           route_ref: route_ref
+         } do
+      original = " ◇ 계약기간  :  old suffix"
+      replacement = "2026.01.01부터 2026.12.31까지"
+      doc_id = doc_with_text(owner, original)
+      route_ref = %{route_ref | document_id: doc_id}
+
+      assert {:ok, %{"revision" => 2}} =
+               MCP.call_tool(owner, route_ref, "doc.edit_text", %{
+                 "sec" => 0,
+                 "para" => 0,
+                 "off" => String.length(" ◇ 계약기간  :  "),
+                 "match" => "old suffix",
+                 "text" => replacement,
+                 "base_revision" => 1
+               })
+
+      {:ok, _stale_snapshot} =
+        %Contract.RhwpSnapshot.Record{}
+        |> Contract.RhwpSnapshot.Record.changeset(%{
+          document_id: doc_id,
+          revision: 2,
+          r2_key: "documents/#{doc_id}/snapshots/2.hwp",
+          ir_r2_key: "documents/#{doc_id}/snapshots/2.ir.json",
+          format: "hwp",
+          content_type: "application/x-hwp",
+          projection: %{
+            "title" => "Text Doc",
+            "contract_type" => "nda_v1",
+            "sections" => [
+              %{
+                "idx" => 0,
+                "paragraphs" => [
+                  %{"idx" => 0, "text" => original}
+                ]
+              }
+            ],
+            "fields" => []
+          }
+        })
+        |> Repo.insert()
+
+      before_change_ids = changes_for(doc_id) |> Enum.map(& &1.id)
+
+      result =
+        MCP.call_tool(owner, route_ref, "doc.edit_text", %{
+          "sec" => 0,
+          "para" => 0,
+          "off" => 0,
+          "match" => " ◇ 계약기간  :  ",
+          "text" => " ◇ 계약기간  :  " <> replacement,
+          "base_revision" => 2
+        })
+
+      assert {:error, {:invalid_params, message}} = result
+      assert message =~ "same-revision"
+      refute match?({:ok, %{"revision" => _, "change_id" => _}}, result)
+      assert changes_for(doc_id) |> Enum.map(& &1.id) == before_change_ids
+    end
+
     test "doc.edit_text rejects negative paragraph coordinates without committing", %{
       owner: owner,
       doc_id: doc_id,
@@ -859,49 +972,29 @@ defmodule Contract.MCPTest do
       assert ["party-b", "party_b", "text", "OMEGA"] = compact_field(fields, "party-b")
     end
 
-    test "doc.get returns inline compact IR even when an R2 URL can be presigned", %{
+    test "doc.get returns inline compact IR without exposing an R2 URL", %{
       owner: owner,
       route_ref: route_ref
     } do
-      original = Application.get_env(:contract, :io_drivers, [])
-
-      Application.put_env(
-        :contract,
-        :io_drivers,
-        Keyword.put(original, :r2, Contract.IO.R2Stub)
-      )
-
-      on_exit(fn -> Application.put_env(:contract, :io_drivers, original) end)
-
-      Contract.IO.R2Stub.setup()
-      Contract.IO.R2Stub.reset()
-
       assert {:ok, %{"ok" => true, "revision" => rev} = payload} =
                MCP.call_tool(owner, route_ref, "doc.get", %{})
 
       assert is_integer(rev)
       assert is_list(payload["outline"])
       assert is_map(payload["counts"])
-
-      # URL can still be present as optional metadata/debug context, but
-      # the agent reads paragraphs via doc.read, not via this URL.
-      if url = payload["ir_url"] do
-        assert is_binary(url)
-        assert String.contains?(url, ".ir.json")
-      end
+      refute Map.has_key?(payload, "ir_url")
     end
 
-    test "doc.get returns metadata even when R2 presign fails", %{
+    test "doc.get returns metadata without consulting R2 presign", %{
       owner: owner,
       route_ref: route_ref
     } do
-      # Stub that returns an error on presign so metadata access
-      # does not depend on R2 URL generation.
+      # Stub that would fail if doc.get still tried to generate URL metadata.
       defmodule R2PresignFailStub do
         def put(_, _, _ \\ []), do: {:ok, %{key: "x", etag: "y"}}
         def get(_, _ \\ []), do: {:error, :not_found}
         def delete(_, _ \\ []), do: :ok
-        def presigned_url(_, _ \\ []), do: {:error, :no_creds}
+        def presigned_url(_, _ \\ []), do: raise("doc.get must not presign IR URLs")
       end
 
       original = Application.get_env(:contract, :io_drivers, [])
@@ -944,7 +1037,7 @@ defmodule Contract.MCPTest do
       refute Repo.get_by(Contract.Snapshot, document_id: doc_id)
     end
 
-    test "doc.get exposes a presigned IR URL only for an existing snapshot", %{
+    test "doc.get does not expose a presigned IR URL for an existing snapshot", %{
       owner: owner,
       doc_id: doc_id,
       route_ref: route_ref
@@ -988,11 +1081,10 @@ defmodule Contract.MCPTest do
         })
         |> Repo.insert()
 
-      assert {:ok, %{"ir_url" => url, "outline" => outline, "counts" => counts}} =
+      assert {:ok, %{"outline" => outline, "counts" => counts} = payload} =
                MCP.call_tool(owner, route_ref, "doc.get", %{})
 
-      assert is_binary(url)
-      assert String.contains?(url, ".ir.json")
+      refute Map.has_key?(payload, "ir_url")
       assert is_list(outline)
       assert counts["para"] == 1
     end
@@ -1005,7 +1097,7 @@ defmodule Contract.MCPTest do
       {:ok, %{"revision" => rev}} = MCP.call_tool(owner, route_ref, "doc.get", %{})
 
       # 2) Re-call with since_revision = rev — server must report
-      # unchanged without paying for a presign / inline build.
+      # unchanged without rebuilding inline metadata.
       assert {:ok, %{"ok" => true, "unchanged" => true, "revision" => ^rev}} =
                MCP.call_tool(owner, route_ref, "doc.get", %{"since_revision" => rev})
     end

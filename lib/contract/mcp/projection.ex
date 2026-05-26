@@ -65,6 +65,139 @@ defmodule Contract.MCP.Projection do
     end
   end
 
+  @doc """
+  Fail-closed guard for MCP text edits that rely on the rhwp projection as
+  their coordinate basis.
+
+  A latest snapshot marked incomplete/stale is not safe to edit against. A
+  same-revision snapshot also has to prove it includes already committed text
+  ops for that revision; otherwise the MCP view can be shorter than the native
+  document and generate destructive ranges.
+  """
+  @spec validate_text_edit_basis(State.t()) :: :ok | {:error, {:invalid_params, binary()}}
+  def validate_text_edit_basis(%State{} = state) do
+    case latest_rhwp_snapshot(state) do
+      %Contract.RhwpSnapshot.Record{} = snap ->
+        with {:ok, raw_ir} <- snapshot_raw_ir(snap),
+             :ok <- validate_projection_basis(raw_ir, "latest"),
+             :ok <- validate_same_revision_text_basis(snap, state, raw_ir) do
+          :ok
+        end
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp snapshot_raw_ir(%Contract.RhwpSnapshot.Record{} = snap) do
+    case fetch_ir_from_r2(snap) do
+      {:ok, ir} when is_map(ir) and map_size(ir) > 0 ->
+        {:ok, ir}
+
+      _ ->
+        case snap.projection do
+          %{} = projection when map_size(projection) > 0 -> {:ok, projection}
+          _ -> {:ok, %{}}
+        end
+    end
+  end
+
+  defp validate_projection_basis(%{} = raw_ir, label) do
+    case map_value(raw_ir, "basis") do
+      %{} = basis ->
+        status = map_value(basis, "status")
+        complete? = map_value(basis, "complete")
+
+        cond do
+          status in ["incomplete", "stale"] ->
+            {:error,
+             {:invalid_params,
+              "#{label} projection basis is #{status}; refusing doc.edit_text until the snapshot is complete"}}
+
+          complete? == false ->
+            {:error,
+             {:invalid_params,
+              "#{label} projection basis is incomplete; refusing doc.edit_text until the snapshot is complete"}}
+
+          true ->
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp validate_same_revision_text_basis(
+         %Contract.RhwpSnapshot.Record{document_id: document_id, revision: revision} = snap,
+         %State{} = state,
+         raw_ir
+       )
+       when is_binary(document_id) and is_integer(revision) do
+    case previous_rhwp_snapshot(snap) do
+      %Contract.RhwpSnapshot.Record{} = previous ->
+        ops = text_ops_between(document_id, previous.revision, revision)
+
+        cond do
+          ops == [] ->
+            :ok
+
+          Enum.any?(ops, &cell_text_op?/1) ->
+            {:error,
+             {:invalid_params,
+              "same-revision projection basis cannot prove committed table-cell text ops are present; refusing doc.edit_text"}}
+
+          true ->
+            with {:ok, previous_raw_ir} <- snapshot_raw_ir(previous),
+                 :ok <- validate_projection_basis(previous_raw_ir, "previous") do
+              expected =
+                previous_raw_ir
+                |> from_snapshot(state)
+                |> overlay_text_ops(ops)
+
+              current = from_snapshot(raw_ir, state)
+
+              if body_text_index(expected) == body_text_index(current) do
+                :ok
+              else
+                {:error,
+                 {:invalid_params,
+                  "same-revision projection basis is stale or missing committed text ops; refusing doc.edit_text"}}
+              end
+            end
+        end
+
+      nil ->
+        case text_ops_between(document_id, 0, revision) do
+          [] ->
+            :ok
+
+          _ops ->
+            {:error,
+             {:invalid_params,
+              "same-revision projection basis cannot be verified against committed text ops; refusing doc.edit_text"}}
+        end
+    end
+  end
+
+  defp validate_same_revision_text_basis(_snap, _state, _raw_ir), do: :ok
+
+  defp previous_rhwp_snapshot(%Contract.RhwpSnapshot.Record{
+         document_id: document_id,
+         revision: revision,
+         format: format
+       })
+       when is_binary(document_id) and is_integer(revision) do
+    Repo.one(
+      from s in Contract.RhwpSnapshot.Record,
+        where: s.document_id == ^document_id and s.format == ^format and s.revision < ^revision,
+        order_by: [desc: s.revision],
+        limit: 1
+    )
+  end
+
+  defp previous_rhwp_snapshot(_snap), do: nil
+
   defp empty_ir(%State{} = state) do
     %{
       "title" => Map.get(state.projection, :title),
@@ -374,20 +507,48 @@ defmodule Contract.MCP.Projection do
   defp overlay_post_snapshot_text(ir, document_id, snapshot_revision) do
     document_id
     |> post_snapshot_text_ops(snapshot_revision || 0)
-    |> Enum.reduce(ir, fn op, acc -> apply_text_op(acc, op) end)
-    |> refresh_field_values()
+    |> then(&overlay_text_ops(ir, &1))
   end
 
   defp post_snapshot_text_ops(document_id, snapshot_revision) do
+    text_ops_after(document_id, snapshot_revision || 0)
+  end
+
+  defp text_ops_after(document_id, snapshot_revision) do
     Repo.all(
       from c in Change,
         where:
           c.document_id == ^document_id and c.command_kind == "edit_text" and
             c.result_revision > ^snapshot_revision,
-        order_by: [asc: c.result_revision]
+        order_by: [asc: c.result_revision, asc: c.inserted_at, asc: c.id]
     )
+    |> changes_to_text_ops()
+  end
+
+  defp text_ops_between(document_id, after_revision, through_revision)
+       when is_binary(document_id) and is_integer(after_revision) and is_integer(through_revision) do
+    Repo.all(
+      from c in Change,
+        where:
+          c.document_id == ^document_id and c.command_kind == "edit_text" and
+            c.result_revision > ^after_revision and c.result_revision <= ^through_revision,
+        order_by: [asc: c.result_revision, asc: c.inserted_at, asc: c.id]
+    )
+    |> changes_to_text_ops()
+  end
+
+  defp text_ops_between(_document_id, _after_revision, _through_revision), do: []
+
+  defp changes_to_text_ops(changes) do
+    changes
     |> Enum.flat_map(fn %Change{payload: payload} -> payload || [] end)
     |> Enum.flat_map(&normalize_text_op/1)
+  end
+
+  defp overlay_text_ops(ir, ops) do
+    ops
+    |> Enum.reduce(ir, fn op, acc -> apply_text_op(acc, op) end)
+    |> refresh_field_values()
   end
 
   defp normalize_text_op(op) when is_map(op) do
@@ -439,6 +600,9 @@ defmodule Contract.MCP.Projection do
   end
 
   defp normalize_text_op(_), do: []
+
+  defp cell_text_op?(%{cell_path: [_ | _]}), do: true
+  defp cell_text_op?(_op), do: false
 
   defp apply_text_op(ir, %{sec: sec, para: para, off: off} = op)
        when is_integer(sec) and is_integer(para) and is_integer(off) do
@@ -581,6 +745,20 @@ defmodule Contract.MCP.Projection do
   end
 
   defp refresh_field_values(ir), do: ir
+
+  defp body_text_index(%{"sections" => sections}) when is_list(sections) do
+    Map.new(
+      for section <- sections,
+          paragraph <- map_value(section, "paragraphs") || [],
+          sec = map_value(section, "idx"),
+          para = map_value(paragraph, "idx"),
+          is_integer(sec) and is_integer(para) do
+        {{sec, para}, map_value(paragraph, "text") || ""}
+      end
+    )
+  end
+
+  defp body_text_index(_ir), do: %{}
 
   defp field_text(sections, pos, field) when is_map(pos) do
     with true <- map_value(pos, "cell_path") in [nil, []],
