@@ -182,67 +182,10 @@ defmodule Contract.ChatThreads do
       %ChatThread{} = thread -> thread.messages || []
     end
     |> Enum.reject(&hidden_message?/1)
-    |> reorder_reasoning_before_tools()
     |> Enum.map(&message_for_rail(ctx, &1))
   end
 
   def list_visible_messages(_ctx, _state), do: []
-
-  # Reasoning is persisted on `:agent_reasoning_done`, which OpenAI
-  # emits AFTER the run's tool calls. The live rail compensates by
-  # pre-inserting the reasoning bubble at chat.submit time and then
-  # updating it in place — so the row stays anchored ABOVE tool calls.
-  # On reload from persistence we get the rows in DB insertion order
-  # (tool, tool, reasoning) which would otherwise flip the visual
-  # order. This pass lifts each reasoning message to immediately before
-  # the FIRST tool_call message that shares its agent_run_id, restoring
-  # the same visual ordering the user saw live.
-  defp reorder_reasoning_before_tools(messages) do
-    {reasoning_by_run, others} =
-      Enum.split_with(messages, fn msg ->
-        reasoning_message?(msg) and is_binary(message_agent_run_id(msg))
-      end)
-
-    reasoning_lookup =
-      Map.new(reasoning_by_run, fn msg -> {message_agent_run_id(msg), msg} end)
-
-    {acc_rev, used} =
-      Enum.reduce(others, {[], MapSet.new()}, fn msg, {acc, used} ->
-        with run_id when is_binary(run_id) <- message_agent_run_id(msg),
-             true <- tool_call_message?(msg),
-             false <- MapSet.member?(used, run_id),
-             {:ok, reasoning} <- Map.fetch(reasoning_lookup, run_id) do
-          {[msg, reasoning | acc], MapSet.put(used, run_id)}
-        else
-          _ -> {[msg | acc], used}
-        end
-      end)
-
-    # Reasoning rows whose run never produced a tool_call get appended
-    # at the end (still after the user message that triggered the run).
-    leftover =
-      reasoning_by_run
-      |> Enum.reject(fn msg -> MapSet.member?(used, message_agent_run_id(msg)) end)
-
-    Enum.reverse(acc_rev) ++ leftover
-  end
-
-  defp reasoning_message?(msg), do: msg_operation_type(msg) == "reasoning"
-
-  defp tool_call_message?(msg), do: msg_operation_type(msg) == "tool_call"
-
-  defp msg_operation_type(%{"operation" => %{"type" => type}}), do: type
-  defp msg_operation_type(%{operation: %{"type" => type}}), do: type
-  defp msg_operation_type(%{operation: %{type: type}}), do: to_string(type)
-  defp msg_operation_type(_), do: nil
-
-  defp message_agent_run_id(%{"agent_run_id" => id}) when is_binary(id), do: id
-  defp message_agent_run_id(%{agent_run_id: id}) when is_binary(id), do: id
-
-  defp message_agent_run_id(%{"operation" => %{"agent_run_id" => id}}) when is_binary(id),
-    do: id
-
-  defp message_agent_run_id(_), do: nil
 
   @doc """
   Returns metadata for the currently visible active thread.

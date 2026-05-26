@@ -163,6 +163,66 @@ defmodule Contract.ChatThreadsTest do
       assert %{title: "Deal setup", message_count: 0} =
                ChatThreads.current_thread_info(ctx, state)
     end
+
+    test "preserves persisted operation order for a run" do
+      owner_id = Ecto.UUID.generate()
+      document_id = Ecto.UUID.generate()
+      agent_run_id = Ecto.UUID.generate()
+
+      Repo.insert!(%ChatThread{
+        owner_id: owner_id,
+        document_id: document_id,
+        title: "Discussion",
+        status: "active",
+        messages: [
+          %{
+            "id" => "user-1",
+            "role" => "user",
+            "content" => "문서를 봐줘",
+            "inserted_at" => "2026-05-26T00:00:00Z"
+          },
+          %{
+            "id" => "tool-doc-get",
+            "role" => "agent",
+            "content" => "",
+            "agent_run_id" => agent_run_id,
+            "operation" => %{
+              "id" => "tool-#{agent_run_id}-doc.get-1",
+              "type" => "tool_call",
+              "title" => "doc.get",
+              "status" => "completed",
+              "summary" => "Read document",
+              "agent_run_id" => agent_run_id
+            },
+            "inserted_at" => "2026-05-26T00:00:01Z"
+          },
+          %{
+            "id" => "reasoning-after-doc-get",
+            "role" => "agent",
+            "content" => "",
+            "agent_run_id" => agent_run_id,
+            "operation" => %{
+              "id" => "reasoning-#{agent_run_id}",
+              "type" => "reasoning",
+              "title" => "Thinking",
+              "status" => "completed",
+              "summary" => "doc.get 결과를 검토함",
+              "details" => %{"text" => "doc.get 결과를 검토함"},
+              "agent_run_id" => agent_run_id
+            },
+            "inserted_at" => "2026-05-26T00:00:02Z"
+          }
+        ],
+        last_message_at: DateTime.utc_now(:second)
+      })
+
+      ctx = Context.for_user(%Contract.Accounts.User{id: owner_id})
+      state = %State{selected_document_id: document_id, mode: :editing}
+
+      assert ["user-1", "tool-doc-get", "reasoning-after-doc-get"] =
+               ChatThreads.list_visible_messages(ctx, state)
+               |> Enum.map(& &1.id)
+    end
   end
 
   describe "persist_user_message/2 grill seed" do
