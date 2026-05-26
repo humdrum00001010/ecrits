@@ -29,6 +29,8 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplate do
       data-text-events={Jason.encode!(assigns[:text_events] || [])}
       data-snapshot-url={assigns[:snapshot][:url]}
       data-snapshot-revision={assigns[:snapshot][:revision]}
+      data-snapshot-lamport={assigns[:snapshot][:lamport]}
+      data-snapshot-candidates={Jason.encode!(assigns[:snapshot_candidates] || [])}
     >
       <p
         data-role="standard-hwp-status"
@@ -46,8 +48,8 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplate do
     """
   end
 
-  defp template_path(%{template_hwpx_path: path}) when is_binary(path) and path != "", do: path
   defp template_path(%{template_hwp_path: path}) when is_binary(path) and path != "", do: path
+  defp template_path(%{template_hwpx_path: path}) when is_binary(path) and path != "", do: path
 
   defp template_name(spec) do
     spec
