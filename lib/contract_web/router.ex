@@ -142,6 +142,7 @@ defmodule ContractWeb.Router do
         ContractWeb.Locale,
         {ContractWeb.DocumentScope, :assign_scope}
       ] do
+      live "/projects/:project_id", ProjectLive, :show
       live "/storage", StorageLive
       live "/studio", StudioLive
       live "/studio/:document_id", StudioLive

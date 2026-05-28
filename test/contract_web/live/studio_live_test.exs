@@ -139,6 +139,51 @@ defmodule ContractWeb.StudioLiveTest do
       assert html =~ ~s(/documents/#{document_id}/rhwp-snapshots/2.hwp)
     end
 
+    test "mount replays doc_write text events newer than the rhwp snapshot", %{
+      conn: conn,
+      user: user
+    } do
+      scope = Contract.Context.for_user(user)
+      document_id = create_typed_document!(scope, "Doc write replay")
+      update_document_metadata!(scope, document_id, 1)
+      insert_rhwp_snapshot!(document_id, 2)
+
+      command = %Command{
+        kind: :doc_write,
+        actor_type: :agent,
+        actor_id: user.id,
+        document_id: document_id,
+        base_revision: 2,
+        idempotency_key: "doc-write-replay-#{Ecto.UUID.generate()}",
+        payload: %{
+          "type" => "paragraph",
+          "sec" => 0,
+          "para" => 12,
+          "payload" => %{
+            "cmd" => "insert_after_match",
+            "payload" => %{"text" => "DOC-WRITE-REPLAY"}
+          },
+          "resolved" => %{"off" => 10}
+        }
+      }
+
+      assert {:ok, %Contract.Change{command_kind: "doc_write", result_revision: 3}} =
+               Contract.Runtime.apply(scope, command)
+
+      {:ok, lv, _html} = live(conn, ~p"/documents/#{document_id}")
+
+      assert [
+               %{
+                 "kind" => "insert_text",
+                 "revision" => 3,
+                 "sec" => 0,
+                 "para" => 12,
+                 "off" => 10,
+                 "text" => "DOC-WRITE-REPLAY"
+               }
+             ] = assigns(lv).rhwp_text_events
+    end
+
     test "mounts at /studio (no params) with no document",
          %{conn: conn} do
       {:ok, lv, _html} = live(conn, ~p"/studio")
@@ -188,6 +233,50 @@ defmodule ContractWeb.StudioLiveTest do
 
       assert doc.type_key == first_spec.key
       assert_redirect(lv, "/studio/#{doc.id}")
+    end
+
+    test "empty /studio with project_id keeps picker and attaches typed document to project",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      {:ok, project} = Contract.Projects.create_project(scope, %{"title" => "프로젝트 문서"})
+
+      conn =
+        Plug.Conn.put_session(
+          conn,
+          :user_perms,
+          ~w(read write commit revoke export type_change agent_run)a
+        )
+
+      {:ok, lv, _html} = live(conn, ~p"/studio?project_id=#{project.id}")
+
+      assert assigns(lv).studio_state.selected_document_id == nil
+      assert assigns(lv).project_id == project.id
+      assert has_element?(lv, ~s([data-role="canvas-empty-type-picker"]))
+      assert Contract.Documents.list_recent_for_scope(scope, 1) == []
+
+      {:ok, specs} = Contract.ContractTypes.list()
+      first_spec = specs |> Enum.reject(&(&1.source == :custom)) |> hd()
+
+      lv
+      |> element(
+        ~s([data-role="canvas-empty-type-option"][phx-value-type_key="#{first_spec.key}"])
+      )
+      |> render_click()
+
+      [doc] = Contract.Documents.list_recent_for_scope(scope, 1)
+      assert doc.type_key == first_spec.key
+
+      {:ok, loaded_project} = Contract.Projects.get_project(scope, project.id)
+      assert Enum.any?(loaded_project.documents, &(&1.id == doc.id))
+
+      project_document =
+        Contract.Repo.get_by!(Contract.Projects.ProjectDocument,
+          project_id: project.id,
+          document_id: doc.id
+        )
+
+      assert project_document.role == "primary"
+      assert_redirect(lv, ~p"/documents/#{doc.id}")
     end
 
     test "DocumentScope threads :user_perms from session onto current_scope.perms",
@@ -988,6 +1077,38 @@ defmodule ContractWeb.StudioLiveTest do
       assert html =~ ~s(id="tool-trace-tool-#{run_id}-#{tool_id}")
       assert html =~ ~s(data-status="completed")
       assert html =~ "Found 2 clauses"
+    end
+
+    test "failed tool-call protocol map keeps compact error summary", %{conn: conn} do
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+      run_id = Ecto.UUID.generate()
+      tool_id = Ecto.UUID.generate()
+
+      send(lv.pid, {
+        :tool_call_failed,
+        run_id,
+        tool_id,
+        %{
+          "id" => tool_id,
+          "name" => "doc.write",
+          "agent_run_id" => run_id,
+          "error" => "{:invalid_params, \"match is ambiguous in paragraph\"}"
+        }
+      })
+
+      fragment = render(lv) |> LazyHTML.from_fragment()
+
+      summary =
+        fragment
+        |> LazyHTML.query(
+          ~s(#tool-trace-tool-#{run_id}-#{tool_id} [data-role="tool-trace-summary"])
+        )
+        |> LazyHTML.text()
+        |> String.trim()
+
+      assert summary == ~s({:invalid_params, "match is ambiguous in paragraph"})
+      refute summary =~ "agent_run_id"
+      refute summary =~ "%{"
     end
 
     test "freshly broadcast tool_call article toggles via client-side JS — details rendered + hidden",

@@ -462,7 +462,7 @@ defmodule ContractWeb.CoreComponents do
       end
 
     ~H"""
-    <table class="table table-zebra">
+    <table class="table">
       <thead>
         <tr>
           <th :for={col <- @col}>{col[:label]}</th>
@@ -472,12 +472,16 @@ defmodule ContractWeb.CoreComponents do
         </tr>
       </thead>
       <tbody id={@id} phx-update={is_struct(@rows, Phoenix.LiveView.LiveStream) && "stream"}>
-        <tr :for={row <- @rows} id={@row_id && @row_id.(row)}>
-          <td
-            :for={col <- @col}
-            phx-click={@row_click && @row_click.(row)}
-            class={@row_click && "hover:cursor-pointer"}
-          >
+        <tr
+          :for={row <- @rows}
+          id={@row_id && @row_id.(row)}
+          phx-click={@row_click && @row_click.(row)}
+          class={[
+            "transition-colors hover:bg-base-200/60",
+            @row_click && "cursor-pointer"
+          ]}
+        >
+          <td :for={col <- @col}>
             {render_slot(col, @row_item.(row))}
           </td>
           <td :if={@action != []} class="w-0 font-semibold">

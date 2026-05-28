@@ -77,6 +77,7 @@ defmodule ContractWeb.StudioLive do
   alias Contract.Command
   alias Contract.ContractTypes
   alias Contract.Documents
+  alias Contract.Projects
   alias Contract.Studio
   alias ContractWeb.Components.Breadcrumbs
   alias ContractWeb.Components.CommandPalette
@@ -87,6 +88,7 @@ defmodule ContractWeb.StudioLive do
   @impl true
   def mount(params, _session, socket) do
     scope = socket.assigns.current_scope
+    project_id = project_id_from_params(scope, params)
 
     case Studio.open(scope, params) do
       {:ok, {studio_state, projection}} ->
@@ -94,11 +96,17 @@ defmodule ContractWeb.StudioLive do
         _ = Studio.subscribe_agent(scope, studio_state.agent_run_id)
         _ = maybe_subscribe_test_operation_blocks(scope)
 
+        _ =
+          if connected?(socket) do
+            register_rhwp_materializer_editor(studio_state.selected_document_id)
+          end
+
         breadcrumbs = build_breadcrumbs(scope, studio_state, projection)
 
         socket =
           socket
           |> assign(:current_scope, scope)
+          |> assign(:project_id, project_id)
           |> assign(:studio_state, studio_state)
           |> assign_projection(projection)
           |> assign(:current_document, current_document(scope, studio_state))
@@ -137,6 +145,7 @@ defmodule ContractWeb.StudioLive do
         socket =
           socket
           |> put_flash(:error, "Could not load Studio: #{inspect(reason)}")
+          |> assign(:project_id, nil)
           |> assign(:studio_state, %Contract.Studio.State{mode: :no_document})
           |> assign_projection(empty_projection())
           |> assign(:current_document, nil)
@@ -259,16 +268,22 @@ defmodule ContractWeb.StudioLive do
   def handle_event("rhwp.snapshot.upload", %{"bytes_base64" => encoded} = params, socket)
       when is_binary(encoded) do
     document_id = socket.assigns.studio_state.selected_document_id
+    requested_document_id = params["document_id"] || params[:document_id]
+    request_id = params["request_id"] || params[:request_id]
     ir = if is_map(params["ir"]), do: params["ir"], else: %{}
     format = params["format"] || params[:format]
+    min_revision = normalize_rhwp_min_revision(params["min_revision"] || params[:min_revision])
 
     with true <- is_binary(document_id),
+         :ok <- verify_rhwp_snapshot_document_id(document_id, requested_document_id),
          {:ok, format} <- Contract.RhwpSnapshot.normalize_format(to_string(format || "")),
          {:ok, revision} <- Contract.Store.latest_revision(document_id),
+         :ok <- verify_rhwp_min_revision(revision, min_revision),
          {:ok, bytes} <- Base.decode64(encoded),
          {:ok, snapshot} <-
            Contract.RhwpSnapshot.upload_and_commit(document_id, revision, bytes, ir, format) do
       socket = assign_rhwp_snapshot_state(socket, document_id, snapshot.format)
+      _ = ack_rhwp_snapshot_committed(request_id, document_id, snapshot)
 
       {:reply,
        %{
@@ -279,16 +294,33 @@ defmodule ContractWeb.StudioLive do
        }, socket}
     else
       false ->
+        _ = ack_rhwp_snapshot_failed(request_id, document_id, :no_document)
         {:reply, %{error: "no_document"}, socket}
 
       :error ->
+        _ = ack_rhwp_snapshot_failed(request_id, document_id, :invalid_base64)
         {:reply, %{error: "invalid_base64"}, socket}
 
       {:error, reason} ->
         require Logger
         Logger.warning("rhwp.snapshot.upload failed: #{inspect(reason)}")
+        _ = ack_rhwp_snapshot_failed(request_id, document_id, reason)
         {:reply, %{error: inspect(reason)}, socket}
     end
+  end
+
+  def handle_event(
+        "rhwp.snapshot.upload",
+        %{"request_id" => request_id, "error" => error} = params,
+        socket
+      )
+      when is_binary(request_id) do
+    document_id =
+      params["document_id"] || params[:document_id] ||
+        socket.assigns.studio_state.selected_document_id
+
+    _ = ack_rhwp_snapshot_failed(request_id, document_id, error)
+    {:reply, %{error: to_string(error)}, socket}
   end
 
   # ---------------------------------------------------------------------------
@@ -473,7 +505,13 @@ defmodule ContractWeb.StudioLive do
 
     case Contract.Runtime.apply(scope, action) do
       {:ok, %Contract.Change{document_id: document_id}} ->
-        {:noreply, push_navigate(socket, to: ~p"/studio/#{document_id}")}
+        case attach_created_document(socket, document_id) do
+          :ok ->
+            {:noreply, push_navigate(socket, to: created_document_path(socket, document_id))}
+
+          {:error, _reason} ->
+            {:noreply, put_flash(socket, :error, "프로젝트에 문서를 연결할 수 없습니다.")}
+        end
 
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "문서 생성에 실패했습니다.")}
@@ -486,6 +524,37 @@ defmodule ContractWeb.StudioLive do
 
   defp blank_document_title(_type_key), do: "새 계약서"
 
+  defp attach_created_document(socket, document_id) do
+    case socket.assigns[:project_id] do
+      project_id when is_binary(project_id) ->
+        case Projects.attach_document(socket.assigns.current_scope, project_id, document_id, %{
+               role: "primary"
+             }) do
+          {:ok, _project_document} -> :ok
+          {:error, _reason} = error -> error
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp created_document_path(socket, document_id) do
+    case socket.assigns[:project_id] do
+      project_id when is_binary(project_id) -> ~p"/documents/#{document_id}"
+      _ -> ~p"/studio/#{document_id}"
+    end
+  end
+
+  defp project_id_from_params(scope, %{"project_id" => project_id}) when is_binary(project_id) do
+    case Projects.get_project(scope, project_id) do
+      {:ok, _project} -> project_id
+      _ -> nil
+    end
+  end
+
+  defp project_id_from_params(_scope, _params), do: nil
+
   # ----------------------------------------------------------------------------
   # handle_info/2
   # ----------------------------------------------------------------------------
@@ -497,6 +566,12 @@ defmodule ContractWeb.StudioLive do
     # message, which was throttling per-token streaming to ~7Hz in dev
     # (~140ms render per delta) even though OpenAI was sending 38 deltas/s.
     {:noreply, handle_protocol_message(message, socket)}
+  end
+
+  @impl true
+  def terminate(_reason, socket) do
+    unregister_rhwp_materializer_editor(socket.assigns[:studio_state])
+    :ok
   end
 
   # ----------------------------------------------------------------------------
@@ -832,6 +907,8 @@ defmodule ContractWeb.StudioLive do
 
   def handle_protocol_message({:document_selected, document_id, revision}, socket)
       when is_binary(document_id) do
+    previous_document_id = socket.assigns.studio_state.selected_document_id
+
     case Studio.select_document(
            socket.assigns.current_scope,
            socket.assigns.studio_state,
@@ -845,9 +922,45 @@ defmodule ContractWeb.StudioLive do
         })
         |> assign_projection(projection)
         |> assign(:current_document, current_document(socket.assigns.current_scope, new_state))
+        |> then(fn socket ->
+          update_rhwp_materializer_editor(previous_document_id, new_state.selected_document_id)
+          socket
+        end)
 
       {:error, _} ->
         socket
+    end
+  end
+
+  def handle_protocol_message({:rhwp_positional_index_request, request}, socket) do
+    selected_document_id = socket.assigns.studio_state.selected_document_id
+    request_id = rhwp_request_value(request, [:request_id, "request_id"])
+    requested_document_id = rhwp_request_value(request, [:document_id, "document_id"])
+    min_revision = rhwp_request_value(request, [:min_revision, "min_revision"])
+    text_events = rhwp_request_value(request, [:text_events, "text_events"]) || []
+    base_snapshot = rhwp_request_value(request, [:base_snapshot, "base_snapshot"])
+    document_id = requested_document_id || selected_document_id
+
+    cond do
+      not is_binary(request_id) or request_id == "" ->
+        socket
+
+      not is_binary(selected_document_id) ->
+        _ = ack_rhwp_snapshot_failed(request_id, document_id, :no_document)
+        socket
+
+      is_binary(document_id) and document_id != selected_document_id ->
+        _ = ack_rhwp_snapshot_failed(request_id, document_id, :document_mismatch)
+        socket
+
+      true ->
+        push_event(socket, "rhwp:positional_index.request", %{
+          request_id: request_id,
+          document_id: selected_document_id,
+          min_revision: min_revision,
+          text_events: text_events,
+          base_snapshot: base_snapshot
+        })
     end
   end
 
@@ -2001,7 +2114,9 @@ defmodule ContractWeb.StudioLive do
 
   defp template_format(_spec), do: nil
 
-  # rhwp canvas replay events: changes 테이블의 :edit_text payload 만 추출 →
+  @rhwp_text_command_kinds ~w(edit_text doc_write)
+
+  # rhwp canvas replay events: changes 테이블의 text-op command payload 추출 →
   # [%{kind, sec, para, off, ...}] 리스트. 클라이언트 hook 이 mount 시 WASM
   # 에 순차 적용하여 baseline template 위에 mutation 누적 결과를 복원한다.
   defp load_rhwp_text_events(nil, _base_revision), do: []
@@ -2010,7 +2125,7 @@ defmodule ContractWeb.StudioLive do
     case Contract.Store.changes_since(document_id, base_revision) do
       {:ok, changes} ->
         changes
-        |> Enum.filter(&(&1.command_kind == "edit_text"))
+        |> Enum.filter(&(&1.command_kind in @rhwp_text_command_kinds))
         |> Enum.flat_map(fn %Contract.Change{payload: payload, result_revision: revision} ->
           payload
           |> List.wrap()
@@ -2096,6 +2211,106 @@ defmodule ContractWeb.StudioLive do
   defp normalize_snapshot_string(value) when is_binary(value) and value != "", do: value
   defp normalize_snapshot_string(_value), do: nil
 
+  defp verify_rhwp_snapshot_document_id(_document_id, nil), do: :ok
+  defp verify_rhwp_snapshot_document_id(document_id, document_id), do: :ok
+
+  defp verify_rhwp_snapshot_document_id(_document_id, _requested_document_id),
+    do: {:error, :document_mismatch}
+
+  defp ack_rhwp_snapshot_committed(request_id, document_id, snapshot) do
+    ack_rhwp_materializer(request_id, %{
+      status: :committed,
+      request_id: request_id,
+      document_id: document_id,
+      revision: snapshot.revision,
+      snapshot: %{
+        key: snapshot.r2_key,
+        ir_key: snapshot.ir_r2_key,
+        format: snapshot.format,
+        content_type: snapshot.content_type
+      }
+    })
+  end
+
+  defp ack_rhwp_snapshot_failed(request_id, document_id, reason) do
+    ack_rhwp_materializer(request_id, %{
+      status: :failed,
+      request_id: request_id,
+      document_id: document_id,
+      error: inspect(reason)
+    })
+  end
+
+  defp rhwp_request_value(request, keys) when is_map(request) do
+    Enum.find_value(keys, &Map.get(request, &1))
+  end
+
+  defp rhwp_request_value(_request, _keys), do: nil
+
+  defp normalize_rhwp_min_revision(value) when is_integer(value), do: value
+
+  defp normalize_rhwp_min_revision(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {revision, ""} -> revision
+      _ -> nil
+    end
+  end
+
+  defp normalize_rhwp_min_revision(_value), do: nil
+
+  defp verify_rhwp_min_revision(_revision, nil), do: :ok
+
+  defp verify_rhwp_min_revision(revision, min_revision)
+       when is_integer(revision) and is_integer(min_revision) and revision >= min_revision,
+       do: :ok
+
+  defp verify_rhwp_min_revision(_revision, min_revision),
+    do: {:error, {:stale_revision, min_revision}}
+
+  defp register_rhwp_materializer_editor(document_id) when is_binary(document_id) do
+    call_rhwp_materializer(:register_editor, [document_id])
+  end
+
+  defp register_rhwp_materializer_editor(_document_id), do: :ok
+
+  defp unregister_rhwp_materializer_editor(%Contract.Studio.State{
+         selected_document_id: document_id
+       }) do
+    unregister_rhwp_materializer_editor(document_id)
+  end
+
+  defp unregister_rhwp_materializer_editor(document_id) when is_binary(document_id) do
+    call_rhwp_materializer(:unregister_editor, [document_id])
+  end
+
+  defp unregister_rhwp_materializer_editor(_document_id), do: :ok
+
+  defp update_rhwp_materializer_editor(previous_document_id, next_document_id)
+       when previous_document_id == next_document_id,
+       do: :ok
+
+  defp update_rhwp_materializer_editor(previous_document_id, next_document_id) do
+    _ = unregister_rhwp_materializer_editor(previous_document_id)
+    register_rhwp_materializer_editor(next_document_id)
+  end
+
+  defp ack_rhwp_materializer(request_id, result)
+       when is_binary(request_id) and request_id != "" do
+    call_rhwp_materializer(:ack, [request_id, result])
+  end
+
+  defp ack_rhwp_materializer(_request_id, _result), do: :ok
+
+  defp call_rhwp_materializer(function, args) do
+    module = Contract.RhwpSnapshot.Materializer
+
+    if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)) do
+      apply(module, function, args)
+    else
+      :ok
+    end
+  end
+
   # Two shapes reach this converter:
   #   * Fresh in-memory Change from Store.append broadcast — atom keys, atom op
   #   * Reloaded Change from Postgres JSONB — string keys, string op
@@ -2167,10 +2382,11 @@ defmodule ContractWeb.StudioLive do
   defp rhwp_event_type_to_op_kind("TableColumnDeleted"), do: :table_column_delete
   defp rhwp_event_type_to_op_kind("TableDeleted"), do: :table_delete
 
-  # rhwp text ops broadcast: 다른 사용자/Agent 의 :edit_text change 가 도착하면
+  # rhwp text ops broadcast: 다른 사용자/Agent 의 text-op change 가 도착하면
   # hook 에 push_event 로 op 리스트 + idempotency_key 전달. hook 은 자기가
   # publish 한 eventId 와 비교해서 echo 면 무시한다.
-  defp push_rhwp_remote_text(socket, %Contract.Change{command_kind: "edit_text"} = change) do
+  defp push_rhwp_remote_text(socket, %Contract.Change{command_kind: kind} = change)
+       when kind in @rhwp_text_command_kinds do
     case change.payload |> List.wrap() |> Enum.flat_map(&change_payload_op_to_event/1) do
       [] ->
         socket
@@ -2184,8 +2400,9 @@ defmodule ContractWeb.StudioLive do
 
   defp append_rhwp_text_events(
          socket,
-         %Contract.Change{command_kind: "edit_text", result_revision: revision} = change
-       ) do
+         %Contract.Change{command_kind: kind, result_revision: revision} = change
+       )
+       when kind in @rhwp_text_command_kinds do
     events =
       change.payload
       |> List.wrap()
@@ -2537,9 +2754,14 @@ defmodule ContractWeb.StudioLive do
   defp protocol_summary(%{"summary" => summary}) when is_binary(summary), do: summary
   defp protocol_summary(%{body: body}) when is_binary(body), do: body
   defp protocol_summary(%{"body" => body}) when is_binary(body), do: body
+  defp protocol_summary(%{error: error}), do: protocol_error_summary(error)
+  defp protocol_summary(%{"error" => error}), do: protocol_error_summary(error)
   defp protocol_summary(value) when is_binary(value), do: value
   defp protocol_summary(value) when is_atom(value), do: Atom.to_string(value)
   defp protocol_summary(value), do: inspect(value)
+
+  defp protocol_error_summary(error) when is_binary(error), do: error
+  defp protocol_error_summary(error), do: inspect(error)
 
   defp tool_trace_title(result, fallback) do
     case protocol_raw_name(result) do
