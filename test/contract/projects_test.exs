@@ -73,6 +73,34 @@ defmodule Contract.ProjectsTest do
     end
   end
 
+  describe "delete_project/2" do
+    test "deletes owned project and memberships without deleting documents" do
+      owner = scope()
+      project = create_project!(owner)
+      document = create_document!(owner)
+      {:ok, _project_document} = Projects.attach_document(owner, project.id, document.id)
+
+      assert {:ok, %Project{id: deleted_id}} = Projects.delete_project(owner, project.id)
+      assert deleted_id == project.id
+
+      assert {:error, :not_found} = Projects.get_project(owner, project.id)
+      assert {:ok, %Document{id: document_id}} = Documents.get(owner, document.id)
+      assert document_id == document.id
+      assert Repo.get_by(ProjectDocument, project_id: project.id, document_id: document.id) == nil
+    end
+
+    test "delete_project/2 enforces owner ACL" do
+      owner = scope()
+      other = scope()
+      project = create_project!(owner)
+
+      assert {:error, :forbidden} = Projects.delete_project(other, project.id)
+      assert {:error, :forbidden} = Projects.delete_project(%Context{user: nil}, project.id)
+      assert {:ok, %Project{id: project_id}} = Projects.get_project(owner, project.id)
+      assert project_id == project.id
+    end
+  end
+
   describe "get_project/2" do
     test "enforces owner ACL and preloads linked documents" do
       owner = scope()

@@ -475,13 +475,13 @@ defmodule ContractWeb.CoreComponents do
         <tr
           :for={row <- @rows}
           id={@row_id && @row_id.(row)}
-          phx-click={@row_click && @row_click.(row)}
-          class={[
-            "transition-colors hover:bg-base-200/60",
-            @row_click && "cursor-pointer"
-          ]}
+          class="transition-colors hover:bg-base-200/60"
         >
-          <td :for={col <- @col}>
+          <td
+            :for={col <- @col}
+            phx-click={@row_click && @row_click.(row)}
+            class={@row_click && "cursor-pointer"}
+          >
             {render_slot(col, @row_item.(row))}
           </td>
           <td :if={@action != []} class="w-0 font-semibold">

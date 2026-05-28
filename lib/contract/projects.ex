@@ -76,6 +76,28 @@ defmodule Contract.Projects do
   def update_project(_scope, _project, _attrs), do: {:error, :forbidden}
 
   @doc """
+  Delete an owned project. Linked documents remain; project membership rows
+  are removed by the database foreign key.
+  """
+  @spec delete_project(Context.t(), T.id() | Project.t()) ::
+          {:ok, Project.t()} | {:error, term()}
+  def delete_project(%Context{user: nil}, _project), do: {:error, :forbidden}
+
+  def delete_project(%Context{} = scope, %Project{} = project) do
+    with :ok <- authorize_owner(scope, project) do
+      Repo.delete(project)
+    end
+  end
+
+  def delete_project(%Context{} = scope, project_id) when is_binary(project_id) do
+    with {:ok, %Project{} = project} <- get_owned_project(scope, project_id) do
+      Repo.delete(project)
+    end
+  end
+
+  def delete_project(_scope, _project), do: {:error, :not_found}
+
+  @doc """
   Attach one owned document to one owned project.
 
   Re-attaching the same document returns the existing join row.

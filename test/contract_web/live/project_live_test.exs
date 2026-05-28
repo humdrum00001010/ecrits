@@ -37,7 +37,8 @@ defmodule ContractWeb.ProjectLiveTest do
       assert has_element?(lv, "table.table tbody#project-documents-table")
       assert has_element?(lv, "#attached-document-#{document.id}", "서비스계약서 원본")
       assert has_element?(lv, "#attached-document-#{document.id}.hover\\:bg-base-200\\/60")
-      assert has_element?(lv, "#attached-document-#{document.id}.cursor-pointer")
+      assert has_element?(lv, "#attached-document-#{document.id} td.cursor-pointer")
+      refute has_element?(lv, "#attached-document-#{document.id}.cursor-pointer")
 
       refute has_element?(
                lv,
