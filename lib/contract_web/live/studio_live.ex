@@ -1382,6 +1382,7 @@ defmodule ContractWeb.StudioLive do
     <% else %>
       <.app_shell
         current_scope={@current_scope}
+        active={app_shell_nav_label(@document_project)}
         primary_nav_label={app_shell_nav_label(@document_project)}
         primary_nav_path={app_shell_nav_path(@document_project)}
       >

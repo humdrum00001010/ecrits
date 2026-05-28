@@ -95,6 +95,12 @@ defmodule ContractWeb.StudioLiveTest do
                "프로젝트"
              )
 
+      assert has_element?(
+               lv,
+               ~s(header ul[aria-label="계약기계"] a.font-semibold[href="/projects/#{project.id}"]),
+               "프로젝트"
+             )
+
       refute has_element?(
                lv,
                ~s(header ul[aria-label="계약기계"] a[href="/storage"]),
