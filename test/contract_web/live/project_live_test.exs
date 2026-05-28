@@ -4,7 +4,10 @@ defmodule ContractWeb.ProjectLiveTest do
   import Phoenix.LiveViewTest
 
   alias Contract.Documents
+  alias Contract.Documents.Document
   alias Contract.Projects
+  alias Contract.Projects.ProjectDocument
+  alias Contract.Repo
 
   describe "auth gate" do
     test "redirects anonymous users to /users/log-in", %{conn: conn} do
@@ -38,6 +41,7 @@ defmodule ContractWeb.ProjectLiveTest do
       assert has_element?(lv, "#attached-document-#{document.id}", "서비스계약서 원본")
       assert has_element?(lv, "#attached-document-#{document.id}.hover\\:bg-base-200\\/60")
       assert has_element?(lv, "#attached-document-#{document.id} td.cursor-pointer")
+      assert has_element?(lv, "#document-settings-#{document.id}[aria-label=\"문서 설정\"]")
       refute has_element?(lv, "#attached-document-#{document.id}.cursor-pointer")
 
       refute has_element?(
@@ -60,6 +64,43 @@ defmodule ContractWeb.ProjectLiveTest do
       refute has_element?(lv, "#reference_document_id")
       refute has_element?(lv, "#project-reference-submit")
       refute has_element?(lv, "#detach-document-#{document.id}")
+      refute has_element?(lv, "#document-edit-#{document.id}")
+      refute has_element?(lv, "#document-delete-#{document.id}")
+    end
+
+    test "document settings removes attached document after confirmation", %{
+      conn: conn,
+      scope: scope
+    } do
+      {:ok, project} =
+        Projects.create_project(scope, %{
+          "title" => "문서 설정 프로젝트",
+          "counterparty" => "Gamma Inc.",
+          "status" => "active"
+        })
+
+      {:ok, document} = Documents.create(scope, %{title: "삭제 대상 문서"})
+      {:ok, _project_document} = Projects.attach_document(scope, project.id, document.id)
+
+      {:ok, lv, _html} = live(conn, ~p"/projects/#{project.id}")
+
+      lv
+      |> element("#document-settings-#{document.id}")
+      |> render_click()
+
+      assert has_element?(lv, "#document-settings-modal", "삭제 대상 문서")
+      assert has_element?(lv, "#document-delete-confirm")
+      assert has_element?(lv, "#attached-document-#{document.id}")
+      assert Repo.get_by(ProjectDocument, project_id: project.id, document_id: document.id)
+
+      lv
+      |> element("#document-delete-confirm")
+      |> render_click()
+
+      refute has_element?(lv, "#document-settings-modal")
+      refute has_element?(lv, "#attached-document-#{document.id}")
+      assert Repo.get_by(ProjectDocument, project_id: project.id, document_id: document.id) == nil
+      assert %Document{status: :archived} = Repo.get!(Document, document.id)
     end
 
     test "새 문서 opens Studio type picker with project context and creates no document yet", %{
