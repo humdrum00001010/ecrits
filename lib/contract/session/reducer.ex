@@ -1020,28 +1020,6 @@ defmodule Contract.Session.Reducer do
      }}
   end
 
-  defp build_ops_and_marks(%Command{kind: :archive_document} = command, _state) do
-    op = %Operation{
-      op: :set_attr,
-      target_type: :document,
-      target_id: command.document_id,
-      args: %{key: :status, value: :archived}
-    }
-
-    {[op], [], %{}}
-  end
-
-  defp build_ops_and_marks(%Command{kind: :restore_document} = command, _state) do
-    op = %Operation{
-      op: :set_attr,
-      target_type: :document,
-      target_id: command.document_id,
-      args: %{key: :status, value: :draft}
-    }
-
-    {[op], [], %{}}
-  end
-
   defp build_ops_and_marks(%Command{kind: :rename_document} = command, _state) do
     payload = normalize_payload(command.payload)
     title = Map.get(payload, :title) || Map.get(payload, :new_title)

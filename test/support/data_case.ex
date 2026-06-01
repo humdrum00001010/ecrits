@@ -1,29 +1,26 @@
 defmodule Contract.DataCase do
   @moduledoc """
-  This module defines the setup for tests requiring
-  access to the application's data layer.
+  This module defines common helpers for data-shaped tests.
 
   You may define functions here to be used as helpers in
   your tests.
 
-  Finally, if the test case interacts with the database,
-  we enable the SQL sandbox, so changes done to the database
-  are reverted at the end of every test. If you are using
-  PostgreSQL, you can even run database tests asynchronously
-  by setting `use Contract.DataCase, async: true`, although
-  this option is not recommended for other databases.
+  The SQL Repo has been retired; legacy DB tests should move to local-first
+  stores or stay excluded until rewritten.
   """
 
   use ExUnit.CaseTemplate
 
   using do
     quote do
-      alias Contract.Repo
+      @moduletag :legacy_saas
 
       import Ecto
       import Ecto.Changeset
       import Ecto.Query
       import Contract.DataCase
+
+      alias Contract.Repo
     end
   end
 
@@ -33,12 +30,9 @@ defmodule Contract.DataCase do
   end
 
   @doc """
-  Sets up the sandbox based on the test tags.
+  Kept as a compatibility hook for older case templates.
   """
-  def setup_sandbox(tags) do
-    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(Contract.Repo, shared: not tags[:async])
-    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
-  end
+  def setup_sandbox(_tags), do: :ok
 
   @doc """
   A helper that transforms changeset errors into a map of messages.

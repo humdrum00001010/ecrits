@@ -12,8 +12,6 @@ defmodule Contract.Runtime do
       :update_metadata             → ensure_session → Session.commit
       :set_contract_type           → ensure_session → Session.commit
       :edit_document               → ensure_session → Session.commit
-      :archive_document            → ensure_session → Session.commit
-      :restore_document            → ensure_session → Session.commit
       :edit_text                   → ensure_session → Session.commit
       :doc_write                   → ensure_session → Session.commit
       :agent_change                → ensure_session → Session.commit
@@ -25,7 +23,6 @@ defmodule Contract.Runtime do
   alias Contract.Change
   alias Contract.Documents
   alias Contract.Documents.Document
-  alias Contract.RouteRef
   alias Contract.Runtime, as: Self
   alias Contract.Session
   alias Contract.Store
@@ -40,8 +37,6 @@ defmodule Contract.Runtime do
     :edit_document,
     :edit_text,
     :doc_write,
-    :archive_document,
-    :restore_document,
     :agent_change
   ]
 
@@ -193,19 +188,7 @@ defmodule Contract.Runtime do
   def authorize_document(_ctx, nil), do: {:error, :missing_document_id}
 
   def authorize_document(ctx, document_id) when is_binary(document_id) do
-    case route_ref(ctx) do
-      %RouteRef{document_id: ^document_id} ->
-        authorize_visible_document(ctx, document_id)
-
-      %RouteRef{document_id: nil} ->
-        {:error, :forbidden}
-
-      %RouteRef{} ->
-        {:error, :forbidden}
-
-      _ ->
-        authorize_visible_document(ctx, document_id)
-    end
+    authorize_visible_document(ctx, document_id)
   end
 
   def authorize_document(_ctx, _document_id), do: {:error, :forbidden}
@@ -216,9 +199,6 @@ defmodule Contract.Runtime do
       {:error, reason} -> {:error, reason}
     end
   end
-
-  defp route_ref(%Contract.Context{perms: %{route_ref: %RouteRef{} = ref}}), do: ref
-  defp route_ref(_ctx), do: nil
 
   defp normalize_payload(nil), do: %{}
   defp normalize_payload(map) when is_map(map), do: map

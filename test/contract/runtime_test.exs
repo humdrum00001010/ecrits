@@ -10,7 +10,6 @@ defmodule Contract.RuntimeTest do
   alias Contract.Documents.Document
   alias Contract.IO.R2Stub
   alias Contract.Lease
-  alias Contract.RouteRef
   alias Contract.Runtime
   alias Contract.Session
   alias Contract.Store
@@ -53,24 +52,6 @@ defmodule Contract.RuntimeTest do
       missing = Ecto.UUID.generate()
       assert {:error, :not_found} = Runtime.load(@ctx, missing)
       assert {:error, :not_found} = Runtime.sync_since(@ctx, missing, 0)
-    end
-
-    test "load denies pinned route_ref without user context" do
-      owner = scope()
-      doc_id = create_owned_doc(owner, title: "Runtime pinned bypass")
-
-      ref = %RouteRef{
-        document_id: doc_id,
-        scopes: [],
-        purpose: "runtime",
-        issued_at: DateTime.utc_now(),
-        expires_at: DateTime.utc_now() |> DateTime.add(3_600, :second)
-      }
-
-      ctx = %Context{perms: %{route_ref: ref}}
-
-      assert {:error, :forbidden} = Runtime.authorize_document(ctx, doc_id)
-      assert {:error, :forbidden} = Runtime.load(ctx, doc_id)
     end
   end
 
@@ -187,8 +168,6 @@ defmodule Contract.RuntimeTest do
             :update_metadata,
             :set_contract_type,
             :edit_document,
-            :archive_document,
-            :restore_document,
             :agent_change
           ] do
         doc = Ecto.UUID.generate()
@@ -347,8 +326,6 @@ defmodule Contract.RuntimeTest do
             :set_contract_type,
             :edit_document,
             :edit_text,
-            :archive_document,
-            :restore_document,
             :agent_change
           ] do
         assert kind in session_kinds
@@ -437,12 +414,6 @@ defmodule Contract.RuntimeTest do
                }
              ]
            }, 1}
-
-        :archive_document ->
-          {%{}, 1}
-
-        :restore_document ->
-          {%{}, 1}
 
         :agent_change ->
           {%{"ops" => [], "marks" => []}, 1}

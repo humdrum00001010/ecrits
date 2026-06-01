@@ -51,7 +51,7 @@ defmodule Contract.Store do
 
   defp r2_driver do
     Application.get_env(:contract, :io_drivers, [])
-    |> Keyword.get(:r2, Contract.IO.R2)
+    |> Keyword.get(:r2, Contract.IO.RetiredObjectStore)
   end
 
   # ----------------------------------------------------------------------------

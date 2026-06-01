@@ -10,6 +10,8 @@ defmodule ContractWeb.Live.Studio.Components.ModalHostTest do
   """
   use ContractWeb.ConnCase, async: false
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest
   import Contract.AccountsFixtures
 

@@ -12,7 +12,7 @@ defmodule Contract.Repo.Migrations.RelaxDocumentsTypeKey do
 
   def change do
     alter table(:documents) do
-      modify :type_key, :string, null: true
+      modify(:type_key, :string, null: true)
     end
   end
 end

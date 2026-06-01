@@ -1,6 +1,8 @@
 defmodule ContractWeb.Components.AppShellTest do
   use ExUnit.Case, async: true
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest, only: [render_component: 2]
 
   alias ContractWeb.Components.AppShell

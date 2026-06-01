@@ -18,7 +18,6 @@ defmodule Contract.Accounts.UserNotifierTest do
 
   alias Contract.Accounts
   alias Contract.AccountsFixtures
-  alias Contract.Workers.MailerJob
   alias ContractWeb.Endpoint
 
   @public_host "contract-studio-v7zk.sprites.app"
@@ -60,7 +59,7 @@ defmodule Contract.Accounts.UserNotifierTest do
       )
 
     assert_enqueued(
-      worker: MailerJob,
+      worker: Contract.Workers.MailerJob,
       args: %{"kind" => "login_instructions", "args" => %{"user_id" => user.id}}
     )
 

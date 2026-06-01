@@ -23,12 +23,12 @@ defmodule Contract.ConfigTest do
   end
 
   describe "required_keys/1" do
-    test ":prod requires DATABASE_URL + SECRET_KEY_BASE + OPENAI/R2; :dev does not" do
+    test ":prod requires SECRET_KEY_BASE + external services; DB URL is retired" do
       prod = Config.required_keys(:prod)
-      assert "DATABASE_URL" in prod
+      refute "DATABASE_URL" in prod
       assert "SECRET_KEY_BASE" in prod
       assert "OPENAI_API_KEY" in prod
-      assert "R2_BUCKET" in prod
+      refute "R2_BUCKET" in prod
 
       dev = Config.required_keys(:dev)
       refute "DATABASE_URL" in dev

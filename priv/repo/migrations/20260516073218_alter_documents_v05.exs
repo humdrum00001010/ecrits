@@ -13,8 +13,8 @@ defmodule Contract.Repo.Migrations.AlterDocumentsV05 do
 
   def change do
     alter table(:documents) do
-      add_if_not_exists :state_snapshot, :map, null: false, default: %{}
-      add_if_not_exists :current_revision, :integer, null: false, default: 0
+      add_if_not_exists(:state_snapshot, :map, null: false, default: %{})
+      add_if_not_exists(:current_revision, :integer, null: false, default: 0)
     end
   end
 end

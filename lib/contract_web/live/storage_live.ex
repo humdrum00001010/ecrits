@@ -177,7 +177,6 @@ defmodule ContractWeb.StorageLive do
           <:col :let={packet} label="패킷">
             {packet_title(packet)}
           </:col>
-          <:col :let={packet} label="수정일">{format_date(field(packet, :updated_at))}</:col>
           <:action :let={packet}>
             <div id={"packet-actions-#{packet_id(packet)}"} class="flex items-center gap-1">
               <button
@@ -312,7 +311,7 @@ defmodule ContractWeb.StorageLive do
             <div class="mt-5 border-t border-base-300 pt-4">
               <h3 class="text-sm font-semibold text-error">삭제</h3>
               <p class="mt-1 text-sm text-base-content/65">
-                패킷만 삭제합니다. 연결된 문서는 삭제되지 않습니다.
+                다른 패킷이 참조하지 않는 문서는 함께 삭제됩니다.
               </p>
               <div class="mt-3 flex justify-end">
                 <button
@@ -359,7 +358,7 @@ defmodule ContractWeb.StorageLive do
             </div>
 
             <p class="mt-4 text-sm text-base-content/70">
-              {packet_title(@deleting_packet)} 패킷을 삭제합니다. 연결된 문서는 삭제되지 않습니다.
+              {packet_title(@deleting_packet)} 패킷을 삭제합니다. 다른 패킷이 참조하지 않는 문서는 함께 삭제됩니다.
             </p>
 
             <div class="mt-5 flex items-center justify-end gap-2">
@@ -417,15 +416,6 @@ defmodule ContractWeb.StorageLive do
 
   defp packet_id(packet), do: field(packet, :id)
   defp packet_title(packet), do: field(packet, :title, "제목 없는 패킷")
-
-  defp format_date(nil), do: ""
-  defp format_date(%DateTime{} = t), do: Calendar.strftime(t, "%Y.%m.%d")
-
-  defp format_date(%NaiveDateTime{} = t),
-    do: t |> DateTime.from_naive!("Etc/UTC") |> format_date()
-
-  defp format_date(%Date{} = d), do: Calendar.strftime(d, "%Y.%m.%d")
-  defp format_date(_), do: ""
 
   defp field(map, key, default \\ nil)
 

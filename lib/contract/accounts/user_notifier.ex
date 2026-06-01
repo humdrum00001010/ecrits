@@ -1,62 +1,39 @@
 defmodule Contract.Accounts.UserNotifier do
   @moduledoc """
-  Builds and dispatches gen.auth transactional emails.
+  Builds and dispatches legacy auth emails.
 
-  Public `deliver_*` functions enqueue an Oban job on the `:mailer`
-  queue rather than calling `Contract.Mailer.deliver/1` directly.
-  Worksmobile SMTP on port 465 takes 2-5 s per send; doing that
-  synchronously inside a LiveView `handle_event/3` blocks the socket
-  for the duration of the SMTP handshake. The Oban indirection lets
-  the LV return immediately and the worker handles the actual send.
-
-  Each public `deliver_*` has a `perform_*` sibling invoked by
-  `Contract.Workers.MailerJob`. The `perform_*` function re-fetches
-  the user by id (Oban args are JSON — no struct round-trip) and
-  calls `Contract.Mailer.deliver/1`.
-
-  Return shape of `deliver_*` is `{:ok, %Oban.Job{}}` on enqueue.
-  Tests that need to assert on the delivered email must drain the
-  queue via `Oban.drain_queue(queue: :mailer)` and then read the
-  Swoosh test inbox (`Swoosh.TestAssertions.assert_email_sent/1`).
-  See `Contract.AccountsFixtures.extract_user_token/1` for the
-  helper that wraps this drain.
+  Oban was removed with the DB substrate, so these functions send directly.
+  Auth routes are retired, but keeping this module DB-free lets old callers
+  compile during the local-first migration.
   """
   import Swoosh.Email
 
   alias Contract.Mailer
   alias Contract.Accounts
   alias Contract.Accounts.User
-  alias Contract.Workers.MailerJob
-
-  # ---------------------------------------------------------------------------
-  # Public API — enqueue an Oban job on the :mailer queue.
-  # ---------------------------------------------------------------------------
 
   @doc """
-  Enqueue an "update email instructions" email. Returns `{:ok, %Oban.Job{}}`.
+  Deliver update email instructions.
   """
   def deliver_update_email_instructions(%User{} = user, url) when is_binary(url) do
-    enqueue("update_email_instructions", %{"user_id" => user.id, "url" => url})
+    deliver_now(user.email, "이메일 변경 안내 · 계약기계", update_email_body(user, url))
   end
 
   @doc """
-  Enqueue a login-instructions email. For unconfirmed users this
-  dispatches to the confirmation-instructions path; for confirmed
-  users it dispatches to the magic-link path. The branching happens
-  inside the worker so the LV's request stays a single enqueue.
+  Deliver login instructions.
   """
   def deliver_login_instructions(%User{} = user, url) when is_binary(url) do
-    enqueue("login_instructions", %{"user_id" => user.id, "url" => url})
-  end
+    case user do
+      %User{confirmed_at: nil} ->
+        deliver_now(user.email, "계정 확인 안내 · 계약기계", confirmation_body(user, url))
 
-  defp enqueue(kind, args) do
-    %{"kind" => kind, "args" => args}
-    |> MailerJob.new()
-    |> Oban.insert()
+      _ ->
+        deliver_now(user.email, "로그인 안내 · 계약기계", magic_link_body(user, url))
+    end
   end
 
   # ---------------------------------------------------------------------------
-  # Worker entry points — invoked by Contract.Workers.MailerJob.
+  # Worker entry points — retained for legacy tests/callers.
   # Each takes a JSON-decoded args map, re-fetches the user, builds the
   # email, and calls Mailer.deliver/1.
   # ---------------------------------------------------------------------------

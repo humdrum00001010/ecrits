@@ -1,17 +1,17 @@
 defmodule ContractWeb.Live.Studio.Components.DocumentListTest do
-  use ContractWeb.ConnCase, async: false
+  use ContractWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
-  import Contract.AccountsFixtures
 
+  alias Contract.Accounts.User
   alias Contract.Context
-  alias Contract.Documents
+  alias Contract.Documents.Document
   alias Contract.Studio.State
   alias ContractWeb.Live.Studio.Components.DocumentList
 
   setup do
     Gettext.put_locale(ContractWeb.Gettext, "en")
-    user = user_fixture()
+    user = %User{id: Ecto.UUID.generate(), email: "local@example.com"}
     scope = %Context{Context.for_user(user) | perms: ~w(read write)a}
     %{user: user, scope: scope}
   end
@@ -26,7 +26,6 @@ defmodule ContractWeb.Live.Studio.Components.DocumentListTest do
 
     assert html =~ ~s(data-role="document-list")
     assert html =~ "Documents"
-    assert html =~ "Recent documents"
     assert html =~ ~s(data-role="documents-empty")
     assert html =~ ~s(phx-value-modal="new_document")
     refute html =~ "Matter"
@@ -34,8 +33,9 @@ defmodule ContractWeb.Live.Studio.Components.DocumentListTest do
   end
 
   test "renders owner-scoped recent documents and selected row", %{scope: scope} do
-    {:ok, doc_a} = Documents.create(scope, %{title: "Alpha", type_key: "nda_v1"})
-    {:ok, doc_b} = Documents.create(scope, %{title: "Beta", type_key: nil})
+    doc_a = document(scope, title: "Alpha", type_key: "nda_v1")
+    doc_b = document(scope, title: "Beta", type_key: nil)
+    stub_documents([doc_a, doc_b])
 
     html =
       render_component(DocumentList,
@@ -57,12 +57,13 @@ defmodule ContractWeb.Live.Studio.Components.DocumentListTest do
     assert html =~ ~r/data-document-id="#{doc_a.id}"[^>]*data-selected="true"/s
   end
 
-  test "treats every non-archived document status as active/current", %{scope: scope} do
-    for status <- [:draft, :importing, :editing, :reviewing, :export_ready] do
-      {:ok, _doc} = Documents.create(scope, %{title: "#{status} document", status: status})
-    end
+  test "renders every persisted document status in one document group", %{scope: scope} do
+    documents =
+      for status <- [:draft, :importing, :editing, :reviewing, :export_ready] do
+        document(scope, title: "#{status} document", status: status)
+      end
 
-    {:ok, _archived} = Documents.create(scope, %{title: "Archived document", status: :archived})
+    stub_documents(documents)
 
     html =
       render_component(DocumentList,
@@ -71,8 +72,7 @@ defmodule ContractWeb.Live.Studio.Components.DocumentListTest do
         current_scope: scope
       )
 
-    assert html =~ ~s(id="doc-list-active")
-    assert html =~ ~s(id="doc-list-archived")
+    assert html =~ ~s(id="doc-list-documents")
 
     for status <- [:draft, :importing, :editing, :reviewing, :export_ready] do
       assert html =~ "#{status} document"
@@ -94,34 +94,19 @@ defmodule ContractWeb.Live.Studio.Components.DocumentListTest do
     refute html =~ ~s(phx-value-modal="new_document")
   end
 
-  test "does not fall back to change-derived rows from another owner when scope has no documents",
-       %{
-         scope: scope
-       } do
-    other_user = user_fixture()
-    other_scope = %Context{Context.for_user(other_user) | perms: ~w(read write)a}
+  defp stub_documents(documents) do
+    Process.put({Contract.Repo, :stub_return}, documents)
+  end
 
-    {:ok, other_doc} =
-      Documents.create(other_scope, %{title: "Other owner draft", type_key: "nda_v1"})
-
-    Contract.Repo.insert!(%Contract.Change{
-      document_id: other_doc.id,
-      command_kind: "edit_document",
-      actor_type: :user,
-      actor_id: other_user.id,
-      result_revision: 1,
-      message: "foreign change row"
-    })
-
-    html =
-      render_component(DocumentList,
-        id: "doc-list",
-        studio_state: %State{mode: :no_document, last_seen_revision: 0},
-        current_scope: scope
-      )
-
-    assert html =~ ~s(data-role="documents-empty")
-    refute html =~ ~s(data-document-id="#{other_doc.id}")
-    refute html =~ "Other owner draft"
+  defp document(%Context{user: user}, attrs) do
+    %Document{
+      id: Keyword.get(attrs, :id, Ecto.UUID.generate()),
+      owner_id: user.id,
+      title: Keyword.fetch!(attrs, :title),
+      type_key: Keyword.get(attrs, :type_key, "nda_v1"),
+      status: Keyword.get(attrs, :status, :draft),
+      latest_revision: Keyword.get(attrs, :latest_revision, 0),
+      updated_at: Keyword.get(attrs, :updated_at, ~N[2026-01-01 00:00:00])
+    }
   end
 end

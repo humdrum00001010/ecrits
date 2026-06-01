@@ -1,6 +1,8 @@
 defmodule ContractWeb.StorageLiveTest do
   use ContractWeb.ConnCase, async: false
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest
 
   alias Contract.Documents
@@ -25,7 +27,6 @@ defmodule ContractWeb.StorageLiveTest do
       assert has_element?(lv, "#open-packet-create-modal", "생성")
       assert has_element?(lv, "table.table tbody#packets-table")
       assert has_element?(lv, "table.table th", "패킷")
-      assert has_element?(lv, "table.table th", "수정일")
       assert has_element?(lv, "#packets-empty")
       assert html =~ "보관함"
 
@@ -34,6 +35,7 @@ defmodule ContractWeb.StorageLiveTest do
       refute has_element?(lv, "[data-role='document-card']")
       refute has_element?(lv, "[data-role='packet-card']")
       refute has_element?(lv, "table.table th", "상대방")
+      refute has_element?(lv, "table.table th", "수정일")
       refute has_element?(lv, "table.table th", "상태")
 
       lv
@@ -146,6 +148,7 @@ defmodule ContractWeb.StorageLiveTest do
       :ok = refute_redirected(lv)
       assert has_element?(lv, "#packet-settings-modal")
       assert has_element?(lv, "#packet-settings-delete")
+      assert has_element?(lv, "#packet-settings-modal", "다른 패킷이 참조하지 않는 문서는 함께 삭제됩니다.")
       refute has_element?(lv, "#packet-delete-modal")
       assert has_element?(lv, "#packet-row-#{packet.id}", "Delete me")
       assert {:ok, _packet} = Packets.get_packet(scope, packet.id)
@@ -156,6 +159,7 @@ defmodule ContractWeb.StorageLiveTest do
 
       :ok = refute_redirected(lv)
       assert has_element?(lv, "#packet-delete-modal")
+      assert has_element?(lv, "#packet-delete-modal", "다른 패킷이 참조하지 않는 문서는 함께 삭제됩니다.")
       refute has_element?(lv, "#packet-settings-modal")
       assert has_element?(lv, "#packet-row-#{packet.id}", "Delete me")
 
@@ -165,7 +169,7 @@ defmodule ContractWeb.StorageLiveTest do
 
       :ok = refute_redirected(lv)
       assert {:error, :not_found} = Packets.get_packet(scope, packet.id)
-      assert {:ok, _document} = Documents.get(scope, document.id)
+      assert {:error, :not_found} = Documents.get(scope, document.id)
       refute has_element?(lv, "#packet-row-#{packet.id}")
       refute has_element?(lv, "#packet-delete-modal")
     end

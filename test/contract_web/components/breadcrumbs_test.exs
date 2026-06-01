@@ -1,6 +1,8 @@
 defmodule ContractWeb.Components.BreadcrumbsTest do
   use ExUnit.Case, async: true
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest, only: [render_component: 2]
 
   alias ContractWeb.Components.Breadcrumbs

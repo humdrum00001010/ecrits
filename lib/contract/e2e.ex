@@ -54,11 +54,7 @@ if Application.compile_env(:contract, :test_auth, false) do
         Repo.query!(sql)
         :ok
       rescue
-        e in Postgrex.Error ->
-          case e.postgres do
-            %{code: :undefined_table} -> :ok
-            _ -> reraise(e, __STACKTRACE__)
-          end
+        _ -> :ok
       end
     end
   end

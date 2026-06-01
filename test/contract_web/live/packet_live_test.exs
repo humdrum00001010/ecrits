@@ -1,6 +1,8 @@
 defmodule ContractWeb.PacketLiveTest do
   use ContractWeb.ConnCase, async: false
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest
 
   alias Contract.Documents
@@ -34,7 +36,14 @@ defmodule ContractWeb.PacketLiveTest do
 
       {:ok, lv, _html} = live(conn, ~p"/packets/#{packet.id}")
 
-      assert has_element?(lv, "#packets-root h1", "서비스 계약")
+      assert has_element?(lv, "#packet-title-form")
+
+      assert has_element?(
+               lv,
+               "#packet-title-form[phx-hook='ContractWeb.PacketLive.BlurPacketTitleOnSubmit']"
+             )
+
+      assert has_element?(lv, "#packet-title-input[value='서비스 계약']")
       assert has_element?(lv, "#packets-root header #packet-new-document", "새 문서")
       refute has_element?(lv, "#packets-root > header a[href='/storage']")
       assert has_element?(lv, "table.table tbody#packet-documents-table")
@@ -51,6 +60,7 @@ defmodule ContractWeb.PacketLiveTest do
              )
 
       assert render(lv) =~ "/documents/#{document.id}"
+      assert render(lv) =~ "/documents/#{document.id}?packet_id=#{packet.id}"
       refute has_element?(lv, "table.table th", "상태")
       refute has_element?(lv, "#packets-root table.table-zebra")
       refute has_element?(lv, "#packets-root header p")
@@ -67,6 +77,25 @@ defmodule ContractWeb.PacketLiveTest do
       refute has_element?(lv, "#detach-document-#{document.id}")
       refute has_element?(lv, "#document-edit-#{document.id}")
       refute has_element?(lv, "#document-delete-#{document.id}")
+    end
+
+    test "edits packet title directly in the header", %{conn: conn, scope: scope} do
+      {:ok, packet} =
+        Packets.create_packet(scope, %{
+          "title" => "수정 전 패킷",
+          "counterparty" => "Gamma Inc.",
+          "status" => "active"
+        })
+
+      {:ok, lv, _html} = live(conn, ~p"/packets/#{packet.id}")
+
+      lv
+      |> form("#packet-title-form", packet: %{title: "수정된 패킷"})
+      |> render_change()
+
+      assert has_element?(lv, "#packet-title-input[value='수정된 패킷']")
+      assert {:ok, loaded} = Packets.get_packet(scope, packet.id)
+      assert loaded.title == "수정된 패킷"
     end
 
     test "document settings removes attached document after confirmation", %{
@@ -90,6 +119,8 @@ defmodule ContractWeb.PacketLiveTest do
       |> render_click()
 
       assert has_element?(lv, "#document-settings-modal", "삭제 대상 문서")
+      assert has_element?(lv, "#document-settings-modal", "다른 패킷에 연결되어 있지 않으면 문서가 삭제됩니다.")
+      refute has_element?(lv, "#document-settings-modal", "보관 처리")
       assert has_element?(lv, "#document-delete-confirm")
       assert has_element?(lv, "#attached-document-#{document.id}")
       assert Repo.get_by(PacketDocument, packet_id: packet.id, document_id: document.id)
@@ -101,7 +132,7 @@ defmodule ContractWeb.PacketLiveTest do
       refute has_element?(lv, "#document-settings-modal")
       refute has_element?(lv, "#attached-document-#{document.id}")
       assert Repo.get_by(PacketDocument, packet_id: packet.id, document_id: document.id) == nil
-      assert %Document{status: :archived} = Repo.get!(Document, document.id)
+      assert Repo.get(Document, document.id) == nil
     end
 
     test "새 문서 opens Studio type picker with packet context and creates no document yet", %{
@@ -157,6 +188,7 @@ defmodule ContractWeb.PacketLiveTest do
 
       assert has_element?(lv, "#attached-document-#{reference_doc.id}", "다른 패킷 문서")
       assert render(lv) =~ "/documents/#{reference_doc.id}"
+      assert render(lv) =~ "/documents/#{reference_doc.id}?packet_id=#{current_packet.id}"
 
       refute has_element?(
                lv,

@@ -30,6 +30,9 @@ contract-*.tar
 # descent만 유지하고, 큰 바이너리(.wasm)는 따로 제외한다.
 /priv/static/assets/*
 !/priv/static/assets/rhwp/
+!/priv/static/assets/standard_contracts/
+/priv/static/assets/standard_contracts/*
+!/priv/static/assets/standard_contracts/employment_v1.editables.json
 
 # 큰 바이너리 산출물(WASM 등)은 별도 repo의 빌드 결과라 contract 히스토리에
 # 넣지 않는다.

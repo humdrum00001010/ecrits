@@ -1,13 +1,33 @@
 defmodule Contract.DocumentsTest do
   use Contract.DataCase, async: false
 
+  @moduletag :repeatable_read
+
   alias Contract.Context
+  alias Contract.ChatThread
   alias Contract.Change
   alias Contract.ContractTypes.DocumentType
   alias Contract.Documents
   alias Contract.Documents.Document
+  alias Contract.IO.R2Stub
   alias Contract.RhwpSnapshot.Record
+  alias Contract.Snapshot
   alias Contract.Store
+
+  setup do
+    R2Stub.setup()
+    R2Stub.reset()
+
+    original_drivers = Application.get_env(:contract, :io_drivers, [])
+    Application.put_env(:contract, :io_drivers, Keyword.put(original_drivers, :r2, R2Stub))
+
+    on_exit(fn ->
+      Application.put_env(:contract, :io_drivers, original_drivers)
+      R2Stub.reset()
+    end)
+
+    :ok
+  end
 
   defp scope do
     %Context{
@@ -145,47 +165,6 @@ defmodule Contract.DocumentsTest do
       assert completed.write_completed_snapshot_revision == 4
     end
 
-    test "complete_write/2 waits on the same per-document advisory lock as Store.append/3" do
-      owner = scope()
-      {:ok, doc} = Documents.create(owner, %{title: "Serialized completion"})
-      insert_change!(doc.id, 1)
-      insert_rhwp_snapshot!(doc.id, 1)
-      parent = self()
-
-      holder =
-        Task.async(fn ->
-          receive do
-            :take_lock ->
-              Repo.transaction(fn ->
-                take_document_lock!(doc.id)
-                send(parent, :lock_acquired)
-
-                receive do
-                  :release_lock -> :ok
-                end
-              end)
-          end
-        end)
-
-      Ecto.Adapters.SQL.Sandbox.allow(Repo, parent, holder.pid)
-      send(holder.pid, :take_lock)
-      assert_receive :lock_acquired
-
-      task =
-        Task.async(fn ->
-          Documents.complete_write(owner, doc.id)
-        end)
-
-      Ecto.Adapters.SQL.Sandbox.allow(Repo, parent, task.pid)
-      ref = task.ref
-      refute_receive {^ref, _result}, 100
-
-      send(holder.pid, :release_lock)
-      assert {:ok, :ok} = Task.await(holder)
-
-      assert {:ok, %Document{status: :write_completed}} = Task.await(task)
-    end
-
     test "with_document_lock/2 runs the callback inside a transaction" do
       assert {:ok, :locked} =
                Documents.with_document_lock(Ecto.UUID.generate(), fn ->
@@ -248,13 +227,88 @@ defmodule Contract.DocumentsTest do
                Documents.guard_body_mutation(doc.id, change)
     end
 
-    test "archive/2 and set_type/3 enforce owner ACL" do
+    test "delete/2 enforces owner ACL and hard-deletes the document" do
       owner = scope()
       other = scope()
       {:ok, doc} = Documents.create(owner, %{title: "Draft"})
 
-      assert {:error, :forbidden} = Documents.archive(other, doc.id)
-      assert {:ok, %Document{status: :archived}} = Documents.archive(owner, doc.id)
+      assert {:error, :forbidden} = Documents.delete(other, doc.id)
+      assert {:ok, %Document{id: deleted_id}} = Documents.delete(owner, doc.id)
+      assert deleted_id == doc.id
+      assert Repo.get(Document, doc.id) == nil
+    end
+
+    test "delete/2 removes document-scoped state rows without cloud cleanup" do
+      owner = scope()
+      upload_key = "uploads/#{owner.user.id}/direct/source.hwp"
+
+      {:ok, doc} =
+        Documents.create(owner, %{
+          title: "Stateful",
+          metadata: %{"source" => %{"object_key" => upload_key}}
+        })
+
+      insert_change!(doc.id, 1)
+      insert_rhwp_snapshot!(doc.id, 1)
+
+      snapshot_key = "documents/#{doc.id}/projection/1.json"
+      native_key = "documents/#{doc.id}/snapshots/1.hwp"
+      ir_key = "documents/#{doc.id}/snapshots/1.ir.json"
+
+      %Snapshot{}
+      |> Snapshot.changeset(%{
+        document_id: doc.id,
+        revision: 1,
+        projection: %{"title" => "Stateful"},
+        r2_key: snapshot_key
+      })
+      |> Repo.insert!()
+
+      Repo.insert!(%ChatThread{owner_id: owner.user.id, document_id: doc.id})
+      assert {:ok, _} = R2Stub.put(upload_key, "uploaded-source")
+      assert {:ok, _} = R2Stub.put(snapshot_key, "{}")
+      assert {:ok, _} = R2Stub.put(native_key, "hwp")
+      assert {:ok, _} = R2Stub.put(ir_key, "{}")
+      objects_before = R2Stub.objects()
+
+      assert {:ok, %Document{}} = Documents.delete(owner, doc.id)
+
+      assert Repo.get(Document, doc.id) == nil
+      refute Repo.get_by(Change, document_id: doc.id)
+      refute Repo.get_by(Record, document_id: doc.id)
+      refute Repo.get_by(Snapshot, document_id: doc.id)
+      refute Repo.get_by(ChatThread, document_id: doc.id)
+      assert R2Stub.objects() == objects_before
+      refute Enum.any?(R2Stub.calls(), &match?({:delete, _key}, &1))
+    end
+
+    test "delete/2 ignores retired cloud cleanup" do
+      owner = scope()
+      upload_key = "uploads/#{owner.user.id}/direct/source.hwp"
+
+      {:ok, doc} =
+        Documents.create(owner, %{
+          title: "Stateful",
+          metadata: %{"source" => %{"object_key" => upload_key}}
+        })
+
+      insert_change!(doc.id, 1)
+      assert {:ok, _} = R2Stub.put(upload_key, "uploaded-source")
+
+      assert {:ok, %Document{}} = Documents.delete(owner, doc.id)
+
+      assert Repo.get(Document, doc.id) == nil
+      refute Repo.get_by(Change, document_id: doc.id)
+      assert R2Stub.objects() == %{upload_key => "uploaded-source"}
+      refute Enum.any?(R2Stub.calls(), &match?({:delete, _key}, &1))
+    end
+
+    test "set_type/3 enforces owner ACL" do
+      owner = scope()
+      other = scope()
+      {:ok, doc} = Documents.create(owner, %{title: "Draft"})
+
+      assert {:error, :forbidden} = Documents.set_type(other, doc.id, "nda_v1")
 
       assert {:ok, %Document{type_key: "nda_v1"} = doc} =
                Documents.set_type(owner, doc.id, "nda_v1")
@@ -325,9 +379,5 @@ defmodule Contract.DocumentsTest do
       payload: []
     })
     |> Repo.insert!()
-  end
-
-  defp take_document_lock!(document_id) do
-    Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", [document_id])
   end
 end

@@ -514,7 +514,7 @@ defmodule Contract.StoreTest do
             "op" => "set_attr",
             "target_type" => "document",
             "target_id" => doc_id,
-            "args" => %{"key" => "status", "value" => "archived"}
+            "args" => %{"key" => "status", "value" => "reviewing"}
           }
         ],
         marks: [],
@@ -530,7 +530,7 @@ defmodule Contract.StoreTest do
       row = Contract.Repo.get(Contract.Documents.Document, doc_id)
       assert row.title == "Bulk Title"
       assert row.type_key == "nda_v1"
-      assert row.status == :archived
+      assert row.status == :reviewing
     end
 
     test "non-attr ops (e.g. create_node) leave the documents row untouched" do

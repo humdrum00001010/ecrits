@@ -4,13 +4,10 @@ defmodule Contract.StudioTest do
   import Mox
 
   alias Contract.Change
-  alias Contract.ChatThread
   alias Contract.Command
   alias Contract.Context
   alias Contract.Documents
   alias Contract.IO.R2Stub
-  alias Contract.Repo
-  alias Contract.RouteRef
   alias Contract.Studio
   alias Contract.Studio.State
 
@@ -61,6 +58,14 @@ defmodule Contract.StudioTest do
       {:ok, doc} = Documents.create(owner, %{title: "Private"})
 
       assert {:error, :forbidden} = Studio.open(other, %{"document_id" => doc.id})
+    end
+
+    test "rejects deleted documents" do
+      s = scope()
+      {:ok, doc} = Documents.create(s, %{title: "Deleted"})
+      assert {:ok, _deleted} = Documents.delete(s, doc.id)
+
+      assert {:error, :not_found} = Studio.open(s, %{"document_id" => doc.id})
     end
   end
 
@@ -280,101 +285,6 @@ defmodule Contract.StudioTest do
   end
 
   # ---------------------------------------------------------------------------
-  # route_ref/3 — new SPEC §10 helper
-  # ---------------------------------------------------------------------------
-
-  describe "route_ref/3" do
-    test "mints a signed token for a Document struct, embedding the document_id" do
-      s = scope()
-      {:ok, doc} = Documents.create(s, %{title: "Route_ref target"})
-
-      assert {:ok, token} = Studio.route_ref(s, doc, purpose: "deep_link", scopes: ["read"])
-      assert is_binary(token)
-
-      assert {:ok, %RouteRef{} = ref} = Contract.Gateway.verify_route_ref(s, token)
-      assert ref.document_id == doc.id
-      assert ref.purpose == "deep_link"
-      assert "read" in ref.scopes
-    end
-
-    test "accepts a binary document_id directly" do
-      s = scope()
-      {:ok, doc} = Documents.create(s, %{title: "Bin doc_id"})
-      doc_id = doc.id
-
-      assert {:ok, token} = Studio.route_ref(s, doc.id, purpose: "mcp")
-
-      assert {:ok, %RouteRef{document_id: ^doc_id, purpose: "mcp"}} =
-               Contract.Gateway.verify_route_ref(s, token)
-    end
-
-    test "does NOT embed agent_run_id in the signed token (task #139 — deterministic bearer)" do
-      # Task #139 — the route_ref bearer is intentionally deterministic
-      # per (user, doc, thread) so OpenAI's hosted MCP tools/list cache
-      # (keyed by bearer) hits across turns. `agent_run_id` is no
-      # longer part of the signed payload; doc.* calls must prove an
-      # explicit run id against the active `Contract.Agent.Document`
-      # attempt for the route_ref scope.
-      s = scope()
-      {:ok, doc} = Documents.create(s, %{title: "Agent route_ref"})
-      run_id = Ecto.UUID.generate()
-
-      assert {:ok, token} =
-               Studio.route_ref(s, doc, purpose: "agent", agent_run_id: run_id)
-
-      assert {:ok, %RouteRef{agent_run_id: nil}} =
-               Contract.Gateway.verify_route_ref(s, token)
-    end
-
-    test "two mints with the same scope produce byte-equal tokens" do
-      # Task #139 — bearer determinism is the whole point: OpenAI caches
-      # tools/list keyed by bearer, so a fresh token per turn busts the
-      # cache (~700ms cold rebuild on every first message).
-      s = scope()
-      {:ok, doc} = Documents.create(s, %{title: "Determinism doc"})
-      thread_id = Ecto.UUID.generate()
-
-      opts = [purpose: "agent_doc_mcp", scopes: ["agent_doc"], chat_thread_id: thread_id]
-
-      assert {:ok, token_a} = Studio.route_ref(s, doc, opts)
-      assert {:ok, token_b} = Studio.route_ref(s, doc, opts)
-      assert token_a == token_b
-    end
-
-    test "accepts a ChatThread and embeds chat_thread_id (no document_id)" do
-      s = scope()
-
-      thread =
-        Repo.insert!(%ChatThread{
-          owner_id: s.user.id,
-          messages: []
-        })
-
-      assert {:ok, token} = Studio.route_ref(s, thread, purpose: "slack_thread")
-      assert {:ok, %RouteRef{} = ref} = Contract.Gateway.verify_route_ref(s, token)
-      assert ref.chat_thread_id == thread.id
-      assert ref.document_id == nil
-      assert ref.purpose == "slack_thread"
-    end
-
-    test "accepts nil and mints a scope-only token" do
-      s = scope()
-      assert {:ok, token} = Studio.route_ref(s, nil, purpose: "scope_only")
-
-      assert {:ok, %RouteRef{document_id: nil, purpose: "scope_only"}} =
-               Contract.Gateway.verify_route_ref(s, token)
-    end
-
-    test "rejects pid-in-attrs (regression guard for SPEC §15.2)" do
-      s = scope()
-      {:ok, doc} = Documents.create(s, %{title: "Pid guard"})
-
-      assert {:error, :pid_in_attrs} =
-               Studio.route_ref(s, doc, purpose: self())
-    end
-  end
-
-  # ---------------------------------------------------------------------------
   # list/search documents (unchanged from prior pass — kept for coverage)
   # ---------------------------------------------------------------------------
 
@@ -385,6 +295,22 @@ defmodule Contract.StudioTest do
 
       assert [%{document_id: id, title: "Visible"}] = Studio.list_documents(s)
       assert id == doc.id
+    end
+
+    test "list_documents/1 returns all owner-scoped rows, not a recent slice" do
+      s = scope()
+
+      ids =
+        for i <- 1..55 do
+          {:ok, doc} = Documents.create(s, %{title: "Visible #{i}", type_key: "nda_v1"})
+          doc.id
+        end
+
+      rows = Studio.list_documents(s)
+      row_ids = Enum.map(rows, & &1.document_id)
+
+      assert length(rows) == 55
+      assert Enum.all?(ids, &(&1 in row_ids))
     end
 
     test "search_documents/2 returns owner-scoped matches" do

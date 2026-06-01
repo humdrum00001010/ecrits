@@ -1,6 +1,8 @@
 defmodule ContractWeb.Components.CommandPaletteTest do
   use ContractWeb.ConnCase, async: true
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest
   import Contract.AccountsFixtures
 

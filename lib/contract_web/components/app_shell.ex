@@ -72,7 +72,7 @@ defmodule ContractWeb.Components.AppShell do
               alt=""
               class="block w-[22px] h-[22px] flex-none dark:invert dark:brightness-110"
             />
-            <span class="inline-block leading-none">계약기계</span>
+            <span class="inline-flex h-[22px] items-center leading-none">계약기계</span>
           </.link>
 
           <ul class="menu menu-horizontal p-0 text-[13px]" aria-label="계약기계">

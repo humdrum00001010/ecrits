@@ -37,32 +37,14 @@ defmodule ContractWeb.Endpoint do
     socket "/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket
     plug Phoenix.LiveReloader
     plug Phoenix.CodeReloader
-    plug Phoenix.Ecto.CheckRepoStatus, otp_app: :contract
   end
 
   plug Phoenix.LiveDashboard.RequestLogger,
     param_key: "request_logger",
     cookie_key: "request_logger"
 
-  # Test-only sandbox endpoint. Wallaby's browser session hits `/sandbox`
-  # with a user-agent header carrying SQL sandbox metadata so it shares the
-  # same Ecto checkout as the test process. `compile_env` ensures this plug
-  # is fully elided from prod / dev builds.
-  if Application.compile_env(:contract, :sql_sandbox) do
-    plug Phoenix.Ecto.SQL.Sandbox,
-      at: "/sandbox",
-      header: "user-agent",
-      repo: Contract.Repo
-  end
-
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
-
-  # For /mcp the inbound MCP plug needs the raw JSON-RPC body (so it can
-  # respond with a JSON-RPC -32700 parse error instead of a generic 400).
-  # We stash the raw body in assigns and zero out body_params so
-  # Plug.Parsers below is a no-op for /mcp.
-  plug ContractWeb.MCP.RawBodyReader
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],

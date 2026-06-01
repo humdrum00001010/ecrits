@@ -354,9 +354,7 @@ defmodule Contract.AgentTest do
       refute user_msg.content =~ "Context Reservoir"
     end
 
-    # Task #143/#222/#246 — the full document IR no longer ships in the
-    # instructions string. The agent uses compact doc.get/doc.read/doc.write.
-    test "instructions no longer inline CURRENT_DOCUMENT_IR" do
+    test "instructions no longer expose hosted document tool surface" do
       action = %Command{
         kind: :chat_message,
         actor_type: :user,
@@ -366,23 +364,24 @@ defmodule Contract.AgentTest do
 
       assert {:ok, frame} = Agent.build_context(nil, action)
       refute frame.system =~ "CURRENT_DOCUMENT_IR"
-      assert frame.system =~ "doc.get"
-      assert frame.system =~ "현재 문서 ID"
-      assert frame.system =~ "`doc.get`은 aggregate metadata"
+      assert frame.system =~ "문서 편집 도구는 서버 에이전트에 제공되지 않습니다"
+      refute frame.system =~ "현재 문서 ID"
+      refute frame.system =~ "contract-doc"
+      refute frame.system =~ "doc.get"
+      refute frame.system =~ "doc.read"
+      refute frame.system =~ "doc.write"
       refute frame.system =~ "doc.get(type:"
       refute frame.system =~ "paragraph_index"
       refute frame.system =~ "leaf_index"
       refute frame.system =~ "bounded metadata/read hints/cursors"
       refute frame.system =~ "doc.get`은 aggregate metadata/read contract"
       refute frame.system =~ "cursors.outline"
-      assert frame.system =~ "doc.read"
-      assert frame.system =~ "doc.write"
       refute frame.system =~ "ir_url"
       refute frame.system =~ "GET"
       refute frame.system =~ "본문 IR이 필요하면"
     end
 
-    test "instructions require compact doc.write for match inserts and full-value text replacement" do
+    test "instructions do not promise server-side document edits" do
       action = %Command{
         kind: :chat_message,
         actor_type: :user,
@@ -392,14 +391,14 @@ defmodule Contract.AgentTest do
 
       assert {:ok, frame} = Agent.build_context(nil, action)
 
-      assert frame.system =~ "slot-like date/period edit"
-      assert frame.system =~ "`doc.write"
-      assert frame.system =~ "insert_after_match"
-      assert frame.system =~ "insert_before_match"
-      assert frame.system =~ "insert_at_offset"
-      assert frame.system =~ "insert_paragraph_after"
-      assert frame.system =~ "payload:{cmd,payload}"
-      assert frame.system =~ "0-based"
+      assert frame.system =~ "실제 반영했다고 말하지 말고"
+      assert frame.system =~ "필요한 변경 위치, 기존 문구, 새 문구"
+      refute frame.system =~ "`doc.write"
+      refute frame.system =~ "insert_after_match"
+      refute frame.system =~ "insert_before_match"
+      refute frame.system =~ "insert_at_offset"
+      refute frame.system =~ "insert_paragraph_after"
+      refute frame.system =~ "payload:{cmd,payload}"
       refute frame.system =~ "`doc.edit`"
       refute frame.system =~ "doc.find"
       refute frame.system =~ "paragraph_index"
@@ -413,18 +412,6 @@ defmodule Contract.AgentTest do
       refute frame.system =~ "doc.delete_block"
       refute frame.system =~ "doc.edit_table"
       refute frame.system =~ "doc.set_field_value"
-      assert frame.system =~ "write the full exact existing value or paragraph"
-      assert frame.system =~ "not only a label prefix"
-      assert frame.system =~ "Never put line breaks inside write text"
-      assert frame.system =~ "Do not replace one template paragraph with an entire contract body"
-      assert frame.system =~ "전화번호"
-      assert frame.system =~ "wider field"
-
-      assert frame.system =~
-               "Use `doc.get` first for aggregate metadata and revision"
-
-      assert frame.system =~
-               "Use `doc.read(sec, at, size)` for concrete content/navigation windows"
     end
 
     test "instructions omit the document-context note for nil document_id" do

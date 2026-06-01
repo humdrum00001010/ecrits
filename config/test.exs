@@ -13,22 +13,6 @@ config :contract, :ui_locale, "en"
 # Only in tests, remove the complexity from the password hashing algorithm
 config :bcrypt_elixir, :log_rounds, 1
 
-# Configure your database
-#
-# The MIX_TEST_PARTITION environment variable can be used
-# to provide built-in test partitioning in CI environment.
-# Run `mix help test` for more information.
-config :contract, Contract.Repo,
-  username: System.get_env("DB_USERNAME") || "contract",
-  password: System.get_env("DB_PASSWORD") || "contract",
-  hostname: System.get_env("DB_HOST") || "localhost",
-  port: String.to_integer(System.get_env("DB_PORT") || "5432"),
-  database:
-    (System.get_env("DB_TEST_NAME") || "#{System.get_env("DB_NAME") || "contract"}_test") <>
-      "#{System.get_env("MIX_TEST_PARTITION")}",
-  pool: Ecto.Adapters.SQL.Sandbox,
-  pool_size: System.schedulers_online() * 2
-
 # Wallaby drives a real browser against the test endpoint, so the HTTP
 # server must be running for `:browser`-tagged feature tests. Plain ConnTest
 # / LiveViewTest cases don't need the server but tolerate `server: true`.
@@ -61,15 +45,8 @@ config :wallaby,
   otp_app: :contract,
   base_url: "http://localhost:4002"
 
-# Mounts the Phoenix.Ecto.SQL.Sandbox plug under `/sandbox` so the real
-# browser session can pin to the same Ecto sandbox owner as the test.
-config :contract, :sql_sandbox, true
-
 # In test we don't send emails
 config :contract, Contract.Mailer, adapter: Swoosh.Adapters.Test
-
-# Oban: disable queues + plugins; tests opt-in via Oban.Testing helpers.
-config :contract, Oban, testing: :manual
 
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false
@@ -103,25 +80,12 @@ config :contract, :law_mcp,
   endpoint: "http://localhost:0/mcp",
   oc: "openapi"
 
-config :contract, :r2,
-  bucket: "test-bucket",
-  account_id: "test-account",
-  access_key_id: "0123456789abcdef0123456789abcdef",
-  secret_access_key: "0123456789abcdef0123456789abcdef01234567",
-  endpoint: "http://localhost:0"
-
 # Mox-based OpenAI driver for the Agent runtime tests.
 config :contract, :io_drivers,
   http: Contract.IO.HTTP.Req,
   openai: Contract.IO.OpenAIMock,
   upstage: Contract.IO.Upstage,
-  law_mcp: Contract.IO.LawMCP,
-  r2: Contract.IO.R2
-
-config :ex_aws,
-  access_key_id: "0123456789abcdef0123456789abcdef",
-  secret_access_key: "0123456789abcdef0123456789abcdef01234567",
-  region: "auto"
+  law_mcp: Contract.IO.LawMCP
 
 # External HWPX validator — used by `test/contract/export/hwpx_external_validator_test.exs`
 # (tag `:external_hwpx`, excluded from the default suite).

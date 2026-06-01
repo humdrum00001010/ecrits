@@ -98,7 +98,7 @@ defmodule Contract.Packets do
 
   @doc """
   Delete an owned packet. Packet membership rows are removed by the database
-  foreign key. Documents that lose their final packet reference are archived.
+  foreign key. Documents that lose their final packet reference are deleted.
   """
   @spec delete_packet(Context.t(), T.id() | Packet.t()) ::
           {:ok, Packet.t()} | {:error, term()}
@@ -179,7 +179,7 @@ defmodule Contract.Packets do
   def detach_document(%Context{} = scope, packet_id, document_id)
       when is_binary(packet_id) and is_binary(document_id) do
     with {:ok, %Packet{} = packet} <- get_owned_packet(scope, packet_id) do
-      Repo.transaction(fn ->
+      repeatable_read_transaction(fn ->
         {deleted_count, _} =
           from(pd in PacketDocument,
             where: pd.packet_id == ^packet.id and pd.document_id == ^document_id
@@ -187,17 +187,21 @@ defmodule Contract.Packets do
           |> Repo.delete_all()
 
         if deleted_count > 0 do
-          case archive_document_if_unreferenced(scope, document_id) do
-            :ok -> :ok
+          case delete_document_if_unreferenced(scope, document_id) do
+            {:ok, r2_keys} -> r2_keys
             {:error, reason} -> Repo.rollback(reason)
           end
         else
-          :ok
+          []
         end
       end)
       |> case do
-        {:ok, :ok} -> :ok
-        {:error, reason} -> {:error, reason}
+        {:ok, r2_keys} ->
+          :ok = Documents.delete_r2_objects_async(r2_keys)
+          :ok
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   rescue
@@ -215,8 +219,6 @@ defmodule Contract.Packets do
   def list_available_documents(%Context{user: %{id: user_id}} = scope, packet_id)
       when is_binary(packet_id) do
     with {:ok, %Packet{} = packet} <- get_owned_packet(scope, packet_id) do
-      archived_status = :archived
-
       attached_document_ids =
         from(pd in PacketDocument,
           where: pd.packet_id == ^packet.id,
@@ -225,7 +227,6 @@ defmodule Contract.Packets do
 
       from(d in Document,
         where: d.owner_id == ^user_id,
-        where: d.status != ^archived_status,
         where: d.id not in subquery(attached_document_ids),
         order_by: [desc: d.updated_at]
       )
@@ -271,13 +272,13 @@ defmodule Contract.Packets do
   end
 
   defp do_delete_packet(%Context{} = scope, %Packet{} = packet) do
-    Repo.transaction(fn ->
+    repeatable_read_transaction(fn ->
       document_ids = attached_document_ids(packet.id)
 
       case Repo.delete(packet) do
         {:ok, deleted_packet} ->
-          case archive_orphaned_documents(scope, document_ids) do
-            :ok -> deleted_packet
+          case delete_orphaned_documents(scope, document_ids) do
+            {:ok, r2_keys} -> {deleted_packet, r2_keys}
             {:error, reason} -> Repo.rollback(reason)
           end
 
@@ -285,6 +286,34 @@ defmodule Contract.Packets do
           Repo.rollback(reason)
       end
     end)
+    |> case do
+      {:ok, {%Packet{} = deleted_packet, r2_keys}} ->
+        :ok = Documents.delete_r2_objects_async(r2_keys)
+        {:ok, deleted_packet}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp repeatable_read_transaction(fun) when is_function(fun, 0) do
+    already_in_transaction? = Repo.in_transaction?()
+
+    Repo.transaction(fn ->
+      unless already_in_transaction? do
+        set_repeatable_read!()
+      end
+
+      fun.()
+    end)
+  end
+
+  defp set_repeatable_read! do
+    unless Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox do
+      Repo.query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", [])
+    end
+
+    :ok
   end
 
   defp attached_document_ids(packet_id) do
@@ -295,31 +324,31 @@ defmodule Contract.Packets do
     |> Repo.all()
   end
 
-  defp archive_orphaned_documents(%Context{} = scope, document_ids) do
+  defp delete_orphaned_documents(%Context{} = scope, document_ids) do
     document_ids
     |> Enum.uniq()
-    |> Enum.reduce_while(:ok, fn document_id, :ok ->
-      case archive_document_if_unreferenced(scope, document_id) do
-        :ok -> {:cont, :ok}
+    |> Enum.reduce_while({:ok, []}, fn document_id, {:ok, acc} ->
+      case delete_document_if_unreferenced(scope, document_id) do
+        {:ok, r2_keys} -> {:cont, {:ok, acc ++ r2_keys}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
 
-  defp archive_document_if_unreferenced(%Context{} = scope, document_id) do
+  defp delete_document_if_unreferenced(%Context{} = scope, document_id) do
     case document_ref_count(scope, document_id) do
       {:ok, 0} ->
-        case Documents.archive(scope, document_id) do
-          {:ok, %Document{}} -> :ok
-          {:error, :not_found} -> :ok
+        case Documents.delete_db(scope, document_id) do
+          {:ok, {%Document{}, r2_keys}} -> {:ok, r2_keys}
+          {:error, :not_found} -> {:ok, []}
           {:error, reason} -> {:error, reason}
         end
 
       {:ok, _count} ->
-        :ok
+        {:ok, []}
 
       {:error, :not_found} ->
-        :ok
+        {:ok, []}
 
       {:error, reason} ->
         {:error, reason}

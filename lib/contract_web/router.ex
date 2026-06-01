@@ -1,8 +1,6 @@
 defmodule ContractWeb.Router do
   use ContractWeb, :router
 
-  import ContractWeb.UserAuth
-
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
@@ -10,7 +8,6 @@ defmodule ContractWeb.Router do
     plug :put_root_layout, html: {ContractWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
-    plug :fetch_current_scope_for_user
     plug ContractWeb.Locale
   end
 
@@ -25,18 +22,6 @@ defmodule ContractWeb.Router do
 
       post "/render-ir", DevController, :render_ir
     end
-  end
-
-  # External MCP / Slack ingress pipeline. No CSRF, no session — MCP and
-  # Slack are API-only. SPEC.md §4 / §21.
-  #
-  # Rate limit lives BEFORE the auth-checking MCPPlug so a flood of
-  # garbage bearers gets shed before doing route_ref Phoenix.Token verify
-  # (which is HMAC-SHA256 + base64 — cheap individually but death by
-  # 10k a second). Per-bearer bucket; missing bearer falls back to IP.
-  pipeline :mcp do
-    plug :accepts, ["json", "event-stream"]
-    plug ContractWeb.Plug.RateLimitMCP
   end
 
   # Playwright-only auth shim. Routes 404 at compile time in :prod because
@@ -77,24 +62,9 @@ defmodule ContractWeb.Router do
     end
   end
 
-  scope "/", ContractWeb do
-    pipe_through :browser
-
-    get "/", PageController, :home
-  end
-
-  # Browser product flow is LiveView-only. The document-first product
-  # routes live in the authenticated browser scope below, inside the
-  # single `:require_authenticated_user` live_session.
-
-  # Inbound MCP server (SPEC.md §4, §21). Streamable HTTP transport: accepts
-  # JSON-RPC 2.0 bodies, returns either application/json or
-  # text/event-stream based on the request Accept header. Auth is bearer
-  # only (route_ref tokens or user api tokens) — no session, no CSRF.
-  scope "/mcp", ContractWeb.MCP do
-    pipe_through :mcp
-    forward "/", MCPPlug
-  end
+  # Browser product flow is local-first LiveView-only. Hosted SaaS browser
+  # routes are kept as 410 responses during the migration so old links do not
+  # render stale product surfaces.
 
   # Slack ingress remains a 501 stub for this build (Slack track is out of
   # scope for Wave 3C2 per user directive 2026-05-15).
@@ -118,7 +88,7 @@ defmodule ContractWeb.Router do
       pipe_through :browser
 
       live_session :dev_only,
-        on_mount: [{ContractWeb.UserAuth, :mount_current_scope}] do
+        on_mount: [ContractWeb.Locale] do
         live "/theme", Dev.ThemePreviewLive
       end
     end
@@ -131,49 +101,36 @@ defmodule ContractWeb.Router do
     end
   end
 
-  ## Authentication routes
-
-  scope "/", ContractWeb do
-    pipe_through [:browser, :require_authenticated_user]
-
-    live_session :require_authenticated_user,
-      on_mount: [
-        {ContractWeb.UserAuth, :require_authenticated},
-        ContractWeb.Locale,
-        {ContractWeb.DocumentScope, :assign_scope}
-      ] do
-      live "/packets/:packet_id", PacketLive, :show
-      live "/storage", StorageLive
-      live "/studio", DocumentLive
-      live "/studio/:document_id", DocumentLive
-      live "/documents/:document_id", DocumentLive
-      live "/documents/:document_id/review", DocumentLive
-      live "/users/settings", UserLive.Settings, :edit
-      live "/users/settings/confirm-email/:token", UserLive.Settings, :confirm_email
-      live "/settings", UserLive.SettingsHub, :index
-      live "/settings/api-tokens", UserLive.ApiTokens, :index
-    end
-
-    # /dashboard → /storage (Document library was renamed to "보관함"
-    # 2026-05-17; old bookmarks must still resolve.)
-    get "/dashboard", LegacyRedirectController, :dashboard
-
-    get "/documents/:document_id/rhwp-snapshots/:revision", RhwpSnapshotController, :show
-
-    post "/users/update-password", UserSessionController, :update_password
-  end
-
   scope "/", ContractWeb do
     pipe_through [:browser]
 
-    live_session :current_user,
-      on_mount: [{ContractWeb.UserAuth, :mount_current_scope}, ContractWeb.Locale] do
-      live "/users/register", UserLive.Registration, :new
-      live "/users/log-in", UserLive.Login, :new
-      live "/users/log-in/:token", UserLive.Confirmation, :new
-    end
+    get "/storage", RetiredController, :gone
+    get "/dashboard", RetiredController, :gone
+    get "/packets/:packet_id", RetiredController, :gone
+    get "/studio", RetiredController, :gone
+    get "/studio/:document_id", RetiredController, :gone
 
-    post "/users/log-in", UserSessionController, :create
-    delete "/users/log-out", UserSessionController, :delete
+    put "/documents/direct-upload", RetiredController, :gone
+    get "/documents/:document_id/rhwp-snapshots/:revision", RetiredController, :gone
+    get "/documents/:document_id/review", RetiredController, :gone
+    get "/documents/:document_id", RetiredController, :gone
+
+    get "/settings", RetiredController, :gone
+    get "/settings/api-tokens", RetiredController, :gone
+
+    get "/users/register", RetiredController, :gone
+    get "/users/log-in", RetiredController, :gone
+    get "/users/log-in/:token", RetiredController, :gone
+    post "/users/log-in", RetiredController, :gone
+    delete "/users/log-out", RetiredController, :gone
+    get "/users/settings", RetiredController, :gone
+    get "/users/settings/confirm-email/:token", RetiredController, :gone
+    post "/users/update-password", RetiredController, :gone
+
+    live_session :local,
+      on_mount: [ContractWeb.Locale] do
+      live "/", Local.MountLive, :index
+      live "/workspace", Local.WorkspaceLive, :show
+    end
   end
 end

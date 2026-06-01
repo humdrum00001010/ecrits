@@ -1,12 +1,34 @@
 defmodule Contract.PacketsTest do
   use Contract.DataCase, async: false
 
+  @moduletag :repeatable_read
+
   alias Contract.Context
+  alias Contract.Change
+  alias Contract.ChatThread
   alias Contract.Documents
   alias Contract.Documents.Document
+  alias Contract.IO.R2Stub
   alias Contract.Packets
   alias Contract.Packets.Packet
   alias Contract.Packets.PacketDocument
+  alias Contract.RhwpSnapshot.Record, as: RhwpSnapshotRecord
+  alias Contract.Snapshot
+
+  setup do
+    R2Stub.setup()
+    R2Stub.reset()
+
+    original_drivers = Application.get_env(:contract, :io_drivers, [])
+    Application.put_env(:contract, :io_drivers, Keyword.put(original_drivers, :r2, R2Stub))
+
+    on_exit(fn ->
+      Application.put_env(:contract, :io_drivers, original_drivers)
+      R2Stub.reset()
+    end)
+
+    :ok
+  end
 
   defp scope do
     %Context{
@@ -26,6 +48,66 @@ defmodule Contract.PacketsTest do
   defp create_document!(scope, attrs \\ %{}) do
     attrs = Map.merge(%{title: "Doc #{System.unique_integer([:positive])}"}, attrs)
     {:ok, document} = Documents.create(scope, attrs)
+    document
+  end
+
+  defp create_document_with_artifacts!(scope, attrs \\ %{}) do
+    upload_key = "uploads/#{scope.user.id}/direct/#{Ecto.UUID.generate()}.hwp"
+
+    document =
+      create_document!(
+        scope,
+        Map.merge(
+          %{
+            metadata: %{
+              "source" => %{"object_key" => upload_key}
+            }
+          },
+          attrs
+        )
+      )
+
+    snapshot_key = "documents/#{document.id}/snapshots/1.json"
+    native_key = "documents/#{document.id}/snapshots/1.hwp"
+    ir_key = "documents/#{document.id}/snapshots/1.ir.json"
+
+    %Snapshot{}
+    |> Snapshot.changeset(%{
+      document_id: document.id,
+      revision: 1,
+      projection: %{"title" => document.title},
+      r2_key: snapshot_key
+    })
+    |> Repo.insert!()
+
+    %RhwpSnapshotRecord{}
+    |> RhwpSnapshotRecord.changeset(%{
+      document_id: document.id,
+      revision: 1,
+      format: "hwp",
+      content_type: "application/x-hwp",
+      r2_key: native_key,
+      ir_r2_key: ir_key,
+      projection: %{"revision" => 1}
+    })
+    |> Repo.insert!()
+
+    %Change{}
+    |> Change.changeset(%{
+      document_id: document.id,
+      command_kind: "seed",
+      actor_type: :user,
+      actor_id: scope.user.id,
+      result_revision: 1
+    })
+    |> Repo.insert!()
+
+    Repo.insert!(%ChatThread{owner_id: scope.user.id, document_id: document.id})
+
+    for key <- [upload_key, snapshot_key, native_key, ir_key] do
+      assert {:ok, _} = R2Stub.put(key, "body")
+    end
+
     document
   end
 
@@ -74,20 +156,29 @@ defmodule Contract.PacketsTest do
   end
 
   describe "delete_packet/2" do
-    test "deletes owned packet and archives documents with no remaining packet refs" do
+    test "deletes owned packet and deletes documents with no remaining packet refs" do
       owner = scope()
       packet = create_packet!(owner)
-      document = create_document!(owner)
+      document = create_document_with_artifacts!(owner)
+      upload_key = document.metadata["source"]["object_key"]
       {:ok, _packet_document} = Packets.attach_document(owner, packet.id, document.id)
 
       assert {:ok, 1} = Packets.document_ref_count(owner, document.id)
+      objects_before = R2Stub.objects()
       assert {:ok, %Packet{id: deleted_id}} = Packets.delete_packet(owner, packet.id)
       assert deleted_id == packet.id
 
       assert {:error, :not_found} = Packets.get_packet(owner, packet.id)
-      assert %Document{status: :archived} = Repo.get!(Document, document.id)
-      assert {:ok, 0} = Packets.document_ref_count(owner, document.id)
+      assert Repo.get(Document, document.id) == nil
+      assert {:error, :not_found} = Packets.document_ref_count(owner, document.id)
       assert Repo.get_by(PacketDocument, packet_id: packet.id, document_id: document.id) == nil
+      assert Repo.get_by(Change, document_id: document.id) == nil
+      assert Repo.get_by(Snapshot, document_id: document.id) == nil
+      assert Repo.get_by(RhwpSnapshotRecord, document_id: document.id) == nil
+      assert Repo.get_by(ChatThread, document_id: document.id) == nil
+      assert R2Stub.objects() == objects_before
+      assert Map.has_key?(objects_before, upload_key)
+      refute Enum.any?(R2Stub.calls(), &match?({:delete, _key}, &1))
     end
 
     test "deleting one packet leaves documents active when another packet still references them" do
@@ -107,6 +198,31 @@ defmodule Contract.PacketsTest do
       assert {:ok, 1} = Packets.document_ref_count(owner, document.id)
       assert Repo.get_by(PacketDocument, packet_id: first.id, document_id: document.id) == nil
       assert Repo.get_by(PacketDocument, packet_id: second.id, document_id: document.id)
+    end
+
+    test "delete_packet/2 keeps DB deletes without cloud cleanup" do
+      owner = scope()
+      packet = create_packet!(owner)
+      document = create_document_with_artifacts!(owner)
+      upload_key = document.metadata["source"]["object_key"]
+
+      assert {:ok, _packet_document} = Packets.attach_document(owner, packet.id, document.id)
+      objects_before = R2Stub.objects()
+
+      assert {:ok, %Packet{id: deleted_id}} = Packets.delete_packet(owner, packet.id)
+      assert deleted_id == packet.id
+
+      assert Repo.get(Packet, packet.id) == nil
+      assert Repo.get(Document, document.id) == nil
+      assert Repo.get_by(PacketDocument, packet_id: packet.id, document_id: document.id) == nil
+      assert Repo.get_by(Change, document_id: document.id) == nil
+      assert Repo.get_by(Snapshot, document_id: document.id) == nil
+      assert Repo.get_by(RhwpSnapshotRecord, document_id: document.id) == nil
+      assert Repo.get_by(ChatThread, document_id: document.id) == nil
+
+      assert R2Stub.objects() == objects_before
+      assert Map.has_key?(objects_before, upload_key)
+      refute Enum.any?(R2Stub.calls(), &match?({:delete, _key}, &1))
     end
 
     test "delete_packet/2 enforces owner ACL" do
@@ -225,10 +341,11 @@ defmodule Contract.PacketsTest do
       assert {:error, :not_found} = Packets.document_ref_count(owner, Ecto.UUID.generate())
     end
 
-    test "detach removes last membership and archives orphaned document" do
+    test "detach removes last membership and deletes orphaned document" do
       owner = scope()
       packet = create_packet!(owner)
-      attached = create_document!(owner, %{title: "Attached"})
+      attached = create_document_with_artifacts!(owner, %{title: "Attached"})
+      upload_key = attached.metadata["source"]["object_key"]
       available = create_document!(owner, %{title: "Available"})
 
       assert available_document_ids(owner, packet.id) == Enum.sort([available.id, attached.id])
@@ -236,12 +353,43 @@ defmodule Contract.PacketsTest do
       assert {:ok, _packet_document} = Packets.attach_document(owner, packet.id, attached.id)
       assert available_document_ids(owner, packet.id) == [available.id]
 
+      objects_before = R2Stub.objects()
       assert :ok = Packets.detach_document(owner, packet.id, attached.id)
-      assert %Document{status: :archived} = Repo.get!(Document, attached.id)
-      assert {:ok, 0} = Packets.document_ref_count(owner, attached.id)
+      assert Repo.get(Document, attached.id) == nil
+      assert {:error, :not_found} = Packets.document_ref_count(owner, attached.id)
       assert available_document_ids(owner, packet.id) == [available.id]
+      assert Repo.get_by(Change, document_id: attached.id) == nil
+      assert Repo.get_by(Snapshot, document_id: attached.id) == nil
+      assert Repo.get_by(RhwpSnapshotRecord, document_id: attached.id) == nil
+      assert Repo.get_by(ChatThread, document_id: attached.id) == nil
+      assert R2Stub.objects() == objects_before
+      assert Map.has_key?(objects_before, upload_key)
+      refute Enum.any?(R2Stub.calls(), &match?({:delete, _key}, &1))
 
       assert :ok = Packets.detach_document(owner, packet.id, attached.id)
+    end
+
+    test "detach keeps DB deletes without cloud cleanup" do
+      owner = scope()
+      packet = create_packet!(owner)
+      attached = create_document_with_artifacts!(owner, %{title: "Attached"})
+      upload_key = attached.metadata["source"]["object_key"]
+
+      assert {:ok, _packet_document} = Packets.attach_document(owner, packet.id, attached.id)
+      objects_before = R2Stub.objects()
+
+      assert :ok = Packets.detach_document(owner, packet.id, attached.id)
+
+      assert Repo.get(Document, attached.id) == nil
+      assert Repo.get_by(PacketDocument, packet_id: packet.id, document_id: attached.id) == nil
+      assert Repo.get_by(Change, document_id: attached.id) == nil
+      assert Repo.get_by(Snapshot, document_id: attached.id) == nil
+      assert Repo.get_by(RhwpSnapshotRecord, document_id: attached.id) == nil
+      assert Repo.get_by(ChatThread, document_id: attached.id) == nil
+
+      assert R2Stub.objects() == objects_before
+      assert Map.has_key?(objects_before, upload_key)
+      refute Enum.any?(R2Stub.calls(), &match?({:delete, _key}, &1))
     end
 
     test "detach from one of two packets leaves shared document active" do

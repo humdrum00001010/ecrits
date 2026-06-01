@@ -1,7 +1,7 @@
 defmodule Contract.IO.R2Stub do
   @moduledoc """
-  In-memory stand-in for `Contract.IO.R2` used by Store/Session tests so we
-  don't hit the network during the snapshot path.
+  In-memory legacy object-store stand-in used by DB-backed Store/Session tests
+  so they do not hit retired cloud storage.
 
   Uses a shared ETS table (`:r2_stub_objects`) so background tasks and
   GenServer processes spawned during a test still see the same object map.
@@ -28,11 +28,24 @@ defmodule Contract.IO.R2Stub do
     :ok
   end
 
-  @doc "Toggle the next `put/3` to fail with the given reason."
+  @doc "Toggle the next operation of the given kind to fail with the given reason."
   def fail_next(:put, reason) do
     setup()
     :ets.insert(@table, {{:flag, :fail_put}, reason})
     :ok
+  end
+
+  def fail_next(:delete, reason) do
+    setup()
+    :ets.insert(@table, {{:flag, :fail_delete}, reason})
+    :ok
+  end
+
+  def block_next_delete(owner_pid \\ self()) when is_pid(owner_pid) do
+    setup()
+    ref = make_ref()
+    :ets.insert(@table, {{:flag, :block_delete}, {owner_pid, ref}})
+    ref
   end
 
   def calls do
@@ -79,8 +92,17 @@ defmodule Contract.IO.R2Stub do
   def delete(key, _opts \\ []) do
     setup()
     record_call({:delete, key})
-    :ets.delete(@table, {:obj, key})
-    :ok
+    maybe_block_delete(key)
+
+    case :ets.lookup(@table, {:flag, :fail_delete}) do
+      [{_, reason}] ->
+        :ets.delete(@table, {:flag, :fail_delete})
+        {:error, reason}
+
+      [] ->
+        :ets.delete(@table, {:obj, key})
+        :ok
+    end
   end
 
   def presigned_url(key, _opts \\ []) do
@@ -90,5 +112,21 @@ defmodule Contract.IO.R2Stub do
   defp record_call(call) do
     idx = :erlang.unique_integer([:monotonic])
     :ets.insert(@table, {{:call, idx}, call})
+  end
+
+  defp maybe_block_delete(key) do
+    case :ets.take(@table, {:flag, :block_delete}) do
+      [{_, {owner_pid, ref}}] ->
+        send(owner_pid, {:r2_delete_blocked, ref, key, self()})
+
+        receive do
+          {:r2_delete_continue, ^ref} -> :ok
+        after
+          5_000 -> exit({:r2_delete_block_timeout, key})
+        end
+
+      [] ->
+        :ok
+    end
   end
 end

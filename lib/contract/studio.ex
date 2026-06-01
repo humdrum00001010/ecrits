@@ -1,7 +1,7 @@
 defmodule Contract.Studio do
   @moduledoc """
   Product façade for the one big LiveView. Orchestrates open, select, command,
-  sync, subscribe, route_ref. See SPEC.md §10.
+  sync, and subscribe. See SPEC.md §10.
 
   Studio is the thin product seam between `ContractWeb.DocumentLive` and
   `Contract.Runtime`. It does **not** own document truth — `Store` is truth.
@@ -11,10 +11,7 @@ defmodule Contract.Studio do
     * routes UI-level intents (open, select, command, sync) through the
       `Runtime`;
     * subscribes the calling process to the right PubSub topics so
-      `handle_info/2` in the LV receives the §9 protocol messages;
-    * mints signed `route_ref` tokens via `Contract.Gateway` so external
-      callers (Slack, MCP, deep links) can act on a Document without ever
-      seeing a BEAM pid (SPEC.md §15 invariant 2).
+      `handle_info/2` in the LV receives the §9 protocol messages.
 
   v0.5: Matter is gone — `open/2` no longer reads `:matter_id` from
   params. The Context Reservoir is no longer in spec — the
@@ -26,7 +23,6 @@ defmodule Contract.Studio do
   alias Contract.Command
   alias Contract.Change
   alias Contract.Context
-  alias Contract.Gateway
   alias Contract.Runtime
   alias Contract.Store
   alias Contract.Studio.State
@@ -338,68 +334,6 @@ defmodule Contract.Studio do
   end
 
   # ----------------------------------------------------------------------------
-  # route_ref/3
-  # ----------------------------------------------------------------------------
-
-  @doc """
-  Builds a signed, opaque `route_ref` token that authorizes an external
-  client (Slack thread, MCP tool caller, deep link) to act on a specific
-  document or chat thread without ever seeing a BEAM pid (SPEC.md §15
-  invariant 2).
-
-  Delegates to `Contract.Gateway.issue_route_ref/2`, which returns
-  `{:ok, token}` on success and `{:error, reason}` otherwise.
-
-  `document_or_thread` may be:
-
-    * a `%Contract.Documents.Document{}` — the `:document_id` field is
-      embedded.
-    * a `%Contract.ChatThread{}` — the `:chat_thread_id` field is
-      embedded (Document is left `nil` — useful for chat-only / pre-
-      document RouteRefs).
-    * a binary UUID — assumed to be a `document_id`.
-    * `nil` — produces a scope-only token (no document attached).
-
-  `opts` is forwarded to the Gateway. Common keys:
-
-    * `:purpose` — string label, e.g. `"slack_thread"`, `"mcp"`,
-      `"deep_link"`. Defaults to `"generic"`.
-    * `:scopes` — list of permission strings/atoms.
-    * `:ttl` — integer seconds. Defaults to the Gateway default.
-    * `:agent_run_id` — embedded when an in-flight agent run is the
-      authoritative actor for the link.
-    * `:base_revision` — embedded so the receiver can detect drift.
-  """
-  @spec route_ref(T.ctx(), term(), keyword() | map()) ::
-          T.result(T.route_ref_token())
-  def route_ref(ctx, document_or_thread, opts \\ [])
-
-  def route_ref(%Context{} = ctx, %Contract.Documents.Document{id: doc_id}, opts) do
-    do_route_ref(ctx, %{document_id: doc_id}, opts)
-  end
-
-  def route_ref(%Context{} = ctx, %Contract.ChatThread{id: thread_id}, opts) do
-    do_route_ref(ctx, %{chat_thread_id: thread_id}, opts)
-  end
-
-  def route_ref(%Context{} = ctx, document_id, opts) when is_binary(document_id) do
-    do_route_ref(ctx, %{document_id: document_id}, opts)
-  end
-
-  def route_ref(%Context{} = ctx, nil, opts) do
-    do_route_ref(ctx, %{}, opts)
-  end
-
-  defp do_route_ref(ctx, base_attrs, opts) when is_list(opts) do
-    do_route_ref(ctx, base_attrs, Map.new(opts))
-  end
-
-  defp do_route_ref(ctx, base_attrs, opts) when is_map(opts) do
-    attrs = Map.merge(opts, base_attrs)
-    Gateway.issue_route_ref(ctx, attrs)
-  end
-
-  # ----------------------------------------------------------------------------
   # search_documents/2
   # ----------------------------------------------------------------------------
 
@@ -428,18 +362,18 @@ defmodule Contract.Studio do
   def search_documents(_ctx, _query), do: []
 
   # ----------------------------------------------------------------------------
-  # list_documents/1 — for DocumentList sidebar
+  # list_documents/1 — for DocumentList/document picker surfaces
   # ----------------------------------------------------------------------------
 
   @doc """
-  List recent documents visible to the scope. Returns the shape the
-  Studio sidebar uses (`document_id, title, type_key, status,
+  List all documents visible to the scope. Returns the shape the Studio
+  document picker/list surfaces use (`document_id, title, type_key, status,
   last_activity_at, last_revision`).
   """
   @spec list_documents(T.ctx()) :: [map()]
   def list_documents(%Context{} = ctx) do
     ctx
-    |> Contract.Documents.list_recent_for_scope(limit: 50)
+    |> Contract.Documents.list_all_for_scope()
     |> Enum.map(&document_row/1)
   end
 
@@ -520,8 +454,7 @@ defmodule Contract.Studio do
         end
     end
   rescue
-    DBConnection.ConnectionError -> :briefing
-    Postgrex.Error -> :briefing
+    _ -> :briefing
   end
 
   defp empty_projection, do: Runtime.State.empty_projection()

@@ -164,6 +164,16 @@ defmodule Contract.ChatThreadsTest do
                ChatThreads.current_thread_info(ctx, state)
     end
 
+    test "rename_context/3 does not create empty no-document threads" do
+      owner_id = Ecto.UUID.generate()
+      ctx = Context.for_user(%Contract.Accounts.User{id: owner_id})
+      state = %State{selected_document_id: nil, mode: :no_document}
+
+      assert {:error, :not_found} = ChatThreads.rename_context(ctx, state, "새 대화")
+      assert ChatThreads.current_thread_info(ctx, state) == nil
+      assert Repo.aggregate(ChatThread, :count) == 0
+    end
+
     test "preserves persisted operation order for a run" do
       owner_id = Ecto.UUID.generate()
       document_id = Ecto.UUID.generate()

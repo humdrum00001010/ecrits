@@ -45,4 +45,34 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplateTest do
     assert html =~ ~s(data-editable-spec-candidates=)
     assert html =~ ~s(service_agreement_v1.editables.json)
   end
+
+  test "renders optional local snapshot event attrs" do
+    html =
+      render_component(HwpTemplate,
+        id: "local-hwp-template-canvas",
+        spec: %{
+          key: "custom_v1",
+          template_hwpx_path: "/local/documents/local-doc-1/source.hwpx"
+        },
+        matching_book: %{},
+        field_values: %{},
+        editable_spec_candidates: [],
+        site_id: "local:test",
+        document_id: "local-doc-1",
+        local_document_id: "local-doc-1",
+        local_document_format: "hwpx",
+        local_document_revision: 3,
+        snapshot_upload_event: "rhwp.local.snapshot.save",
+        role: "local-rhwp-editor",
+        text_events: [],
+        snapshot: nil,
+        snapshot_candidates: []
+      )
+
+    assert html =~ ~s(data-snapshot-upload-event="rhwp.local.snapshot.save")
+    assert html =~ ~s(data-local-document-id="local-doc-1")
+    assert html =~ ~s(data-local-document-format="hwpx")
+    assert html =~ ~s(data-local-document-revision="3")
+    assert html =~ ~s(data-role="local-rhwp-editor")
+  end
 end

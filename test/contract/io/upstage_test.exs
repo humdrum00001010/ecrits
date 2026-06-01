@@ -196,19 +196,7 @@ defmodule Contract.IO.UpstageTest do
   end
 
   describe "import_upload/3" do
-    test "returns Action(:create_document) with normalized nodes + source ref", %{bypass: bypass} do
-      Bypass.expect_once(bypass, "POST", "/v1/document-ai/document-parse", fn conn ->
-        response = %{
-          "elements" => [
-            %{"id" => 0, "category" => "heading1", "content" => %{"text" => "TITLE"}},
-            %{"id" => 1, "category" => "paragraph", "content" => %{"text" => "body"}}
-          ],
-          "content" => %{}
-        }
-
-        Plug.Conn.resp(conn, 200, Jason.encode!(response))
-      end)
-
+    test "returns retired cloud-storage error for hosted source upload" do
       tmpfile = write_tempfile("PDFBYTES")
       owner_id = Ecto.UUID.generate()
 
@@ -219,35 +207,7 @@ defmodule Contract.IO.UpstageTest do
         client_size: 8
       }
 
-      # Stub R2: rewire to a fake bucket-less endpoint that 200s.
-      bypass_r2 = Bypass.open()
-
-      Bypass.expect(bypass_r2, fn conn ->
-        Plug.Conn.resp(conn, 200, "")
-      end)
-
-      original = Application.get_env(:contract, :r2)
-
-      Application.put_env(:contract, :r2,
-        bucket: "test-bucket",
-        access_key_id: "k",
-        secret_access_key: "s",
-        endpoint: "http://localhost:#{bypass_r2.port}"
-      )
-
-      on_exit(fn -> Application.put_env(:contract, :r2, original) end)
-
-      assert {:ok, %Contract.Command{} = action} =
-               Upstage.import_upload(nil, owner_id, upload)
-
-      assert action.kind == :create_document
-      assert is_list(action.payload["nodes"])
-      assert length(action.payload["nodes"]) == 2
-      assert hd(action.payload["nodes"])["kind"] == :heading
-      assert action.payload["title"] == "contract.pdf"
-      assert action.payload["mime_type"] == "application/pdf"
-      assert is_binary(action.payload["artifact_id"])
-      assert String.starts_with?(action.payload["source"]["key"], "uploads/#{owner_id}/")
+      assert {:error, :cloud_storage_retired} = Upstage.import_upload(nil, owner_id, upload)
     end
   end
 

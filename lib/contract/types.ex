@@ -19,7 +19,6 @@ defmodule Contract.Types do
   @type field_id :: id()
   @type agent_run_id :: id()
   @type chat_thread_id :: id()
-  @type route_ref_token :: String.t()
 
   @type revision :: non_neg_integer()
   @type contract_type_key :: String.t()

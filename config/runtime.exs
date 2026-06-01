@@ -16,9 +16,8 @@ if System.get_env("PHX_SERVER") do
 end
 
 # Port override is dev/prod only. The `:test` env pins :4002 in
-# `config/test.exs` so Wallaby + the Phoenix.Ecto.SQL.Sandbox plug can
-# target a stable endpoint, regardless of whatever SERVER_PORT/PORT
-# happens to be set in `.env` for the dev sprite.
+# `config/test.exs` so browser tests target a stable endpoint, regardless
+# of whatever SERVER_PORT/PORT happens to be set in `.env` for the dev sprite.
 if config_env() != :test do
   config :contract, ContractWeb.Endpoint,
     http: [
@@ -42,20 +41,6 @@ if config_env() != :test do
   endpoint_port = port || if(scheme == "https", do: 443, else: 80)
 
   config :contract, ContractWeb.Endpoint, url: [host: host, port: endpoint_port, scheme: scheme]
-end
-
-# ---------------------------------------------------------------------------
-# Repo (env-driven, dev + prod alike)
-# ---------------------------------------------------------------------------
-if config_env() != :test do
-  config :contract, Contract.Repo,
-    hostname: System.get_env("DB_HOST", "localhost"),
-    port: String.to_integer(System.get_env("DB_PORT", "5432")),
-    database: System.get_env("DB_NAME", "contract"),
-    username: System.get_env("DB_USERNAME", "contract"),
-    password: System.get_env("DB_PASSWORD", ""),
-    pool_size: String.to_integer(System.get_env("POOL_SIZE", "10")),
-    show_sensitive_data_on_connection_error: config_env() != :prod
 end
 
 # ---------------------------------------------------------------------------
@@ -98,28 +83,6 @@ if System.get_env("MAIL_FROM_ADDRESS") not in [nil, ""] do
 end
 
 # ---------------------------------------------------------------------------
-# Cloudflare R2 (via ex_aws + ex_aws_s3)
-# ---------------------------------------------------------------------------
-if System.get_env("R2_ACCESS_KEY_ID") not in [nil, ""] do
-  config :ex_aws,
-    access_key_id: System.fetch_env!("R2_ACCESS_KEY_ID"),
-    secret_access_key: System.fetch_env!("R2_SECRET_ACCESS_KEY"),
-    region: System.get_env("R2_REGION", "auto"),
-    json_codec: Jason
-
-  config :ex_aws, :s3,
-    scheme: "https://",
-    host: URI.parse(System.fetch_env!("R2_ENDPOINT")).host,
-    port: 443,
-    region: System.get_env("R2_REGION", "auto")
-
-  config :contract, :r2,
-    bucket: System.fetch_env!("R2_BUCKET"),
-    endpoint: System.fetch_env!("R2_ENDPOINT"),
-    force_path_style: System.get_env("R2_FORCE_PATH_STYLE", "true") == "true"
-end
-
-# ---------------------------------------------------------------------------
 # OpenAI / Upstage / Korean Law MCP
 # ---------------------------------------------------------------------------
 # Model + effort are runtime-only so swapping them never trips the dev
@@ -151,20 +114,9 @@ end
 config :contract, :env, config_env()
 
 # ---------------------------------------------------------------------------
-# Production-only: endpoint URL + secret_key_base + DATABASE_URL override
+# Production-only: endpoint URL + secret_key_base
 # ---------------------------------------------------------------------------
 if config_env() == :prod do
-  database_url = System.get_env("DATABASE_URL")
-
-  if database_url do
-    maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
-
-    config :contract, Contract.Repo,
-      url: database_url,
-      pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-      socket_options: maybe_ipv6
-  end
-
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
       raise """

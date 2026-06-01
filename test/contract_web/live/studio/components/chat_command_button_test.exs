@@ -16,6 +16,8 @@ defmodule ContractWeb.Live.Studio.Components.ChatCommandButtonTest do
   """
   use ContractWeb.ConnCase, async: true
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest
   import Contract.AccountsFixtures
 

@@ -1,0 +1,1801 @@
+defmodule ContractWeb.Local.MountWorkspaceLiveTest do
+  use ContractWeb.ConnCase, async: false
+
+  import Phoenix.LiveViewTest
+
+  alias Contract.Local.Agent.Endpoint, as: AgentEndpoint
+  alias Contract.Local.ACP
+  alias Contract.Local.Document
+  alias ContractWeb.LocalAgentAdapterStub
+  alias ContractWeb.LocalDirectoryPickerStub
+  alias ContractWeb.LocalWorkspaceAdapterStub
+
+  setup do
+    previous = Application.get_env(:contract, :local_workspace_adapter)
+    previous_directory_picker = Application.get_env(:contract, :local_directory_picker)
+    previous_directory_picker_stub = Application.get_env(:contract, :local_directory_picker_stub)
+    previous_agent = Application.get_env(:contract, :local_agent)
+    previous_agent_ui = Application.get_env(:contract, :local_agent_ui)
+    Application.put_env(:contract, :local_workspace_adapter, LocalWorkspaceAdapterStub)
+    Application.put_env(:contract, :local_directory_picker, LocalDirectoryPickerStub)
+
+    Application.put_env(
+      :contract,
+      :local_directory_picker_stub,
+      {:ok, LocalDirectoryPickerStub.valid_path()}
+    )
+
+    prepare_local_workspace_fixture()
+
+    on_exit(fn ->
+      cleanup_local_workspace_fixture()
+
+      if previous do
+        Application.put_env(:contract, :local_workspace_adapter, previous)
+      else
+        Application.delete_env(:contract, :local_workspace_adapter)
+      end
+
+      if previous_directory_picker do
+        Application.put_env(:contract, :local_directory_picker, previous_directory_picker)
+      else
+        Application.delete_env(:contract, :local_directory_picker)
+      end
+
+      if previous_directory_picker_stub do
+        Application.put_env(
+          :contract,
+          :local_directory_picker_stub,
+          previous_directory_picker_stub
+        )
+      else
+        Application.delete_env(:contract, :local_directory_picker_stub)
+      end
+
+      if previous_agent_ui do
+        Application.put_env(:contract, :local_agent_ui, previous_agent_ui)
+      else
+        Application.delete_env(:contract, :local_agent_ui)
+      end
+
+      if previous_agent do
+        Application.put_env(:contract, :local_agent, previous_agent)
+      else
+        Application.delete_env(:contract, :local_agent)
+      end
+    end)
+  end
+
+  test "root renders unauthenticated mount screen", %{conn: conn} do
+    {:ok, lv, html} = live(conn, ~p"/")
+
+    assert has_element?(lv, "#local-mount-root")
+    assert has_element?(lv, "#local-mount-picker")
+    assert has_element?(lv, "#local-native-directory-picker[data-role='native-directory-picker']")
+    assert has_element?(lv, "#local-mount-picker-surface[data-role='mount-picker-surface']")
+    assert has_element?(lv, "#local-mount-control-row[data-role='mount-control-row']")
+    assert has_element?(lv, "#local-mount-control-row #local-mount-choose", "Choose folder")
+    assert has_element?(lv, "#local-mount-control-row #local-path-form[method='get']")
+
+    assert has_element?(
+             lv,
+             "#local-mount-control-row #local-path-input[name='path']"
+           )
+
+    assert has_element?(
+             lv,
+             "#local-mount-control-row #local-path-submit[type='submit'][aria-label='Open path'][title='Open path'] .hero-arrow-turn-down-left"
+           )
+
+    refute has_element?(lv, "#local-path-submit", "Open")
+    refute has_element?(lv, "footer")
+
+    refute has_element?(lv, "#local-manual-path-picker")
+    refute has_element?(lv, "#local-provider-picker")
+    refute has_element?(lv, "#local-agent-provider-picker")
+    refute has_element?(lv, "#local-directory-picker[data-role='directory-picker']")
+    refute has_element?(lv, "#local-mount-submit")
+    refute has_element?(lv, "#local-mount-form")
+    refute has_element?(lv, "#local-mount-path")
+    refute html =~ "data-picker-path"
+    refute html =~ "You must log in"
+  end
+
+  test "codex provider favicon is served from static assets", %{conn: conn} do
+    conn = get(conn, "/images/icons/openai-blossom.svg")
+
+    assert response(conn, 200) =~ "<svg"
+    assert get_resp_header(conn, "content-type") == ["image/svg+xml"]
+  end
+
+  test "invalid mount path renders inline error", %{conn: conn} do
+    Application.put_env(:contract, :local_directory_picker_stub, {:ok, "/not-here"})
+
+    {:ok, lv, _html} = live(conn, ~p"/")
+
+    lv
+    |> element("#local-mount-choose")
+    |> render_click()
+
+    assert has_element?(lv, "#local-mount-error", "Workspace path does not exist.")
+    assert has_element?(lv, "#local-mount-picker")
+  end
+
+  test "workspace path query rejects an invalid path", %{conn: conn} do
+    file_path = Path.join(LocalWorkspaceAdapterStub.valid_path(), "not-a-directory.txt")
+    File.write!(file_path, "not a directory")
+
+    {:ok, lv, _html} = live(conn, ~p"/workspace?#{[path: file_path]}")
+
+    assert has_element?(lv, "#local-workspace-error", "Workspace path does not exist.")
+  end
+
+  test "native picker unavailable renders inline error", %{conn: conn} do
+    Application.put_env(:contract, :local_directory_picker_stub, {
+      :error,
+      {:native_picker_unavailable, "Native folder picker is unavailable on this OS."}
+    })
+
+    {:ok, lv, _html} = live(conn, ~p"/")
+
+    lv
+    |> element("#local-mount-choose")
+    |> render_click()
+
+    assert has_element?(
+             lv,
+             "#local-mount-error",
+             "Native folder picker is unavailable on this OS."
+           )
+  end
+
+  test "manual path form is a native GET to the workspace shell", %{conn: conn} do
+    {:ok, lv, _html} = live(conn, ~p"/")
+
+    assert has_element?(
+             lv,
+             "#local-path-form[action='/workspace'][method='get'] #local-path-input[name='path']"
+           )
+  end
+
+  test "valid mount path navigates to workspace shell", %{conn: conn} do
+    {:ok, lv, _html} = live(conn, ~p"/")
+
+    lv
+    |> element("#local-mount-choose")
+    |> render_click()
+
+    assert_redirect(
+      lv,
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}"
+    )
+
+    {:ok, workspace_lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}"
+      )
+
+    assert has_element?(workspace_lv, "#local-workspace-root")
+    assert has_element?(workspace_lv, "#local-workspace-root[class*='overflow-hidden']")
+    assert has_element?(workspace_lv, "#local-workspace-grid[phx-hook='LocalChatRailResizer']")
+    assert has_element?(workspace_lv, "#local-workspace-grid[class*='h-full']")
+    assert has_element?(workspace_lv, "#local-workspace-grid[class*='lg:overflow-hidden']")
+
+    assert has_element?(
+             workspace_lv,
+             "#local-workspace-grid[class*='--local-chat-rail-width']"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-workspace-grid[class*='--local-file-tree-width']"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-file-tree-panel[data-component='repo-browser'][data-local-file-tree-panel='true'][data-collapsed='false'][class*='overflow-hidden']"
+           )
+
+    assert has_element?(workspace_lv, "#local-file-tree-panel [data-role='repo-browser-header']")
+
+    assert has_element?(
+             workspace_lv,
+             "#local-file-tree-panel > #local-file-tree-content:first-child > div:first-child[data-role='repo-browser-header'][data-action='collapse-file-tree']"
+           )
+
+    assert has_element?(workspace_lv, "#local-file-tree-content[data-role='file-tree-content']")
+
+    assert has_element?(
+             workspace_lv,
+             ~s(#local-file-tree-resizer[data-role="file-tree-resizer"][aria-label="Resize file tree"][class*="lg:block"])
+           )
+
+    assert has_element?(
+             workspace_lv,
+             ~s(#local-file-tree-hide[data-role="file-tree-hide"][aria-label="Hide file tree"][aria-controls="local-file-tree-content"][aria-expanded="true"])
+           )
+
+    assert has_element?(
+             workspace_lv,
+             ~s(#local-file-tree-restore[data-role="file-tree-restore"][class*="hidden"])
+           )
+
+    assert has_element?(
+             workspace_lv,
+             ~s(#local-file-tree-show[data-role="file-tree-show"][aria-label="Show file tree"][aria-controls="local-file-tree-content"][aria-expanded="false"])
+           )
+
+    refute has_element?(workspace_lv, "#local-file-tree-breadcrumb")
+    assert has_element?(workspace_lv, "#local-agent-sidebar[data-default-visible='true']")
+    assert has_element?(workspace_lv, "#local-agent-sidebar[class*='relative']")
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-rail-resizer[data-role='chat-rail-resizer'][aria-label='Resize chat rail'][class*='lg:block']"
+           )
+
+    assert has_element?(workspace_lv, "#local-agent-sidebar[data-agent-status='idle']")
+
+    assert has_element?(
+             workspace_lv,
+             "form#local-agent-provider-options[data-role='provider-options']"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "form#local-agent-provider-options[data-selected-provider='codex'][data-selected-model='gpt-5.5'][data-selected-reasoning='medium'][data-selected-access='read-only'] select#local-agent-model-select[data-role='agent-model-select'][name='model'][data-selected-provider='codex'][data-selected-model='gpt-5.5']"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-select option[value='gpt-5.5'][data-provider='codex'][selected]",
+             "GPT-5.5"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-select option[value='gpt-5.4'][data-provider='codex']",
+             "GPT-5.4"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-select option[value='gpt-5.4-mini'][data-provider='codex']",
+             "GPT-5.4 mini"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-select option[value='gpt-5.3-codex'][data-provider='codex']",
+             "GPT-5.3 Codex"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-select option[value='gpt-5.3-codex-spark'][data-provider='codex']",
+             "GPT-5.3 Codex Spark"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-select option[value='claude-default'][data-provider='claude']",
+             "Claude"
+           )
+
+    refute has_element?(workspace_lv, "#local-agent-model-select option[value='fake']")
+    refute has_element?(workspace_lv, "#local-agent-model-select option[value='external']")
+    refute has_element?(workspace_lv, "#local-agent-provider-options option[value='fake']")
+    refute has_element?(workspace_lv, "#local-agent-provider-options option[value='external']")
+    refute has_element?(workspace_lv, "#local-agent-provider-options button")
+
+    assert has_element?(
+             workspace_lv,
+             "form#local-agent-provider-options select#local-agent-reasoning-select[name='reasoning'][data-selected-reasoning='medium'] option[value='medium'][selected]",
+             "Medium - balanced reasoning/tokens"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "form#local-agent-provider-options select#local-agent-access-select[name='access'][data-selected-access='read-only'] option[value='read-only'][selected]",
+             "Read only"
+           )
+
+    refute has_element?(workspace_lv, "#local-agent-provider-picker")
+    refute has_element?(workspace_lv, "#local-agent-provider-integrations")
+    refute has_element?(workspace_lv, "#local-agent-modal-reasoning-select")
+    refute has_element?(workspace_lv, "#local-agent-modal-access-control")
+
+    refute has_element?(workspace_lv, "#local-agent-model-modal")
+
+    workspace_lv
+    |> element("#local-agent-model-select")
+    |> render_focus()
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-modal[role='dialog'][aria-modal='true'] #local-agent-model-detail-codex[data-provider='codex'][data-selected='true']",
+             "Codex"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-modal #local-agent-model-detail-claude[data-provider='claude']",
+             "Claude"
+           )
+
+    refute has_element?(workspace_lv, "#local-agent-model-modal [data-provider='fake']")
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-modal #local-agent-modal-model-select[data-role='agent-model-modal-select'][name='model'][data-selected-provider='codex'][data-selected-model='gpt-5.5'] option[value='gpt-5.5'][selected]",
+             "GPT-5.5"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-modal #local-agent-modal-model-select option[value='claude-default'][data-provider='claude']",
+             "Claude"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-modal #local-agent-modal-reasoning-select[data-role='provider-reasoning-select'][name='reasoning'][data-selected-reasoning='medium'] option#local-agent-reasoning-medium[data-selected='true'][selected]",
+             "Medium - balanced reasoning/tokens"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-modal #local-agent-modal-access-control[data-role='agent-access-control'][name='access'][data-selected-access='read-only']"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-modal #local-agent-modal-access-control option#local-agent-access-read-only[data-access='read-only'][data-selected='true'][selected]",
+             "Read only"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-modal #local-agent-modal-access-control option#local-agent-access-ask[data-access='ask']",
+             "Ask"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-agent-model-modal #local-agent-modal-access-control option#local-agent-access-full-workspace[data-access='full-workspace']",
+             "Full workspace"
+           )
+
+    refute has_element?(
+             workspace_lv,
+             "#local-agent-model-modal button[data-role='provider-reasoning-option']"
+           )
+
+    refute has_element?(
+             workspace_lv,
+             "#local-agent-model-modal button[data-role='agent-access-option']"
+           )
+
+    refute has_element?(
+             workspace_lv,
+             "#local-agent-model-modal button[data-provider]"
+           )
+
+    workspace_lv
+    |> element("#local-agent-model-modal-close")
+    |> render_click()
+
+    refute has_element?(workspace_lv, "#local-agent-model-modal")
+
+    assert has_element?(workspace_lv, "form#local-agent-form[data-role='chat-form']")
+
+    assert has_element?(
+             workspace_lv,
+             "form#local-agent-form #local-agent-input[name='agent[message]']"
+           )
+
+    refute has_element?(workspace_lv, "form#local-agent-form #local-agent-model-select")
+    refute has_element?(workspace_lv, "form#local-agent-form #local-agent-reasoning-select")
+    refute has_element?(workspace_lv, "form#local-agent-form #local-agent-access-select")
+    assert has_element?(workspace_lv, "#local-agent-upload[data-role='chat-upload']")
+
+    assert has_element?(
+             workspace_lv,
+             ~s(#local-agent-form input[type="file"][name="local_document_import"][data-role="local-document-upload-file-input"])
+           )
+
+    assert has_element?(workspace_lv, "#local-agent-submit", "Send")
+  end
+
+  test "workspace chat rail reasoning option is selectable", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+      )
+
+    lv
+    |> element("#local-agent-model-select")
+    |> render_focus()
+
+    assert has_element?(
+             lv,
+             "#local-agent-provider-options #local-agent-reasoning-select option[value='minimal']",
+             "Minimal - fastest, least tokens"
+           )
+
+    assert has_element?(
+             lv,
+             "#local-agent-model-modal #local-agent-reasoning-low",
+             "Low - light reasoning, lower tokens"
+           )
+
+    assert has_element?(
+             lv,
+             "#local-agent-model-modal #local-agent-reasoning-medium[data-selected='true']",
+             "Medium - balanced reasoning/tokens"
+           )
+
+    assert has_element?(
+             lv,
+             "#local-agent-model-modal #local-agent-reasoning-xhigh",
+             "XHigh - maximum reasoning/tokens"
+           )
+
+    lv
+    |> element("#local-agent-reasoning-select")
+    |> render_change(%{"reasoning" => "high"})
+
+    assert_patch(
+      lv,
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.5", reasoning: "high", access: "read-only"]}"
+    )
+
+    assert has_element?(
+             lv,
+             "#local-agent-model-modal #local-agent-modal-reasoning-select[data-selected-reasoning='high'] option#local-agent-reasoning-high[data-selected='true'][selected]",
+             "High - deeper reasoning, more tokens"
+           )
+  end
+
+  test "workspace chat rail model select switches provider", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+      )
+
+    lv
+    |> element("#local-agent-model-select")
+    |> render_focus()
+
+    lv
+    |> element("#local-agent-modal-model-select")
+    |> render_change(%{"model" => "claude-default"})
+
+    assert_patch(
+      lv,
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "claude", model: "claude-default", reasoning: "medium", access: "read-only"]}"
+    )
+
+    assert has_element?(
+             lv,
+             "#local-agent-provider-options[data-selected-provider='claude'][data-selected-model='claude-default'] #local-agent-model-select[data-selected-provider='claude'][data-selected-model='claude-default'] option[value='claude-default'][selected]",
+             "Claude"
+           )
+
+    refute has_element?(lv, "#local-agent-model-select option[value='fake']")
+  end
+
+  test "workspace chat rail submits selected inline options to the local agent", %{conn: conn} do
+    use_test_agent_adapter!(adapter_opts: [echo_opts: true])
+
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+      )
+
+    assert has_element?(
+             lv,
+             "form#local-agent-provider-options select#local-agent-model-select[name='model']"
+           )
+
+    assert has_element?(
+             lv,
+             "form#local-agent-provider-options select#local-agent-reasoning-select[name='reasoning']"
+           )
+
+    assert has_element?(
+             lv,
+             "form#local-agent-provider-options select#local-agent-access-select[name='access']"
+           )
+
+    refute has_element?(lv, "form#local-agent-provider-options option[value='fake']")
+    refute has_element?(lv, "form#local-agent-provider-options option[value='external']")
+
+    lv
+    |> element("#local-agent-model-select")
+    |> render_change(%{"model" => "gpt-5.3-codex-spark"})
+
+    assert_patch(
+      lv,
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.3-codex-spark", reasoning: "medium", access: "read-only"]}"
+    )
+
+    lv
+    |> element("#local-agent-reasoning-select")
+    |> render_change(%{"reasoning" => "xhigh"})
+
+    assert_patch(
+      lv,
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.3-codex-spark", reasoning: "xhigh", access: "read-only"]}"
+    )
+
+    lv
+    |> element("#local-agent-access-select")
+    |> render_change(%{"access" => "full-workspace"})
+
+    assert_patch(
+      lv,
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.3-codex-spark", reasoning: "xhigh", access: "full-workspace"]}"
+    )
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "selected rail opts"})
+    |> render_submit()
+
+    assert_receive {:local_agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      text: text
+                    }},
+                   1_000
+
+    assert text =~ "Test response: selected rail opts"
+    assert text =~ "model=gpt-5.3-codex-spark"
+    assert text =~ "reasoning=xhigh"
+    assert text =~ "access=full-workspace"
+    assert text =~ "approval=never"
+    assert text =~ "sandbox=workspace-write"
+    assert text =~ "permission=dontAsk"
+
+    sync_liveview(lv)
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="completed"]),
+             "model=gpt-5.3-codex-spark"
+           )
+  end
+
+  test "workspace chat rail access option is selectable and gates write tools on ask", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          %{
+            type: :tool_call,
+            id: "tool-access-write",
+            name: "positionalindex.write",
+            arguments: %{"text" => "needs approval"}
+          }
+        ]
+      ]
+    )
+
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+      )
+
+    lv
+    |> element("#local-agent-model-select")
+    |> render_focus()
+
+    assert has_element?(
+             lv,
+             "#local-agent-model-modal #local-agent-modal-access-control option#local-agent-access-read-only[data-selected='true'][selected]",
+             "Read only"
+           )
+
+    lv
+    |> element("#local-agent-modal-access-control")
+    |> render_change(%{"access" => "ask"})
+
+    assert_patch(
+      lv,
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.5", reasoning: "medium", access: "ask"]}"
+    )
+
+    assert has_element?(
+             lv,
+             "#local-agent-model-modal #local-agent-modal-access-control[data-selected-access='ask'] option#local-agent-access-ask[data-selected='true'][selected]",
+             "Ask"
+           )
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "write"})
+    |> render_submit()
+
+    assert_receive {:local_agent_event,
+                    %{
+                      type: :tool_approval_required,
+                      session_id: ^session_id,
+                      tool_call_id: "tool-access-write"
+                    }},
+                   1_000
+
+    sync_liveview(lv)
+
+    assert has_element?(
+             lv,
+             "#local-agent-tool-tool-access-write[data-role='local-agent-tool'][data-message-status='approval_required']",
+             "Needs approval"
+           )
+  end
+
+  test "workspace chat rail tool write mutates active local document fields", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    relative_path = "employment_v1.hwp"
+    path = Path.join(root, relative_path)
+    bytes = File.read!(path)
+    title_paragraph = "표준근로계약서"
+    party_paragraph = employment_party_paragraph("기존회사", "기존직원")
+    employer_offset = 2
+    employer_count = 14
+    worker_offset = 34
+    worker_count = 11
+    employer_text = "주식회사 한빛       "
+    worker_text = "김로컬        "
+
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          %{
+            type: :tool_call,
+            id: "tool-write-employer",
+            name: "positionalindex.write",
+            arguments: %{
+              "sec" => 0,
+              "para" => 1,
+              "type" => "paragraph",
+              "base_revision" => 1,
+              "timeout_ms" => 1_000,
+              "payload" => %{
+                "cmd" => "replace_range",
+                "payload" => %{
+                  "off" => employer_offset,
+                  "count" => employer_count,
+                  "text" => employer_text
+                }
+              }
+            }
+          },
+          %{
+            type: :tool_call,
+            id: "tool-write-worker",
+            name: "positionalindex.write",
+            arguments: %{
+              "sec" => 0,
+              "para" => 1,
+              "type" => "paragraph",
+              "base_revision" => 1,
+              "timeout_ms" => 1_000,
+              "payload" => %{
+                "cmd" => "replace_range",
+                "payload" => %{
+                  "off" => worker_offset,
+                  "count" => worker_count,
+                  "text" => worker_text
+                }
+              }
+            }
+          },
+          {:text_delta, "edited parties"}
+        ]
+      ]
+    )
+
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: root, document: relative_path, provider: "codex", access: "full-workspace"]}"
+      )
+
+    document_id = local_rhwp_document_id(lv)
+    session_id = subscribe_agent(lv)
+
+    render_hook(lv, "rhwp.local.snapshot.checkpoint", %{
+      "document_id" => document_id,
+      "bytes_base64" => Base.encode64(bytes),
+      "format" => "hwp",
+      "min_revision" => 0,
+      "context" =>
+        local_agent_edit_ir([title_paragraph, party_paragraph],
+          contract_type: "employment_v1",
+          title: "employment_v1.hwp"
+        )
+    })
+
+    assert {:ok, %Document{revision: 1}} = Document.document(document_id)
+    assert has_element?(lv, "#local-rhwp-save-state", "Checkpointed revision 1")
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "사업주와 근로자를 수정해"})
+    |> render_submit()
+
+    assert_push_event(
+      lv,
+      "rhwp:positional_index.request",
+      %{
+        request_id: employer_request_id,
+        document_id: ^document_id,
+        min_revision: 2,
+        text_events: employer_events
+      },
+      1_000
+    )
+
+    assert_value_edit_before_label(
+      employer_events,
+      party_paragraph,
+      "(이하 “사업주”",
+      "사업주",
+      employer_offset,
+      employer_count,
+      employer_text
+    )
+
+    employer_edited_paragraph =
+      replace_grapheme_range(party_paragraph, employer_offset, employer_count, employer_text)
+
+    render_hook(lv, "rhwp.local.snapshot.save", %{
+      "request_id" => employer_request_id,
+      "document_id" => document_id,
+      "bytes_base64" => Base.encode64(bytes),
+      "format" => "hwp",
+      "min_revision" => 2,
+      "context" =>
+        local_agent_edit_ir([title_paragraph, employer_edited_paragraph],
+          contract_type: "employment_v1",
+          title: "employment_v1.hwp"
+        )
+    })
+
+    assert_receive {:local_agent_event,
+                    %{
+                      type: :tool_call_completed,
+                      session_id: ^session_id,
+                      tool_call_id: "tool-write-employer",
+                      name: "positionalindex.write",
+                      result: %{"revision" => 2}
+                    }},
+                   1_000
+
+    assert_push_event(
+      lv,
+      "rhwp:positional_index.request",
+      %{
+        request_id: worker_request_id,
+        document_id: ^document_id,
+        min_revision: 3,
+        text_events: worker_events
+      },
+      1_000
+    )
+
+    assert_value_edit_before_label(
+      worker_events,
+      employer_edited_paragraph,
+      "(이하 “근로자”",
+      "근로자",
+      worker_offset,
+      worker_count,
+      worker_text
+    )
+
+    final_party_paragraph =
+      replace_grapheme_range(employer_edited_paragraph, worker_offset, worker_count, worker_text)
+
+    render_hook(lv, "rhwp.local.snapshot.save", %{
+      "request_id" => worker_request_id,
+      "document_id" => document_id,
+      "bytes_base64" => Base.encode64(bytes),
+      "format" => "hwp",
+      "min_revision" => 3,
+      "context" =>
+        local_agent_edit_ir([title_paragraph, final_party_paragraph],
+          contract_type: "employment_v1",
+          title: "employment_v1.hwp"
+        )
+    })
+
+    assert_receive {:local_agent_event,
+                    %{
+                      type: :tool_call_completed,
+                      session_id: ^session_id,
+                      tool_call_id: "tool-write-worker",
+                      name: "positionalindex.write",
+                      result: %{"revision" => 3}
+                    }},
+                   1_000
+
+    assert_receive {:local_agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      text: "edited parties"
+                    }},
+                   1_000
+
+    sync_liveview(lv)
+
+    assert has_element?(lv, "#local-rhwp-save-state", "Saved revision 3")
+    assert has_element?(lv, "#local-agent-tool-tool-write-employer", "positionalindex.write")
+    assert has_element?(lv, "#local-agent-tool-tool-write-worker", "positionalindex.write")
+
+    assert {:ok, %Document{revision: 3} = document} = Document.document(document_id)
+
+    assert [^title_paragraph, saved_party_paragraph] = local_agent_context_texts(document)
+    assert employer_value_before_label(saved_party_paragraph) == "주식회사 한빛"
+    assert worker_value_before_label(saved_party_paragraph) == "김로컬"
+  end
+
+  test "workspace chat rail coerces fake provider URL to codex", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+
+    assert {:error, {:live_redirect, %{to: to}}} =
+             live(conn, ~p"/workspace?#{[path: root, provider: "fake"]}")
+
+    assert to =~ "provider=codex"
+    refute to =~ "provider=fake"
+  end
+
+  test "workspace provider fallback does not crash when ACP is stopped", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    stop_registered_acp!()
+
+    assert {:error, {:live_redirect, %{to: to}}} =
+             live(conn, ~p"/workspace?#{[path: root, provider: "fake"]}")
+
+    assert to =~ "provider=codex"
+    refute to =~ "provider=fake"
+  end
+
+  test "file tree supports metadata, expansion, row-open, and format affordances", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+
+    assert has_element?(lv, "#local-file-tree")
+    assert has_element?(lv, ~s(#local-file-tree ul[role="tree"]))
+    assert has_element?(lv, ~s([data-node-path=".contract"][data-metadata="true"]))
+    assert has_element?(lv, ~s([data-node-path="Assignment #2"][data-expanded="false"]))
+    assert has_element?(lv, ~s([data-node-path="drafts"][data-expanded="false"]))
+
+    assert has_element?(
+             lv,
+             ~s([data-role="repo-browser-row"][data-node-path="template.hwp"][data-openable="true"][data-file-extension="hwp"][phx-click="open_file"][class*="hover:bg-base-200"])
+           )
+
+    assert has_element?(lv, "#local-file-node-template-hwp[phx-click='open_file']")
+    refute has_element?(lv, ~s([id^="open-file-"]))
+    refute has_element?(lv, "#local-file-tree [data-role='file-extension']")
+    refute has_element?(lv, "#disabled-file-Antigravity-dmg")
+    refute has_element?(lv, ~s([data-node-path="Antigravity.dmg"]))
+    refute has_element?(lv, ~s([data-node-path="drafts/service.hwpx"]))
+
+    lv
+    |> element("#toggle-dir-Assignment-2")
+    |> render_click()
+
+    assert has_element?(lv, "#local-file-node-Assignment-2[data-expanded='true']")
+    refute has_element?(lv, "#local-file-node-Assignment-2 + ul[role='group']")
+
+    lv
+    |> element("#toggle-dir-drafts")
+    |> render_click()
+
+    assert has_element?(lv, ~s([data-node-path="drafts"][data-expanded="true"]))
+
+    assert has_element?(
+             lv,
+             ~s([data-node-path="drafts/service.hwpx"][data-openable="true"][phx-click="open_file"])
+           )
+
+    refute has_element?(lv, "#open-file-drafts-service-hwpx")
+    refute has_element?(lv, ~s([id^="open-file-"]))
+    refute has_element?(lv, "#preview-file-drafts-reference-docx")
+    refute has_element?(lv, "#disabled-file-drafts-notes-xyz")
+    refute has_element?(lv, ~s([data-node-path="drafts/reference.docx"][phx-click="open_file"]))
+    refute has_element?(lv, ~s([data-node-path="drafts/reference.docx"]))
+
+    lv
+    |> element("#toggle-dir-rulebook-md")
+    |> render_click()
+
+    assert has_element?(lv, ~s([data-node-path="rulebook.md"][data-expanded="true"]))
+
+    lv
+    |> element("#toggle-dir-rulebook-md-acceptance-certificate")
+    |> render_click()
+
+    assert has_element?(
+             lv,
+             "#local-file-node-rulebook-md-acceptance-certificate[data-tree-depth='1']"
+           )
+
+    assert has_element?(
+             lv,
+             "#local-file-node-rulebook-md-acceptance-certificate-acceptance-certificate-md[data-tree-depth='2'][phx-click='select_file']"
+           )
+
+    refute has_element?(
+             lv,
+             "#local-file-node-rulebook-md-acceptance-certificate #local-file-node-rulebook-md-acceptance-certificate-acceptance-certificate-md"
+           )
+
+    lv
+    |> element("#local-file-node-rulebook-md-acceptance-certificate-acceptance-certificate-md")
+    |> render_click()
+
+    assert has_element?(
+             lv,
+             ~s([data-node-path="rulebook.md/acceptance_certificate/acceptance_certificate.md"][data-selected="true"])
+           )
+
+    assert has_element?(
+             lv,
+             "#local-selected-file",
+             "rulebook.md/acceptance_certificate/acceptance_certificate.md"
+           )
+
+    refute has_element?(lv, "#local-rhwp-shell")
+    refute has_element?(lv, "#local-rhwp-error")
+
+    lv
+    |> element("#local-file-node-drafts-service-hwpx")
+    |> render_click()
+
+    assert_patch(
+      lv,
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx", provider: "codex", model: "gpt-5.5", reasoning: "medium", access: "read-only"]}"
+    )
+
+    assert has_element?(lv, ~s([data-node-path="drafts/service.hwpx"][data-selected="true"]))
+    assert has_element?(lv, ~s([data-node-path="drafts/service.hwpx"][class*="bg-base-300/70"]))
+    assert has_element?(lv, "#local-file-tree-breadcrumb", "drafts")
+    assert has_element?(lv, "#local-file-tree-breadcrumb", "service.hwpx")
+    refute has_element?(lv, "#local-file-tree-breadcrumb", "contract-local-ui")
+    assert has_element?(lv, "#local-file-tree-breadcrumb", "drafts")
+    assert has_element?(lv, "#local-file-tree-breadcrumb", "service.hwpx")
+    assert has_element?(lv, "#local-active-document-badge", "Open")
+
+    lv
+    |> element("#local-file-node-template-hwp")
+    |> render_click()
+
+    assert_patch(
+      lv,
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex", model: "gpt-5.5", reasoning: "medium", access: "read-only"]}"
+    )
+
+    assert has_element?(lv, "#local-active-document-badge", "Open")
+    assert has_element?(lv, "#local-file-tree-breadcrumb", "template.hwp")
+  end
+
+  test "document query reopens a local HWPX in the rhwp shell without SaaS upload UI", %{
+    conn: conn
+  } do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx"]}"
+      )
+
+    assert has_element?(lv, "#local-rhwp-shell")
+    assert has_element?(lv, "#local-rhwp-toolbar")
+    assert has_element?(lv, "#studio-root[data-component='studio-document-surface']")
+    assert has_element?(lv, "#studio-document-header")
+    assert has_element?(lv, "#local-file-tree-breadcrumb", "drafts")
+    assert has_element?(lv, "#local-file-tree-breadcrumb", "service.hwpx")
+    assert has_element?(lv, "#studio-document-title-form[data-role='document-title-form']")
+    assert has_element?(lv, ~s(#studio-document-title-input[value="drafts/service.hwpx"]))
+    refute has_element?(lv, "#studio-document-header details")
+    refute has_element?(lv, "#studio-document-header summary")
+    refute has_element?(lv, "#studio-document-header [data-role='document-picker']")
+    refute has_element?(lv, "#document-type-badge")
+    refute has_element?(lv, "#studio-export-picker")
+    refute has_element?(lv, ~s([data-role="export-picker"]))
+    refute has_element?(lv, ~s([data-role="rhwp-export-pdf"]))
+    refute has_element?(lv, ~s([data-role="rhwp-export-hwpx"]))
+    assert has_element?(lv, ~s([data-role="rhwp-prev-edit-target"]))
+    assert has_element?(lv, ~s([data-role="rhwp-next-edit-target"]))
+    assert has_element?(lv, "#local-rhwp-fullscreen[data-role='toggle-chat-rail']")
+    assert has_element?(lv, "#local-rhwp-save-state", "Loaded revision 0")
+    refute has_element?(lv, "#local-rhwp-checkpoint")
+    refute has_element?(lv, "#local-rhwp-save")
+    refute has_element?(lv, ~s([data-role="rhwp-local-checkpoint"]))
+    refute has_element?(lv, ~s([data-role="rhwp-local-save"]))
+    assert has_element?(lv, "#local-rhwp-editor-frame.contents")
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-rhwp-editor"][data-local-document-format="hwpx"][data-local-document-revision="0"])
+           )
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-rhwp-editor"][data-editable-spec-candidates="[]"])
+           )
+
+    refute has_element?(lv, ~s([data-role="canvas-empty-upload-action"]))
+    refute has_element?(lv, "#document-direct-upload-input")
+    refute has_element?(lv, ~s([phx-hook="DirectR2Upload"]))
+  end
+
+  test "local composer upload imports a selected HWPX into the workspace and opens it", %{
+    conn: conn
+  } do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    upload_name = "imported-service.hwpx"
+    upload_path = Path.join(root, upload_name)
+    upload_bytes = File.read!("test/fixtures/hwpx/real_contract.hwpx")
+
+    refute File.exists?(upload_path)
+
+    {:ok, lv, _html} = live(conn, ~p"/workspace?#{[path: root, provider: "codex"]}")
+
+    upload =
+      file_input(lv, "#local-agent-form", :local_document_import, [
+        %{
+          name: upload_name,
+          content: upload_bytes,
+          size: byte_size(upload_bytes),
+          type: "application/vnd.hancom.hwpx",
+          last_modified: 1_720_000_000_000
+        }
+      ])
+
+    render_upload(upload, upload_name)
+
+    assert_patch(
+      lv,
+      ~p"/workspace?#{[path: root, document: upload_name, provider: "codex", model: "gpt-5.5", reasoning: "medium", access: "read-only"]}"
+    )
+
+    assert File.read!(upload_path) == upload_bytes
+    assert has_element?(lv, "#local-rhwp-shell")
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-rhwp-editor"][data-local-document-format="hwpx"][data-document-path="#{upload_name}"])
+           )
+
+    refute has_element?(lv, "#document-direct-upload-input")
+    refute has_element?(lv, ~s([phx-hook="DirectR2Upload"]))
+  end
+
+  test "document query opens a local HWP with the same Studio editor surface", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp"]}"
+      )
+
+    assert has_element?(lv, "#local-rhwp-shell[data-component='studio-local-document-surface']")
+    assert has_element?(lv, "#studio-root[data-local-document-id]")
+    assert has_element?(lv, "#studio-document-header")
+    assert has_element?(lv, "#studio-document-header.flex-wrap")
+    assert has_element?(lv, "#local-file-tree-breadcrumb", "template.hwp")
+    assert has_element?(lv, "#studio-document-title-form[data-role='document-title-form']")
+    assert has_element?(lv, ~s(#studio-document-title-input[value="template.hwp"]))
+    refute has_element?(lv, "#studio-document-header details")
+    refute has_element?(lv, "#studio-document-header summary")
+    refute has_element?(lv, "#studio-document-header [data-role='document-picker']")
+    refute has_element?(lv, "#document-type-badge")
+    refute has_element?(lv, "#studio-export-picker")
+    assert has_element?(lv, "#local-rhwp-fullscreen[data-role='toggle-chat-rail']")
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-rhwp-editor"][data-local-document-format="hwp"][data-document-path="template.hwp"])
+           )
+  end
+
+  test "local employment standard HWP exposes editable specs to the editor", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "employment_v1.hwp"]}"
+      )
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-rhwp-editor"][data-local-document-format="hwp"][data-document-path="employment_v1.hwp"][data-contract-type-key="employment_v1"])
+           )
+
+    assert [
+             %{
+               "contractTypeKey" => "employment_v1",
+               "documentPath" => "/assets/standard_contracts/employment_v1.hwp",
+               "specPath" => "/assets/standard_contracts/employment_v1.editables.json"
+             }
+           ] = local_rhwp_editable_spec_candidates(lv)
+  end
+
+  test "copied local employment standard HWP exposes editable specs to the editor", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "employment_v1 (1).hwp"]}"
+      )
+
+    assert has_element?(
+             lv,
+             ~s|[data-role="local-rhwp-editor"][data-local-document-format="hwp"][data-document-path="employment_v1 (1).hwp"][data-contract-type-key="employment_v1"]|
+           )
+
+    assert [_candidate | _rest] = local_rhwp_editable_spec_candidates(lv)
+  end
+
+  test "local rhwp events load bytes, checkpoint, save, and reload saved revision", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    relative_path = "drafts/service.hwpx"
+    path = Path.join(root, relative_path)
+    original = File.read!(path)
+
+    {:ok, lv, _html} =
+      live(conn, ~p"/workspace?#{[path: root, document: relative_path]}")
+
+    document_id = local_rhwp_document_id(lv)
+
+    render_hook(lv, "rhwp.local.load", %{"document_id" => document_id})
+    assert has_element?(lv, "#local-rhwp-save-state", "Loaded revision 0")
+
+    render_hook(lv, "rhwp.local.snapshot.checkpoint", %{
+      "document_id" => document_id,
+      "bytes_base64" => Base.encode64(original),
+      "format" => "hwpx",
+      "min_revision" => 0
+    })
+
+    assert File.read!(path) == original
+    assert has_element?(lv, "#local-rhwp-save-state", "Checkpointed revision 1")
+
+    saved = File.read!("test/fixtures/hwpx/real_contract.hwpx")
+
+    render_hook(lv, "rhwp.local.snapshot.save", %{
+      "document_id" => document_id,
+      "bytes_base64" => Base.encode64(saved),
+      "format" => "hwpx",
+      "min_revision" => 1
+    })
+
+    assert File.read!(path) == saved
+    assert has_element?(lv, "#local-rhwp-save-state", "Saved revision 2")
+
+    {:ok, reloaded_lv, _html} =
+      live(conn, ~p"/workspace?#{[path: root, document: relative_path]}")
+
+    assert has_element?(
+             reloaded_lv,
+             ~s([data-role="local-rhwp-editor"][data-local-document-revision="2"])
+           )
+  end
+
+  test "local rhwp text mutation is acknowledged and does not remount", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+
+    {:ok, lv, _html} =
+      live(conn, ~p"/workspace?#{[path: root, document: "drafts/service.hwpx"]}")
+
+    pid = lv.pid
+    document_id = local_rhwp_document_id(lv)
+
+    render_hook(lv, "rhwp.text.mutated", %{
+      "documentId" => document_id,
+      "eventId" => "local-edit-1",
+      "siteId" => "local",
+      "lamport" => 11,
+      "body" => %{
+        "type" => "TextDeleted",
+        "sectionIndex" => 0,
+        "paragraphIndex" => 1,
+        "charOffset" => 3,
+        "count" => 1
+      }
+    })
+
+    _ = :sys.get_state(pid)
+    assert lv.pid == pid
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-rhwp-editor"][data-local-document-id="#{document_id}"])
+           )
+
+    assert {:ok, document} = Document.document(document_id)
+
+    records =
+      document
+      |> Document.metadata_paths()
+      |> Map.fetch!(:mutations)
+      |> read_jsonl!()
+
+    assert [
+             %{
+               "event_id" => "local-edit-1",
+               "site_id" => "local",
+               "lamport" => 11,
+               "body" => %{"type" => "TextDeleted"}
+             }
+           ] = records
+  end
+
+  test "agent form reports real provider unavailable without fake response", %{conn: conn} do
+    missing = "contract-codex-missing-#{Ecto.UUID.generate()}"
+
+    Application.put_env(:contract, :local_agent_ui,
+      provider: "codex",
+      adapter_opts: [executable: missing, timeout: 200]
+    )
+
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+      )
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "hello local"})
+    |> render_submit()
+
+    assert_receive {:local_agent_event,
+                    %{
+                      type: :turn_failed,
+                      session_id: ^session_id
+                    }},
+                   1_000
+
+    sync_liveview(lv)
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             "hello local"
+           )
+
+    assert has_element?(
+             lv,
+             ~s([id^="local-agent-user-"][data-chat-role="chat-message"] [data-role="chat-message-body"]),
+             "hello local"
+           )
+
+    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='failed']")
+    assert has_element?(lv, "#local-agent-error", "Codex ACP unavailable")
+    refute render(lv) =~ "Fake response"
+  end
+
+  test "agent session starts with active local document id", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex"]}"
+      )
+
+    document_id = local_rhwp_document_id(lv)
+    session_id = subscribe_agent(lv)
+
+    assert {:ok, %{document_id: ^document_id}} = AgentEndpoint.status(nil, session_id)
+  end
+
+  test "agent header reuses prior chat rail title UI for codex route display", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+      )
+
+    assert has_element?(
+             lv,
+             "#local-agent-sidebar[data-component='chat-rail'][data-local-chat-rail='true'][data-provider-key='codex']"
+           )
+
+    assert has_element?(
+             lv,
+             ~s(#local-agent-title[data-role="chat-thread-title"] [data-role="chat-title-favicon"][src="/images/icons/openai-blossom.svg"])
+           )
+
+    assert has_element?(
+             lv,
+             "#local-agent-title-label[data-role='chat-thread-title-label']",
+             "contract-local-ui chat"
+           )
+
+    assert has_element?(
+             lv,
+             "#local-agent-sidebar [data-role='chat-rail-controls'] #local-agent-refresh"
+           )
+
+    refute has_element?(lv, "#local-file-tree-refresh")
+    refute has_element?(lv, "#local-agent-provider")
+    refute has_element?(lv, "#local-agent-provider-icon")
+  end
+
+  test "agent refresh belongs to chat rail and starts a fresh local agent session", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+      )
+
+    old_session_id = subscribe_agent(lv)
+
+    lv
+    |> element("#local-agent-refresh")
+    |> render_click()
+
+    sync_liveview(lv)
+
+    new_session_id = local_agent_session_id(lv)
+    refute new_session_id == old_session_id
+    track_agent_session(new_session_id)
+
+    refute has_element?(lv, "#local-agent-system")
+
+    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='idle']")
+  end
+
+  test "agent header supports codex route favicon without provider badge", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+      )
+
+    assert has_element?(lv, "#local-agent-sidebar[data-provider-key='codex']")
+
+    assert has_element?(
+             lv,
+             ~s(#local-agent-title[data-role="chat-thread-title"] [data-role="chat-title-favicon"][src="/images/icons/openai-blossom.svg"])
+           )
+
+    refute has_element?(lv, "#local-agent-provider")
+    refute has_element?(lv, "#local-agent-provider-icon")
+  end
+
+  test "unsupported provider coerces to codex", %{conn: conn} do
+    assert {:error, {:live_redirect, %{to: to}}} =
+             live(
+               conn,
+               ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "bogus"]}"
+             )
+
+    assert to =~ "provider=codex"
+    refute to =~ "provider=fake"
+  end
+
+  test "agent status is internal and has no icon or provider badge structure", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+      )
+
+    fragment =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+
+    assert has_element?(lv, "#local-agent-status[data-role='local-agent-status']", "Idle")
+
+    assert ["sr-only"] =
+             fragment
+             |> LazyHTML.query("#local-agent-status")
+             |> LazyHTML.attribute("class")
+
+    assert [] =
+             fragment
+             |> LazyHTML.query(~s([data-role="agent-status"]))
+             |> LazyHTML.attribute("data-role")
+
+    assert [] =
+             fragment
+             |> LazyHTML.query("#local-agent-status img")
+             |> LazyHTML.attribute("src")
+
+    assert [] =
+             fragment
+             |> LazyHTML.query("#local-agent-status [class*='hero-']")
+             |> LazyHTML.attribute("class")
+
+    assert [] =
+             fragment
+             |> LazyHTML.query("#local-agent-status [data-provider-icon]")
+             |> LazyHTML.attribute("data-provider-icon")
+  end
+
+  test "agent body uses chat rail stream and composer structure", %{conn: conn} do
+    {:ok, lv, _html} =
+      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+
+    assert has_element?(lv, "#local-agent-thread[data-role='chat-stream'][phx-update='stream']")
+
+    refute has_element?(lv, "#local-agent-system")
+
+    assert has_element?(lv, "#local-agent-form[data-role='chat-form']")
+    assert has_element?(lv, "#local-agent-input")
+    assert has_element?(lv, "#local-agent-upload[data-role='chat-upload']")
+
+    assert has_element?(
+             lv,
+             ~s(#local-agent-form input[type="file"][name="local_document_import"][class="sr-only"][data-role="local-document-upload-file-input"])
+           )
+
+    assert has_element?(lv, "#local-agent-submit[data-role='chat-send'][data-action='send']")
+    refute has_element?(lv, "#document-direct-upload-input")
+    refute has_element?(lv, ~s([phx-hook="DirectR2Upload"]))
+  end
+
+  test "agent sidebar renders provider tool row events", %{conn: conn} do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          %{
+            type: :tool_call_failed,
+            id: "tool-ui-read",
+            name: "positionalindex.read",
+            reason: "missing document session"
+          },
+          {:text_delta, "done"}
+        ]
+      ]
+    )
+
+    {:ok, lv, _html} =
+      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "read"})
+    |> render_submit()
+
+    assert_receive {:local_agent_event,
+                    %{
+                      type: :tool_call_failed,
+                      session_id: ^session_id,
+                      tool_call_id: "tool-ui-read"
+                    }},
+                   1_000
+
+    sync_liveview(lv)
+
+    assert has_element?(
+             lv,
+             "#local-agent-tool-tool-ui-read[data-role='local-agent-tool'][data-message-status='failed']",
+             "positionalindex.read"
+           )
+
+    assert has_element?(
+             lv,
+             "#local-agent-tool-tool-ui-read[data-chat-role='chat-message'] [data-role='operation-block']"
+           )
+  end
+
+  test "agent sidebar can cancel a running local agent turn", %{conn: conn} do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_local_agent_ui,
+        script: [{:text_delta, "late"}]
+      ]
+    )
+
+    {:ok, lv, _html} =
+      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "wait"})
+    |> render_submit()
+
+    assert_receive {:local_agent_adapter_waiting, _stream_pid}, 1_000
+    sync_liveview(lv)
+
+    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='running']")
+    assert has_element?(lv, "#local-agent-cancel")
+
+    lv
+    |> element("#local-agent-cancel")
+    |> render_click()
+
+    assert_receive {:local_agent_event, %{type: :turn_cancelled, session_id: ^session_id}},
+                   1_000
+
+    sync_liveview(lv)
+
+    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='cancelled']")
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="cancelled"]),
+             "Cancelled."
+           )
+  end
+
+  defp use_test_agent_adapter!(opts) do
+    Application.put_env(:contract, :local_agent, provider: "codex")
+
+    Application.put_env(
+      :contract,
+      :local_agent_ui,
+      Keyword.merge([provider: "codex", adapter: LocalAgentAdapterStub], opts)
+    )
+  end
+
+  defp stop_registered_acp! do
+    on_exit(&restart_registered_acp/0)
+
+    case Process.whereis(ACP) do
+      pid when is_pid(pid) ->
+        assert :ok = Supervisor.terminate_child(Contract.Supervisor, ACP)
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp restart_registered_acp do
+    case Process.whereis(ACP) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        case Supervisor.restart_child(Contract.Supervisor, ACP) do
+          {:ok, _pid} -> :ok
+          {:ok, _pid, _info} -> :ok
+          {:error, :running} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, _reason} -> :ok
+        end
+    end
+  end
+
+  defp subscribe_agent(lv) do
+    session_id = local_agent_session_id(lv)
+    :ok = AgentEndpoint.subscribe(session_id)
+    track_agent_session(session_id)
+
+    session_id
+  end
+
+  defp track_agent_session(session_id) do
+    on_exit(fn ->
+      case AgentEndpoint.whereis(session_id) do
+        pid when is_pid(pid) -> GenServer.stop(pid)
+        nil -> :ok
+      end
+    end)
+  end
+
+  defp local_agent_session_id(lv) do
+    session_id =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query("#local-agent-sidebar")
+      |> LazyHTML.attribute("data-session-id")
+      |> List.first()
+
+    assert is_binary(session_id)
+    assert session_id != ""
+    session_id
+  end
+
+  defp sync_liveview(lv) do
+    _ = :sys.get_state(lv.pid)
+    :ok
+  end
+
+  defp read_jsonl!(path) do
+    path
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
+  end
+
+  defp local_rhwp_document_id(lv) do
+    document_id =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="local-rhwp-editor"]))
+      |> LazyHTML.attribute("data-local-document-id")
+      |> List.first()
+
+    assert is_binary(document_id)
+    assert document_id != ""
+    document_id
+  end
+
+  defp local_rhwp_editable_spec_candidates(lv) do
+    source =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="local-rhwp-editor"]))
+      |> LazyHTML.attribute("data-editable-spec-candidates")
+      |> List.first()
+
+    assert is_binary(source)
+
+    source
+    |> Jason.decode!()
+    |> tap(fn candidates -> assert candidates != [] end)
+  end
+
+  defp assert_value_edit_before_label(
+         events,
+         paragraph,
+         label_context,
+         label_word,
+         off,
+         count,
+         text
+       ) do
+    assert [
+             %{
+               "kind" => "delete_text",
+               "sec" => 0,
+               "para" => 1,
+               "off" => ^off,
+               "count" => ^count
+             },
+             %{"kind" => "insert_text", "sec" => 0, "para" => 1, "off" => ^off, "text" => ^text}
+           ] = events
+
+    label_offset = label_offset!(paragraph, label_context)
+    deleted_text = String.slice(paragraph, off, count)
+
+    assert off + count <= label_offset
+    refute text =~ label_word
+    assert String.trim(deleted_text) != ""
+  end
+
+  defp employment_party_paragraph(employer, worker) do
+    "  " <>
+      String.pad_trailing(employer, 14) <>
+      "(이하 “사업주”라 함)과 " <>
+      "   " <>
+      String.pad_trailing(worker, 11) <>
+      "(이하 “근로자”라 함)은 근로계약을 체결한다."
+  end
+
+  defp replace_grapheme_range(text, off, count, replacement) do
+    graphemes = String.graphemes(text)
+    {left, rest} = Enum.split(graphemes, off)
+    {_deleted, right} = Enum.split(rest, count)
+
+    Enum.join(left ++ String.graphemes(replacement) ++ right)
+  end
+
+  defp employer_value_before_label(paragraph) do
+    [value, _rest] = String.split(paragraph, "(이하 “사업주”", parts: 2)
+    String.trim(value)
+  end
+
+  defp worker_value_before_label(paragraph) do
+    [_employer, worker_part] = String.split(paragraph, "(이하 “사업주”라 함)과", parts: 2)
+    [value, _rest] = String.split(worker_part, "(이하 “근로자”", parts: 2)
+    String.trim(value)
+  end
+
+  defp label_offset!(paragraph, label_context) do
+    [before_label, _rest] = String.split(paragraph, label_context, parts: 2)
+    String.length(before_label)
+  end
+
+  defp local_agent_edit_ir(paragraphs, opts) do
+    title = Keyword.get(opts, :title, "service.hwpx")
+    contract_type = Keyword.get(opts, :contract_type, "local_hwpx")
+
+    %{
+      "version" => 1,
+      "title" => title,
+      "contract_type" => contract_type,
+      "sections" => [
+        %{
+          "idx" => 0,
+          "paragraphs" =>
+            paragraphs
+            |> Enum.with_index()
+            |> Enum.map(fn {text, index} -> %{"idx" => index, "text" => text} end)
+        }
+      ],
+      "positional_index" => %{
+        "version" => 1,
+        "paragraphs" =>
+          paragraphs
+          |> Enum.with_index()
+          |> Enum.map(fn {text, index} ->
+            %{
+              "sec" => 0,
+              "para" => index,
+              "page" => 0,
+              "off_start" => 0,
+              "off_end" => String.length(text)
+            }
+          end),
+        "tables" => []
+      }
+    }
+  end
+
+  defp local_agent_context_texts(%Document{} = document) do
+    %{"context" => %{"sections" => [%{"paragraphs" => paragraphs}]}} =
+      document
+      |> Document.metadata_paths()
+      |> Map.fetch!(:context)
+      |> File.read!()
+      |> Jason.decode!()
+
+    Enum.map(paragraphs, &Map.fetch!(&1, "text"))
+  end
+
+  defp prepare_local_workspace_fixture do
+    cleanup_local_workspace_fixture()
+
+    root = LocalWorkspaceAdapterStub.valid_path()
+    File.mkdir_p!(Path.join(root, "drafts"))
+
+    File.cp!(
+      "priv/static/assets/standard_contracts/service_agreement_v1.hwp",
+      Path.join(root, "template.hwp")
+    )
+
+    File.cp!(
+      "priv/static/assets/standard_contracts/employment_v1.hwp",
+      Path.join(root, "employment_v1.hwp")
+    )
+
+    File.cp!(
+      "priv/static/assets/standard_contracts/employment_v1.hwp",
+      Path.join(root, "employment_v1 (1).hwp")
+    )
+
+    File.cp!(
+      "test/fixtures/hwpx/real_contract.hwpx",
+      Path.join(root, "drafts/service.hwpx")
+    )
+  end
+
+  defp cleanup_local_workspace_fixture do
+    root = LocalWorkspaceAdapterStub.valid_path()
+
+    for relative_path <- [
+          "template.hwp",
+          "employment_v1.hwp",
+          "employment_v1 (1).hwp",
+          "drafts/service.hwpx",
+          "imported-service.hwpx"
+        ] do
+      document_id = Document.id_for(root, relative_path)
+      _ = Document.close(document_id)
+    end
+
+    File.rm_rf!(root)
+  end
+end

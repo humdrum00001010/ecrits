@@ -18,10 +18,12 @@ defmodule Contract.IO.Upstage do
   @default_timeout 60_000
 
   @doc """
-  Streams a LiveView upload to a tempfile, uploads the raw source to R2,
-  parses it with Upstage Document Parse, and returns an
+  Legacy hosted upload import path. Cloud source upload is retired, so active
+  local-first document import should use local workspace flows instead.
+
+  Historically this parsed with Upstage Document Parse and returned an
   `Action(:create_document)` whose payload contains the normalized node
-  tree plus the R2 artifact id.
+  tree plus the source artifact id.
   """
   @spec import_upload(T.ctx(), T.user_id() | nil, map() | T.upload(), keyword()) ::
           {:ok, Contract.Command.t()} | {:error, term()}
@@ -152,8 +154,8 @@ defmodule Contract.IO.Upstage do
   defp to_map(_), do: :error
 
   @doc """
-  Lower-level entry called by `Contract.IO.parse_source/3` after the raw
-  source bytes are fetched (typically from R2).
+  Lower-level entry called by `Contract.IO.parse_source/3` after raw source
+  bytes are fetched.
   """
   @spec parse_source(T.ctx(), String.t(), keyword()) ::
           {:ok, %{elements: list(), content: map()}} | {:error, term()}
@@ -359,7 +361,7 @@ defmodule Contract.IO.Upstage do
     case File.read(info.path) do
       {:ok, body} ->
         key = source_key(owner_id, artifact_id, info)
-        Contract.IO.R2.put(key, body, content_type: info.mime_type)
+        Contract.IO.RetiredObjectStore.put(key, body, content_type: info.mime_type)
 
       {:error, reason} ->
         {:error, {:upload_read_failed, reason}}
@@ -379,7 +381,7 @@ defmodule Contract.IO.Upstage do
       filename = Keyword.get(opts, :filename) || Path.basename(path)
       {File.read!(path), filename, content_type_for(filename)}
     else
-      # Treat as raw bytes (e.g. from R2 fetch). Allow callers to pass a
+      # Treat as raw bytes. Allow callers to pass a
       # filename via opts (preferred) or `:source_ref` so the multipart
       # part carries enough metadata for Upstage to accept the upload.
       filename =
@@ -423,7 +425,7 @@ defmodule Contract.IO.Upstage do
 
   defp fetch_source("r2://" <> rest) do
     [_bucket, key] = String.split(rest, "/", parts: 2)
-    Contract.IO.R2.get(key)
+    Contract.IO.RetiredObjectStore.get(key)
   end
 
   defp fetch_source(path) when is_binary(path) do

@@ -1,11 +1,14 @@
 defmodule ContractWeb.DocumentLiveDocumentFirstTest do
   use ContractWeb.ConnCase, async: false
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest
 
   alias Contract.Command
   alias Contract.Context
   alias Contract.Documents
+  alias Contract.Packets
   alias Contract.Studio.State
   alias ContractWeb.DocumentLive
 
@@ -49,6 +52,9 @@ defmodule ContractWeb.DocumentLiveDocumentFirstTest do
     # Title input lives in the document header bar (the former
     # `.studio-document__bar` class is now Tailwind utilities).
     assert has_element?(lv, "#studio-document-header")
+    assert has_element?(lv, "#studio-export-picker")
+    assert has_element?(lv, "#studio-export-picker [data-role='rhwp-export-pdf']")
+    assert has_element?(lv, "#studio-export-picker [data-role='rhwp-export-hwpx']")
     # The "수정 가능한 자리" pre-aggregated nav was removed in #34 —
     # editability is now communicated by inline coloring + input-like
     # UI in the document body itself, not by an upfront chip rail.
@@ -61,6 +67,66 @@ defmodule ContractWeb.DocumentLiveDocumentFirstTest do
     refute visible_text =~ "tool call"
     refute visible_text =~ "Tool call"
     refute visible_text =~ "font selector"
+  end
+
+  test "document header picker only shows documents in the same packet", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, packet} = Packets.create_packet(scope, %{title: "CLM"})
+    {:ok, current_doc} = Documents.create(scope, %{title: "Current", type_key: "nda_v1"})
+    {:ok, sibling_doc} = Documents.create(scope, %{title: "Sibling", type_key: "nda_v1"})
+    {:ok, orphan_doc} = Documents.create(scope, %{title: "Orphan", type_key: "nda_v1"})
+
+    {:ok, _} = Packets.attach_document(scope, packet.id, current_doc.id)
+    {:ok, _} = Packets.attach_document(scope, packet.id, sibling_doc.id)
+
+    {:ok, lv, _html} = live(conn, ~p"/documents/#{current_doc.id}")
+
+    assert has_element?(
+             lv,
+             "#studio-document-header [data-role='document-picker'] a[href='/documents/#{sibling_doc.id}?packet_id=#{packet.id}']",
+             "Sibling"
+           )
+
+    refute has_element?(
+             lv,
+             "#studio-document-header [data-role='document-picker'] a[href='/documents/#{orphan_doc.id}?packet_id=#{packet.id}']",
+             "Orphan"
+           )
+  end
+
+  test "document header picker respects explicit current packet when document is shared", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, packet_a} = Packets.create_packet(scope, %{title: "Packet A"})
+    {:ok, packet_b} = Packets.create_packet(scope, %{title: "Packet B"})
+    {:ok, current_doc} = Documents.create(scope, %{title: "Shared", type_key: "nda_v1"})
+    {:ok, sibling_a} = Documents.create(scope, %{title: "Sibling A", type_key: "nda_v1"})
+    {:ok, sibling_b} = Documents.create(scope, %{title: "Sibling B", type_key: "nda_v1"})
+
+    {:ok, _} = Packets.attach_document(scope, packet_a.id, current_doc.id)
+    {:ok, _} = Packets.attach_document(scope, packet_a.id, sibling_a.id)
+    {:ok, _} = Packets.attach_document(scope, packet_b.id, current_doc.id)
+    {:ok, _} = Packets.attach_document(scope, packet_b.id, sibling_b.id)
+
+    {:ok, lv, _html} = live(conn, ~p"/documents/#{current_doc.id}?packet_id=#{packet_a.id}")
+
+    assert :sys.get_state(lv.pid).socket.assigns.packet_id == packet_a.id
+    assert :sys.get_state(lv.pid).socket.assigns.document_picker_packet_id == packet_a.id
+
+    assert has_element?(
+             lv,
+             "#studio-document-header [data-role='document-picker'] a[href='/documents/#{sibling_a.id}?packet_id=#{packet_a.id}']",
+             "Sibling A"
+           )
+
+    refute has_element?(
+             lv,
+             "#studio-document-header [data-role='document-picker']",
+             "Sibling B"
+           )
   end
 
   test "tool protocol messages render as compact v33 trace rows by default", %{

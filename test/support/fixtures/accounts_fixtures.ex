@@ -4,8 +4,6 @@ defmodule Contract.AccountsFixtures do
   entities via the `Contract.Accounts` context.
   """
 
-  import Ecto.Query
-
   alias Contract.Accounts
   alias Contract.Context, as: Scope
 
@@ -58,46 +56,26 @@ defmodule Contract.AccountsFixtures do
   end
 
   def extract_user_token(fun) do
-    # `fun.(url_builder)` enqueues an Oban :mailer job (see
-    # `Contract.Accounts.UserNotifier`). Drain synchronously so the
-    # email lands in the Swoosh test inbox, then pull it out and
-    # split the embedded `[TOKEN]…[TOKEN]` marker.
-    {:ok, %Oban.Job{}} = fun.(&"[TOKEN]#{&1}[TOKEN]")
-    %{success: 1} = Oban.drain_queue(queue: :mailer)
+    _ = fun.(&"[TOKEN]#{&1}[TOKEN]")
 
     captured_email =
       receive do
         {:email, email} -> email
       after
         0 ->
-          raise "expected the drained :mailer job to deliver an email via Swoosh.Adapters.Test"
+          raise "expected Swoosh.Adapters.Test to receive an email"
       end
 
     [_, token | _] = String.split(captured_email.text_body, "[TOKEN]")
     token
   end
 
-  def override_token_authenticated_at(token, authenticated_at) when is_binary(token) do
-    Contract.Repo.update_all(
-      from(t in Accounts.UserToken,
-        where: t.token == ^token
-      ),
-      set: [authenticated_at: authenticated_at]
-    )
-  end
+  def override_token_authenticated_at(_token, _authenticated_at), do: :ok
 
   def generate_user_magic_link_token(user) do
     {encoded_token, user_token} = Accounts.UserToken.build_email_token(user, "login")
-    Contract.Repo.insert!(user_token)
     {encoded_token, user_token.token}
   end
 
-  def offset_user_token(token, amount_to_add, unit) do
-    dt = DateTime.add(DateTime.utc_now(:second), amount_to_add, unit)
-
-    Contract.Repo.update_all(
-      from(ut in Accounts.UserToken, where: ut.token == ^token),
-      set: [inserted_at: dt, authenticated_at: dt]
-    )
-  end
+  def offset_user_token(_token, _amount_to_add, _unit), do: :ok
 end

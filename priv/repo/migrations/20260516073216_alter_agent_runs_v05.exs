@@ -17,16 +17,16 @@ defmodule Contract.Repo.Migrations.AlterAgentRunsV05 do
 
   def change do
     alter table(:agent_runs) do
-      add_if_not_exists :owner_id, :binary_id
-      add_if_not_exists :chat_thread_id, :binary_id
-      add_if_not_exists :started_at, :utc_datetime
-      add_if_not_exists :completed_at, :utc_datetime
-      add_if_not_exists :error, :map
-      add_if_not_exists :model, :string
-      add_if_not_exists :tools_enabled, {:array, :string}, default: []
+      add_if_not_exists(:owner_id, :binary_id)
+      add_if_not_exists(:chat_thread_id, :binary_id)
+      add_if_not_exists(:started_at, :utc_datetime)
+      add_if_not_exists(:completed_at, :utc_datetime)
+      add_if_not_exists(:error, :map)
+      add_if_not_exists(:model, :string)
+      add_if_not_exists(:tools_enabled, {:array, :string}, default: [])
     end
 
-    create_if_not_exists index(:agent_runs, [:chat_thread_id])
+    create_if_not_exists(index(:agent_runs, [:chat_thread_id]))
     # :document_id and :status indexes already exist from the original
     # create_agent_runs migration.
   end

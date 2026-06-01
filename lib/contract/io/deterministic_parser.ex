@@ -9,63 +9,45 @@ defmodule Contract.IO.DeterministicParser do
   """
 
   @spec parse(binary() | Path.t(), keyword()) ::
-          {:ok, %{elements: list(), content: map(), raw: map()}}
+          {:ok, %{elements: list(), content: map(), raw: map()}} | {:error, term()}
   def parse(file_or_bytes, _opts \\ []) do
-    text = read_text(file_or_bytes)
-    lines = text |> String.split(~r/\R/, trim: true)
+    with {:ok, text} <- read_text(file_or_bytes) do
+      lines = text |> String.split(~r/\R/, trim: true)
 
-    elements =
-      lines
-      |> Enum.with_index()
-      |> Enum.map(fn {line, index} ->
-        %{
-          "id" => "det-region-#{index + 1}",
-          "category" => "paragraph",
-          "page" => 1,
-          "coordinates" => [],
-          "content" => %{"text" => line}
-        }
-      end)
+      elements =
+        lines
+        |> Enum.with_index()
+        |> Enum.map(fn {line, index} ->
+          %{
+            "id" => "det-region-#{index + 1}",
+            "category" => "paragraph",
+            "page" => 1,
+            "coordinates" => [],
+            "content" => %{"text" => line}
+          }
+        end)
 
-    claims =
-      lines
-      |> Enum.with_index()
-      |> Enum.flat_map(fn {line, index} -> claims_for_line(line, index + 1) end)
-      |> ensure_claim(text)
+      claims =
+        lines
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {line, index} -> claims_for_line(line, index + 1) end)
 
-    {:ok, %{elements: elements, content: %{"text" => text}, raw: %{"claims" => claims}}}
+      {:ok, %{elements: elements, content: %{"text" => text}, raw: %{"claims" => claims}}}
+    end
   end
 
   def normalize_elements(list), do: Contract.IO.Upstage.normalize_elements(list)
 
   defp read_text(path) when is_binary(path) do
-    if File.exists?(path) and not String.contains?(path, "\n") do
-      File.read!(path)
-    else
-      path
-    end
+    body =
+      if File.exists?(path) and not String.contains?(path, "\n") do
+        File.read!(path)
+      else
+        path
+      end
+
+    if String.valid?(body), do: {:ok, body}, else: {:error, :invalid_text_upload}
   end
-
-  defp ensure_claim([], text) do
-    value = text |> String.trim() |> String.slice(0, 120)
-
-    if value == "" do
-      []
-    else
-      [
-        %{
-          "region_id" => "det-region-1",
-          "kind" => "source_summary",
-          "value" => value,
-          "confidence" => 0.5,
-          "anchors" => [%{"page" => 1, "text" => value}],
-          "rationale" => "Deterministic parser fallback claim."
-        }
-      ]
-    end
-  end
-
-  defp ensure_claim(claims, _text), do: claims
 
   defp claims_for_line(line, index) do
     region_id = "det-region-#{index}"

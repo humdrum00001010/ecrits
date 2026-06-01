@@ -4,6 +4,8 @@ defmodule ContractWeb.StorageLiveDocumentFirstTest do
   """
   use ContractWeb.ConnCase, async: false
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest
 
   alias Contract.Documents

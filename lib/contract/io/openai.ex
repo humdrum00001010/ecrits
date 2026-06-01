@@ -98,44 +98,6 @@ defmodule Contract.IO.OpenAI do
 
   def slack_mcp_tool(_), do: nil
 
-  @contract_doc_allowed_tools ~w(
-    doc.get
-    doc.read
-    doc.write
-  )
-
-  @doc """
-  Agent-facing MCP tool spec for the in-house `contract-doc` server. Takes
-  a signed route_ref `bearer` token (which carries document_id +
-  agent_run_id) and returns the spec to splice into a Responses-API tools
-  list. `allowed_tools` restricts the model's surface to the agent doc.* tools
-  even though the server advertises more.
-
-  Returns `nil` when no bearer is supplied so callers can drop it.
-  """
-  @spec contract_doc_mcp_tool(bearer :: String.t() | nil) :: map() | nil
-  def contract_doc_mcp_tool(nil), do: nil
-  def contract_doc_mcp_tool(""), do: nil
-
-  def contract_doc_mcp_tool(bearer) when is_binary(bearer) do
-    base = Application.get_env(:contract, :mcp, []) |> Keyword.get(:public_base_url)
-
-    case base do
-      nil ->
-        nil
-
-      url ->
-        %{
-          type: "mcp",
-          server_label: "contract-doc",
-          server_url: String.trim_trailing(url, "/") <> "/mcp",
-          require_approval: "never",
-          allowed_tools: @contract_doc_allowed_tools,
-          headers: %{"Authorization" => "Bearer " <> bearer}
-        }
-    end
-  end
-
   # --- internals ---------------------------------------------------------
 
   # Write-capable Slack tool names that REQUIRE user approval before

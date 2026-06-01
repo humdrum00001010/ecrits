@@ -108,6 +108,23 @@ defmodule Contract.ContractTypesTest do
         end
       end
     end
+
+    test "employment standard contract ships a matching seed next to the HWP template" do
+      assert {:ok, spec} = ContractTypes.get("employment_v1")
+      assert spec.template_hwp_path == "/assets/standard_contracts/employment_v1.hwp"
+
+      spec_path =
+        :contract
+        |> :code.priv_dir()
+        |> Path.join("static/assets/standard_contracts/employment_v1.editables.json")
+
+      assert File.exists?(spec_path)
+
+      assert {:ok, %{"contractType" => "employment_v1", "editables" => editables}} =
+               spec_path |> File.read!() |> Jason.decode()
+
+      assert length(editables) >= 10
+    end
   end
 
   describe "compile-time wiring" do

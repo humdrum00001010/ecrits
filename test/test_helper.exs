@@ -17,22 +17,13 @@ ExUnit.start(
     :live_openai,
     :live_law_mcp,
     :live_upstage,
+    :legacy_saas,
     :browser,
     :external_hwpx,
     :requires_chromium,
     :requires_pandoc
   ]
 )
-
-# Engine and other pure-mechanics tests run without the database. We only
-# switch the sandbox into :manual mode when the Repo actually started up.
-case Process.whereis(Contract.Repo) do
-  nil ->
-    :ok
-
-  _pid ->
-    Ecto.Adapters.SQL.Sandbox.mode(Contract.Repo, :manual)
-end
 
 # Start Wallaby only when the endpoint actually booted AND the `:browser`
 # tag is in the include set (i.e. the caller asked for the browser suite).

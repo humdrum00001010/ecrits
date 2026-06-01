@@ -10,7 +10,7 @@ defmodule Contract.IO.UpstageStub do
 
   Implementation note: `Mox` would be the cleaner answer, but
   Wave 5's worker reads its driver out of `:io_drivers` (the same
-  Application-env swap used by `Contract.IO.R2Stub`) — Mox needs
+  Application-env swap used by legacy object-store stubs — Mox needs
   `Contract.IO.Upstage` to grow a `@behaviour`, which the Wave-5
   hard constraint "DON'T touch Engine/IO module bodies" forbids.
   """

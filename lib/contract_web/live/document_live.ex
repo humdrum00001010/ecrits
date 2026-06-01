@@ -84,6 +84,7 @@ defmodule ContractWeb.DocumentLive do
   alias ContractWeb.Live.Studio.Components
 
   @mobile_viewport_max_width 767
+  @direct_upload_max_size 50_000_000
 
   @impl true
   def mount(params, _session, socket) do
@@ -116,7 +117,6 @@ defmodule ContractWeb.DocumentLive do
           |> assign(:page_title, page_title(scope))
           |> assign(:viewport, :desktop)
           |> assign(:chat_rail_hidden?, false)
-          |> assign(:other_documents, list_other_documents(scope, studio_state))
           |> then(fn s ->
             assign_rhwp_snapshot_state(
               s,
@@ -150,6 +150,7 @@ defmodule ContractWeb.DocumentLive do
           |> assign_projection(empty_projection())
           |> assign(:current_document, nil)
           |> assign(:document_packet, nil)
+          |> assign(:document_picker_packet_id, nil)
           |> assign(:chat_thread, nil)
           |> assign(:agent_document_status, nil)
           |> assign(:rhwp_snapshot, nil)
@@ -159,7 +160,7 @@ defmodule ContractWeb.DocumentLive do
           |> assign(:page_title, "Studio")
           |> assign(:viewport, :desktop)
           |> assign(:chat_rail_hidden?, false)
-          |> assign(:other_documents, list_other_documents(scope, %{selected_document_id: nil}))
+          |> assign(:other_documents, [])
           |> stream_configure(:chat_messages, dom_id: &"chat-msg-#{&1.id}")
           |> stream(:chat_messages, [])
           |> stream_configure(:changes, dom_id: &"change-#{&1.id}")
@@ -440,13 +441,34 @@ defmodule ContractWeb.DocumentLive do
     {:noreply, socket}
   end
 
+  def handle_event("document.direct_upload.prepare", params, socket) do
+    case prepare_direct_upload(socket, params) do
+      {:ok, payload} ->
+        {:reply, Map.put(payload, :ok, true), socket}
+
+      {:error, reason} ->
+        {:reply, %{ok: false, error: inspect(reason)}, socket}
+    end
+  end
+
+  def handle_event("document.direct_upload.complete", params, socket) do
+    case complete_direct_upload(socket, params) do
+      {:ok, document_id} ->
+        {:reply, %{ok: true, document_path: created_document_path(socket, document_id)}, socket}
+
+      {:error, reason} ->
+        {:reply, %{ok: false, error: inspect(reason)}, socket}
+    end
+  end
+
   def handle_event(
         "rhwp.matching_book.changed",
         %{"contract_type_key" => type_key, "matching_book" => matching_book},
         socket
       )
       when is_binary(type_key) and is_map(matching_book) do
-    if type_key == projection_type_key(socket.assigns.projection) do
+    if type_key == projection_type_key(socket.assigns.projection) and
+         standard_matching_type?(type_key) do
       case ContractTypes.upsert_matching_book(type_key, matching_book) do
         {:ok, _row} -> {:noreply, assign(socket, :rhwp_matching_book, matching_book)}
         {:error, _reason} -> {:noreply, socket}
@@ -542,10 +564,273 @@ defmodule ContractWeb.DocumentLive do
 
   defp created_document_path(socket, document_id) do
     case socket.assigns[:packet_id] do
-      id when is_binary(id) -> ~p"/documents/#{document_id}"
+      id when is_binary(id) -> ~p"/documents/#{document_id}?packet_id=#{id}"
       _ -> ~p"/studio/#{document_id}"
     end
   end
+
+  defp prepare_direct_upload(socket, params) do
+    with {:ok, owner_id} <- direct_upload_owner_id(socket),
+         {:ok, byte_size} <- direct_upload_byte_size(params),
+         :ok <- validate_direct_upload_size(byte_size),
+         file_name <- direct_upload_file_name(params),
+         {:ok, _format} <- direct_upload_rhwp_format(file_name),
+         object_key <- direct_upload_key(owner_id, file_name) do
+      {:ok,
+       %{
+         object_key: object_key,
+         upload_url: ~p"/documents/direct-upload",
+         upload_method: "PUT"
+       }}
+    end
+  end
+
+  defp complete_direct_upload(socket, params) do
+    with {:ok, owner_id} <- direct_upload_owner_id(socket),
+         object_key when is_binary(object_key) <- direct_upload_param(params, "object_key"),
+         true <- valid_direct_upload_key?(object_key, owner_id),
+         {:ok, format} <- direct_upload_rhwp_format(params),
+         :ok <- verify_direct_upload_key_format(object_key, format),
+         {:ok, body} <- call_upload_driver(fn -> r2_driver().get(object_key) end),
+         :ok <- verify_direct_upload_bytes(body, params),
+         {:ok, action} <- uploaded_document_command(socket, body, params, object_key, format),
+         {:ok, document_id} <-
+           persist_direct_uploaded_document(socket, action, body, params, object_key, format) do
+      {:ok, document_id}
+    else
+      false -> {:error, :invalid_object_key}
+      nil -> {:error, :missing_object_key}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp persist_direct_uploaded_document(socket, action, body, params, object_key, format) do
+    scope = socket.assigns.current_scope
+
+    case Contract.Runtime.apply(scope, action) do
+      {:ok, %Contract.Change{document_id: document_id, result_revision: revision}} ->
+        persist_result =
+          with {:ok, _snapshot} <-
+                 commit_direct_upload_snapshot(
+                   document_id,
+                   revision,
+                   body,
+                   params,
+                   object_key,
+                   format
+                 ),
+               :ok <- attach_created_document(socket, document_id) do
+            :ok
+          end
+
+        case persist_result do
+          :ok ->
+            {:ok, document_id}
+
+          {:error, _reason} = error ->
+            _ = Documents.delete(scope, document_id)
+            error
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp uploaded_document_command(socket, body, params, object_key, format) do
+    scope = socket.assigns.current_scope
+    file_name = direct_upload_file_name(params)
+    mime_type = direct_upload_mime_type(params)
+
+    {:ok,
+     %Command{
+       kind: :create_document,
+       actor_type: :user,
+       actor_id: scope.user.id,
+       base_revision: 0,
+       idempotency_key: "upload:#{object_key}",
+       payload: %{
+         "title" => file_name,
+         "type_key" => "custom_v1",
+         "metadata" => direct_upload_metadata(file_name, mime_type, object_key, format, body),
+         "nodes" => [],
+         "node_order" => [],
+         "fields" => [],
+         "field_bindings" => []
+       }
+     }}
+  end
+
+  defp commit_direct_upload_snapshot(document_id, revision, body, params, object_key, format) do
+    ir =
+      direct_upload_initial_ir(document_id, revision, params, object_key, format, byte_size(body))
+
+    Contract.RhwpSnapshot.upload_and_commit(document_id, revision, body, ir, format)
+  end
+
+  defp direct_upload_metadata(file_name, mime_type, object_key, format, body) do
+    %{
+      "source" => %{
+        "kind" => "direct_upload",
+        "object_key" => object_key,
+        "file_name" => file_name,
+        "mime_type" => mime_type,
+        "byte_size" => byte_size(body)
+      },
+      "rhwp" => %{
+        "format" => format,
+        "initial_revision" => 1
+      }
+    }
+  end
+
+  defp direct_upload_initial_ir(document_id, revision, params, object_key, format, byte_size) do
+    %{
+      "version" => 1,
+      "doc_id" => document_id,
+      "revision" => revision,
+      "lamport_max" => 0,
+      "contract_type" => "custom_v1",
+      "title" => direct_upload_file_name(params),
+      "format" => format,
+      "source" => %{
+        "kind" => "direct_upload",
+        "object_key" => object_key,
+        "byte_size" => byte_size
+      },
+      "fields" => [],
+      "sections" => []
+    }
+  end
+
+  defp direct_upload_owner_id(%{assigns: %{current_scope: %{user: %{id: id}}}})
+       when is_binary(id),
+       do: {:ok, id}
+
+  defp direct_upload_owner_id(_socket), do: {:error, :missing_owner}
+
+  defp direct_upload_param(params, "object_key"),
+    do: Map.get(params, "object_key") || Map.get(params, :object_key)
+
+  defp direct_upload_param(params, "file_name"),
+    do: Map.get(params, "file_name") || Map.get(params, :file_name)
+
+  defp direct_upload_param(params, "mime_type"),
+    do: Map.get(params, "mime_type") || Map.get(params, :mime_type)
+
+  defp direct_upload_param(params, "byte_size"),
+    do: Map.get(params, "byte_size") || Map.get(params, :byte_size)
+
+  defp direct_upload_param(params, "sha256"),
+    do: Map.get(params, "sha256") || Map.get(params, :sha256)
+
+  defp direct_upload_file_name(params) do
+    params
+    |> direct_upload_param("file_name")
+    |> case do
+      name when is_binary(name) and name != "" -> Path.basename(name)
+      _ -> "uploaded-document"
+    end
+  end
+
+  defp direct_upload_rhwp_format(params) when is_map(params) do
+    params
+    |> direct_upload_file_name()
+    |> direct_upload_rhwp_format()
+  end
+
+  defp direct_upload_rhwp_format(file_name) when is_binary(file_name) do
+    case file_name |> Path.extname() |> String.downcase() do
+      ".hwp" -> {:ok, "hwp"}
+      ".hwpx" -> {:ok, "hwpx"}
+      _ -> {:error, :unsupported_direct_upload_type}
+    end
+  end
+
+  defp direct_upload_mime_type(params) do
+    case direct_upload_param(params, "mime_type") do
+      mime when is_binary(mime) and mime != "" -> mime
+      _ -> "application/octet-stream"
+    end
+  end
+
+  defp direct_upload_byte_size(params) do
+    case direct_upload_param(params, "byte_size") do
+      size when is_integer(size) and size >= 0 ->
+        {:ok, size}
+
+      size when is_binary(size) ->
+        case Integer.parse(size) do
+          {int, ""} when int >= 0 -> {:ok, int}
+          _ -> {:error, :invalid_byte_size}
+        end
+
+      _ ->
+        {:error, :invalid_byte_size}
+    end
+  end
+
+  defp validate_direct_upload_size(size) when size <= @direct_upload_max_size, do: :ok
+  defp validate_direct_upload_size(_size), do: {:error, :file_too_large}
+
+  defp verify_direct_upload_bytes(body, params) do
+    with {:ok, expected_size} <- direct_upload_byte_size(params),
+         :ok <- validate_direct_upload_size(expected_size),
+         true <- byte_size(body) == expected_size,
+         :ok <- verify_direct_upload_sha256(body, params) do
+      :ok
+    else
+      false -> {:error, :upload_size_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp verify_direct_upload_sha256(body, params) do
+    case direct_upload_param(params, "sha256") do
+      hash when is_binary(hash) and hash != "" ->
+        if sha256_hex(body) == String.downcase(hash),
+          do: :ok,
+          else: {:error, :upload_hash_mismatch}
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp direct_upload_key(owner_id, file_name) do
+    "uploads/#{owner_id}/direct/#{Ecto.UUID.generate()}#{direct_upload_ext(file_name)}"
+  end
+
+  defp direct_upload_ext(file_name) do
+    case file_name |> Path.extname() |> String.downcase() do
+      ext when ext in [".hwp", ".hwpx"] -> ext
+      _ -> ""
+    end
+  end
+
+  defp valid_direct_upload_key?(key, owner_id) do
+    String.starts_with?(key, "uploads/#{owner_id}/direct/")
+  end
+
+  defp verify_direct_upload_key_format(object_key, format) do
+    case object_key |> Path.extname() |> String.trim_leading(".") |> String.downcase() do
+      ^format -> :ok
+      _ -> {:error, :upload_type_mismatch}
+    end
+  end
+
+  defp r2_driver do
+    Application.get_env(:contract, :io_drivers, [])
+    |> Keyword.get(:r2, Contract.IO.RetiredObjectStore)
+  end
+
+  defp call_upload_driver(fun) do
+    fun.()
+  rescue
+    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
+  end
+
+  defp sha256_hex(body), do: :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
 
   defp packet_id_from_params(scope, %{"packet_id" => packet_id}) when is_binary(packet_id) do
     case Packets.get_packet(scope, packet_id) do
@@ -741,7 +1026,7 @@ defmodule ContractWeb.DocumentLive do
   def event_to_command(event, params, assigns)
 
   def event_to_command("document.rename", params, assigns),
-    do: build_action(assigns, :rename_document, params)
+    do: rename_event_to_command(params, assigns)
 
   def event_to_command("document.open", params, assigns),
     do: build_action(assigns, :open_document, params)
@@ -767,7 +1052,7 @@ defmodule ContractWeb.DocumentLive do
   # Compatibility aliases for pre-dotted event producers. Product UI should use
   # the dotted clauses above.
   def event_to_command("rename_document", params, assigns) do
-    build_action(assigns, :rename_document, params)
+    rename_event_to_command(params, assigns)
   end
 
   def event_to_command("set_contract_type", params, assigns) do
@@ -821,6 +1106,28 @@ defmodule ContractWeb.DocumentLive do
   def event_to_command(event, _params, _assigns) do
     {:error, {:unknown_event, event}}
   end
+
+  defp rename_event_to_command(%{"document_id" => form_document_id} = params, assigns) do
+    if form_document_id == current_document_id(assigns) do
+      build_action(assigns, :rename_document, params)
+    else
+      :local
+    end
+  end
+
+  defp rename_event_to_command(params, assigns),
+    do: build_action(assigns, :rename_document, params)
+
+  defp current_document_id(%{studio_state: %{selected_document_id: id}}) when is_binary(id),
+    do: id
+
+  defp current_document_id(%{current_document_id: id}) when is_binary(id),
+    do: id
+
+  defp current_document_id(%{current_document: %{id: id}}) when is_binary(id),
+    do: id
+
+  defp current_document_id(_assigns), do: nil
 
   defp removed_command_kind?(kind) do
     kind in [
@@ -1306,6 +1613,8 @@ defmodule ContractWeb.DocumentLive do
   def render(assigns) do
     ~H"""
     <% standard_template = standard_template_spec(@projection) %>
+    <% hwp_template =
+      standard_template || uploaded_native_template_spec(@rhwp_snapshot, @current_document) %>
     <%= if @viewport == :mobile do %>
       <%!--
       Mobile: full-bleed chat surface. Owner directive 2026-05-17:
@@ -1342,6 +1651,15 @@ defmodule ContractWeb.DocumentLive do
             }
           }
         </script>
+
+        <input
+          id="document-direct-upload-input"
+          type="file"
+          accept=".hwp,.hwpx"
+          class="sr-only"
+          phx-hook="DirectR2Upload"
+          data-role="document-upload-file-input"
+        />
 
         <.live_component
           module={Components.ChatRail}
@@ -1395,11 +1713,20 @@ defmodule ContractWeb.DocumentLive do
             @chat_rail_hidden? && "!pr-0"
           ]}
         >
+          <input
+            id="document-direct-upload-input"
+            type="file"
+            accept=".hwp,.hwpx"
+            class="sr-only"
+            phx-hook="DirectR2Upload"
+            data-role="document-upload-file-input"
+          />
+
           <%!-- Desktop: document canvas + right chat rail. No permanent Context Reservoir. --%>
           <section class="flex h-full min-w-0 min-h-0 flex-col overflow-hidden bg-transparent">
             <header
               id="studio-document-header"
-              class="flex items-center justify-between gap-2.5 min-h-[58px] px-5 border-b border-base-300 bg-base-100 max-sm:flex-wrap max-sm:min-h-0 max-sm:px-4 max-sm:py-3"
+              class="flex items-center justify-between gap-2.5 min-h-11 px-5 border-b border-base-300 bg-base-100 max-sm:flex-wrap max-sm:min-h-0 max-sm:px-4 max-sm:py-2"
             >
               <div class="inline-flex items-center gap-1 min-w-0">
                 <div class="inline-flex min-w-0 items-center">
@@ -1413,6 +1740,11 @@ defmodule ContractWeb.DocumentLive do
                   >
                     <% title_value =
                       document_header_title(@current_document, @projection, @studio_state) %>
+                    <input
+                      type="hidden"
+                      name="document_id"
+                      value={@studio_state.selected_document_id || ""}
+                    />
                     <input
                       id="studio-document-title-input"
                       type="text"
@@ -1464,7 +1796,7 @@ defmodule ContractWeb.DocumentLive do
                     >
                       <.link
                         :for={d <- @other_documents}
-                        navigate={~p"/studio/#{d.id}"}
+                        navigate={document_switch_path(@document_picker_packet_id, d.id)}
                         role="menuitem"
                         class="block px-3 py-1.5 truncate text-base-content hover:bg-base-200"
                         title={d.title}
@@ -1473,7 +1805,7 @@ defmodule ContractWeb.DocumentLive do
                       </.link>
                       <.link
                         :if={@other_documents == []}
-                        navigate={~p"/storage"}
+                        navigate={document_picker_empty_path(@document_picker_packet_id)}
                         role="menuitem"
                         class="block px-3 py-1.5 text-base-content/60 hover:bg-base-200"
                       >
@@ -1658,6 +1990,75 @@ defmodule ContractWeb.DocumentLive do
               </div>
 
               <div class="inline-flex items-center">
+                <details
+                  id="studio-export-picker"
+                  class="relative shrink-0"
+                  data-role="export-picker"
+                  phx-hook=".CloseExportOnOutside"
+                >
+                  <summary
+                    class="inline-flex h-8 list-none items-center justify-center gap-1 rounded-md px-2 text-[13px] font-medium text-base-content/70 transition-colors cursor-pointer hover:bg-base-200 hover:text-base-content"
+                    aria-label={dgettext("studio", "내보내기")}
+                  >
+                    <.icon name="hero-arrow-down-tray" class="size-4" />
+                    <span class="inline-flex h-4 items-center leading-none">
+                      {dgettext("studio", "내보내기")}
+                    </span>
+                  </summary>
+                  <div
+                    class="absolute right-0 top-full mt-1 z-30 w-44 rounded-md border border-base-300 bg-base-100 shadow-lg py-1 text-sm"
+                    role="menu"
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-role="rhwp-export-pdf"
+                      class="flex w-full items-center justify-between px-3 py-1.5 text-base-content hover:bg-base-200"
+                    >
+                      <span class="font-medium">{dgettext("studio", "PDF로 내려받기")}</span>
+                      <span class="text-xs uppercase tracking-wide text-base-content/40">pdf</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-role="rhwp-export-hwpx"
+                      class="flex w-full items-center justify-between px-3 py-1.5 text-base-content hover:bg-base-200"
+                    >
+                      <span class="font-medium">{dgettext("studio", "HWPX로 내려받기")}</span>
+                      <span class="text-xs uppercase tracking-wide text-base-content/40">hwpx</span>
+                    </button>
+                  </div>
+                </details>
+                <script :type={Phoenix.LiveView.ColocatedHook} name=".CloseExportOnOutside">
+                  export default {
+                    mounted() {
+                      this.close = () => this.el.removeAttribute("open")
+                      this.onPointerDown = event => {
+                        if (!this.el.open || this.el.contains(event.target)) return
+                        this.close()
+                      }
+                      this.onFocusIn = event => {
+                        if (!this.el.open || this.el.contains(event.target)) return
+                        this.close()
+                      }
+                      this.onKeyDown = event => {
+                        if (event.key !== "Escape" || !this.el.open) return
+                        this.close()
+                        this.el.querySelector("summary")?.focus()
+                      }
+                      document.addEventListener("pointerdown", this.onPointerDown, true)
+                      document.addEventListener("focusin", this.onFocusIn, true)
+                      document.addEventListener("keydown", this.onKeyDown, true)
+                    },
+                    destroyed() {
+                      document.removeEventListener("pointerdown", this.onPointerDown, true)
+                      document.removeEventListener("focusin", this.onFocusIn, true)
+                      document.removeEventListener("keydown", this.onKeyDown, true)
+                    }
+                  }
+                </script>
+
                 <button
                   type="button"
                   phx-click="toggle_chat_rail"
@@ -1685,7 +2086,7 @@ defmodule ContractWeb.DocumentLive do
             <article class="relative m-0 p-0 border-0 bg-transparent shadow-none text-base-content text-[15px] leading-[1.78] overflow-hidden min-h-0 flex-1 font-sans max-sm:mx-3 max-sm:py-7 max-sm:px-5">
               <div class="relative h-full min-h-0">
                 <div
-                  :if={show_canvas_type_picker?(@studio_state, @projection)}
+                  :if={show_canvas_type_picker?(@studio_state, @projection, hwp_template)}
                   id="canvas-empty-type-picker"
                   data-stub="canvas-empty"
                   data-role="canvas-empty-type-picker"
@@ -1700,6 +2101,15 @@ defmodule ContractWeb.DocumentLive do
                         {dgettext("studio", "새 문서")}
                       </span>
                     </div>
+                    <label
+                      :if={is_nil(@studio_state.selected_document_id)}
+                      for="document-direct-upload-input"
+                      data-role="canvas-empty-upload-action"
+                      class="mb-3 inline-flex min-h-9 cursor-pointer items-center gap-2 rounded-md border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-base-content/75 transition-colors hover:border-base-content/30 hover:bg-base-200 hover:text-base-content"
+                    >
+                      <.icon name="hero-arrow-up-tray" class="size-4 text-base-content/45" />
+                      <span>{dgettext("studio", "문서 업로드 해서 시작하기")}</span>
+                    </label>
                     <div class="grid gap-2 sm:grid-cols-2">
                       <button
                         :for={spec <- contract_type_options("")}
@@ -1721,13 +2131,13 @@ defmodule ContractWeb.DocumentLive do
                   </div>
                 </div>
                 <.live_component
-                  :if={standard_template}
+                  :if={hwp_template}
                   module={Components.Canvas.HwpTemplate}
                   id="standard-hwp-template-canvas"
-                  spec={standard_template}
+                  spec={hwp_template}
                   matching_book={@rhwp_matching_book || %{}}
                   field_values={@rhwp_field_values || %{}}
-                  editable_spec_candidates={editable_spec_candidates()}
+                  editable_spec_candidates={editable_spec_candidates(hwp_template)}
                   site_id={"user:#{@current_scope.user.id}"}
                   document_id={@studio_state.selected_document_id}
                   text_events={@rhwp_text_events}
@@ -1881,22 +2291,70 @@ defmodule ContractWeb.DocumentLive do
   defp current_document(_scope, _state), do: nil
 
   defp assign_current_document_context(socket, scope, state) do
+    packet = packet_for_current_context(scope, state, socket.assigns[:packet_id])
+
     socket
     |> assign(:current_document, current_document(scope, state))
-    |> assign(:document_packet, packet_for_current_document(scope, state))
+    |> assign(:document_packet, packet)
+    |> assign(:document_picker_packet_id, packet_id(packet))
+    |> assign(:other_documents, other_documents_from_packet(packet, state))
   end
+
+  defp packet_for_current_context(scope, %{selected_document_id: document_id} = state, packet_id)
+       when is_binary(document_id) and is_binary(packet_id) do
+    case packet_with_document(scope, packet_id, document_id) do
+      {:ok, packet} -> packet
+      _ -> packet_for_current_document(scope, state)
+    end
+  end
+
+  defp packet_for_current_context(scope, %{selected_document_id: nil}, packet_id)
+       when is_binary(packet_id) do
+    case Packets.get_packet(scope, packet_id) do
+      {:ok, packet} -> packet
+      _ -> nil
+    end
+  end
+
+  defp packet_for_current_context(scope, state, _packet_id),
+    do: packet_for_current_document(scope, state)
+
+  defp packet_with_document(scope, packet_id, document_id) do
+    with {:ok, packet} <- Packets.get_packet(scope, packet_id),
+         true <- packet_has_document?(packet, document_id) do
+      {:ok, packet}
+    else
+      false -> {:error, :document_not_in_packet}
+      error -> error
+    end
+  end
+
+  defp packet_has_document?(%{documents: documents}, document_id) when is_list(documents) do
+    Enum.any?(documents, &(&1.id == document_id))
+  end
+
+  defp packet_has_document?(_packet, _document_id), do: false
 
   defp packet_for_current_document(scope, %Contract.Studio.State{
          selected_document_id: document_id
        })
        when is_binary(document_id) do
     case Packets.packet_for_document(scope, document_id) do
-      {:ok, packet} -> packet
-      _ -> nil
+      {:ok, %{id: packet_id}} ->
+        case Packets.get_packet(scope, packet_id) do
+          {:ok, packet} -> packet
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 
   defp packet_for_current_document(_scope, _state), do: nil
+
+  defp packet_id(%{id: id}) when is_binary(id), do: id
+  defp packet_id(_packet), do: nil
 
   defp app_shell_nav_label(%Contract.Packets.Packet{}), do: "문서들"
   defp app_shell_nav_label(_packet), do: "문서들"
@@ -1906,17 +2364,25 @@ defmodule ContractWeb.DocumentLive do
 
   defp app_shell_nav_path(_packet), do: ~p"/storage"
 
-  defp list_other_documents(scope, %{selected_document_id: current_id}) do
-    scope
-    |> Contract.Documents.list_all_for_scope(limit: 30)
-    |> Enum.reject(&(&1.status in [:template, :archived]))
+  defp other_documents_from_packet(%{documents: documents}, %{selected_document_id: current_id})
+       when is_list(documents) do
+    documents
+    |> Enum.reject(&(&1.status == :template))
     |> Enum.reject(&(&1.id == current_id))
     |> Enum.map(fn d -> %{id: d.id, title: d.title} end)
-  rescue
-    _ -> []
   end
 
-  defp list_other_documents(_scope, _state), do: []
+  defp other_documents_from_packet(_packet, _state), do: []
+
+  defp document_switch_path(packet_id, document_id) when is_binary(packet_id),
+    do: ~p"/documents/#{document_id}?packet_id=#{packet_id}"
+
+  defp document_switch_path(_packet_id, document_id), do: ~p"/studio/#{document_id}"
+
+  defp document_picker_empty_path(packet_id) when is_binary(packet_id),
+    do: ~p"/packets/#{packet_id}"
+
+  defp document_picker_empty_path(_packet_id), do: ~p"/storage"
 
   # Estimate input `size=` for the editable title. The HTML `size` attribute
   # measures in average-glyph widths (effectively ASCII "0"). CJK glyphs
@@ -1967,9 +2433,14 @@ defmodule ContractWeb.DocumentLive do
   defp projection_type_key(%{type_key: tk}) when is_binary(tk) and tk != "", do: tk
   defp projection_type_key(_), do: nil
 
-  defp show_canvas_type_picker?(%{selected_document_id: nil}, _projection), do: true
+  defp show_canvas_type_picker?(_studio_state, _projection, hwp_template)
+       when not is_nil(hwp_template),
+       do: false
 
-  defp show_canvas_type_picker?(_studio_state, projection),
+  defp show_canvas_type_picker?(%{selected_document_id: nil}, _projection, _hwp_template),
+    do: true
+
+  defp show_canvas_type_picker?(_studio_state, projection, _hwp_template),
     do: is_nil(projection_type_key(projection))
 
   defp assign_projection(socket, projection) do
@@ -1984,6 +2455,7 @@ defmodule ContractWeb.DocumentLive do
 
   defp rhwp_matching_book_for_projection(projection) do
     with type_key when is_binary(type_key) <- projection_type_key(projection),
+         true <- standard_matching_type?(type_key),
          {:ok, matching_book} <- ContractTypes.get_matching_book(type_key) do
       matching_book
     else
@@ -2093,21 +2565,71 @@ defmodule ContractWeb.DocumentLive do
     end
   end
 
+  defp standard_matching_type?(type_key) when is_binary(type_key) do
+    case ContractTypes.get(type_key) do
+      {:ok, %{source: source} = spec} when source != :custom ->
+        not is_nil(editable_spec_candidate(spec))
+
+      _ ->
+        false
+    end
+  end
+
+  defp uploaded_native_template_spec(%{url: url}, current_document)
+       when is_binary(url) and url != "" do
+    case uploaded_native_format(url) do
+      "hwp" ->
+        %{
+          key: "custom_v1",
+          name: uploaded_native_name(current_document, url),
+          template_hwp_path: url,
+          template_hwpx_path: nil
+        }
+
+      "hwpx" ->
+        %{
+          key: "custom_v1",
+          name: uploaded_native_name(current_document, url),
+          template_hwp_path: nil,
+          template_hwpx_path: url
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  defp uploaded_native_template_spec(_snapshot, _current_document), do: nil
+
+  defp uploaded_native_format(url) do
+    case url |> Path.extname() |> String.downcase() do
+      ".hwp" -> "hwp"
+      ".hwpx" -> "hwpx"
+      _ -> nil
+    end
+  end
+
+  defp uploaded_native_name(%Documents.Document{title: title}, _url)
+       when is_binary(title) and title != "",
+       do: title
+
+  defp uploaded_native_name(_document, url), do: Path.basename(url)
+
   defp template_path(%{template_hwp_path: path}) when is_binary(path) and path != "", do: path
   defp template_path(%{template_hwpx_path: path}) when is_binary(path) and path != "", do: path
   defp template_path(_spec), do: nil
 
-  defp editable_spec_candidates do
-    case ContractTypes.list() do
-      {:ok, specs} ->
-        specs
-        |> Enum.map(&editable_spec_candidate/1)
-        |> Enum.reject(&is_nil/1)
-
-      _ ->
-        []
+  defp editable_spec_candidates(%{key: type_key}) when is_binary(type_key) do
+    with true <- standard_matching_type?(type_key),
+         {:ok, spec} <- ContractTypes.get(type_key),
+         candidate when not is_nil(candidate) <- editable_spec_candidate(spec) do
+      [candidate]
+    else
+      _ -> []
     end
   end
+
+  defp editable_spec_candidates(_spec), do: []
 
   defp editable_spec_candidate(spec) do
     with template_path when is_binary(template_path) <- template_path(spec),
@@ -2877,8 +3399,11 @@ defmodule ContractWeb.DocumentLive do
 
   defp summarizable_node?(%{} = node) do
     kind = node[:kind] || node["kind"]
+    attrs = node[:attrs] || node["attrs"] || %{}
+    category = attrs[:category] || attrs["category"]
 
     to_string(kind) in @summarizable_kinds and
+      category != "attachment" and
       String.trim(to_string(node[:content] || node["content"] || "")) != ""
   end
 

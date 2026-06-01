@@ -14,13 +14,17 @@ defmodule Contract.Documents do
   """
 
   import Ecto.Query
-
+  alias Contract.ChatThread
   alias Contract.Context
   alias Contract.Change
   alias Contract.ContractTypes
   alias Contract.Documents.Document
+  alias Contract.Lease.Record, as: LeaseRecord
   alias Contract.Operation
+  alias Contract.Packets.PacketDocument
   alias Contract.Repo
+  alias Contract.RhwpSnapshot.Record, as: RhwpSnapshotRecord
+  alias Contract.Snapshot
   alias Contract.Types, as: T
 
   # ----------------------------------------------------------------------------
@@ -60,8 +64,7 @@ defmodule Contract.Documents do
     )
     |> Repo.all()
   rescue
-    DBConnection.ConnectionError -> []
-    Postgrex.Error -> []
+    _ -> []
   end
 
   # ----------------------------------------------------------------------------
@@ -74,29 +77,32 @@ defmodule Contract.Documents do
   document is dropped for being old — the dashboard surface wants the
   full library, not a "recent" slice (2026-05-17 owner directive).
 
-  Accepts an optional keyword list with `:limit`. Defaults to a very
-  high cap (10_000) so callers that pass no limit still get the full
-  set without blowing memory in pathological cases.
+  Accepts an optional keyword list with `:limit`. Callers that pass no
+  limit get the full set; UI surfaces without pagination must not silently
+  drop older documents.
   """
-  @default_all_limit 10_000
-
   @spec list_all_for_scope(Context.t(), keyword()) :: [Document.t()]
   def list_all_for_scope(scope, opts \\ [])
 
   def list_all_for_scope(%Context{user: nil}, _opts), do: []
 
   def list_all_for_scope(%Context{user: %{id: user_id}}, opts) when is_list(opts) do
-    limit = Keyword.get(opts, :limit, @default_all_limit)
+    query =
+      from(d in Document,
+        where: d.owner_id == ^user_id,
+        order_by: [desc: d.updated_at]
+      )
 
-    from(d in Document,
-      where: d.owner_id == ^user_id,
-      order_by: [desc: d.updated_at],
-      limit: ^limit
-    )
+    query =
+      case Keyword.get(opts, :limit) do
+        limit when is_integer(limit) and limit > 0 -> limit(query, ^limit)
+        _ -> query
+      end
+
+    query
     |> Repo.all()
   rescue
-    DBConnection.ConnectionError -> []
-    Postgrex.Error -> []
+    _ -> []
   end
 
   # ----------------------------------------------------------------------------
@@ -162,19 +168,100 @@ defmodule Contract.Documents do
   end
 
   # ----------------------------------------------------------------------------
-  # archive/2 / set_type/3
+  # delete/2 / set_type/3
   # ----------------------------------------------------------------------------
 
   @doc """
-  Archive a document. Owner-only.
+  Delete a document and its document-scoped state. Owner-only.
   """
-  @spec archive(Context.t(), T.id()) ::
+  @spec delete(Context.t(), T.id()) ::
           {:ok, Document.t()} | {:error, term()}
-  def archive(%Context{} = scope, document_id) do
-    with {:ok, doc} <- get(scope, document_id) do
-      doc
-      |> Document.changeset(%{"status" => "archived"})
-      |> Repo.update()
+  def delete(%Context{} = scope, document_id) when is_binary(document_id) do
+    with {:ok, {%Document{} = deleted, r2_keys}} <- delete_db(scope, document_id) do
+      :ok = delete_r2_objects_async(r2_keys)
+      {:ok, deleted}
+    end
+  end
+
+  def delete(_scope, _document_id), do: {:error, :not_found}
+
+  @doc false
+  @spec delete_db(Context.t(), T.id()) ::
+          {:ok, {Document.t(), [String.t()]}} | {:error, term()}
+  def delete_db(%Context{} = scope, document_id) when is_binary(document_id) do
+    with_document_lock(
+      document_id,
+      fn ->
+        with {:ok, %Document{} = doc} <- get(scope, document_id) do
+          r2_keys = document_r2_keys(doc)
+
+          with {:ok, %Document{} = deleted} <- delete_document_rows(doc) do
+            {:ok, {deleted, r2_keys}}
+          end
+        end
+      end,
+      isolation: :repeatable_read
+    )
+  end
+
+  def delete_db(_scope, _document_id), do: {:error, :not_found}
+
+  @doc false
+  @spec delete_r2_objects_async([String.t()]) :: :ok
+  def delete_r2_objects_async(keys) when is_list(keys), do: :ok
+
+  defp document_r2_keys(%Document{id: document_id, metadata: metadata}) do
+    snapshot_keys =
+      from(s in Snapshot,
+        where: s.document_id == ^document_id,
+        select: s.r2_key
+      )
+      |> Repo.all()
+
+    rhwp_snapshot_keys =
+      from(r in RhwpSnapshotRecord,
+        where: r.document_id == ^document_id,
+        select: [r.r2_key, r.ir_r2_key]
+      )
+      |> Repo.all()
+      |> List.flatten()
+
+    [metadata_object_key(metadata) | snapshot_keys ++ rhwp_snapshot_keys]
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+  end
+
+  defp metadata_object_key(metadata) when is_map(metadata) do
+    case read_key(metadata, :source) do
+      source when is_map(source) -> read_key(source, :object_key)
+      _ -> nil
+    end
+  end
+
+  defp metadata_object_key(_metadata), do: nil
+
+  defp delete_document_rows(%Document{id: document_id} = doc) do
+    from(pd in PacketDocument, where: pd.document_id == ^document_id)
+    |> Repo.delete_all()
+
+    from(t in ChatThread, where: t.document_id == ^document_id)
+    |> Repo.delete_all()
+
+    from(l in LeaseRecord, where: l.document_id == ^document_id)
+    |> Repo.delete_all()
+
+    from(r in RhwpSnapshotRecord, where: r.document_id == ^document_id)
+    |> Repo.delete_all()
+
+    from(s in Snapshot, where: s.document_id == ^document_id)
+    |> Repo.delete_all()
+
+    from(c in Change, where: c.document_id == ^document_id)
+    |> Repo.delete_all()
+
+    case Repo.delete(doc) do
+      {:ok, %Document{} = deleted} -> {:ok, deleted}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -209,10 +296,18 @@ defmodule Contract.Documents do
   end
 
   @doc false
-  @spec with_document_lock(T.id(), (-> {:ok, term()} | {:error, term()})) ::
+  @spec with_document_lock(T.id(), (-> {:ok, term()} | {:error, term()}), keyword()) ::
           {:ok, term()} | {:error, term()}
-  def with_document_lock(document_id, fun) when is_binary(document_id) and is_function(fun, 0) do
+  def with_document_lock(document_id, fun, opts \\ [])
+      when is_binary(document_id) and is_function(fun, 0) and is_list(opts) do
+    set_repeatable_read? = Keyword.get(opts, :isolation) == :repeatable_read
+    already_in_transaction? = Repo.in_transaction?()
+
     case Repo.transaction(fn ->
+           if set_repeatable_read? and not already_in_transaction? do
+             set_repeatable_read!()
+           end
+
            :ok = take_advisory_lock!(document_id)
 
            case fun.() do
@@ -320,9 +415,7 @@ defmodule Contract.Documents do
 
     :ok
   rescue
-    Postgrex.Error -> :ok
-    DBConnection.ConnectionError -> :ok
-    Ecto.Query.CastError -> :ok
+    _ -> :ok
   end
 
   def set_title(_, _), do: :ok
@@ -356,9 +449,7 @@ defmodule Contract.Documents do
 
     :ok
   rescue
-    Postgrex.Error -> :ok
-    DBConnection.ConnectionError -> :ok
-    Ecto.Query.CastError -> :ok
+    _ -> :ok
   end
 
   def set_type(_, _), do: :ok
@@ -390,8 +481,8 @@ defmodule Contract.Documents do
          :importing,
          :editing,
          :reviewing,
-         :export_ready,
-         :archived
+         :write_completed,
+         :export_ready
        ] do
       from(d in Document,
         where: d.id == ^document_id,
@@ -402,9 +493,7 @@ defmodule Contract.Documents do
 
     :ok
   rescue
-    Postgrex.Error -> :ok
-    DBConnection.ConnectionError -> :ok
-    Ecto.Query.CastError -> :ok
+    _ -> :ok
   end
 
   def set_status(_, _), do: :ok
@@ -428,14 +517,21 @@ defmodule Contract.Documents do
 
     :ok
   rescue
-    Postgrex.Error -> :ok
-    DBConnection.ConnectionError -> :ok
+    _ -> :ok
   end
 
   def touch_revision(_, _), do: :ok
 
   defp take_advisory_lock!(document_id) do
     {:ok, _} = Repo.query("SELECT pg_advisory_xact_lock(hashtext($1))", [document_id])
+    :ok
+  end
+
+  defp set_repeatable_read! do
+    unless Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox do
+      Repo.query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", [])
+    end
+
     :ok
   end
 
@@ -583,8 +679,7 @@ defmodule Contract.Documents do
     )
     |> Repo.all()
   rescue
-    DBConnection.ConnectionError -> []
-    Postgrex.Error -> []
+    _ -> []
   end
 
   def search(_scope, _query, _limit), do: []

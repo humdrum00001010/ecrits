@@ -302,20 +302,6 @@ defmodule Contract.Session.ReducerTest do
     end
   end
 
-  describe "compile/2 — archive_document / restore_document" do
-    test "archive sets status=:archived" do
-      state = new_state()
-      {:ok, input} = Reducer.compile(action(:archive_document), state)
-      assert [%Operation{op: :set_attr, args: %{key: :status, value: :archived}}] = input.ops
-    end
-
-    test "restore sets status=:draft" do
-      state = new_state()
-      {:ok, input} = Reducer.compile(action(:restore_document), state)
-      assert [%Operation{op: :set_attr, args: %{key: :status, value: :draft}}] = input.ops
-    end
-  end
-
   describe "compile/2 — update_metadata" do
     test "merges new metadata with current" do
       proj = Map.put(Runtime.State.empty_projection(), :metadata, %{client: "Acme"})
@@ -644,13 +630,6 @@ defmodule Contract.Session.ReducerTest do
       a = action(:rename_document, payload: %{"title" => "New"})
       {_input, new_state} = run_pipeline(a, state)
       assert new_state.projection.title == "New"
-    end
-
-    test "archive_document writes :status into metadata" do
-      state = new_state()
-      a = action(:archive_document)
-      {_input, new_state} = run_pipeline(a, state)
-      assert new_state.projection.metadata[:status] == :archived
     end
 
     test "edit_document: create_node then replace_content" do

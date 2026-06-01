@@ -4,21 +4,7 @@
 # This configuration file is loaded before any dependency and
 # is restricted to this project.
 
-# General application configuration
 import Config
-
-config :contract, :scopes,
-  user: [
-    default: true,
-    module: Contract.Context,
-    assign_key: :current_scope,
-    access_path: [:user, :id],
-    schema_key: :user_id,
-    schema_type: :binary_id,
-    schema_table: :users,
-    test_data_fixture: Contract.AccountsFixtures,
-    test_setup_helper: :register_and_log_in_user
-  ]
 
 # Load .env (if present) before reading System.get_env in env-specific configs.
 # Hand-rolled to avoid bootstrapping deps at config-compile time.
@@ -44,8 +30,9 @@ if File.exists?(Path.expand("../.env", __DIR__)) do
 end
 
 config :contract,
-  ecto_repos: [Contract.Repo],
   generators: [timestamp_type: :utc_datetime, binary_id: true]
+
+config :contract, :local_agent, provider: "codex"
 
 # Default UI locale. Korean-primary for the public-facing surface
 # (landing, storage, auth, settings). Tests override this back to
@@ -70,37 +57,16 @@ config :contract, :openai,
 # boot, doesn't trip the reloader, and is also where env-var overrides
 # (OPENAI_MODEL, OPENAI_REASONING_EFFORT) get wired in.
 
-# Public base URL for our MCP server. OpenAI Responses MCP calls back into
-# this URL during a run, so it must be reachable from OpenAI's edge. Local
-# tunnel: cloudflared `main` → :4000 (see ~/.cloudflared/main.yml).
-config :contract, :mcp,
-  public_base_url: System.get_env("MCP_PUBLIC_BASE_URL", "https://contract.cloudxyz.org")
-
-# Per-bearer rate limit for /mcp. Sanity cap, not fairness — see
-# `ContractWeb.Plug.RateLimitMCP`. Both knobs are runtime-readable so
-# config/runtime.exs or tests can override without recompiling.
-config :contract, ContractWeb.Plug.RateLimitMCP,
-  limit: 120,
-  window_ms: 60_000
-
 config :contract, :law_mcp,
   endpoint: System.get_env("LAW_MCP_URL", "https://korean-law-mcp.fly.dev/mcp"),
   oc: System.get_env("LAW_OC", "openapi")
-
-config :contract, :r2,
-  bucket: System.get_env("R2_BUCKET", "contract-studio-prod"),
-  account_id: System.get_env("R2_ACCOUNT_ID"),
-  access_key_id: System.get_env("R2_ACCESS_KEY_ID"),
-  secret_access_key: System.get_env("R2_SECRET_ACCESS_KEY"),
-  endpoint: System.get_env("R2_ENDPOINT")
 
 # Driver overrides — tests swap these for mock implementations.
 config :contract, :io_drivers,
   http: Contract.IO.HTTP.Req,
   openai: Contract.IO.OpenAI,
   upstage: Contract.IO.Upstage,
-  law_mcp: Contract.IO.LawMCP,
-  r2: Contract.IO.R2
+  law_mcp: Contract.IO.LawMCP
 
 # Configure the endpoint
 config :contract, ContractWeb.Endpoint,
@@ -121,20 +87,6 @@ config :contract, ContractWeb.Endpoint,
 # For production it's recommended to configure a different adapter
 # at the `config/runtime.exs`.
 config :contract, Contract.Mailer, adapter: Swoosh.Adapters.Local
-
-# Oban background jobs. Queue capacities are tuned for Contract Studio
-# workloads per SPEC.md §6 (Upstage parse, DOCX/PDF export, async OpenAI
-# turns, system jobs).
-config :contract, Oban,
-  repo: Contract.Repo,
-  queues: [
-    import: 5,
-    export: 3,
-    agent: 8,
-    system: 2,
-    mailer: 4
-  ],
-  plugins: [Oban.Plugins.Pruner, {Oban.Plugins.Cron, crontab: []}]
 
 # Configure esbuild (the version is required)
 config :esbuild,
@@ -165,11 +117,7 @@ config :logger, :default_formatter,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
-# Register the SSE MIME type so the `/mcp` pipeline's `:accepts ["json",
-# "event-stream"]` filter can negotiate `text/event-stream` requests. See
-# SPEC.md §21.
 config :mime, :types, %{
-  "text/event-stream" => ["event-stream"],
   # DESIGN.md §4 — StorageLive accepts HWP / HWPX uploads. The MIME
   # registry needs these extensions before `allow_upload(accept: ~w(.hwp
   # .hwpx))` can validate them.

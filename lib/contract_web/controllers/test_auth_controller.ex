@@ -2,8 +2,7 @@ if Application.compile_env(:contract, :test_auth, false) do
   defmodule ContractWeb.TestAuthController do
     @moduledoc """
     Playwright-only auth shim. Mints a persona user via
-    `Contract.PersonaFactory`, then **sets a real session cookie** (the
-    same kind `ContractWeb.UserAuth.log_in_user/2` would set) and responds
+    `Contract.PersonaFactory`, then **sets a legacy session cookie** and responds
     JSON. Playwright takes the cookie back into its `BrowserContext` and
     behaves like a logged-in user for the rest of the spec.
 

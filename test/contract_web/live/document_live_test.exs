@@ -1,6 +1,8 @@
 defmodule ContractWeb.DocumentLiveTest do
   use ContractWeb.ConnCase, async: false
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest
   import Contract.AccountsFixtures
   import Ecto.Query
@@ -278,7 +280,22 @@ defmodule ContractWeb.DocumentLiveTest do
       {:ok, lv, _html} = live(conn, ~p"/studio")
 
       assert has_element?(lv, ~s([data-role="canvas-empty-type-picker"]))
-      refute has_element?(lv, ~s([data-role="canvas-empty-upload-action"]))
+
+      assert has_element?(
+               lv,
+               ~s(label[data-role="canvas-empty-upload-action"][for="document-direct-upload-input"]),
+               "문서 업로드 해서 시작하기"
+             )
+
+      assert has_element?(
+               lv,
+               ~s(input#document-direct-upload-input[type="file"][class="sr-only"])
+             )
+
+      refute has_element?(
+               lv,
+               ~s([data-role="canvas-empty-upload-action"][phx-click="agent_option_picked"])
+             )
 
       {:ok, specs} = Contract.ContractTypes.list()
       visible_specs = Enum.reject(specs, &(&1.source == :custom))
@@ -349,7 +366,194 @@ defmodule ContractWeb.DocumentLiveTest do
         )
 
       assert packet_document.role == "primary"
-      assert_redirect(lv, ~p"/documents/#{doc.id}")
+      assert_redirect(lv, ~p"/documents/#{doc.id}?packet_id=#{packet.id}")
+    end
+
+    test "direct upload completion commits uploaded HWPX and attaches it to packet",
+         %{conn: conn, user: user} do
+      old_drivers = Application.get_env(:contract, :io_drivers, [])
+
+      Application.put_env(
+        :contract,
+        :io_drivers,
+        Keyword.put(old_drivers, :r2, Contract.IO.R2Stub)
+      )
+
+      Contract.IO.R2Stub.reset()
+
+      on_exit(fn ->
+        Application.put_env(:contract, :io_drivers, old_drivers)
+        Contract.IO.R2Stub.reset()
+      end)
+
+      scope = Contract.Context.for_user(user)
+      {:ok, packet} = Contract.Packets.create_packet(scope, %{"title" => "업로드 패킷"})
+      body = File.read!("test/fixtures/hwpx/real_contract.hwpx")
+      object_key = "uploads/#{user.id}/direct/test.hwpx"
+      {:ok, _} = Contract.IO.R2Stub.put(object_key, body)
+
+      {:ok, lv, _html} = live(conn, ~p"/studio?packet_id=#{packet.id}")
+
+      assert has_element?(lv, ~s([data-role="canvas-empty-upload-action"]))
+
+      _ =
+        render_hook(lv, "document.direct_upload.complete", %{
+          "object_key" => object_key,
+          "file_name" => "uploaded.hwpx",
+          "mime_type" => "application/vnd.hancom.hwpx",
+          "byte_size" => byte_size(body),
+          "sha256" => :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+        })
+
+      [doc] = Contract.Documents.list_recent_for_scope(scope, 1)
+      assert doc.title == "uploaded.hwpx"
+      assert doc.type_key == "custom_v1"
+
+      assert %Contract.RhwpSnapshot.Record{revision: 1, format: "hwpx"} =
+               Contract.RhwpSnapshot.latest_for_document(doc.id, "hwpx")
+
+      snapshot_key = "documents/#{doc.id}/snapshots/1.hwpx"
+      ir_key = "documents/#{doc.id}/snapshots/1.ir.json"
+      objects = Contract.IO.R2Stub.objects()
+      assert objects[snapshot_key] == body
+
+      assert {:ok, %{"contract_type" => "custom_v1", "title" => "uploaded.hwpx"}} =
+               Jason.decode(objects[ir_key])
+
+      {:ok, loaded_packet} = Contract.Packets.get_packet(scope, packet.id)
+      assert Enum.any?(loaded_packet.documents, &(&1.id == doc.id))
+
+      expected_path = ~p"/documents/#{doc.id}?packet_id=#{packet.id}"
+      assert_reply(lv, %{ok: true, document_path: ^expected_path})
+    end
+
+    test "direct upload completion opens uploaded HWPX in the RHWP editor",
+         %{conn: conn, user: user} do
+      old_drivers = Application.get_env(:contract, :io_drivers, [])
+
+      Application.put_env(
+        :contract,
+        :io_drivers,
+        Keyword.put(old_drivers, :r2, Contract.IO.R2Stub)
+      )
+
+      Contract.IO.R2Stub.reset()
+
+      on_exit(fn ->
+        Application.put_env(:contract, :io_drivers, old_drivers)
+        Contract.IO.R2Stub.reset()
+      end)
+
+      scope = Contract.Context.for_user(user)
+      body = File.read!("test/fixtures/hwpx/real_contract.hwpx")
+      object_key = "uploads/#{user.id}/direct/sample.hwpx"
+      {:ok, _} = Contract.IO.R2Stub.put(object_key, body)
+
+      {:ok, lv, _html} = live(conn, ~p"/studio")
+
+      _ =
+        render_hook(lv, "document.direct_upload.complete", %{
+          "object_key" => object_key,
+          "file_name" => "sample.hwpx",
+          "mime_type" => "application/vnd.hancom.hwpx",
+          "byte_size" => byte_size(body),
+          "sha256" => :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+        })
+
+      [doc] = Contract.Documents.list_recent_for_scope(scope, 1)
+      assert doc.title == "sample.hwpx"
+
+      expected_path = ~p"/studio/#{doc.id}"
+      assert_reply(lv, %{ok: true, document_path: ^expected_path})
+
+      assert %Contract.RhwpSnapshot.Record{revision: 1, format: "hwpx"} =
+               Contract.RhwpSnapshot.latest_for_document(doc.id, "hwpx")
+
+      {:ok, opened, _html} = live(conn, ~p"/studio/#{doc.id}")
+
+      assert has_element?(
+               opened,
+               ~s([data-role="standard-hwp-editor"][data-document-path="/documents/#{doc.id}/rhwp-snapshots/1.hwpx"])
+             )
+
+      assert has_element?(
+               opened,
+               ~s([data-role="standard-hwp-editor"][data-editable-spec-candidates="[]"])
+             )
+
+      refute has_element?(opened, ~s([data-role="custom-document-canvas"]))
+
+      _ =
+        render_hook(opened, "rhwp.matching_book.changed", %{
+          "contract_type_key" => "custom_v1",
+          "matching_book" => %{"itemsById" => %{"unexpected" => %{}}}
+        })
+
+      assert %Contract.ContractTypes.DocumentType{default_matching_book: %{}} =
+               Repo.get_by!(Contract.ContractTypes.DocumentType, key: "custom_v1")
+    end
+
+    test "nda_v1 standard template is not matching-capable without its own editable spec",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+      document_id = create_typed_document!(scope, "nda_v1", "NDA")
+
+      {:ok, lv, _html} = live(conn, ~p"/documents/#{document_id}")
+
+      assert assigns(lv).projection.type_key == "nda_v1"
+      assert assigns(lv).rhwp_matching_book == %{}
+
+      assert has_element?(
+               lv,
+               ~s([data-role="standard-hwp-editor"][data-document-path="/assets/standard_contracts/nda_v1.hwp"][data-editable-spec-candidates="[]"][data-matching-book="{}"])
+             )
+
+      _ =
+        render_hook(lv, "rhwp.matching_book.changed", %{
+          "contract_type_key" => "nda_v1",
+          "matching_book" => %{"itemsById" => %{"should_not_persist" => %{}}}
+        })
+
+      assert assigns(lv).rhwp_matching_book == %{}
+
+      case Repo.get_by(Contract.ContractTypes.DocumentType, key: "nda_v1") do
+        nil ->
+          :ok
+
+        document_type ->
+          assert document_type.default_matching_book == %{}
+      end
+    end
+
+    test "matching-capable standards publish only their own editable spec candidates",
+         %{conn: conn, user: user} do
+      scope = Contract.Context.for_user(user)
+
+      for type_key <- ["employment_v1", "service_agreement_v1"] do
+        document_id = create_typed_document!(scope, type_key, "Typed #{type_key}")
+
+        {:ok, lv, html} = live(conn, ~p"/documents/#{document_id}")
+
+        own_spec = "/assets/standard_contracts/#{type_key}.editables.json"
+        other_spec = other_editable_spec_path(type_key)
+
+        assert assigns(lv).projection.type_key == type_key
+        assert html =~ own_spec
+        refute html =~ other_spec
+
+        matching_book = %{"itemsById" => %{"#{type_key}_field" => %{"aboveIndex" => nil}}}
+
+        _ =
+          render_hook(lv, "rhwp.matching_book.changed", %{
+            "contract_type_key" => type_key,
+            "matching_book" => matching_book
+          })
+
+        assert assigns(lv).rhwp_matching_book == matching_book
+
+        assert %Contract.ContractTypes.DocumentType{default_matching_book: ^matching_book} =
+                 Repo.get_by!(Contract.ContractTypes.DocumentType, key: type_key)
+      end
     end
 
     test "DocumentScope threads :user_perms from session onto current_scope.perms",
@@ -625,7 +829,7 @@ defmodule ContractWeb.DocumentLiveTest do
       {:ok, _lv, html} = live(conn, ~p"/studio")
 
       assert html =~ ~s(data-role="canvas-empty-type-picker")
-      refute html =~ ~s(data-role="canvas-empty-upload-action")
+      assert html =~ ~s(data-role="canvas-empty-upload-action")
       refute html =~ ~s(data-role="chat-no-doc-welcome")
     end
 
@@ -668,6 +872,33 @@ defmodule ContractWeb.DocumentLiveTest do
 
       assert {:ok, %Command{kind: :rename_document, document_id: ^doc, actor_type: :user}} =
                DocumentLive.event_to_command("document.rename", %{"title" => "New"}, assigns)
+    end
+
+    test "rename_document ignores stale title form document ids", %{assigns: assigns} do
+      doc = Ecto.UUID.generate()
+      other_doc = Ecto.UUID.generate()
+      assigns = put_doc(assigns, doc)
+
+      assert :local =
+               DocumentLive.event_to_command(
+                 "rename_document",
+                 %{"document_id" => "", "title" => "stale"},
+                 assigns
+               )
+
+      assert :local =
+               DocumentLive.event_to_command(
+                 "rename_document",
+                 %{"document_id" => other_doc, "title" => "stale"},
+                 assigns
+               )
+
+      assert {:ok, %Command{kind: :rename_document, document_id: ^doc}} =
+               DocumentLive.event_to_command(
+                 "rename_document",
+                 %{"document_id" => doc, "title" => "New"},
+                 assigns
+               )
     end
 
     test "document.type.set → :set_contract_type", %{assigns: assigns} do
@@ -1606,6 +1837,10 @@ defmodule ContractWeb.DocumentLiveTest do
   end
 
   defp create_typed_document!(scope, title) do
+    create_typed_document!(scope, "nda_v1", title)
+  end
+
+  defp create_typed_document!(scope, type_key, title) do
     document_id = Ecto.UUID.generate()
 
     command = %Command{
@@ -1615,12 +1850,18 @@ defmodule ContractWeb.DocumentLiveTest do
       document_id: document_id,
       base_revision: 0,
       idempotency_key: "create-typed-#{document_id}",
-      payload: %{"title" => title, "type_key" => "nda_v1"}
+      payload: %{"title" => title, "type_key" => type_key}
     }
 
     {:ok, %Contract.Change{}} = Contract.Runtime.apply(scope, command)
     document_id
   end
+
+  defp other_editable_spec_path("employment_v1"),
+    do: "/assets/standard_contracts/service_agreement_v1.editables.json"
+
+  defp other_editable_spec_path("service_agreement_v1"),
+    do: "/assets/standard_contracts/employment_v1.editables.json"
 
   defp update_document_metadata!(scope, document_id, base_revision) do
     command = %Command{

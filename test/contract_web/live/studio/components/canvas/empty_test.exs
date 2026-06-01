@@ -6,6 +6,8 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.EmptyTest do
   """
   use ContractWeb.ConnCase, async: true
 
+  @moduletag :legacy_saas
+
   import Phoenix.LiveViewTest
   import Contract.AccountsFixtures
 

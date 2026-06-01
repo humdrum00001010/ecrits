@@ -214,8 +214,6 @@ defmodule ContractWeb.CoreComponents do
   defp status_dot_bg("reviewing"), do: "bg-warning"
   defp status_dot_bg(:error), do: "bg-error"
   defp status_dot_bg("error"), do: "bg-error"
-  defp status_dot_bg(:archived), do: "bg-base-300"
-  defp status_dot_bg("archived"), do: "bg-base-300"
   defp status_dot_bg(_), do: "bg-base-content/45"
 
   @doc """

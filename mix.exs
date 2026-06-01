@@ -43,9 +43,7 @@ defmodule Contract.MixProject do
       {:tidewave, "~> 0.5", only: [:dev]},
       {:bcrypt_elixir, "~> 3.0"},
       {:phoenix, "~> 1.8.7"},
-      {:phoenix_ecto, "~> 4.5"},
-      {:ecto_sql, "~> 3.13"},
-      {:postgrex, ">= 0.0.0"},
+      {:ecto, "~> 3.13"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.1.0"},
@@ -72,11 +70,6 @@ defmodule Contract.MixProject do
       {:bandit, "~> 1.5"},
       # Contract Studio extra deps.
       {:openai_ex, "~> 0.9"},
-      {:ex_aws, "~> 2.5"},
-      {:ex_aws_s3, "~> 2.5"},
-      {:hackney, "~> 1.20"},
-      {:sweet_xml, "~> 0.7"},
-      {:oban, "~> 2.18"},
       {:dotenvy, "~> 1.0"},
       {:toml, "~> 0.7"},
       {:stream_data, "~> 1.1", only: [:test, :dev]},
@@ -94,10 +87,7 @@ defmodule Contract.MixProject do
   # See the documentation for `Mix` for more info on aliases.
   defp aliases do
     [
-      setup: ["deps.get", "ecto.setup", "assets.setup", "assets.build"],
-      "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
-      "ecto.reset": ["ecto.drop", "ecto.setup"],
-      test: test_alias(),
+      setup: ["deps.get", "assets.setup", "assets.build"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["compile", "tailwind contract", "esbuild contract"],
       "assets.deploy": [
@@ -108,17 +98,5 @@ defmodule Contract.MixProject do
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
       "test.pure": ["test --no-start"]
     ]
-  end
-
-  # The `test` alias normally runs `ecto.create --quiet && ecto.migrate --quiet`
-  # before the test task. Pure-mechanics test suites (Engine, ChangeInput,
-  # etc.) do not need a database; setting `SKIP_DB=1` lets CI / sandboxes run
-  # `mix test` without Postgres.
-  defp test_alias do
-    if System.get_env("SKIP_DB") in ["1", "true"] do
-      ["test --no-start"]
-    else
-      ["ecto.create --quiet", "ecto.migrate --quiet", "test"]
-    end
   end
 end

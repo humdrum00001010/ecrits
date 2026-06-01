@@ -5,13 +5,9 @@ defmodule Contract.MCP.Projection do
 
   ## Source of truth
 
-  R2 is the canonical source. At snapshot time the client uploads both
-  the native HWP/HWPX visual snapshot (`<rev>.hwp` or `<rev>.hwpx`) and the extracted agent IR
-  (`<rev>.ir.json`); projection helpers read the `.ir.json` blob via the
-  S3-compatible client (`Contract.IO.R2.get/2`) when deriving slices for
-  `doc.get`, `doc.read`, and `doc.write`. Postgres
-  `rhwp_snapshots.projection` stays as a hot cache that's used when R2 is
-  unreachable.
+  `rhwp_snapshots.projection` is the legacy hosted snapshot source. Active
+  local-first HWP/HWPX snapshots are stored under `.contract` by
+  `Contract.Local.Document`.
 
   The snapshotted IR is the base the agent reads. Text edits committed
   after that snapshot are overlaid for the compact MCP view so an agent
@@ -25,8 +21,6 @@ defmodule Contract.MCP.Projection do
   """
 
   import Ecto.Query
-  require Logger
-
   alias Contract.Change
   alias Contract.Repo
   alias Contract.Runtime.State
@@ -45,14 +39,7 @@ defmodule Contract.MCP.Projection do
   def to_agent_ir(%State{} = state) do
     case latest_rhwp_snapshot(state) do
       %Contract.RhwpSnapshot.Record{} = snap ->
-        snapshot_ir =
-          case fetch_ir_from_r2(snap) do
-            {:ok, ir} when is_map(ir) and map_size(ir) > 0 ->
-              from_snapshot(ir, state)
-
-            _ ->
-              from_db_projection(snap, state)
-          end
+        snapshot_ir = from_db_projection(snap, state)
 
         overlay_post_snapshot_text(snapshot_ir, state.document_id, snap.revision)
 
@@ -124,15 +111,9 @@ defmodule Contract.MCP.Projection do
     do: validate_text_edit_basis(state)
 
   defp snapshot_raw_ir(%Contract.RhwpSnapshot.Record{} = snap) do
-    case fetch_ir_from_r2(snap) do
-      {:ok, ir} when is_map(ir) and map_size(ir) > 0 ->
-        {:ok, ir}
-
-      _ ->
-        case snap.projection do
-          %{} = projection when map_size(projection) > 0 -> {:ok, projection}
-          _ -> {:ok, %{}}
-        end
+    case snap.projection do
+      %{} = projection when map_size(projection) > 0 -> {:ok, projection}
+      _ -> {:ok, %{}}
     end
   end
 
@@ -300,11 +281,6 @@ defmodule Contract.MCP.Projection do
     }
   end
 
-  defp r2_driver do
-    Application.get_env(:contract, :io_drivers, [])
-    |> Keyword.get(:r2, Contract.IO.R2)
-  end
-
   defp latest_rhwp_snapshot(%State{} = state) do
     Contract.RhwpSnapshot.latest_for_document(state.document_id, snapshot_format_for_state(state))
   end
@@ -326,23 +302,6 @@ defmodule Contract.MCP.Projection do
 
   defp template_format(_spec), do: nil
 
-  defp fetch_ir_from_r2(%Contract.RhwpSnapshot.Record{ir_r2_key: ir_key})
-       when is_binary(ir_key) do
-    with {:ok, body} <- r2_driver().get(ir_key),
-         {:ok, ir} <- Jason.decode(body) do
-      {:ok, ir}
-    else
-      err ->
-        Logger.debug("doc.get: R2 IR fetch failed for #{ir_key}: #{inspect(err)}")
-        err
-    end
-  end
-
-  defp fetch_ir_from_r2(_), do: {:error, :no_key}
-
-  # When R2 fetch fails, fall back to the snapshot row's cached `projection`
-  # column (a hot copy of the same IR). If even that's empty we return an
-  # empty IR — no legacy node-graph reconstruction.
   defp from_db_projection(
          %Contract.RhwpSnapshot.Record{projection: %{} = snap},
          %State{} = state

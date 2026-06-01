@@ -39,8 +39,8 @@ defmodule Contract.Context do
   @doc """
   Builds a context for the given user.
 
-  Returns `nil` if no user is given, matching the contract `phx.gen.auth`
-  relies on in `Contract.UserAuth`.
+  Returns `nil` if no user is given, matching the legacy auth contract used
+  by older document-scoped code.
   """
   @spec for_user(User.t() | nil) :: t() | nil
   def for_user(%User{} = user), do: %__MODULE__{user: user}

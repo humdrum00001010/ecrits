@@ -8,12 +8,14 @@ defmodule ContractWeb.PacketLive do
   use ContractWeb, :live_view
 
   alias Contract.Packets
+  alias Contract.Packets.Packet
 
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
      socket
      |> assign(:packet, nil)
+     |> assign(:packet_title_form, packet_title_form())
      |> assign(:attached_documents, [])
      |> assign(:deleting_document, nil)}
   end
@@ -28,6 +30,36 @@ defmodule ContractWeb.PacketLive do
     packet_id = field(socket.assigns.packet, :id)
 
     {:noreply, push_navigate(socket, to: ~p"/studio?packet_id=#{packet_id}")}
+  end
+
+  def handle_event("rename_packet", %{"packet" => packet_params}, socket) do
+    case socket.assigns.packet do
+      %Packet{} = packet ->
+        case Packets.update_packet(
+               socket.assigns.current_scope,
+               packet,
+               packet_title_attrs(packet_params)
+             ) do
+          {:ok, updated_packet} ->
+            {:noreply,
+             socket
+             |> assign(:packet, updated_packet)
+             |> assign(
+               :packet_title_form,
+               packet_title_form(%{"title" => packet_title(updated_packet)})
+             )
+             |> assign(:page_title, packet_title(updated_packet))}
+
+          {:error, %Ecto.Changeset{} = changeset} ->
+            {:noreply, assign(socket, :packet_title_form, to_form(changeset, action: :update))}
+
+          {:error, _reason} ->
+            {:noreply, put_flash(socket, :error, "패킷명을 수정할 수 없습니다.")}
+        end
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "패킷을 찾을 수 없습니다.")}
+    end
   end
 
   def handle_event("open_document_settings", %{"id" => document_id}, socket) do
@@ -71,6 +103,7 @@ defmodule ContractWeb.PacketLive do
       >
         <.packet_detail
           packet={@packet}
+          packet_title_form={@packet_title_form}
           attached_documents={@attached_documents}
           deleting_document={@deleting_document}
         />
@@ -80,16 +113,60 @@ defmodule ContractWeb.PacketLive do
   end
 
   attr :packet, :any, required: true
+  attr :packet_title_form, :any, required: true
   attr :attached_documents, :list, required: true
   attr :deleting_document, :any, required: true
 
   def packet_detail(assigns) do
     ~H"""
     <header class="flex items-center justify-between gap-3">
-      <div class="space-y-1">
-        <h1 class="m-0 text-[clamp(22px,4vw,28px)] font-semibold tracking-tight">
-          {packet_title(@packet)}
-        </h1>
+      <div class="min-w-0">
+        <.form
+          for={@packet_title_form}
+          id="packet-title-form"
+          phx-change="rename_packet"
+          phx-submit="rename_packet"
+          class="min-w-0"
+          phx-hook=".BlurPacketTitleOnSubmit"
+        >
+          <% title_value = Phoenix.HTML.Form.input_value(@packet_title_form, :title) || "" %>
+          <input
+            id="packet-title-input"
+            type="text"
+            name="packet[title]"
+            value={title_value}
+            size={packet_title_input_size(title_value)}
+            aria-label="패킷명"
+            autocomplete="off"
+            spellcheck="false"
+            phx-debounce="400"
+            class="block h-9 min-w-0 max-w-full rounded-md border border-transparent bg-transparent px-1 py-0 text-[clamp(22px,4vw,28px)] font-semibold tracking-tight text-base-content outline-none transition-colors hover:border-base-content/20 focus:border-base-content/40 focus:bg-base-100 focus:ring-0"
+          />
+        </.form>
+        <script :type={Phoenix.LiveView.ColocatedHook} name=".BlurPacketTitleOnSubmit">
+          export default {
+            mounted() {
+              this.titleInput = this.el.querySelector("input[name='packet[title]']")
+              this.blurTitle = () => {
+                setTimeout(() => this.titleInput?.blur(), 0)
+                setTimeout(() => this.titleInput?.blur(), 120)
+              }
+              this.onSubmit = () => this.blurTitle()
+              this.onKeyDown = event => {
+                if (event.key !== "Enter") return
+                event.preventDefault()
+                this.el.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))
+                this.blurTitle()
+              }
+              this.el.addEventListener("submit", this.onSubmit)
+              this.titleInput?.addEventListener("keydown", this.onKeyDown)
+            },
+            destroyed() {
+              this.el.removeEventListener("submit", this.onSubmit)
+              this.titleInput?.removeEventListener("keydown", this.onKeyDown)
+            }
+          }
+        </script>
       </div>
 
       <button
@@ -103,11 +180,16 @@ defmodule ContractWeb.PacketLive do
     </header>
 
     <section id="packet-documents-panel" class="space-y-3">
+      <% current_packet_id = field(@packet, :id) %>
       <.table
         id="packet-documents-table"
         rows={@attached_documents}
         row_id={fn document -> "attached-document-#{document_id(document)}" end}
-        row_click={fn document -> JS.navigate(~p"/documents/#{document_id(document)}") end}
+        row_click={
+          fn document ->
+            JS.navigate(~p"/documents/#{document_id(document)}?packet_id=#{current_packet_id}")
+          end
+        }
       >
         <:col :let={document} label="문서">
           {document_title(document)}
@@ -162,7 +244,7 @@ defmodule ContractWeb.PacketLive do
           {document_title(@deleting_document)} 항목을 이 패킷에서 제거합니다.
         </p>
         <p class="mt-2 text-sm text-base-content/60">
-          다른 패킷에 연결되어 있지 않으면 보관 처리됩니다.
+          다른 패킷에 연결되어 있지 않으면 문서가 삭제됩니다.
         </p>
 
         <div class="mt-5 flex items-center justify-end gap-2">
@@ -197,6 +279,7 @@ defmodule ContractWeb.PacketLive do
         socket
         |> assign(:page_title, packet_title(packet))
         |> assign(:packet, packet)
+        |> assign(:packet_title_form, packet_title_form(%{"title" => packet_title(packet)}))
         |> assign(:attached_documents, attached_documents(packet))
 
       {:error, _reason} ->
@@ -233,6 +316,29 @@ defmodule ContractWeb.PacketLive do
   defp find_attached_document(documents, target_document_id) do
     Enum.find(documents, &(document_id(&1) == target_document_id))
   end
+
+  defp packet_title_form(attrs \\ %{"title" => ""}) do
+    to_form(attrs, as: :packet)
+  end
+
+  defp packet_title_attrs(attrs) do
+    Map.take(attrs, ["title"])
+  end
+
+  defp packet_title_input_size(title) when is_binary(title) do
+    title
+    |> String.graphemes()
+    |> Enum.reduce(0, fn grapheme, acc ->
+      if String.match?(grapheme, ~r/[\p{Han}\p{Hangul}\p{Hiragana}\p{Katakana}]/u),
+        do: acc + 2,
+        else: acc + 1
+    end)
+    |> Kernel.+(2)
+    |> max(8)
+    |> min(32)
+  end
+
+  defp packet_title_input_size(_title), do: 8
 
   defp field(map, key, default \\ nil)
 

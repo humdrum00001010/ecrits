@@ -708,8 +708,7 @@ defmodule ContractWeb.Components.CommandPalette do
   def search_documents(scope, query) do
     Contract.Studio.search_documents(scope, query)
   rescue
-    Postgrex.Error -> []
-    DBConnection.ConnectionError -> []
+    _ -> []
   end
 
   # Backwards-compat shim — pre-Wave-4 callers used search_documents_stub/2.

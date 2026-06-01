@@ -43,8 +43,7 @@ defmodule Contract.Documents.Document do
         :editing,
         :reviewing,
         :write_completed,
-        :export_ready,
-        :archived
+        :export_ready
       ],
       default: :draft
 

@@ -143,8 +143,7 @@ defmodule Contract.ContractTypes do
         {:ok, %{}}
     end
   rescue
-    DBConnection.ConnectionError -> {:ok, %{}}
-    Postgrex.Error -> {:ok, %{}}
+    _ -> {:ok, %{}}
   end
 
   def get_matching_book(_ctx, _type_key), do: {:ok, %{}}
@@ -162,8 +161,7 @@ defmodule Contract.ContractTypes do
       |> Repo.update()
     end
   rescue
-    DBConnection.ConnectionError -> {:error, :db_unavailable}
-    Postgrex.Error -> {:error, :db_unavailable}
+    _ -> {:error, :db_unavailable}
   end
 
   def upsert_matching_book(_type_key, _matching_book), do: {:error, :invalid_matching_book}
@@ -183,14 +181,13 @@ defmodule Contract.ContractTypes do
   def ensure_document_type(type_key) when is_binary(type_key) do
     case Repo.get_by(DocumentType, key: type_key) do
       %DocumentType{} = document_type ->
-        {:ok, document_type}
+        reconcile_document_type(document_type)
 
       nil ->
         insert_document_type(type_key)
     end
   rescue
-    DBConnection.ConnectionError -> {:error, :db_unavailable}
-    Postgrex.Error -> {:error, :db_unavailable}
+    _ -> {:error, :db_unavailable}
   end
 
   @spec document_type_id_for_key(Contract.Types.contract_type_key() | nil) ::
@@ -291,6 +288,17 @@ defmodule Contract.ContractTypes do
           nil -> {:error, changeset}
         end
     end
+  end
+
+  defp reconcile_document_type(%DocumentType{key: type_key} = document_type) do
+    attrs =
+      type_key
+      |> document_type_attrs()
+      |> Map.delete(:default_matching_book)
+
+    document_type
+    |> DocumentType.changeset(attrs)
+    |> Repo.update()
   end
 
   defp document_type_attrs(type_key) do

@@ -9,23 +9,23 @@ defmodule Contract.Repo.Migrations.CreateToolCalls do
 
   def change do
     create_if_not_exists table(:tool_calls, primary_key: false) do
-      add :id, :binary_id, primary_key: true
-      add :agent_run_id, :binary_id, null: false
+      add(:id, :binary_id, primary_key: true)
+      add(:agent_run_id, :binary_id, null: false)
 
-      add :name, :string, null: false
-      add :arguments, :map, null: false, default: %{}
-      add :result, :map, null: false, default: %{}
+      add(:name, :string, null: false)
+      add(:arguments, :map, null: false, default: %{})
+      add(:result, :map, null: false, default: %{})
 
-      add :status, :string, null: false, default: "pending"
+      add(:status, :string, null: false, default: "pending")
 
-      add :started_at, :utc_datetime
-      add :completed_at, :utc_datetime
+      add(:started_at, :utc_datetime)
+      add(:completed_at, :utc_datetime)
 
       timestamps(type: :utc_datetime)
     end
 
-    create_if_not_exists index(:tool_calls, [:agent_run_id])
-    create_if_not_exists index(:tool_calls, [:name])
-    create_if_not_exists index(:tool_calls, [:status])
+    create_if_not_exists(index(:tool_calls, [:agent_run_id]))
+    create_if_not_exists(index(:tool_calls, [:name]))
+    create_if_not_exists(index(:tool_calls, [:status]))
   end
 end

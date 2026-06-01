@@ -1,21 +1,6 @@
 import Config
 
-# Playwright e2e: enables the `/test/personas/:p/sign_in` + `/test/reset`
-# routes (gated by `Application.compile_env(:contract, :test_auth)`).
-# Mirrored in `:test`; explicitly `false` in `:prod`.
-config :contract, :test_auth, true
-
-# Configure your database. Runtime values are re-applied in config/runtime.exs;
-# the fallbacks here cover bare `mix ecto.*` invocations without a populated .env.
-config :contract, Contract.Repo,
-  username: System.get_env("DB_USERNAME") || "contract",
-  password: System.get_env("DB_PASSWORD") || "contract",
-  hostname: System.get_env("DB_HOST") || "localhost",
-  port: String.to_integer(System.get_env("DB_PORT") || "5432"),
-  database: System.get_env("DB_NAME") || "contract",
-  stacktrace: true,
-  show_sensitive_data_on_connection_error: true,
-  pool_size: 10
+config :contract, :test_auth, false
 
 # For development, we disable any cache and enable
 # debugging and code reloading.
@@ -77,14 +62,13 @@ config :contract, ContractWeb.Endpoint,
 # Enable dev routes for dashboard and mailbox
 config :contract, dev_routes: true
 
-# Browser QA runs dev with test_auth enabled; keep source uploads deterministic
-# and offline unless a test explicitly overrides the driver.
+# Keep source uploads deterministic and offline unless a test explicitly
+# overrides the driver.
 config :contract, :io_drivers,
   http: Contract.IO.HTTP.Req,
   openai: Contract.IO.OpenAI,
   upstage: Contract.IO.DeterministicParser,
-  law_mcp: Contract.IO.LawMCP,
-  r2: Contract.IO.R2
+  law_mcp: Contract.IO.LawMCP
 
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"

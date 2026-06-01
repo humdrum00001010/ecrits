@@ -15,20 +15,20 @@ defmodule Contract.Repo.Migrations.CreateSlackTokens do
 
   def change do
     create table(:slack_tokens, primary_key: false) do
-      add :id, :binary_id, primary_key: true
-      add :user_id, references(:users, type: :binary_id, on_delete: :delete_all), null: false
-      add :tenant_id, :binary_id, null: true
-      add :slack_team_id, :string, null: false
-      add :slack_user_id, :string, null: false
-      add :access_token, :binary, null: false
-      add :scopes, {:array, :string}, null: false, default: []
-      add :expires_at, :utc_datetime, null: true
-      add :raw_response, :map, null: false, default: %{}
+      add(:id, :binary_id, primary_key: true)
+      add(:user_id, references(:users, type: :binary_id, on_delete: :delete_all), null: false)
+      add(:tenant_id, :binary_id, null: true)
+      add(:slack_team_id, :string, null: false)
+      add(:slack_user_id, :string, null: false)
+      add(:access_token, :binary, null: false)
+      add(:scopes, {:array, :string}, null: false, default: [])
+      add(:expires_at, :utc_datetime, null: true)
+      add(:raw_response, :map, null: false, default: %{})
 
       timestamps(type: :utc_datetime)
     end
 
-    create index(:slack_tokens, [:user_id])
-    create unique_index(:slack_tokens, [:user_id, :slack_team_id])
+    create(index(:slack_tokens, [:user_id]))
+    create(unique_index(:slack_tokens, [:user_id, :slack_team_id]))
   end
 end

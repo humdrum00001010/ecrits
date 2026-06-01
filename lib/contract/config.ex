@@ -14,15 +14,13 @@ defmodule Contract.Config do
   require Logger
 
   @required_prod ~w(
-    DATABASE_URL OPENAI_API_KEY UPSTAGE_API_KEY LAW_OC
-    R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET
+    OPENAI_API_KEY UPSTAGE_API_KEY LAW_OC
     MAIL_HOST MAIL_PORT MAIL_USERNAME MAIL_PASSWORD
     MAIL_FROM_ADDRESS MAIL_FROM_NAME SECRET_KEY_BASE
   )
 
   @required_nonprod ~w(
     OPENAI_API_KEY UPSTAGE_API_KEY LAW_OC
-    R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET
     MAIL_HOST MAIL_PORT MAIL_USERNAME MAIL_PASSWORD
     MAIL_FROM_ADDRESS MAIL_FROM_NAME
   )
@@ -61,7 +59,7 @@ defmodule Contract.Config do
       keys ->
         Logger.warning(
           "Contract.Config: missing env vars (#{env}): #{Enum.join(keys, ", ")} — " <>
-            "some features (mailer, R2, OpenAI, Upstage, Korean Law MCP) will not work."
+            "some features (mailer, OpenAI, Upstage, Korean Law MCP) will not work."
         )
 
         :ok

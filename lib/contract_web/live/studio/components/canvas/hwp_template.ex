@@ -24,7 +24,7 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplate do
       data-field-values={Jason.encode!(assigns[:field_values] || %{})}
       data-editable-spec-candidates={Jason.encode!(assigns[:editable_spec_candidates] || [])}
       data-renderer="svg"
-      data-role="standard-hwp-editor"
+      data-role={assigns[:role] || "standard-hwp-editor"}
       data-site-id={@site_id}
       data-document-id={@document_id}
       data-text-events={Jason.encode!(assigns[:text_events] || [])}
@@ -32,6 +32,10 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplate do
       data-snapshot-revision={assigns[:snapshot][:revision]}
       data-snapshot-lamport={assigns[:snapshot][:lamport]}
       data-snapshot-candidates={Jason.encode!(assigns[:snapshot_candidates] || [])}
+      data-snapshot-upload-event={assigns[:snapshot_upload_event]}
+      data-local-document-id={assigns[:local_document_id]}
+      data-local-document-format={assigns[:local_document_format]}
+      data-local-document-revision={assigns[:local_document_revision]}
     >
       <p
         data-role="standard-hwp-status"
@@ -51,6 +55,8 @@ defmodule ContractWeb.Live.Studio.Components.Canvas.HwpTemplate do
 
   defp template_path(%{template_hwp_path: path}) when is_binary(path) and path != "", do: path
   defp template_path(%{template_hwpx_path: path}) when is_binary(path) and path != "", do: path
+
+  defp template_name(%{name: name}) when is_binary(name) and name != "", do: name
 
   defp template_name(spec) do
     spec

@@ -306,17 +306,15 @@ defmodule ContractWeb.Live.Studio.Components.ChatRail do
           ></textarea>
           <div class="flex items-center justify-between gap-2 px-2 pb-1.5 pt-0.5 text-[11px] text-base-content/45">
             <div class="flex items-center gap-1">
-              <button
+              <label
                 id={"#{@id}-upload"}
-                type="button"
                 data-role="chat-upload"
-                phx-click="agent_option_picked"
-                phx-value-key="upload"
-                class="inline-flex h-6 w-6 items-center justify-center rounded text-base-content/45 hover:text-base-content hover:bg-base-200 transition-colors"
+                for="document-direct-upload-input"
+                class="inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded text-base-content/45 hover:text-base-content hover:bg-base-200 transition-colors"
                 aria-label={dgettext("studio", "파일 업로드")}
               >
                 <.icon name="hero-paper-clip" class="size-3.5" />
-              </button>
+              </label>
             </div>
             <%= if @agent_status.key in [:working, :queued, :materializing] do %>
               <button

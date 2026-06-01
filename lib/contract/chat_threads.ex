@@ -232,7 +232,13 @@ defmodule Contract.ChatThreads do
         end
 
       nil ->
-        create_thread(owner_id, state.selected_document_id, normalize_title(title))
+        case state.selected_document_id do
+          document_id when is_binary(document_id) ->
+            create_thread(owner_id, document_id, normalize_title(title))
+
+          nil ->
+            {:error, :not_found}
+        end
     end
   end
 

@@ -1,8 +1,7 @@
 defmodule ContractWeb.NotImplementedPlug do
   @moduledoc """
   Returns `501 Not Implemented` for routes whose handler hasn't been wired up
-  yet. Used as a placeholder for `/mcp` and `/slack/*` until the Gateway
-  worktree lands real implementations. See SPEC.md §21.
+  yet. Used as a placeholder for `/slack/*` until that boundary lands.
   """
 
   @behaviour Plug

@@ -1,17 +1,14 @@
 defmodule ContractWeb.Live.Studio.Components.DocumentList do
   @moduledoc """
-  Studio left rail: document tree grouped by status
-  (active/archived).
+  Studio left rail: document tree.
 
   Owned by Wave 3C1 / document-list.
 
   ## Data sources
 
-  Wave 4: `Contract.Studio.list_documents/2` is the real source. When the
-  scope's matter has no documents yet, falls back to the legacy
-  changes-table aggregate so tests pre-dating the `documents` migration
-  still see something. The result shape (document_id, title, type_key,
-  status, last_activity_at, last_revision) is stable.
+  `Contract.Studio.list_documents/1` is the real source. The result shape
+  (document_id, title, type_key, status, last_activity_at, last_revision)
+  is stable.
 
   ## Persona perms
 
@@ -40,13 +37,10 @@ defmodule ContractWeb.Live.Studio.Components.DocumentList do
   def update(assigns, socket) do
     documents = list_documents_for_matter(assigns.current_scope, assigns.studio_state)
 
-    {active, archived} = partition_by_status(documents)
-
     socket =
       socket
       |> assign(assigns)
-      |> assign(:active_documents, active)
-      |> assign(:archived_documents, archived)
+      |> assign(:documents, documents)
       |> assign(:can_create?, can_create?(assigns.current_scope))
 
     {:ok, socket}
@@ -56,8 +50,7 @@ defmodule ContractWeb.Live.Studio.Components.DocumentList do
   attr :studio_state, :map, required: true
   attr :current_scope, :map, required: true
   attr :layout, :atom, default: :desktop, values: [:desktop, :drawer]
-  attr :active_documents, :list, default: []
-  attr :archived_documents, :list, default: []
+  attr :documents, :list, default: []
   attr :can_create?, :boolean, default: false
 
   @impl true
@@ -85,9 +78,9 @@ defmodule ContractWeb.Live.Studio.Components.DocumentList do
           </p>
           <h2
             class="text-sm font-semibold tracking-tight truncate"
-            title={dgettext("studio", "Recent documents")}
+            title={dgettext("studio", "Documents")}
           >
-            {dgettext("studio", "Recent documents")}
+            {dgettext("studio", "Documents")}
           </h2>
         </div>
         <button
@@ -107,7 +100,7 @@ defmodule ContractWeb.Live.Studio.Components.DocumentList do
       <%!-- ----------------------------------------------------------- --%>
       <%!-- Body                                                         --%>
       <%!-- ----------------------------------------------------------- --%>
-      <%= if @active_documents == [] and @archived_documents == [] do %>
+      <%= if @documents == [] do %>
         <div
           id={"#{@id}-empty"}
           class="px-4 py-8 text-center"
@@ -134,19 +127,10 @@ defmodule ContractWeb.Live.Studio.Components.DocumentList do
       <% else %>
         <nav class="px-2 pb-4 overflow-y-auto" aria-label={dgettext("studio", "Document tree")}>
           <.document_group
-            :if={@active_documents != []}
-            id={"#{@id}-active"}
-            heading={dgettext("studio", "Active")}
-            documents={@active_documents}
+            id={"#{@id}-documents"}
+            heading={dgettext("studio", "Documents")}
+            documents={@documents}
             selected_document_id={@studio_state.selected_document_id}
-          />
-          <.document_group
-            :if={@archived_documents != []}
-            id={"#{@id}-archived"}
-            heading={dgettext("studio", "Archived")}
-            documents={@archived_documents}
-            selected_document_id={@studio_state.selected_document_id}
-            muted?={true}
           />
         </nav>
       <% end %>
@@ -235,10 +219,6 @@ defmodule ContractWeb.Live.Studio.Components.DocumentList do
 
   defp list_documents_for_matter(scope, _state) do
     Contract.Studio.list_documents(scope)
-  end
-
-  defp partition_by_status(documents) do
-    Enum.split_with(documents, fn doc -> doc.status != :archived end)
   end
 
   # ---------------------------------------------------------------------------

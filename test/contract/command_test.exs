@@ -45,11 +45,9 @@ defmodule Contract.CommandTest do
       doc_id = "11111111-1111-1111-1111-111111111111"
 
       for kind <- [
-            :archive_document,
             :edit_document,
             :edit_text,
             :rename_document,
-            :restore_document,
             :update_metadata,
             :set_contract_type
           ] do
@@ -71,11 +69,9 @@ defmodule Contract.CommandTest do
   describe "document_scoped_kinds/0" do
     test "returns the documented list" do
       kinds = Command.document_scoped_kinds()
-      assert :archive_document in kinds
       assert :edit_document in kinds
       assert :edit_text in kinds
       assert :rename_document in kinds
-      assert :restore_document in kinds
       assert :update_metadata in kinds
       assert :set_contract_type in kinds
       refute :create_document in kinds

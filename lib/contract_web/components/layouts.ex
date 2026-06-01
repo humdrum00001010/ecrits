@@ -2,14 +2,8 @@ defmodule ContractWeb.Layouts do
   @moduledoc """
   Layouts and shared chrome for Contract Studio's web surface.
 
-  The `app/1` component is the standard "navbar + main + flash" frame used
-  by every dead view (landing) and most LiveViews (auth, storage). It
-  reads `@current_scope` and switches the right-side nav between
-  signed-out (Log in / Get started) and signed-in (Storage / Settings /
-  Log out) states.
-
-  The Studio LiveView (Wave 3C1) is expected to render its own chrome and
-  bypass `app/1` — see SPEC.md §10.
+  The `app/1` component is the standard local-first frame used by the
+  workspace mount and editor surfaces.
   """
   use ContractWeb, :html
 
@@ -41,12 +35,12 @@ defmodule ContractWeb.Layouts do
   attr :variant, :string, default: "default", values: ~w(default narrow split)
   attr :page_title, :string, default: nil
   attr :current_document_id, :any, default: nil
+  attr :show_footer, :boolean, default: true
 
   attr :chrome, :string,
     default: "app",
     values: ~w(app landing),
-    doc:
-      "Navbar style: `app` (default, used by every LiveView — brand mark + 보관함 link + user_menu) or `landing` (marketing CTAs — only used by `/`)."
+    doc: "Navbar style: `app` (default local chrome) or `landing`."
 
   attr :breadcrumbs, :list,
     default: [],
@@ -70,7 +64,7 @@ defmodule ContractWeb.Layouts do
           </div>
         </main>
 
-        <.site_footer :if={@variant != "split"} />
+        <.site_footer :if={@show_footer && @variant != "split"} />
       </div>
 
       <div class="drawer-side z-40">
@@ -105,15 +99,14 @@ defmodule ContractWeb.Layouts do
   attr :chrome, :string, default: "app", values: ~w(app landing)
 
   @doc """
-  Top navigation. The navbar intentionally keeps the same structure on
-  every page; auth state only swaps the right-side account actions.
+  Top navigation for the local workspace product.
   """
   def top_nav(assigns) do
     ~H"""
     <header class="navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px] flex-nowrap border-b border-base-300 bg-base-200/90 supports-[backdrop-filter]:backdrop-blur-md px-7 max-md:px-4">
       <div class="navbar-start gap-6 min-w-0">
         <.link
-          navigate={if signed_in?(@current_scope), do: ~p"/storage", else: ~p"/"}
+          navigate={~p"/"}
           class="link link-hover inline-flex items-center gap-2 min-w-0 text-base-content text-sm font-semibold leading-none"
           aria-label="계약기계"
         >
@@ -122,34 +115,12 @@ defmodule ContractWeb.Layouts do
             alt=""
             class="block w-[22px] h-[22px] flex-none dark:invert dark:brightness-110"
           />
-          <span class="inline-block leading-none">계약기계</span>
+          <span class="inline-flex h-[22px] items-center leading-none">계약기계</span>
         </.link>
-
-        <ul
-          :if={signed_in?(@current_scope)}
-          class="menu menu-horizontal p-0 text-[13px]"
-          aria-label="계약기계"
-        >
-          <li>
-            <.link navigate={~p"/storage"} class="font-semibold">
-              보관함
-            </.link>
-          </li>
-        </ul>
       </div>
 
       <div class="navbar-end gap-3">
         <.theme_toggle />
-        <.user_menu :if={signed_in?(@current_scope)} current_scope={@current_scope} />
-
-        <div :if={!signed_in?(@current_scope)} class="inline-flex items-center gap-2">
-          <.link navigate={~p"/users/log-in"} class="btn btn-ghost btn-sm h-9 min-h-9">
-            {dgettext("layouts", "Log in")}
-          </.link>
-          <.link navigate={~p"/users/register"} class="btn btn-primary btn-sm h-9 min-h-9">
-            {dgettext("layouts", "Register")}
-          </.link>
-        </div>
       </div>
     </header>
     """
@@ -160,9 +131,8 @@ defmodule ContractWeb.Layouts do
     doc: "must contain `:user` with `:email`"
 
   @doc """
-  Authenticated user-profile affordance for the topbar. Renders an
-  avatar-style `<details>` dropdown (no JS) with the user's email + a
-  Settings link + a Log out action.
+  Authenticated user-profile affordance retained only for compiled legacy
+  components during the localize migration.
   """
   def user_menu(assigns) do
     email = assigns.current_scope.user.email
@@ -192,21 +162,9 @@ defmodule ContractWeb.Layouts do
 
         <div class="border-t border-base-200 my-1" />
 
-        <.link
-          navigate={~p"/users/settings"}
-          role="menuitem"
-          class="block px-3 py-2 rounded-box hover:bg-base-200"
-        >
-          {dgettext("layouts", "Settings")}
-        </.link>
-        <.link
-          href={~p"/users/log-out"}
-          method="delete"
-          role="menuitem"
-          class="block px-3 py-2 rounded-box hover:bg-base-200 text-base-content/80"
-        >
-          {dgettext("layouts", "Log out")}
-        </.link>
+        <span class="block px-3 py-2 text-base-content/60">
+          {dgettext("layouts", "Account routes retired")}
+        </span>
       </div>
     </details>
     """
@@ -215,9 +173,7 @@ defmodule ContractWeb.Layouts do
   attr :current_scope, :map, default: nil
 
   @doc """
-  Mobile drawer-side nav. Renders the same link set as the top nav, in
-  a vertical menu visible only when the user toggles the hamburger on
-  `< lg` viewports.
+  Mobile drawer-side nav for local workspace chrome.
   """
   def mobile_nav(assigns) do
     ~H"""
@@ -236,55 +192,11 @@ defmodule ContractWeb.Layouts do
         </label>
       </div>
 
-      <%= if signed_in?(@current_scope) do %>
-        <p class="text-xs uppercase tracking-wide text-base-content/50">
-          {dgettext("layouts", "Account")}
-        </p>
-        <p class="text-sm text-base-content/80 truncate">{@current_scope.user.email}</p>
-
-        <nav class="flex flex-col gap-1 text-sm">
-          <.link navigate={~p"/storage"} class="px-3 py-2 rounded-box hover:bg-base-200">
-            {dgettext("layouts", "Storage")}
-          </.link>
-          <.link navigate={~p"/studio"} class="px-3 py-2 rounded-box hover:bg-base-200">
-            {dgettext("layouts", "Studio")}
-          </.link>
-          <.link navigate={~p"/users/settings"} class="px-3 py-2 rounded-box hover:bg-base-200">
-            {dgettext("layouts", "Settings")}
-          </.link>
-        </nav>
-
-        <div class="mt-auto pt-4 border-t border-base-200">
-          <.link
-            href={~p"/users/log-out"}
-            method="delete"
-            class="btn btn-ghost btn-sm w-full justify-start"
-          >
-            <.icon name="hero-arrow-right-on-rectangle" class="size-4" /> {dgettext(
-              "layouts",
-              "Log out"
-            )}
-          </.link>
-        </div>
-      <% else %>
-        <nav class="flex flex-col gap-1 text-sm">
-          <a href="/#docs" class="px-3 py-2 rounded-box hover:bg-base-200">
-            {dgettext("layouts", "Docs")}
-          </a>
-          <a href="/#changelog" class="px-3 py-2 rounded-box hover:bg-base-200">
-            {dgettext("layouts", "Changelog")}
-          </a>
-        </nav>
-
-        <div class="mt-auto pt-4 border-t border-base-200 flex flex-col gap-2">
-          <.link navigate={~p"/users/log-in"} class="btn btn-ghost btn-sm w-full">
-            {dgettext("layouts", "Log in")}
-          </.link>
-          <.link navigate={~p"/users/register"} class="btn btn-primary btn-sm w-full">
-            {dgettext("layouts", "Register")}
-          </.link>
-        </div>
-      <% end %>
+      <nav class="flex flex-col gap-1 text-sm">
+        <.link navigate={~p"/"} class="px-3 py-2 rounded-box hover:bg-base-200">
+          Mount workspace
+        </.link>
+      </nav>
     </aside>
     """
   end
@@ -296,7 +208,7 @@ defmodule ContractWeb.Layouts do
     ~H"""
     <footer class="border-t border-base-200 mt-24">
       <div class="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-6 text-xs text-base-content/55 sm:flex-row sm:items-start sm:justify-between sm:px-6 lg:px-8">
-        <p>Contract Studio · 비공개 베타 · 2026</p>
+        <p>계약기계 · Local workspace · 2026</p>
 
         <div class="space-y-1" aria-label="문의">
           <p class="font-semibold text-base-content/70">문의</p>
@@ -312,9 +224,6 @@ defmodule ContractWeb.Layouts do
     </footer>
     """
   end
-
-  defp signed_in?(%{user: %{}}), do: true
-  defp signed_in?(_), do: false
 
   @doc """
   Shows the flash group with standard titles and content.

@@ -1,20 +1,13 @@
 defmodule ContractWeb.LegacyRedirectControllerTest do
   @moduledoc """
-  Tests for `ContractWeb.LegacyRedirectController` routes that pre-date
-  naming changes but must continue to resolve for bookmarks and email
-  links.
-
-  Each redirect is asserted to be a permanent (301) response so caches
-  and link previews can pin the new URL.
+  Tests for hosted browser routes retired by the localize migration.
   """
   use ContractWeb.ConnCase, async: true
 
   describe "GET /dashboard" do
-    setup :register_and_log_in_user
-
-    test "permanently redirects to /storage (renamed 2026-05-17)", %{conn: conn} do
+    test "returns gone instead of reaching old storage", %{conn: conn} do
       conn = get(conn, ~p"/dashboard")
-      assert redirected_to(conn, 301) == ~p"/storage"
+      assert response(conn, 410) =~ "hosted route has been retired"
     end
   end
 end

@@ -13,7 +13,6 @@ defmodule Contract.Application do
     children = [
       ContractWeb.Telemetry,
       {Phoenix.PubSub, name: Contract.PubSub},
-      Contract.Repo,
       {DNSCluster, query: Application.get_env(:contract, :dns_cluster_query) || :ignore},
       # Finch pool used by Swoosh.ApiClient.Finch. openai_ex / req each
       # manage their own pools internally, so one pool here is enough.
@@ -31,10 +30,6 @@ defmodule Contract.Application do
        pools: %{
          :default => [size: 10, count: 1, conn_max_idle_time: 30_000]
        }},
-      {Oban, Application.fetch_env!(:contract, Oban)},
-      # ETS table owner for the /mcp per-bearer rate limiter. Starts before
-      # the endpoint so the table exists by the time the first request lands.
-      ContractWeb.Plug.RateLimitMCP.Bucket,
       Contract.RhwpSnapshot.Materializer,
       ContractWeb.Endpoint,
       # Agent runtime: one process per document scope, with per-run lookup
@@ -44,7 +39,14 @@ defmodule Contract.Application do
       Contract.Agent.DocumentSupervisor,
       # Wave 2 Persistence runtime: per-document Session registry + transient supervisor.
       {Registry, keys: :unique, name: Contract.Session.Registry},
-      {DynamicSupervisor, strategy: :one_for_one, name: Contract.Session.Supervisor}
+      {DynamicSupervisor, strategy: :one_for_one, name: Contract.Session.Supervisor},
+      # Localize document runtime: one session per mounted workspace file.
+      {Registry, keys: :unique, name: Contract.Local.Document.Registry},
+      Contract.Local.Document.Supervisor,
+      # Local provider-agnostic agent endpoint runtime.
+      {Registry, keys: :unique, name: Contract.Local.Agent.SessionRegistry},
+      Contract.Local.Agent.SessionSupervisor,
+      Contract.Local.ACP
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

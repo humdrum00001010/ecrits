@@ -1,0 +1,248 @@
+{
+  "version": 1,
+  "source": "moel_hwp_curated",
+  "contractType": "employment_v1",
+  "documentPath": "/assets/standard_contracts/employment_v1.hwp",
+  "editables": [
+    {
+      "id": "employer",
+      "label": "사업주",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 1, "charOffset": 2},
+        "end": {"sectionIndex": 0, "paragraphIndex": 1, "charOffset": 16}
+      },
+      "preserveSlot": true,
+      "minWidth": 100
+    },
+    {
+      "id": "employee",
+      "label": "근로자",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 1, "charOffset": 34},
+        "end": {"sectionIndex": 0, "paragraphIndex": 1, "charOffset": 45}
+      },
+      "preserveSlot": true,
+      "minWidth": 90
+    },
+    {
+      "id": "start_date",
+      "label": "근로개시일",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 2, "charOffset": 10},
+        "end": {"sectionIndex": 0, "paragraphIndex": 2, "charOffset": 25}
+      },
+      "preserveSlot": true,
+      "minWidth": 120
+    },
+    {
+      "id": "workplace",
+      "label": "근무 장소",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 3, "charOffset": 12},
+        "end": {"sectionIndex": 0, "paragraphIndex": 3, "charOffset": 12}
+      },
+      "insertPrefix": " ",
+      "minWidth": 200
+    },
+    {
+      "id": "position",
+      "label": "업무의 내용",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 4, "charOffset": 11},
+        "end": {"sectionIndex": 0, "paragraphIndex": 4, "charOffset": 11}
+      },
+      "insertPrefix": " ",
+      "minWidth": 200
+    },
+    {
+      "id": "work_start_time",
+      "label": "근무 시작 시각",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 5, "charOffset": 12},
+        "end": {"sectionIndex": 0, "paragraphIndex": 5, "charOffset": 17}
+      },
+      "preserveSlot": true,
+      "minWidth": 48
+    },
+    {
+      "id": "work_end_time",
+      "label": "근무 종료 시각",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 5, "charOffset": 20},
+        "end": {"sectionIndex": 0, "paragraphIndex": 5, "charOffset": 26}
+      },
+      "preserveSlot": true,
+      "minWidth": 48
+    },
+    {
+      "id": "weekly_work_days",
+      "label": "주 근무일수",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 6, "charOffset": 14},
+        "end": {"sectionIndex": 0, "paragraphIndex": 6, "charOffset": 17}
+      },
+      "preserveSlot": true,
+      "minWidth": 40
+    },
+    {
+      "id": "working_days",
+      "label": "근무요일",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 6, "charOffset": 31},
+        "end": {"sectionIndex": 0, "paragraphIndex": 6, "charOffset": 38}
+      },
+      "preserveSlot": true,
+      "minWidth": 80
+    },
+    {
+      "id": "weekly_rest_day",
+      "label": "주휴일",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 6, "charOffset": 47},
+        "end": {"sectionIndex": 0, "paragraphIndex": 6, "charOffset": 50}
+      },
+      "preserveSlot": true,
+      "minWidth": 40
+    },
+    {
+      "id": "monthly_wage",
+      "label": "월 임금",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 9, "charOffset": 16},
+        "end": {"sectionIndex": 0, "paragraphIndex": 9, "charOffset": 35}
+      },
+      "preserveSlot": true,
+      "minWidth": 140
+    },
+    {
+      "id": "bonus_amount",
+      "label": "상여금",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 10, "charOffset": 20},
+        "end": {"sectionIndex": 0, "paragraphIndex": 10, "charOffset": 46}
+      },
+      "preserveSlot": true,
+      "minWidth": 160
+    },
+    {
+      "id": "allowance_1",
+      "label": "약정수당 1",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 12, "charOffset": 6},
+        "end": {"sectionIndex": 0, "paragraphIndex": 12, "charOffset": 31}
+      },
+      "preserveSlot": true,
+      "minWidth": 160
+    },
+    {
+      "id": "allowance_2",
+      "label": "약정수당 2",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 12, "charOffset": 33},
+        "end": {"sectionIndex": 0, "paragraphIndex": 12, "charOffset": 66}
+      },
+      "preserveSlot": true,
+      "minWidth": 180
+    },
+    {
+      "id": "wage_payment_date",
+      "label": "임금 지급일",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 14, "charOffset": 24},
+        "end": {"sectionIndex": 0, "paragraphIndex": 14, "charOffset": 31}
+      },
+      "preserveSlot": true,
+      "minWidth": 56
+    },
+    {
+      "id": "signature_date",
+      "label": "계약 체결일",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 27, "charOffset": 0},
+        "end": {"sectionIndex": 0, "paragraphIndex": 27, "charOffset": 21}
+      },
+      "preserveSlot": true,
+      "minWidth": 160
+    },
+    {
+      "id": "employer_company",
+      "label": "사업체명",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 28, "charOffset": 12},
+        "end": {"sectionIndex": 0, "paragraphIndex": 28, "charOffset": 31}
+      },
+      "preserveSlot": true,
+      "minWidth": 140
+    },
+    {
+      "id": "employer_phone",
+      "label": "사업주 전화",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 28, "charOffset": 36},
+        "end": {"sectionIndex": 0, "paragraphIndex": 28, "charOffset": 52}
+      },
+      "preserveSlot": true,
+      "minWidth": 120
+    },
+    {
+      "id": "employer_representative",
+      "label": "대표자",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 28, "charOffset": 70},
+        "end": {"sectionIndex": 0, "paragraphIndex": 28, "charOffset": 89}
+      },
+      "preserveSlot": true,
+      "minWidth": 140
+    },
+    {
+      "id": "employee_name",
+      "label": "근로자 성명",
+      "kind": "text_field",
+      "pageIndex": 0,
+      "position": {
+        "start": {"sectionIndex": 0, "paragraphIndex": 29, "charOffset": 32},
+        "end": {"sectionIndex": 0, "paragraphIndex": 29, "charOffset": 51}
+      },
+      "preserveSlot": true,
+      "minWidth": 140
+    }
+  ]
+}

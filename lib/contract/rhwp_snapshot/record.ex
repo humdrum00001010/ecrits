@@ -1,10 +1,10 @@
 defmodule Contract.RhwpSnapshot.Record do
   @moduledoc """
-  Persisted rhwp visual snapshot.
+  Legacy hosted RHWP visual snapshot row.
 
   Runtime state snapshots stay in `Contract.Snapshot`. This schema is only
-  for the editable HWP/HWPX document bytes and the companion agent IR captured
-  from that exact revision.
+  retained for old DB-backed hosted state; active local HWP/HWPX snapshots
+  live under `.contract`.
   """
 
   use Ecto.Schema

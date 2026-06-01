@@ -102,7 +102,7 @@ defmodule Contract.Export.HWPX do
 
   Returns `{:ok, binary}` on success. The binary is a complete ZIP
   container, suitable for writing to a `.hwpx` file or uploading via
-  `Contract.IO.R2.put/3`.
+  the retired hosted object-store path.
   """
   @spec render(State.t() | map(), keyword()) :: {:ok, binary()} | {:error, term()}
   def render(state_or_projection, _opts \\ [])
