@@ -234,9 +234,30 @@ body[data-chat-rail-dragging="true"] {
   font-display: swap;
 }
 
-/* rhwp WASM canvas styles. Class-based because rhwp.js creates these
-   elements at runtime and queries by class for hit-testing. */
-@import "./rhwp.css";
+.ehwp-document-stack {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  overflow: auto;
+  background: #f4f4f5;
+  padding: 32px 16px;
+}
+
+.ehwp-svg-page {
+  position: relative;
+  width: min(100%, 794px);
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+.ehwp-svg-page svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
 
 /* A Tailwind plugin that makes "hero-#{ICON}" classes available.
    The heroicons installation itself is managed by your mix.exs */

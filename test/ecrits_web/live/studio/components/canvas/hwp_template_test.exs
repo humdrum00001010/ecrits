@@ -28,6 +28,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpTemplateTest do
       )
 
     assert html =~ ~s(data-document-path="/assets/standard_contracts/service_agreement_v1.hwp")
+    assert html =~ ~s(data-renderer="ehwp-svg")
     assert html =~ ~s(data-snapshot-url="/documents/doc-1/rhwp-snapshots/217.hwpx")
     assert html =~ ~s(data-snapshot-revision="217")
     assert html =~ ~s(data-snapshot-lamport="9")
@@ -36,6 +37,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpTemplateTest do
     refute html =~ "data-editable-spec-candidates"
     refute html =~ "data-matching-book"
     refute html =~ "data-field-values"
+    refute html =~ ~s(phx-hook="Rhwp")
+    refute html =~ ~s(phx-update="ignore")
   end
 
   test "renders optional local snapshot event attrs" do

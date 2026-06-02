@@ -24,7 +24,6 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/ecrits"
 import topbar from "../vendor/topbar"
-import {Rhwp} from "./rhwp"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
@@ -483,7 +482,7 @@ const LocalChatRailResizer = {
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, Rhwp, DirectR2Upload, LocalChatRailResizer},
+  hooks: {...colocatedHooks, DirectR2Upload, LocalChatRailResizer},
 })
 
 // Show progress bar on live navigation and form submits

@@ -7,6 +7,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   alias Ecrits.Local.ACP
   alias Ecrits.Local.Document
+  alias Ecrits.Local.Document.EhwpRenderer
   alias Ecrits.Local.Document.RhwpAdapter
   alias Ecrits.Local.Path, as: LocalPath
   alias Ecrits.Local.Workspace
@@ -88,7 +89,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     {:ok,
      socket
      |> stream_configure(:local_agent_items, dom_id: & &1.dom_id)
+     |> stream_configure(:local_hwp_pages, dom_id: & &1.id)
      |> stream(:local_agent_items, [])
+     |> stream(:local_hwp_pages, [])
      |> assign(:page_title, "Workspace")
      |> assign(:workspace, nil)
      |> assign(:workspace_path, nil)
@@ -100,6 +103,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:local_document_error, nil)
      |> assign(:local_document_status, :none)
      |> assign(:local_document_snapshot, nil)
+     |> assign(:local_hwp_page_count, 0)
      |> assign(:workspace_error, nil)
      |> assign(:local_agent_session_id, nil)
      |> assign(:local_agent_status, :offline)
@@ -586,6 +590,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               document={@active_document}
               document_spec={local_document_spec(@active_document)}
               canvas_id={local_rhwp_dom_id(@active_document)}
+              hwp_pages={@streams.local_hwp_pages}
+              hwp_page_count={@local_hwp_page_count}
               save_state={
                 local_save_state(
                   @active_document,
@@ -593,7 +599,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                   @local_document_status
                 )
               }
-              snapshot={local_document_snapshot(@active_document)}
             />
 
             <div :if={!@active_document} class="px-5 py-6">
@@ -1229,6 +1234,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:active_document, nil)
     |> assign(:local_document_status, :none)
     |> assign(:local_document_snapshot, nil)
+    |> assign(:local_hwp_page_count, 0)
+    |> stream(:local_hwp_pages, [], reset: true)
     |> maybe_restart_local_agent_for_document(previous_document_id)
   end
 
@@ -1238,21 +1245,22 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     root = workspace_root_path(socket.assigns.workspace)
     previous_document_id = active_document_id(socket)
 
-    case RhwpAdapter.open(root, path) do
-      {:ok, response} ->
+    case Document.open(root, path) do
+      {:ok, %Document{} = document} ->
         if connected?(socket) do
-          :ok = Document.subscribe(response.document_id)
-          update_local_rhwp_materializer_editor(previous_document_id, response.document_id)
+          :ok = Document.subscribe(document.id)
+          update_local_rhwp_materializer_editor(previous_document_id, document.id)
         end
 
         socket =
           socket
-          |> assign(:selected_path, response.relative_path)
-          |> assign(:active_document_path, response.relative_path)
-          |> assign(:active_document, document_summary(response))
+          |> assign(:selected_path, document.relative_path)
+          |> assign(:active_document_path, document.relative_path)
+          |> assign(:active_document, document_summary(document))
           |> assign(:local_document_status, :opened)
           |> assign(:local_document_snapshot, nil)
           |> assign(:local_document_error, nil)
+          |> render_local_hwp_pages(document)
 
         maybe_restart_local_agent_for_document(socket, previous_document_id)
 
@@ -1265,6 +1273,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         |> assign(:active_document, nil)
         |> assign(:local_document_status, :error)
         |> assign(:local_document_error, error_message(reason))
+        |> assign(:local_hwp_page_count, 0)
+        |> stream(:local_hwp_pages, [], reset: true)
     end
   end
 
@@ -1814,6 +1824,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         |> assign(:local_document_status, action_status(action))
         |> assign(:local_document_snapshot, response.snapshot)
         |> assign(:local_document_error, nil)
+        |> maybe_render_active_local_hwp_pages(document_id)
 
       {:reply,
        %{
@@ -1856,6 +1867,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       |> assign(:local_document_status, status)
       |> assign(:local_document_snapshot, snapshot)
       |> assign(:local_document_error, nil)
+      |> render_local_hwp_pages(document)
     else
       socket
     end
@@ -1924,15 +1936,40 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp local_document_contract_type_key(_document), do: nil
 
-  defp local_document_snapshot(document) do
-    %{
-      url: nil,
-      revision: document.revision,
-      lamport: 0
-    }
+  defp local_rhwp_dom_id(%{id: id}), do: "local-rhwp-editor-#{dom_token(id)}"
+
+  defp render_local_hwp_pages(socket, %Document{} = document) do
+    socket = stream(socket, :local_hwp_pages, [], reset: true)
+
+    case EhwpRenderer.render_pages(document) do
+      {:ok, %{page_count: page_count, pages: pages}} ->
+        pages
+        |> Enum.reduce(assign(socket, :local_hwp_page_count, page_count), fn page, socket ->
+          stream_insert(socket, :local_hwp_pages, local_hwp_page(document, page))
+        end)
+
+      {:error, reason} ->
+        socket
+        |> assign(:local_hwp_page_count, 0)
+        |> assign(:local_document_error, error_message(reason))
+    end
   end
 
-  defp local_rhwp_dom_id(%{id: id}), do: "local-rhwp-editor-#{dom_token(id)}"
+  defp maybe_render_active_local_hwp_pages(socket, document_id) do
+    case Document.document(document_id) do
+      {:ok, %Document{} = document} -> render_local_hwp_pages(socket, document)
+      {:error, _reason} -> socket
+    end
+  end
+
+  defp local_hwp_page(%Document{} = document, page) do
+    page
+    |> Map.put(:id, local_hwp_page_dom_id(document, page.index))
+  end
+
+  defp local_hwp_page_dom_id(%Document{} = document, page_index) do
+    "local-ehwp-page-#{dom_token(document.id)}-r#{document.revision}-p#{page_index}"
+  end
 
   defp rhwp_request_value(request, keys) when is_map(request) do
     Enum.find_value(keys, &Map.get(request, &1))

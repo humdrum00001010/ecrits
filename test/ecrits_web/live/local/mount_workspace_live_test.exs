@@ -1,3 +1,25 @@
+defmodule EcritsWeb.LocalEhwpRuntimeStub do
+  def available?, do: true
+
+  def open(path, _opts) when is_binary(path),
+    do: {:ok, %{path: path}, %{page_count: 2}}
+
+  def page_count(_handle), do: 2
+  def profile(_handle), do: %{page_count: 2}
+
+  def render_page_svg(_handle, page_index) do
+    svg =
+      ~s(<svg data-ehwp-test-page="#{page_index}" viewBox="0 0 10 10"><text>#{page_index + 1}</text></svg>)
+
+    {:ok, svg, %{page_index: page_index}}
+  end
+
+  def read(_handle, opts), do: {:ok, {:read, opts}}
+  def find(_handle, pattern, opts), do: {:ok, {:find, pattern, opts}}
+  def write(_handle, op, opts), do: {:ok, {:write, op, opts}}
+  def close(_handle), do: :ok
+end
+
 defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   use EcritsWeb.ConnCase, async: false
 
@@ -16,8 +38,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     previous_directory_picker_stub = Application.get_env(:ecrits, :local_directory_picker_stub)
     previous_agent = Application.get_env(:ecrits, :local_agent)
     previous_agent_ui = Application.get_env(:ecrits, :local_agent_ui)
+    previous_local_ehwp_opts = Application.get_env(:ecrits, :local_ehwp_opts)
     Application.put_env(:ecrits, :local_workspace_adapter, LocalWorkspaceAdapterStub)
     Application.put_env(:ecrits, :local_directory_picker, LocalDirectoryPickerStub)
+    Application.put_env(:ecrits, :local_ehwp_opts, runtime: EcritsWeb.LocalEhwpRuntimeStub)
 
     Application.put_env(
       :ecrits,
@@ -62,6 +86,12 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         Application.put_env(:ecrits, :local_agent, previous_agent)
       else
         Application.delete_env(:ecrits, :local_agent)
+      end
+
+      if previous_local_ehwp_opts do
+        Application.put_env(:ecrits, :local_ehwp_opts, previous_local_ehwp_opts)
+      else
+        Application.delete_env(:ecrits, :local_ehwp_opts)
       end
     end)
   end
@@ -907,7 +937,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     refute has_element?(lv, "#local-file-tree-breadcrumb")
   end
 
-  test "document query reopens a local HWPX in the rhwp shell without SaaS upload UI", %{
+  test "document query reopens a local HWPX in the EHWP shell without SaaS upload UI", %{
     conn: conn
   } do
     {:ok, lv, _html} =
@@ -943,10 +973,14 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-rhwp-editor"][data-local-document-format="hwpx"][data-local-document-revision="0"])
+             ~s([data-role="local-ehwp-editor"][data-renderer="ehwp-svg"][data-local-document-format="hwpx"][data-local-document-revision="0"][data-ehwp-page-count="2"])
            )
 
-    refute has_element?(lv, ~s([data-role="local-rhwp-editor"][data-editable-spec-candidates]))
+    assert has_element?(lv, ~s([data-role="local-ehwp-pages"][phx-update="stream"]))
+    assert has_element?(lv, ~s([data-role="local-ehwp-page"][data-page-index="0"]))
+    assert has_element?(lv, ~s(svg[data-ehwp-test-page="0"]))
+    refute render(lv) =~ ~s(phx-hook="Rhwp")
+    refute has_element?(lv, ~s([data-role="local-ehwp-editor"][data-editable-spec-candidates]))
 
     refute has_element?(lv, ~s([data-role="canvas-empty-upload-action"]))
     refute has_element?(lv, "#document-direct-upload-input")
@@ -988,7 +1022,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-rhwp-editor"][data-local-document-format="hwpx"][data-document-path="#{upload_name}"])
+             ~s([data-role="local-ehwp-editor"][data-local-document-format="hwpx"][data-document-path="#{upload_name}"])
            )
 
     refute has_element?(lv, "#document-direct-upload-input")
@@ -1018,7 +1052,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-rhwp-editor"][data-local-document-format="hwp"][data-document-path="template.hwp"])
+             ~s([data-role="local-ehwp-editor"][data-local-document-format="hwp"][data-document-path="template.hwp"])
            )
   end
 
@@ -1031,10 +1065,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-rhwp-editor"][data-local-document-format="hwp"][data-document-path="employment_v1.hwp"][data-contract-type-key="employment_v1"])
+             ~s([data-role="local-ehwp-editor"][data-local-document-format="hwp"][data-document-path="employment_v1.hwp"][data-contract-type-key="employment_v1"])
            )
 
-    refute has_element?(lv, ~s([data-role="local-rhwp-editor"][data-editable-spec-candidates]))
+    refute has_element?(lv, ~s([data-role="local-ehwp-editor"][data-editable-spec-candidates]))
   end
 
   test "copied local employment standard HWP does not expose editable specs to the editor", %{
@@ -1048,10 +1082,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s|[data-role="local-rhwp-editor"][data-local-document-format="hwp"][data-document-path="employment_v1 (1).hwp"][data-contract-type-key="employment_v1"]|
+             ~s|[data-role="local-ehwp-editor"][data-local-document-format="hwp"][data-document-path="employment_v1 (1).hwp"][data-contract-type-key="employment_v1"]|
            )
 
-    refute has_element?(lv, ~s([data-role="local-rhwp-editor"][data-editable-spec-candidates]))
+    refute has_element?(lv, ~s([data-role="local-ehwp-editor"][data-editable-spec-candidates]))
   end
 
   test "local rhwp events load bytes, checkpoint, save, and reload saved revision", %{conn: conn} do
@@ -1095,7 +1129,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              reloaded_lv,
-             ~s([data-role="local-rhwp-editor"][data-local-document-revision="2"])
+             ~s([data-role="local-ehwp-editor"][data-local-document-revision="2"])
            )
   end
 
@@ -1127,7 +1161,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-rhwp-editor"][data-local-document-id="#{document_id}"])
+             ~s([data-role="local-ehwp-editor"][data-local-document-id="#{document_id}"])
            )
 
     assert {:ok, document} = Document.document(document_id)
@@ -1843,7 +1877,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       lv
       |> render()
       |> LazyHTML.from_fragment()
-      |> LazyHTML.query(~s([data-role="local-rhwp-editor"]))
+      |> LazyHTML.query(~s([data-role="local-ehwp-editor"]))
       |> LazyHTML.attribute("data-local-document-id")
       |> List.first()
 

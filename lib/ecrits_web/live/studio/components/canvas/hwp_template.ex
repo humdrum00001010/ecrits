@@ -2,9 +2,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpTemplate do
   @moduledoc """
   HWP/HWPX-backed standard contract canvas.
 
-  This component owns the rhwp SVG preview boundary for government
-  standard-contract originals. DocumentLive only chooses the current
-  template; this component owns the DOM that rhwp mutates.
+  Static metadata boundary for hosted HWP/HWPX templates.
   """
   use EcritsWeb, :live_component
 
@@ -16,11 +14,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpTemplate do
       class="relative h-full min-h-0 overflow-auto bg-white"
       data-component="canvas-hwp-template"
       data-contract-type-key={@spec.key}
-      phx-hook="Rhwp"
-      phx-update="ignore"
       data-document-path={template_path(@spec)}
       data-document-name={template_name(@spec)}
-      data-renderer="svg"
+      data-renderer="ehwp-svg"
       data-role={assigns[:role] || "standard-hwp-editor"}
       data-site-id={@site_id}
       data-document-id={@document_id}
@@ -43,7 +39,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpTemplate do
       </p>
       <div
         data-role="standard-hwp-svg"
-        class="rhwp-document-stack"
+        class="ehwp-document-stack"
       >
       </div>
     </div>

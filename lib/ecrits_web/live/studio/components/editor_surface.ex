@@ -5,7 +5,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
 
   use EcritsWeb, :html
 
-  alias EcritsWeb.Live.Studio.Components.Canvas.HwpTemplate
+  alias EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages
 
   attr :id, :string, default: "studio-root"
   attr :shell_id, :string, required: true
@@ -15,8 +15,8 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   attr :document_spec, :map, required: true
   attr :canvas_id, :string, required: true
   attr :save_state, :string, required: true
-  attr :snapshot, :map, required: true
-  attr :snapshot_upload_event, :string, default: "rhwp.local.snapshot.save"
+  attr :hwp_pages, :any, required: true
+  attr :hwp_page_count, :integer, default: 0
 
   def local_document(assigns) do
     assigns = assign(assigns, :document_path, assigns.document.relative_path)
@@ -113,20 +113,14 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
           <article class="relative m-0 flex min-h-0 flex-1 overflow-hidden border-0 bg-transparent p-0 font-sans text-[15px] leading-[1.78] text-base-content shadow-none max-sm:mx-3 max-sm:px-5 max-sm:py-7">
             <div class="relative h-full min-h-0 w-full">
               <div id={@frame_id} class="contents">
-                <.live_component
-                  module={HwpTemplate}
+                <LocalHwpPages.render
                   id={@canvas_id}
+                  pages={@hwp_pages}
+                  page_count={@hwp_page_count}
                   spec={@document_spec}
-                  site_id="local"
                   document_id={@document.id}
-                  text_events={[]}
-                  snapshot={@snapshot}
-                  snapshot_candidates={[]}
-                  snapshot_upload_event={@snapshot_upload_event}
-                  local_document_id={@document.id}
-                  local_document_revision={@document.revision}
                   local_document_format={@document.format}
-                  role="local-rhwp-editor"
+                  local_document_revision={@document.revision}
                 />
               </div>
             </div>
