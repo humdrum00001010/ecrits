@@ -88,7 +88,10 @@ defmodule Ecrits.Supervision do
 
   defp document_service_children do
     [
-      Ecrits.RhwpSnapshot.Materializer
+      Ecrits.RhwpSnapshot.Materializer,
+      # Multi-document MCP registry: one Editor per open document, browser/server
+      # backing, revision/rebase. See `Ecrits.Doc.Pool` (doc-editing MCP design §4.3).
+      Ecrits.Doc.Pool
     ] ++ office_warmer_children()
   end
 

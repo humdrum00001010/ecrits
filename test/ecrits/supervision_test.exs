@@ -23,6 +23,7 @@ defmodule Ecrits.SupervisionTest do
              Ecrits.Repo,
              Ecrits.Loader,
              Ecrits.RhwpSnapshot.Materializer,
+             Ecrits.Doc.Pool,
              EcritsWeb.Endpoint,
              Ecrits.Local.Document.Registry,
              Ecrits.Local.Document.Supervisor,
