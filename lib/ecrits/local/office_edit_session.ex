@@ -50,6 +50,11 @@ defmodule Ecrits.Local.OfficeEditSession do
   #   * twip margin above the caret line we still repaint (a descender / the line
   #     box just above), so the clip never visibly chops the current line.
   @caret_clip_margin_twip 240
+  #   * while actively typing, paint only a BAND of this height around the caret
+  #     line (~5 lines) instead of caret-to-bottom: a ~12KB PNG vs ~75KB, so each
+  #     keystroke transfers/decodes far faster. The idle crisp repaint covers the
+  #     full caret-to-bottom region, fixing any reflow below the band.
+  @live_band_twip 1400
 
   defstruct [
     :edit,
@@ -63,9 +68,12 @@ defmodule Ecrits.Local.OfficeEditSession do
     :part_count,
     :repaint_timer,
     :crisp_timer,
-    # Pending coalesced repaint for the active part: the union (min y .. doc
-    # bottom) we will paint once the debounce fires, clipped to caret-down.
+    # Pending coalesced repaint for the active part: a BAND around the caret
+    # line, painted at the cheap typing scale when the debounce fires.
     :pending_repaint,
+    # The full caret-to-bottom region for the one-shot crisp repaint after typing
+    # goes idle (covers reflow below the live band).
+    :full_repaint,
     # Last known caret (twips doc-space) so the clip can start at the caret line.
     :last_caret_twip_y,
     # Monotonic ms of the last live paint, for leading-edge debounce.
@@ -260,14 +268,16 @@ defmodule Ecrits.Local.OfficeEditSession do
       case state.pending_repaint do
         %{} = region ->
           paint_region(state, region, @typing_scale)
+          crisp = state.full_repaint || region
 
           %{
             state
             | repaint_timer: nil,
               pending_repaint: nil,
+              full_repaint: nil,
               last_paint_ms: System.monotonic_time(:millisecond)
           }
-          |> arm_crisp_repaint(region)
+          |> arm_crisp_repaint(crisp)
 
         _ ->
           %{state | repaint_timer: nil}
@@ -353,7 +363,7 @@ defmodule Ecrits.Local.OfficeEditSession do
           _ -> min_y
         end
 
-      region = %{
+      crisp_region = %{
         part: part,
         x: full.x,
         y: clip_top,
@@ -361,8 +371,15 @@ defmodule Ecrits.Local.OfficeEditSession do
         h: max(max_y - clip_top, 1)
       }
 
-      merged = union_region(state.pending_repaint, region)
-      arm_repaint(%{state | pending_repaint: merged})
+      # Live typing paints only a band around the caret line (small PNG, fast
+      # transfer); the idle crisp repaint covers the whole caret-to-bottom span.
+      live_region = %{crisp_region | h: min(crisp_region.h, @live_band_twip)}
+
+      arm_repaint(%{
+        state
+        | pending_repaint: union_region(state.pending_repaint, live_region),
+          full_repaint: union_region(state.full_repaint, crisp_region)
+      })
     end
   end
 
