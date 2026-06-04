@@ -7,30 +7,38 @@ defmodule Ecrits.Local.ACP do
 
   alias Ecrits.Local.Agent.Adapters.ClaudeCLI
   alias Ecrits.Local.Agent.Adapters.CodexAppServer
+  alias Ecrits.Local.Agent.Adapters.ExMCPACP
   alias Ecrits.Local.Agent.Adapters.Fake
   alias Ecrits.Local.Agent.Adapters.Unavailable
+  alias ExMCP.ACP.Adapters.Claude, as: ExMCPClaude
+  alias ExMCP.ACP.Adapters.Codex, as: ExMCPCodex
   alias Ecrits.Local.Agent.OrchexAdapter
   alias Ecrits.Local.Agent.Session
   alias Ecrits.Local.Agent.SessionSupervisor
 
   @name __MODULE__
 
+  # Provider routing now drives the maintained ExMCP.ACP stack via
+  # `Ecrits.Local.Agent.Adapters.ExMCPACP`, selecting the matching ACP agent
+  # adapter per provider (Codex / Claude). The bespoke `CodexAppServer` /
+  # `ClaudeCLI` adapters remain available for fallback/override but are no longer
+  # the default producer for the chat rail.
   @providers [
     %{
       id: "codex",
       label: "Codex",
       icon: "local-agent-provider-codex",
       favicon_src: "/images/icons/openai-blossom.svg",
-      adapter: CodexAppServer,
-      adapter_opts: []
+      adapter: ExMCPACP,
+      adapter_opts: [exmcp_adapter: ExMCPCodex]
     },
     %{
       id: "claude",
       label: "Claude",
       icon: "local-agent-provider-claude",
       favicon_src: "/images/icons/claude-favicon.ico",
-      adapter: ClaudeCLI,
-      adapter_opts: []
+      adapter: ExMCPACP,
+      adapter_opts: [exmcp_adapter: ExMCPClaude]
     },
     %{
       id: "external",

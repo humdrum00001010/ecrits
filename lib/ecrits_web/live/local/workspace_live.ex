@@ -3809,6 +3809,34 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     "Local agent runtime unavailable. Refresh the workspace."
   end
 
-  defp local_agent_error(reason) when is_binary(reason), do: reason
+  # ExMCP.ACP adapter failures arrive as inspected strings (the adapter raises
+  # with a descriptive message that Session inspects into the event reason). Map
+  # the common provider-startup failures (missing CLI binary, bridge launch
+  # failure) onto the same friendly guidance the bespoke adapters produced.
+  defp local_agent_error(reason) when is_binary(reason) do
+    cond do
+      acp_codex_unavailable?(reason) ->
+        "Codex ACP unavailable. Install codex, then refresh agent chat."
+
+      acp_claude_unavailable?(reason) ->
+        "Claude unavailable. Install and authenticate Claude CLI, then refresh agent chat."
+
+      true ->
+        reason
+    end
+  end
+
   defp local_agent_error(reason), do: inspect(reason)
+
+  defp acp_codex_unavailable?(reason) do
+    (String.contains?(reason, "executable_not_found") or
+       String.contains?(reason, "ex_mcp ACP session start failed")) and
+      String.contains?(reason, "codex")
+  end
+
+  defp acp_claude_unavailable?(reason) do
+    (String.contains?(reason, "executable_not_found") or
+       String.contains?(reason, "ex_mcp ACP session start failed")) and
+      String.contains?(reason, "claude")
+  end
 end

@@ -263,6 +263,7 @@ defmodule Ecrits.Local.Agent.EndpointTest do
     {:ok, session} =
       start_local_session(
         provider: :codex,
+        adapter: CodexAppServer,
         adapter_opts: [executable: missing, timeout: 1_000]
       )
 
@@ -288,6 +289,7 @@ defmodule Ecrits.Local.Agent.EndpointTest do
     {:ok, session} =
       start_local_session(
         provider: :codex,
+        adapter: CodexAppServer,
         adapter_opts: [executable: executable, timeout: 2_000]
       )
 
@@ -325,6 +327,7 @@ defmodule Ecrits.Local.Agent.EndpointTest do
     {:ok, session} =
       start_local_session(
         provider: :codex,
+        adapter: CodexAppServer,
         document_id: document.id,
         workspace_root: document.workspace_root,
         adapter_opts: [executable: executable, timeout: 2_000, approval_policy: "on_write"]

@@ -1385,6 +1385,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     Application.put_env(:ecrits, :local_agent_ui,
       provider: "codex",
+      adapter: Ecrits.Local.Agent.Adapters.CodexAppServer,
       adapter_opts: [executable: missing, timeout: 200]
     )
 
@@ -2109,7 +2110,6 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     |> Map.get(:socket)
     |> then(& &1.assigns[key])
   end
-
 
   defp read_jsonl!(path) do
     path
