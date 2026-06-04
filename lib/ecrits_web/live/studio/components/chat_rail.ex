@@ -571,20 +571,10 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
     """
   end
 
-  # GFM markdown -> sanitized HTML via the MDEx library (comrak). Raw HTML in the
+  # GFM markdown -> sanitized HTML via the shared MDEx renderer. Raw HTML in the
   # source is escaped by default, so agent/user output can't inject markup. On any
-  # parse error we fall back to the plain text rather than crash the render.
-  defp render_markdown(body) when is_binary(body) and body != "" do
-    Phoenix.HTML.raw(
-      MDEx.to_html!(body,
-        extension: [strikethrough: true, table: true, autolink: true, tasklist: true]
-      )
-    )
-  rescue
-    _ -> body
-  end
-
-  defp render_markdown(_), do: ""
+  # parse error the helper falls back to the plain text rather than crash.
+  defp render_markdown(body), do: EcritsWeb.Markdown.to_safe_html(body)
 
   attr :operation, :map, required: true
   attr :transient?, :boolean, default: false

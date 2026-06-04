@@ -13,7 +13,8 @@ defmodule Ecrits.Local.Document do
 
   @ehwp_formats ~w(hwp hwpx)
   @libreoffice_formats ~w(doc docx docm dot dotx dotm xls xlsx xlsm xlt xltx xltm ppt pptx pptm pps ppsx ppsm pot potx potm rtf)
-  @formats @ehwp_formats ++ @libreoffice_formats
+  @markdown_formats ~w(md markdown)
+  @formats @ehwp_formats ++ @libreoffice_formats ++ @markdown_formats
   @hwp_content_type "application/x-hwp"
   @hwpx_content_type "application/vnd.hancom.hwpx"
   @hwp_min_byte_size 512
@@ -155,6 +156,10 @@ defmodule Ecrits.Local.Document do
       {:ok, format} when format in @libreoffice_formats ->
         {:ok, format}
 
+      # Markdown is plain text with no file magic — trust the extension.
+      {:ok, format} when format in @markdown_formats ->
+        {:ok, format}
+
       _other ->
         with {:ok, format} <- detect_magic(bytes),
              :ok <- verify_extension_format(path_or_name, format) do
@@ -197,6 +202,9 @@ defmodule Ecrits.Local.Document do
   def content_type("pptx"),
     do: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
+  def content_type("md"), do: "text/markdown"
+  def content_type("markdown"), do: "text/markdown"
+
   def content_type(_format), do: "application/octet-stream"
 
   @spec ehwp_format?(format()) :: boolean()
@@ -204,6 +212,9 @@ defmodule Ecrits.Local.Document do
 
   @spec libreoffice_format?(format()) :: boolean()
   def libreoffice_format?(format), do: format in @libreoffice_formats
+
+  @spec markdown_format?(format()) :: boolean()
+  def markdown_format?(format), do: format in @markdown_formats
 
   @spec id_for(String.t(), String.t()) :: String.t()
   def id_for(workspace_root, relative_path)

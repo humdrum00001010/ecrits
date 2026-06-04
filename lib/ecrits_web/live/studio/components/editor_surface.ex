@@ -6,6 +6,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   use EcritsWeb, :html
 
   alias EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages
+  alias EcritsWeb.Live.Studio.Components.Canvas.LocalMarkdownEditor
   alias EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeEditor
   alias EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeTiles
 
@@ -24,6 +25,8 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   attr :hwp_page_count, :integer, default: 0
   attr :hwp_stream_loading?, :boolean, default: false
   attr :office_edit?, :boolean, default: false
+  attr :markdown_source, :string, default: ""
+  attr :markdown_preview_html, :any, default: ""
 
   def local_document(assigns) do
     assigns =
@@ -153,8 +156,20 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                   local_document_format={@document.format}
                   local_document_revision={@document.revision}
                 />
+                <LocalMarkdownEditor.render
+                  :if={markdown_format?(@document.format)}
+                  id={@canvas_id}
+                  document_id={@document.id}
+                  local_document_format={@document.format}
+                  local_document_revision={@document.revision}
+                  source={@markdown_source}
+                  preview_html={@markdown_preview_html}
+                />
                 <LocalOfficeEditor.render
-                  :if={!ehwp_format?(@document.format) and @office_edit?}
+                  :if={
+                    not ehwp_format?(@document.format) and
+                      not markdown_format?(@document.format) and @office_edit?
+                  }
                   id={@canvas_id}
                   document_id={@document.id}
                   local_document_format={@document.format}
@@ -162,7 +177,10 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                   loading?={@hwp_stream_loading?}
                 />
                 <LocalOfficeTiles.render
-                  :if={!ehwp_format?(@document.format) and not @office_edit?}
+                  :if={
+                    not ehwp_format?(@document.format) and
+                      not markdown_format?(@document.format) and not @office_edit?
+                  }
                   id={@canvas_id}
                   tiles={@hwp_pages}
                   page_count={@hwp_page_count}
@@ -189,6 +207,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   end
 
   defp ehwp_format?(format), do: format in ~w(hwp hwpx)
+  defp markdown_format?(format), do: format in ~w(md markdown)
 
   defp toggle_local_fullscreen(js \\ %JS{}) do
     js

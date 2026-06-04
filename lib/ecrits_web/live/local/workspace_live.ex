@@ -109,6 +109,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:office_edit_session, nil)
      |> assign(:office_edit_document_id, nil)
      |> assign(:office_edit_document, nil)
+     # Markdown (.md/.markdown) editor: plain-text source + live MDEx preview.
+     |> assign(:local_markdown_source, "")
+     |> assign(:local_markdown_preview_html, "")
      |> assign(:page_title, "Workspace")
      |> assign(:workspace, nil)
      |> assign(:workspace_path, nil)
@@ -393,6 +396,45 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         {:noreply, socket}
     end
   end
+
+  # --- Markdown (.md/.markdown) editor events (from the MarkdownEditor hook) ----
+  # Debounced source changes re-render the live preview; Ctrl/Cmd+S persists the
+  # current source to the canonical workspace file via the file-based Document
+  # persistence. Both are no-ops unless the active document is markdown, so a
+  # stray client event can never crash the LiveView.
+
+  def handle_event("markdown.source_changed", %{"source" => source}, socket)
+      when is_binary(source) do
+    if markdown_document_active?(socket) do
+      {:noreply,
+       socket
+       |> assign(:local_markdown_source, source)
+       |> assign(:local_markdown_preview_html, EcritsWeb.Markdown.to_safe_html(source))}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("markdown.source_changed", _params, socket), do: {:noreply, socket}
+
+  def handle_event("markdown.save", %{"source" => source}, socket) when is_binary(source) do
+    with %{id: document_id} <- socket.assigns[:active_document],
+         true <- markdown_document_active?(socket),
+         {:ok, _document, _snapshot} <- Document.save(document_id, source) do
+      # The `:local_document_saved` broadcast updates save_state + revision via
+      # apply_local_document_snapshot/4; we just confirm the save to the client.
+      {:noreply, push_event(socket, "markdown_saved", %{ok: true})}
+    else
+      {:error, reason} ->
+        {:noreply,
+         push_event(socket, "markdown_saved", %{ok: false, error: error_message(reason)})}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("markdown.save", _params, socket), do: {:noreply, socket}
 
   def handle_event("refresh_tree", _params, socket) do
     {:noreply, refresh_tree(socket, socket.assigns.expanded_paths)}
@@ -905,6 +947,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               hwp_page_count={@local_hwp_page_count}
               hwp_stream_loading?={@local_hwp_stream_loading?}
               office_edit?={@local_hwp_stream_renderer == :libreofficex_edit}
+              markdown_source={@local_markdown_source}
+              markdown_preview_html={@local_markdown_preview_html}
               save_state={
                 @active_document &&
                   local_save_state(
@@ -2468,11 +2512,39 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp local_rhwp_dom_id(%{id: id}), do: "local-rhwp-editor-#{dom_token(id)}"
 
   defp render_local_document_pages(socket, %Document{format: format} = document) do
-    if Document.ehwp_format?(format) do
-      render_local_hwp_pages(socket, document)
-    else
-      render_local_office_tiles(socket, document)
+    cond do
+      Document.ehwp_format?(format) -> render_local_hwp_pages(socket, document)
+      Document.markdown_format?(format) -> render_local_markdown(socket, document)
+      true -> render_local_office_tiles(socket, document)
     end
+  end
+
+  # Markdown (.md/.markdown) is plain text — no engine, no stream, no LOK/WASM.
+  # We load the canonical workspace bytes as UTF-8 source into the editable
+  # textarea and render a live MDEx preview alongside it. Re-entrant on save
+  # (the `:local_document_saved` broadcast re-renders), so we only reseed the
+  # source when it actually differs from what's already in the editor — the
+  # textarea is phx-update="ignore" anyway, so this just keeps the assign honest
+  # and the preview in sync without clobbering the user's in-flight edits.
+  defp render_local_markdown(socket, %Document{} = document) do
+    socket =
+      socket
+      |> unsubscribe_local_hwp_stream()
+      |> clear_local_hwp_pages()
+      |> assign(:local_hwp_stream_renderer, :markdown)
+      |> assign(:local_hwp_stream_document_id, document.id)
+      |> assign(:local_hwp_stream_revision, document.revision)
+      |> assign(:local_hwp_stream_loading?, false)
+
+    source =
+      case Document.read(document.id) do
+        {:ok, bytes} when is_binary(bytes) -> bytes
+        _ -> ""
+      end
+
+    socket
+    |> assign(:local_markdown_source, source)
+    |> assign(:local_markdown_preview_html, EcritsWeb.Markdown.to_safe_html(source))
   end
 
   # HWP/HWPX now render entirely in the browser via rhwp_core WASM. The server
@@ -2661,6 +2733,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp office_stream?(%{assigns: %{local_hwp_stream_renderer: :libreofficex}}), do: true
 
   defp office_stream?(_socket), do: false
+
+  defp markdown_document_active?(%{assigns: %{active_document: %{format: format}}})
+       when is_binary(format),
+       do: Document.markdown_format?(format)
+
+  defp markdown_document_active?(_socket), do: false
 
   defp current_local_hwp_stream?(socket, stream_id) do
     active_document = socket.assigns.active_document
