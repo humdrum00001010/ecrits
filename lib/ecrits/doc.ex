@@ -5,8 +5,8 @@ defmodule Ecrits.Doc do
   This is the `Ecrits.Doc` behaviour from the document-editing MCP design
   (`docs/plans/2026-06-04-doc-editing-mcp-design.md`, §4.2). It mirrors each
   engine's own object/property model so that a *small* set of reflective MCP
-  tools (`doc.outline`/`read`/`find`/`get`/`set`/`edit`/`apply_style`/`save`)
-  can drive any backend without one tool per editing operation.
+  tools (`doc.inspect`/`outline`/`read`/`find`/`get`/`set`/`edit`/`apply_style`/
+  `save`) can drive any backend without one tool per editing operation.
 
   Implementations:
 
@@ -74,6 +74,18 @@ defmodule Ecrits.Doc do
   @doc "Literal search. Returns `[%{ref: ref, text: ...}]`-shaped matches."
   @callback find(handle(), pattern :: String.t(), opts :: keyword()) ::
               {:ok, [map()]} | {:error, term()}
+
+  @doc """
+  Reflective discovery for `ref` (design §4.1, §4.4 `inspect`).
+
+  Mirrors the engine's own self-description so the agent never hard-codes a
+  property name: for Office this is `XServiceInfo` + `XPropertySetInfo` +
+  children; for rhwp it is the element's type plus the *native* property names
+  (`Bold`/`Italic`/`Width`/…) that `get/3`/`set/4` understand for that element
+  kind, plus its child refs. The returned map carries at least `:ref`,
+  `:type`, and `:properties` (a list of native property names).
+  """
+  @callback inspect(handle(), ref() | nil) :: {:ok, map()} | {:error, term()}
 
   @doc "Read native properties of `ref` (nil props = all)."
   @callback get(handle(), ref(), props :: [String.t()] | nil) ::

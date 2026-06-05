@@ -66,4 +66,30 @@ defmodule Ecrits.Doc.RhwpNativeTest do
       assert after_text =~ "ECRITS_DOC_MCP_TOKEN"
     end
   end
+
+  test "real NIF: doc.read is capped at 30 paragraphs with a continuation cursor", %{} = context do
+    unless context[:native] do
+      IO.puts("\n[skip] ehwp NIF not loaded; skipping real-NIF cap test")
+    else
+      ctx = context.ctx
+
+      {:ok, %{"document" => doc}} =
+        Tools.call(ctx, "doc.open", %{"path" => @fixture, "kind" => "hwpx"})
+
+      # The real contract is a 53-page document with hundreds of paragraphs;
+      # a single read must still return at most 30 of them, plus a cursor.
+      assert {:ok, page0} = Tools.call(ctx, "doc.read", %{"document" => doc})
+      assert page0["size"] <= 30
+      assert page0["size"] == 30
+      assert length(page0["paragraphs"]) == 30
+      assert page0["total"] > 30
+      assert page0["next_at"] == 30
+      assert page0["capped"] == 30
+
+      # Paging advances and remains within the cap.
+      assert {:ok, page1} = Tools.call(ctx, "doc.read", %{"document" => doc, "at" => 30})
+      assert page1["at"] == 30
+      assert page1["size"] <= 30
+    end
+  end
 end

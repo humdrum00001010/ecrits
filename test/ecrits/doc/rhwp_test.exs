@@ -28,6 +28,79 @@ defmodule Ecrits.Doc.RhwpTest do
       assert result.text =~ "제2조"
       assert is_integer(result.size)
     end
+
+    test "NEVER returns more than the 30-paragraph cap in one call" do
+      # 100-paragraph document; a single read must return at most 30 paragraphs.
+      text = 1..100 |> Enum.map_join("\n", &"para #{&1}")
+      {:ok, handle} = Rhwp.open("big.hwp", __text__: text)
+      on_exit(fn -> Rhwp.close(handle) end)
+
+      assert Rhwp.read_paragraph_cap() == 30
+
+      assert {:ok, result} = Rhwp.read(handle, [])
+      assert result.size == 30
+      assert length(result.paragraphs) == 30
+      assert result.total == 100
+      assert result.at == 0
+      assert result.next_at == 30
+      # The chunk text contains exactly 30 paragraphs.
+      assert length(String.split(result.text, "\n")) == 30
+    end
+
+    test "caps an explicit oversized size request at 30" do
+      text = 1..100 |> Enum.map_join("\n", &"para #{&1}")
+      {:ok, handle} = Rhwp.open("big.hwp", __text__: text)
+      on_exit(fn -> Rhwp.close(handle) end)
+
+      assert {:ok, result} = Rhwp.read(handle, at: 0, size: 1000)
+      assert result.size == 30
+    end
+
+    test "pages through the document via next_at until the end" do
+      text = 1..70 |> Enum.map_join("\n", &"para #{&1}")
+      {:ok, handle} = Rhwp.open("big.hwp", __text__: text)
+      on_exit(fn -> Rhwp.close(handle) end)
+
+      assert {:ok, p0} = Rhwp.read(handle, at: 0)
+      assert p0.size == 30 and p0.next_at == 30
+
+      assert {:ok, p1} = Rhwp.read(handle, at: p0.next_at)
+      assert p1.size == 30 and p1.next_at == 60
+      assert hd(p1.paragraphs) == "para 31"
+
+      assert {:ok, p2} = Rhwp.read(handle, at: p1.next_at)
+      # last page: only 10 paragraphs remain, cursor is nil (end reached).
+      assert p2.size == 10
+      assert p2.next_at == nil
+      assert List.last(p2.paragraphs) == "para 70"
+    end
+  end
+
+  describe "inspect/2 — reflective property-IR discovery" do
+    test "document inspect reports type, interfaces, and children", %{handle: handle} do
+      assert {:ok, info} = Rhwp.inspect(handle, nil)
+      assert info.type == "document"
+      assert "Container" in info.interfaces
+      assert is_list(info.children)
+      assert length(info.children) >= 3
+    end
+
+    test "paragraph inspect reports NATIVE property names (Bold/FontSize/...)", %{handle: handle} do
+      ref = Ecrits.Doc.Rhwp.Ref.encode(%{kind: :paragraph, sec: 0, para: 1})
+      assert {:ok, info} = Rhwp.inspect(handle, ref)
+      assert info.type == "paragraph"
+      assert "Bold" in info.properties
+      assert "FontSize" in info.properties
+      assert "Alignment" in info.properties
+    end
+
+    test "char-run inspect reports char native props", %{handle: handle} do
+      ref = Ecrits.Doc.Rhwp.Ref.encode(%{kind: :char, sec: 0, para: 1, off: 0, len: 3})
+      assert {:ok, info} = Rhwp.inspect(handle, ref)
+      assert info.type == "char_run"
+      assert "Bold" in info.properties
+      assert "Italic" in info.properties
+    end
   end
 
   describe "find/3" do

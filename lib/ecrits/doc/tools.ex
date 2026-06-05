@@ -7,10 +7,12 @@ defmodule Ecrits.Doc.Tools do
 
   | tool             | risk  | maps to |
   |------------------|-------|---------|
+  | `doc.context`    | read  | active document + cursor/selection ref |
   | `doc.list`       | read  | `Pool.list/1` |
   | `doc.open`       | read  | `Pool.open/3` |
+  | `doc.inspect`    | read  | `Editor.inspect_element/2` (services/interfaces/props/children) |
   | `doc.outline`    | read  | `Editor.outline/3` |
-  | `doc.read`       | read  | `Editor.read/2` |
+  | `doc.read`       | read  | `Editor.read/2` (**≤30 paragraphs/call** + cursor) |
   | `doc.find`       | read  | `Editor.find/3` |
   | `doc.get`        | read  | `Editor.get/3` |
   | `doc.set`        | write | `Editor.set/4` (base_revision) |
@@ -18,9 +20,14 @@ defmodule Ecrits.Doc.Tools do
   | `doc.apply_style`| write | `Editor.apply_style/3` |
   | `doc.save`       | write | `Editor.save/2` |
 
+  `doc.read` is **incremental**: a single call returns at most 30 paragraphs (a
+  hard cap, design §4.4) plus a `next_at` cursor, so the agent pages through a
+  document and never pulls the whole thing.
+
   The deep Office tools (`office.inspect`/`office.call`/`office.dispatch`,
   design §4.4 "Office 전용 심화") are intentionally **not** part of this HWP
-  surface; the LibreOffice backend is a separate effort.
+  surface; the LibreOffice backend is a separate effort. The reflective
+  `doc.inspect` here is the engine-agnostic equivalent for the HWP backend.
 
   Tools run against a context map `%{pool: pool}` (defaults to the named
   `Ecrits.Doc.Pool`). Results are JSON-shaped maps so the layer is testable
@@ -34,7 +41,22 @@ defmodule Ecrits.Doc.Tools do
 
   @namespace "doc"
 
+  # Hard cap on `doc.read` (design §4.4, the user's explicit limit). Sourced
+  # from the backend so the tool schema and the enforcement can never drift.
+  @read_cap Ecrits.Doc.Rhwp.read_paragraph_cap()
+
   @tools [
+    %{
+      "namespace" => @namespace,
+      "name" => "context",
+      "description" =>
+        "Active/focused document id + cursor/selection ref. Reads whatever active-doc " <>
+          "and cursor state is currently available server-side. (Browser->server cursor " <>
+          "reporting that populates the live cursor is wired by the editors; see TODO.)",
+      "risk" => "read",
+      "inputSchema" => %{"type" => "object", "additionalProperties" => false, "properties" => %{}},
+      "annotations" => %{"readOnlyHint" => true}
+    },
     %{
       "namespace" => @namespace,
       "name" => "list",
@@ -77,15 +99,30 @@ defmodule Ecrits.Doc.Tools do
     %{
       "namespace" => @namespace,
       "name" => "read",
-      "description" => "Read a text chunk from a document.",
+      "description" =>
+        "Read a paragraph chunk from a document. INCREMENTAL: a single call returns " <>
+          "AT MOST #{@read_cap} paragraphs (a hard cap) and never the whole document. " <>
+          "Start at paragraph index `at` (default 0); `size` is the requested paragraph " <>
+          "count, clamped to #{@read_cap}. The result includes `next_at` (the cursor for " <>
+          "the next page, or null at end) and `total` — page through long docs with it.",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
           "document" => %{"type" => "string"},
           "ref" => %{"type" => "string"},
-          "at" => %{"type" => "integer", "minimum" => 0},
-          "size" => %{"type" => "integer", "minimum" => 1}
+          "at" => %{
+            "type" => "integer",
+            "minimum" => 0,
+            "description" => "0-based paragraph index to start the page at."
+          },
+          "size" => %{
+            "type" => "integer",
+            "minimum" => 1,
+            "maximum" => @read_cap,
+            "description" =>
+              "Requested paragraph count; hard-capped at #{@read_cap} per call."
+          }
         },
         "required" => ["document"]
       },
@@ -104,6 +141,25 @@ defmodule Ecrits.Doc.Tools do
           "case_sensitive" => %{"type" => "boolean", "default" => false}
         },
         "required" => ["document", "pattern"]
+      },
+      "annotations" => %{"readOnlyHint" => true}
+    },
+    %{
+      "namespace" => @namespace,
+      "name" => "inspect",
+      "description" =>
+        "Reflective discovery for an element (ref, nil = document): its type, the NATIVE " <>
+          "property names get/set understand (e.g. Bold/Italic/Width), conceptual " <>
+          "interfaces, and child refs. Use this to discover property names instead of " <>
+          "guessing them (design §4.1).",
+      "risk" => "read",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "document" => %{"type" => "string"},
+          "ref" => %{"type" => "string"}
+        },
+        "required" => ["document"]
       },
       "annotations" => %{"readOnlyHint" => true}
     },
@@ -204,6 +260,10 @@ defmodule Ecrits.Doc.Tools do
   @spec call(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def call(ctx \\ %{}, tool_name, args)
 
+  def call(ctx, "doc.context", _args) do
+    {:ok, context_json(pool(ctx))}
+  end
+
   def call(ctx, "doc.list", _args) do
     {:ok, %{"documents" => Enum.map(Pool.list(pool(ctx)), &entry_json/1)}}
   end
@@ -221,6 +281,13 @@ defmodule Ecrits.Doc.Tools do
           {:error, error_json(reason)}
       end
     end
+  end
+
+  def call(ctx, "doc.inspect", args) do
+    with_editor(ctx, args, fn editor ->
+      ref = get(args, ["ref"])
+      wrap(Editor.inspect_element(editor, ref), &inspect_json/1)
+    end)
   end
 
   def call(ctx, "doc.outline", args) do
@@ -348,6 +415,34 @@ defmodule Ecrits.Doc.Tools do
     node
     |> stringify()
     |> Map.update("children", [], fn children -> Enum.map(children, &outline_json/1) end)
+  end
+
+  defp inspect_json(node) when is_map(node), do: stringify(node)
+
+  # Active/focused document + cursor/selection. The browser->server cursor
+  # reporting that would populate `cursor`/`selection` for the *viewed* document
+  # lives in the editors (owned by another agent) and is not wired yet, so we
+  # report whatever active-doc state is available server-side today.
+  #
+  # TODO(browser-wiring): once the editors report the live caret/selection back
+  # to the server (e.g. Pool.attach_browser + a cursor-report message), surface
+  # the focused document's `cursor` ref and `selection` here. Until then the
+  # active document is inferred as the single browser-backed doc if one is
+  # attached, else nil, and `cursor`/`selection` are null.
+  defp context_json(pool) do
+    docs = Pool.list(pool)
+
+    active =
+      Enum.find(docs, &(&1.backing == :browser)) ||
+        (length(docs) == 1 && hd(docs)) || nil
+
+    %{
+      "active_document" => active && active.id,
+      "cursor" => nil,
+      "selection" => nil,
+      "cursor_reporting" => "todo:browser_wiring",
+      "documents" => Enum.map(docs, &entry_json/1)
+    }
   end
 
   defp error_json({:not_supported, reason}),

@@ -52,6 +52,10 @@ defmodule Ecrits.Doc.Editor do
   @spec outline(t(), term() | nil, keyword()) :: {:ok, map()} | {:error, term()}
   def outline(editor, ref \\ nil, opts \\ []), do: GenServer.call(editor, {:outline, ref, opts})
 
+  @doc "Reflective discovery (element type, native property names, children)."
+  @spec inspect_element(t(), term() | nil) :: {:ok, map()} | {:error, term()}
+  def inspect_element(editor, ref \\ nil), do: GenServer.call(editor, {:inspect, ref})
+
   @doc "Native property read."
   @spec get(t(), term(), [String.t()] | nil) :: {:ok, map()} | {:error, term()}
   def get(editor, ref, props \\ nil), do: GenServer.call(editor, {:get, ref, props})
@@ -143,6 +147,9 @@ defmodule Ecrits.Doc.Editor do
 
   def handle_call({:outline, ref, opts}, _from, st),
     do: {:reply, st.backend.outline(st.handle, ref, opts), st}
+
+  def handle_call({:inspect, ref}, _from, st),
+    do: {:reply, st.backend.inspect(st.handle, ref), st}
 
   def handle_call({:get, ref, props}, _from, st),
     do: {:reply, st.backend.get(st.handle, ref, props), st}
