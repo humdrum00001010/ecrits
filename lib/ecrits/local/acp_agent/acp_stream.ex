@@ -485,8 +485,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     [System] A document is currently open in the editor#{doc}. You can read AND
     edit that open document through the document MCP tools served by the MCP
     server named `doc`. These tools are `doc_context`, `doc_list`, `doc_find`,
-    `doc_read`, `doc_edit`, `doc_set`, `doc_outline`, `doc_get`, `doc_apply_style`,
-    `doc_save` (the server registers them with a dot, e.g. `doc.context`, and your
+    `doc_read`, `doc_edit`, `doc_set`, `doc_get`, `doc_apply_style`, `doc_save` (the server registers them with a dot, e.g. `doc.context`, and your
     client normalizes the `.` to `_` — treat `doc_<x>` and `doc.<x>` as the SAME
     tool). They are the one and only way to touch the open document. Do NOT shell
     out to hwp5proc, LibreOffice, soffice, pandoc, cat/sed, or any file

@@ -75,6 +75,30 @@ defmodule Ecrits.Doc.Op do
     end
   end
 
+  defp validate("insert_text", %{} = op) do
+    cond do
+      is_nil(op[:ref]) ->
+        {:error, {:invalid_op, "insert_text requires a \"ref\" (from doc.find) saying where to insert"}}
+
+      not is_binary(op[:text]) or op[:text] == "" ->
+        {:error, {:invalid_op, "insert_text requires a non-empty string \"text\""}}
+
+      String.contains?(op[:text], "\n") ->
+        {:error, {:invalid_op, "insert_text \"text\" must be a single paragraph (no newlines); use \"split\" for new paragraphs"}}
+
+      true ->
+        {:ok, op}
+    end
+  end
+
+  defp validate("delete_range", %{} = op) do
+    if is_nil(op[:ref]) do
+      {:error, {:invalid_op, "delete_range requires a \"ref\" (from doc.find) saying what to delete"}}
+    else
+      {:ok, op}
+    end
+  end
+
   defp validate(_verb, op), do: {:ok, op}
 
   defp fetch(map, key) when is_atom(key) do

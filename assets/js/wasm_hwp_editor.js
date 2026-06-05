@@ -1150,13 +1150,15 @@ const WasmHwpEditor = {
     }
   },
 
-  // Structural edit verbs. `replace_text` (the verb the agent uses to rewrite a
-  // phrase) maps to the WASM `replaceAll(query, replacement, case_sensitive)`;
-  // it rewrites every match in the viewed model and re-renders. Other verbs are
-  // reported unsupported (the agent falls back to replace_text / re-reads).
+  // Structural edit verbs over the viewed WASM model: `replace_text`,
+  // `insert_text`, `delete_range`. Each addresses text positionally via a `ref`
+  // ({section, paragraph, offset} from doc.find) so the agent can target ONE
+  // paragraph instead of the whole document. `replace_text` may also run without
+  // a ref (global), but only replaces >1 match when `all:true` is set.
   applyAgentEdit({ op, base_revision }) {
     const verb = op && op.op
     const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const ref = this.parseRef(op && op.ref)
 
     if (verb === "replace_text") {
       const query = op.query != null ? String(op.query) : ""
@@ -1171,12 +1173,32 @@ const WasmHwpEditor = {
       if (replacement.includes("\n")) {
         return { error: "replace_text replacement must be a single paragraph (no newlines); use one op per paragraph or 'split'" }
       }
-      const all = op.all === true
 
-      // Count matches BEFORE replacing: `replaceAll` is global, and this file can
-      // hold several sample contracts, so a paragraph-length query may match in
-      // unrelated blocks. Replacing >1 requires an explicit all:true so the agent
-      // never rewrites unrelated text by accident.
+      // ref-scoped: replace the query ONLY inside the referenced paragraph, so a
+      // phrase that recurs across sample blocks is edited exactly where intended.
+      if (ref) {
+        const len = this.paragraphLength(ref.section, ref.paragraph)
+        let paraText = ""
+        try {
+          paraText = this.doc.getTextRange(ref.section, ref.paragraph, 0, len) || ""
+        } catch (error) {
+          return { error: `getTextRange failed: ${String((error && error.message) || error)}` }
+        }
+        const idx = paraText.indexOf(query)
+        if (idx < 0) return { error: `replace_text: query not found in ref paragraph (section ${ref.section}, paragraph ${ref.paragraph})` }
+        try {
+          this.doc.deleteText(ref.section, ref.paragraph, idx, query.length)
+          this.doc.insertText(ref.section, ref.paragraph, idx, replacement)
+        } catch (error) {
+          return { error: `scoped replace failed: ${String((error && error.message) || error)}` }
+        }
+        this.recordOp("AgentReplaceText", { section: ref.section, para: ref.paragraph, offset: idx, query, replacement, replaced: 1 })
+        return this.finishAgentEdit(baseRev, { replaced: 1 })
+      }
+
+      // global (no ref): count matches first; replacing >1 needs explicit all:true
+      // so a paragraph-length query can never rewrite unrelated sample blocks.
+      const all = op.all === true
       let matchCount = null
       try {
         const raw = this.doc.searchAllText(query, true, true)
@@ -1190,7 +1212,7 @@ const WasmHwpEditor = {
         return { error: `replace_text: no match for query (it must be the document's exact current text)` }
       }
       if (matchCount != null && matchCount > 1 && !all) {
-        return { error: `replace_text: query matches ${matchCount} places; use a longer/unique query, or pass all:true to replace every match` }
+        return { error: `replace_text: query matches ${matchCount} places; pass a ref to target one, use a longer/unique query, or pass all:true to replace every match` }
       }
 
       let replaced = 0
@@ -1200,19 +1222,71 @@ const WasmHwpEditor = {
       } catch (error) {
         return { error: `replaceAll failed: ${String((error && error.message) || error)}` }
       }
-
-      // Re-render the whole visible window: a replace can reflow any page.
-      this.rendered.clear()
-      this.renderVisiblePages()
-      if (this.caret) this.drawCaret(this.caret)
-      // Persist the edited bytes so the change survives a reload.
-      this.scheduleSnapshot()
       this.recordOp("AgentReplaceText", { query, replacement, replaced })
+      return this.finishAgentEdit(baseRev, { replaced })
+    }
 
-      return { ok: true, result: { ok: true, revision: baseRev + 1, replaced } }
+    if (verb === "insert_text") {
+      if (!ref) return { error: "insert_text requires a ref {section,paragraph,offset} (from doc.find)" }
+      const text = op.text != null ? String(op.text) : ""
+      if (!text) return { error: "insert_text requires non-empty 'text'" }
+      if (text.includes("\n")) return { error: "insert_text 'text' must be a single paragraph (no newlines); use 'split' for new paragraphs" }
+      const offset = Number.isInteger(ref.offset) ? ref.offset : 0
+      try {
+        this.doc.insertText(ref.section, ref.paragraph, offset, text)
+      } catch (error) {
+        return { error: `insertText failed: ${String((error && error.message) || error)}` }
+      }
+      this.recordOp("AgentInsertText", { section: ref.section, para: ref.paragraph, offset, text })
+      return this.finishAgentEdit(baseRev, { inserted: text.length })
+    }
+
+    if (verb === "delete_range") {
+      if (!ref) return { error: "delete_range requires a ref {section,paragraph,offset} (from doc.find)" }
+      const offset = Number.isInteger(ref.offset) ? ref.offset : 0
+      // count defaults to "rest of the paragraph from offset" when omitted.
+      let count = Number.isInteger(op.count) ? op.count : null
+      if (count == null) {
+        const len = this.paragraphLength(ref.section, ref.paragraph)
+        count = Math.max(0, len - offset)
+      }
+      if (count <= 0) return { error: "delete_range: nothing to delete (count must be > 0)" }
+      try {
+        this.doc.deleteText(ref.section, ref.paragraph, offset, count)
+      } catch (error) {
+        return { error: `deleteText failed: ${String((error && error.message) || error)}` }
+      }
+      this.recordOp("AgentDeleteRange", { section: ref.section, para: ref.paragraph, offset, count })
+      return this.finishAgentEdit(baseRev, { deleted: count })
     }
 
     return { error: `unsupported_op:${verb}` }
+  },
+
+  // A ref is the positional index doc.find returns (a JSON string
+  // {section,paragraph,offset}); accept the parsed object too. null when absent.
+  parseRef(ref) {
+    if (ref == null) return null
+    let r = ref
+    if (typeof ref === "string") {
+      try { r = JSON.parse(ref) } catch (_) { return null }
+    }
+    if (typeof r !== "object") return null
+    const section = Number(r.section ?? r.sectionIndex ?? 0)
+    const paragraph = Number(r.paragraph ?? r.paragraphIndex)
+    if (!Number.isInteger(paragraph)) return null
+    const offset = Number(r.offset ?? r.charOffset ?? 0)
+    return { section: Number.isInteger(section) ? section : 0, paragraph, offset: Number.isInteger(offset) ? offset : 0 }
+  },
+
+  // Shared post-edit step: re-render the visible window (an edit can reflow any
+  // page), redraw the caret, and persist the edited bytes so it survives reload.
+  finishAgentEdit(baseRev, extra) {
+    this.rendered.clear()
+    this.renderVisiblePages()
+    if (this.caret) this.drawCaret(this.caret)
+    this.scheduleSnapshot()
+    return { ok: true, result: { ok: true, revision: baseRev + 1, ...extra } }
   },
 
   // Best-effort match count from replaceAll's JSON return (shape varies across

@@ -11,7 +11,6 @@ defmodule Ecrits.Doc.Tools do
   | `doc.list`       | read  | `Pool.list/1` |
   | `doc.open`       | read  | `Pool.open/3` |
   | `doc.inspect`    | read  | `Editor.inspect_element/2` (services/interfaces/props/children) |
-  | `doc.outline`    | read  | `Editor.outline/3` |
   | `doc.read`       | read  | `Editor.read/2` (**≤30 paragraphs/call** + cursor) |
   | `doc.find`       | read  | `Editor.find/3` |
   | `doc.get`        | read  | `Editor.get/3` |
@@ -82,22 +81,6 @@ defmodule Ecrits.Doc.Tools do
           "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx"]}
         },
         "required" => ["path"]
-      },
-      "annotations" => %{"readOnlyHint" => true}
-    },
-    %{
-      "namespace" => @namespace,
-      "name" => "outline",
-      "description" => "Structure tree: each node {ref, type, ...}. ref is opaque.",
-      "risk" => "read",
-      "inputSchema" => %{
-        "type" => "object",
-        "properties" => %{
-          "document" => %{"type" => "string"},
-          "ref" => %{"type" => "string"},
-          "depth" => %{"type" => "integer", "minimum" => 1}
-        },
-        "required" => ["document"]
       },
       "annotations" => %{"readOnlyHint" => true}
     },
@@ -220,7 +203,7 @@ defmodule Ecrits.Doc.Tools do
                 "BOTH `query` and `replacement` are REQUIRED (the field is `replacement`, NOT `text`/`new`/`value`). " <>
                 "To DELETE text use delete_range — never an empty/omitted `replacement`. " <>
                 "`replacement` is SINGLE-paragraph text: do NOT put newlines in it (one paragraph per op; use `split` to add paragraphs). " <>
-                "By default only the FIRST match is replaced; scope to one paragraph with `ref` (from doc.find/doc.outline), or pass `all:true` to replace every match. " <>
+                "By default only the FIRST match is replaced; scope to one paragraph with `ref` (from doc.find), or pass `all:true` to replace every match. " <>
                 "If `query` occurs in more than one place and neither `ref` nor `all` is given, the edit is REJECTED (so you never edit unrelated sample blocks by accident).\n" <>
                 "• insert_text {op, ref, text, at?}\n" <>
                 "• delete_range {op, ref, count? | to_ref?}\n" <>
@@ -235,7 +218,7 @@ defmodule Ecrits.Doc.Tools do
                 "type" => "string",
                 "description" => "replace_text: text to substitute in (single paragraph, no newlines). REQUIRED for replace_text."
               },
-              "ref" => %{"type" => "string", "description" => "Target element ref (from doc.find/doc.outline). Scopes the edit to that element."},
+              "ref" => %{"type" => "string", "description" => "Target element ref (from doc.find). Scopes the edit to that element/paragraph."},
               "all" => %{"type" => "boolean", "description" => "replace_text: replace EVERY match (default false = first match only)."},
               "text" => %{"type" => "string", "description" => "insert_text: text to insert."},
               "at" => %{"type" => "integer", "description" => "char offset within the target paragraph."},
@@ -322,13 +305,6 @@ defmodule Ecrits.Doc.Tools do
     with_editor(ctx, args, fn editor ->
       ref = get(args, ["ref"])
       wrap(Editor.inspect_element(editor, ref), &inspect_json/1)
-    end)
-  end
-
-  def call(ctx, "doc.outline", args) do
-    with_editor(ctx, args, fn editor ->
-      ref = get(args, ["ref"])
-      wrap(Editor.outline(editor, ref, depth: get(args, ["depth"])), "outline", &outline_json/1)
     end)
   end
 
@@ -496,7 +472,7 @@ defmodule Ecrits.Doc.Tools do
           fun.(editor)
 
         {:browser, _lv} ->
-          # Browser-backed doc, but this tool (inspect/outline/get/set/style/save)
+          # Browser-backed doc, but this tool (inspect/get/set/style/save)
           # has no browser apply yet. The server Editor still holds the document
           # (identical structure on open), so serve these read/meta verbs from it.
           case Pool.with_doc(pool(ctx), document, fun) do
@@ -530,15 +506,6 @@ defmodule Ecrits.Doc.Tools do
 
   defp wrap({:ok, value}, mapper) when is_function(mapper, 1), do: {:ok, mapper.(value)}
   defp wrap({:error, reason}, _mapper), do: {:error, error_json(reason)}
-
-  defp wrap({:ok, value}, key, mapper), do: {:ok, %{key => mapper.(value)}}
-  defp wrap({:error, reason}, _key, _mapper), do: {:error, error_json(reason)}
-
-  defp outline_json(node) when is_map(node) do
-    node
-    |> stringify()
-    |> Map.update("children", [], fn children -> Enum.map(children, &outline_json/1) end)
-  end
 
   defp inspect_json(node) when is_map(node), do: stringify(node)
 
