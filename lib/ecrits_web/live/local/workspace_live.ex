@@ -144,6 +144,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:local_agent_text, "")
      |> assign(:local_agent_text_segment, 0)
      |> assign(:local_agent_text_flush_ref, nil)
+     |> assign(:local_agent_active_tools, %{})
      |> assign(:local_agent_reasoning_text, "")
      |> assign(:local_agent_title, default_local_agent_title())
      |> assign(:local_agent_title_user_edited?, false)
@@ -575,7 +576,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
            |> stream_insert(
              :local_agent_items,
              cancelled_agent_item(turn_id, partial, segment)
-           )}
+           )
+           |> finalize_dangling_tools("Turn cancelled.")}
 
         {:error, reason} ->
           {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
@@ -1994,6 +1996,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     socket
     |> close_local_agent_text_segment()
     |> maybe_remove_empty_agent_placeholder()
+    |> update(:local_agent_active_tools, &Map.put(&1 || %{}, tool_call_id, name))
     |> stream_insert(
       :local_agent_items,
       agent_tool_item(tool_call_id, name, :running, agent_tool_payload(arguments))
@@ -2006,8 +2009,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
          name: name,
          result: result
        }) do
-    stream_insert(
-      socket,
+    socket
+    |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
+    |> stream_insert(
       :local_agent_items,
       agent_tool_item(tool_call_id, name, :completed, agent_tool_payload(result))
     )
@@ -2019,8 +2023,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
          name: name,
          reason: reason
        }) do
-    stream_insert(
-      socket,
+    socket
+    |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
+    |> stream_insert(
       :local_agent_items,
       agent_tool_item(tool_call_id, name, :failed, reason)
     )
@@ -2050,6 +2055,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> maybe_remove_empty_reasoning(turn_id)
     |> assign(:local_agent_reasoning_text, "")
     |> maybe_stream_final_agent_text(turn_id, text)
+    |> finalize_dangling_tools("Turn ended before the tool finished.")
   end
 
   defp apply_local_agent_event(socket, %{type: :turn_failed, turn_id: turn_id, reason: reason}) do
@@ -2062,6 +2068,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> maybe_remove_empty_reasoning(turn_id)
     |> assign(:local_agent_reasoning_text, "")
     |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "Agent failed.", :failed))
+    |> finalize_dangling_tools("Turn failed.")
   end
 
   defp apply_local_agent_event(%{assigns: %{local_agent_turn_id: turn_id}} = socket, %{
@@ -2082,6 +2089,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       :local_agent_items,
       cancelled_agent_item(turn_id, partial, segment)
     )
+    |> finalize_dangling_tools("Turn cancelled.")
   end
 
   defp apply_local_agent_event(socket, %{type: :turn_cancelled}), do: socket
@@ -3902,6 +3910,23 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       {:ok, json} -> json
       {:error, _reason} -> inspect(payload, pretty: true)
     end
+  end
+
+  # A turn can end (complete / fail / cancel / die) while a tool_call is still
+  # mid-flight — that tool_call never gets its terminal `tool_call_completed` /
+  # `tool_call_failed` event, so its rail row would be stuck on "running" forever
+  # even though the backend turn is already gone. On every turn terminal, flip
+  # any still-tracked in-flight tool_calls to :failed so the UI never shows a
+  # phantom running tool after the turn is over.
+  defp finalize_dangling_tools(socket, reason) do
+    active = socket.assigns[:local_agent_active_tools] || %{}
+
+    socket =
+      Enum.reduce(active, socket, fn {tool_call_id, name}, acc ->
+        stream_insert(acc, :local_agent_items, agent_tool_item(tool_call_id, name, :failed, reason))
+      end)
+
+    assign(socket, :local_agent_active_tools, %{})
   end
 
   defp agent_tool_item(tool_call_id, name, status, body) do
