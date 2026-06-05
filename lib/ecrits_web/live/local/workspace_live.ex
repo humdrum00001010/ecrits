@@ -2146,8 +2146,16 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp refresh_tree(socket, expanded_paths) do
     case WorkspaceAdapter.list_tree(socket.assigns.workspace, expanded_paths) do
-      {:ok, tree} -> assign(socket, :tree, tree)
-      {:error, reason} -> assign(socket, :workspace_error, error_message(reason))
+      {:ok, tree} ->
+        assign(socket, :tree, tree)
+
+      {:error, reason} ->
+        # The workspace became unreadable (e.g. the folder was removed). Don't
+        # strand the user on a dead-end error page — send them back to the
+        # folder picker ("/"), mirroring do_mount_workspace's mount-failure path.
+        socket
+        |> put_flash(:error, "Workspace is no longer available: #{error_message(reason)}")
+        |> push_navigate(to: ~p"/")
     end
   end
 
