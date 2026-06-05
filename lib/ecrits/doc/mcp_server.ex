@@ -53,6 +53,18 @@ defmodule Ecrits.Doc.MCPServer do
     {:ok, Enum.map(Tools.tools(), &to_mcp_tool/1), nil, state}
   end
 
+  # Codex's MCP connection manager probes `resources/list` on *every* server
+  # right after `initialize` (before it builds the per-turn tool list). The
+  # `ExMCP.Server.Handler` default answers it with a JSON-RPC error
+  # (`-32603 "Resources not implemented"`), which codex logs as a WARN and which
+  # makes the freshly-connected server look partially-broken during the exact
+  # window when codex is deciding whether the doc tools are ready for the turn.
+  # We expose no resources, so answer the probe cleanly with an empty list — the
+  # server then presents as fully healthy the instant `initialize` completes,
+  # so codex reliably includes the 12 `doc.*` tools in the turn's tool list.
+  @impl true
+  def handle_list_resources(_cursor, state), do: {:ok, [], nil, state}
+
   @impl true
   def handle_call_tool(name, arguments, state) do
     # Strip the protocol `_meta` envelope ex_mcp folds into arguments.
