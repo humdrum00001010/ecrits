@@ -465,9 +465,20 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
 
     """
     [System] A document is currently open in the editor#{doc}. You can read AND
-    edit that open document ONLY through the `doc.*` MCP tools — these are the one
+    edit that open document ONLY through the `doc.*` MCP tools (e.g. `doc.context`,
+    `doc.list`, `doc.find`, `doc.read`, `doc.edit`, `doc.set`) — these are the one
     and only way to touch it. Do NOT shell out to hwp5proc, LibreOffice, soffice,
     pandoc, cat/sed, or any file reader/writer for the open document.
+
+    MANDATORY FIRST STEP: before doing anything else, call `doc.context` (and, if
+    needed, `doc.list`) to load the open document and PROVE the `doc.*` tools are
+    available. These tools ARE registered and available to you in this session —
+    they are provided directly, you do NOT need to search/discover/enable them
+    first. Never use any built-in MCP-listing or resource-listing tool (such as
+    `list_mcp_resources`, `list_mcp_tools`, `tool_search`, or any generic MCP
+    server browser) to look for them, and NEVER claim the `doc.*` tools are
+    missing / not exposed / not loaded. If a `doc.*` call ever errors, retry it —
+    do not give up and do not substitute another mechanism.
 
     Workflow: `doc.context` to orient, then `doc.find` / `doc.read` to locate the
     target text, then APPLY the change with `doc.edit` (or `doc.set`). You MUST

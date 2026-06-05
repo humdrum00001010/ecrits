@@ -51,6 +51,15 @@ defmodule ExMCP.ACP.Adapters.Codex do
 
   require Logger
 
+  # Seconds codex waits for an HTTP MCP server to finish its initial connect +
+  # `tools/list` before proceeding with the turn. Generous on purpose so the
+  # in-process doc server is RELIABLY ready (and its `doc.*` tools in context)
+  # rather than racing the first turn. See `mcp_server_overrides/1`.
+  @mcp_startup_timeout_sec 30
+  # Seconds an individual MCP tool call may run before codex aborts it; doc.edit
+  # on a large document can be slow, so give it room.
+  @mcp_tool_timeout_sec 120
+
   defstruct [
     :model,
     :thread_id,
@@ -108,7 +117,8 @@ defmodule ExMCP.ACP.Adapters.Codex do
 
   # Build `-c key=value` overrides for each MCP server. HTTP (streamable) servers
   # use `mcp_servers.<name>.url`; stdio servers use `.command`/`.args`. We also
-  # enable `features.rmcp_client` which codex requires for HTTP MCP transport.
+  # enable `features.rmcp_client` which codex 0.137 requires for HTTP (streamable)
+  # MCP transport — the in-process doc server is served over HTTP.
   defp mcp_server_config_args(servers) when is_list(servers) and servers != [] do
     base = ["-c", "features.rmcp_client=true"]
 
@@ -120,7 +130,29 @@ defmodule ExMCP.ACP.Adapters.Codex do
   defp mcp_server_config_args(_servers), do: []
 
   defp mcp_server_overrides(%{name: name, url: url}) when is_binary(url) and url != "" do
-    ["-c", "mcp_servers.#{name}.url=#{toml_string(url)}"]
+    # `startup_timeout_sec`/`tool_timeout_sec` are per-server keys on codex's
+    # `RawMcpServerConfig` (verified against `codex app-server --strict-config`
+    # on 0.137). Codex connects to an HTTP (streamable) MCP server asynchronously
+    # and only surfaces its tools to the model once the connection is established
+    # and `tools/list` returns. With a short/default startup window, a slow first
+    # connect to the in-process doc server can race the turn: the model is handed
+    # ZERO `doc.*` tools, then hallucinates that "편집 MCP가 로드되지 않았습니다"
+    # and flails with codex's built-in MCP-listing tools instead of calling
+    # `doc.*`. A generous startup timeout makes codex WAIT for the doc server's
+    # tool list before the turn begins, so the tools are surfaced in context.
+    # `tool_timeout_sec` likewise gives the (sometimes slow) doc.edit call room to
+    # finish instead of being aborted mid-write. This is the deterministic config
+    # lever available here — `tool_search` is already removed/disabled by default
+    # on 0.137, so there is no per-server "always_available" toggle to flip; a
+    # generous eager-startup window is the closest equivalent.
+    [
+      "-c",
+      "mcp_servers.#{name}.url=#{toml_string(url)}",
+      "-c",
+      "mcp_servers.#{name}.startup_timeout_sec=#{@mcp_startup_timeout_sec}",
+      "-c",
+      "mcp_servers.#{name}.tool_timeout_sec=#{@mcp_tool_timeout_sec}"
+    ]
   end
 
   defp mcp_server_overrides(%{name: name, command: command} = server)
