@@ -10,14 +10,20 @@ defmodule Ecrits.Doc.Tools do
   | `doc.context`    | read  | active document + cursor/selection ref |
   | `doc.list`       | read  | `Pool.list/1` |
   | `doc.open`       | read  | `Pool.open/3` |
-  | `doc.inspect`    | read  | `Editor.inspect_element/2` (services/interfaces/props/children) |
+  | `doc.create`     | write | `Pool.create/3` (blank template) |
   | `doc.read`       | read  | `Editor.read/2` (**≤30 paragraphs/call** + cursor) |
   | `doc.find`       | read  | `Editor.find/3` |
-  | `doc.get`        | read  | `Editor.get/3` |
-  | `doc.set`        | write | `Editor.set/4` (base_revision) |
+  | `doc.get`        | read  | `Editor.get/3` + `Editor.inspect_element/2` (type/values/settable/children) |
+  | `doc.set`        | write | `Editor.set/4` (base_revision) — UNIVERSAL property setter |
   | `doc.edit`       | write | `Editor.apply/3` (base_revision) |
-  | `doc.apply_style`| write | `Editor.apply_style/3` |
   | `doc.save`       | write | `Editor.save/2` |
+
+  Ten tools (the former `doc.inspect` and `doc.apply_style` are folded away):
+  `doc.get` now also returns the reflective discovery the standalone
+  `doc.inspect` used to (element type + the settable native-property names +
+  child refs) alongside the current values, and char-run formatting is just
+  `doc.set` (it routes char refs to the engine's `apply_char_format`), so there
+  is a single read-properties tool and a single write-properties tool.
 
   `doc.read` is **incremental**: a single call returns at most 30 paragraphs (a
   hard cap, design §4.4) plus a `next_at` cursor, so the agent pages through a
@@ -25,8 +31,8 @@ defmodule Ecrits.Doc.Tools do
 
   The deep Office tools (`office.inspect`/`office.call`/`office.dispatch`,
   design §4.4 "Office 전용 심화") are intentionally **not** part of this HWP
-  surface; the LibreOffice backend is a separate effort. The reflective
-  `doc.inspect` here is the engine-agnostic equivalent for the HWP backend.
+  surface; the LibreOffice backend is a separate effort. `doc.get`'s reflective
+  discovery is the engine-agnostic equivalent for the HWP backend.
 
   Tools run against a context map `%{pool: pool}` (defaults to the named
   `Ecrits.Doc.Pool`). Results are JSON-shaped maps so the layer is testable
@@ -152,27 +158,14 @@ defmodule Ecrits.Doc.Tools do
     },
     %{
       "namespace" => @namespace,
-      "name" => "inspect",
-      "description" =>
-        "Reflective discovery for an element (ref, nil = document): its type, the NATIVE " <>
-          "property names get/set understand (e.g. Bold/Italic/Width), conceptual " <>
-          "interfaces, and child refs. Use this to discover property names instead of " <>
-          "guessing them (design §4.1).",
-      "risk" => "read",
-      "inputSchema" => %{
-        "type" => "object",
-        "properties" => %{
-          "document" => %{"type" => "string"},
-          "ref" => %{"type" => "string"}
-        },
-        "required" => ["document"]
-      },
-      "annotations" => %{"readOnlyHint" => true}
-    },
-    %{
-      "namespace" => @namespace,
       "name" => "get",
-      "description" => "Read native properties of an element (ref). props? selects names.",
+      "description" =>
+        "Inspect an element (ref). Returns its `type`, current property `values`, the " <>
+          "`settable` property NAMES doc.set understands for that element (e.g. " <>
+          "Bold/Italic/FontSize for a char run, BackgroundColor for a cell, " <>
+          "Alignment/LineSpacing for a paragraph), and child `refs`. Use this to discover " <>
+          "what you can set and read current values in one call. `props?` narrows the " <>
+          "returned values to those names.",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
@@ -189,7 +182,12 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "set",
       "description" =>
-        "Universal property edit. Routes to native setters. Honours base_revision.",
+        "Universal property edit — sets ANY element's properties (use doc.get to discover " <>
+          "the settable names). Examples: a CHAR run -> {Bold:true, TextColor:\"#FF0000\", " <>
+          "FontSize:12}; a TABLE CELL -> {kind:\"cell\", BackgroundColor:\"#FFFF00\"} (to fill " <>
+          "a cell/column, doc.find the cells then doc.set kind:cell BackgroundColor); a " <>
+          "PARAGRAPH -> {Alignment:\"center\", LineSpacing:160}; table/picture/shape props " <>
+          "likewise. Routes to the right native setter automatically. Honours base_revision.",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
@@ -261,22 +259,6 @@ defmodule Ecrits.Doc.Tools do
     },
     %{
       "namespace" => @namespace,
-      "name" => "apply_style",
-      "description" => "Apply a named style to an element (ref).",
-      "risk" => "write",
-      "inputSchema" => %{
-        "type" => "object",
-        "properties" => %{
-          "document" => %{"type" => "string"},
-          "ref" => %{"type" => "string"},
-          "style" => %{"type" => ["string", "object"]}
-        },
-        "required" => ["document", "ref", "style"]
-      },
-      "annotations" => %{"readOnlyHint" => false}
-    },
-    %{
-      "namespace" => @namespace,
       "name" => "save",
       "description" => "Persist the document to disk (export).",
       "risk" => "write",
@@ -343,13 +325,6 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
-  def call(ctx, "doc.inspect", args) do
-    with_editor(ctx, args, fn editor ->
-      ref = get(args, ["ref"])
-      wrap(Editor.inspect_element(editor, ref), &inspect_json/1)
-    end)
-  end
-
   def call(ctx, "doc.read", args) do
     route_doc(ctx, args,
       browser: fn lv -> browser_call(lv, args, :read, %{opts: take_opts(args, ["at", "size", "ref"])}) end,
@@ -384,11 +359,28 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
+  # doc.get inspects a ref: its element type, current property VALUES, the
+  # settable property NAMES (the native-property vocabulary), and child refs.
+  # This folds the former standalone `doc.inspect` into the one read-properties
+  # tool, so the agent has a single place to discover what it can set and what
+  # the current values are.
   def call(ctx, "doc.get", args) do
     with {:ok, ref} <- require_string(args, "ref") do
       with_editor(ctx, args, fn editor ->
         props = get(args, ["props"])
-        wrap(Editor.get(editor, ref, props), &stringify/1)
+
+        # Reflective metadata (type + settable property NAMES + child refs) is the
+        # backbone of the merged tool — it needs no value NIF, so it anchors the
+        # result. The live property VALUES are best-effort layered on top: if the
+        # engine can't read them yet, the agent still learns what it CAN set.
+        case Editor.inspect_element(editor, ref) do
+          {:ok, meta} ->
+            values = best_effort_values(editor, ref, props)
+            {:ok, merge_get_inspect(values, stringify(meta))}
+
+          {:error, reason} ->
+            {:error, error_json(reason)}
+        end
       end)
     end
   end
@@ -415,15 +407,6 @@ defmodule Ecrits.Doc.Tools do
         browser: fn lv -> browser_write(lv, args, op) end,
         server: fn editor -> write_result(Editor.apply(editor, op, base_rev)) end
       )
-    end
-  end
-
-  def call(ctx, "doc.apply_style", args) do
-    with {:ok, ref} <- require_string(args, "ref"),
-         {:ok, style} <- require_present(args, "style") do
-      with_editor(ctx, args, fn editor ->
-        write_result(Editor.apply_style(editor, ref, style))
-      end)
     end
   end
 
@@ -593,7 +576,32 @@ defmodule Ecrits.Doc.Tools do
   defp wrap({:ok, value}, mapper) when is_function(mapper, 1), do: {:ok, mapper.(value)}
   defp wrap({:error, reason}, _mapper), do: {:error, error_json(reason)}
 
-  defp inspect_json(node) when is_map(node), do: stringify(node)
+  # Live property values for doc.get, best-effort: nil when the engine can't read
+  # them yet, so the reflective discovery still stands.
+  defp best_effort_values(editor, ref, props) do
+    case Editor.get(editor, ref, props) do
+      {:ok, values} -> stringify(values)
+      {:error, _reason} -> nil
+    end
+  end
+
+  # Combine the property VALUES (from get) with the reflective metadata (type,
+  # settable property NAMES, child refs) into the one doc.get result. `values`
+  # are the live readings (nil when unreadable); `settable` is the native-prop
+  # vocabulary; `properties` keeps the values map so existing callers still find
+  # it.
+  defp merge_get_inspect(values, meta) do
+    %{
+      "ref" => meta["ref"],
+      "type" => meta["type"],
+      "kind" => meta["kind"],
+      "interfaces" => meta["interfaces"],
+      "values" => values,
+      "properties" => values,
+      "settable" => meta["properties"],
+      "children" => meta["children"] || []
+    }
+  end
 
   # Active/focused document + cursor/selection. The active document is the one
   # the user is viewing in the workspace: `WorkspaceLive` registers the open
@@ -678,13 +686,6 @@ defmodule Ecrits.Doc.Tools do
     case get(args, [key]) do
       %{} = value -> {:ok, value}
       _ -> {:error, {:invalid_params, "#{key} (object) is required"}}
-    end
-  end
-
-  defp require_present(args, key) do
-    case get(args, [key]) do
-      nil -> {:error, {:invalid_params, "#{key} is required"}}
-      value -> {:ok, value}
     end
   end
 

@@ -11,7 +11,7 @@ defmodule Ecrits.Doc.Rhwp do
 
   The current `ehwp` NIF exposes `open`/`read`/`find`/`write({:replace_one})`
   (plus `page_count`/`render_page_svg`/`profile`). The design's richer
-  edit-only NIF surface — `get/set_*_properties`, `apply_style`, structural
+  edit-only NIF surface — `get/set_*_properties`, `apply_char_format`, structural
   verbs, and `save`/export — is a *future* `ehwp` revival (design §8 "다음" #1,
   #6). Until those NIFs land, the corresponding callbacks return
   `{:error, {:not_supported, reason}}` rather than silently faking success.
@@ -29,15 +29,15 @@ defmodule Ecrits.Doc.Rhwp do
     * `inspect/2`         -> reflective discovery: element type + the *native*
       property names (`Bold`/`Italic`/`FontSize`/`Width`/…) that `get`/`set`
       understand for that element kind + child refs. This needs no new NIF —
-      it mirrors the engine vocabulary (design §4.1).
+      it mirrors the engine vocabulary (design §4.1). Surfaced to the agent
+      through `doc.get` (the standalone `doc.inspect` tool was folded in).
     * `edit replace_text` -> `Ehwp.write(handle, {:replace_one, q, r})`
 
-  Not yet (`{:not_supported}`): `get/3`, `set/4`, `apply_style/3`,
-  `edit insert_text|delete_range|split|insert_node|delete_node|move_node|insert_picture`,
-  `save/2`. These need the edit-only `ehwp` NIF revival (property
-  getters/setters, `apply_style`, structural verbs, export); the **ref routing
-  and the native-property vocabulary are already wired** here so they light up
-  the moment those NIFs land.
+  `set/4` is the UNIVERSAL property setter: char-run formatting
+  (Bold/Italic/FontSize/TextColor/…) routes to the `apply_char_format` op
+  (the NIF rejects `set_properties kind:char`), while picture/shape/table/cell
+  (incl. cell `BackgroundColor`) and paragraph properties route to
+  `set_properties kind:<k>`.
   """
 
   @behaviour Ecrits.Doc
@@ -262,16 +262,67 @@ defmodule Ecrits.Doc.Rhwp do
   end
 
   @impl true
-  # IR-direct property edit: apply_op set_properties at the ref. `kind`
-  # (picture/shape/table/cell/paragraph) routes to the native setter; take it
-  # from the props map if the caller embedded it, else let the engine infer.
+  # IR-direct property edit. `set` is the UNIVERSAL property setter for every
+  # element kind, so it must route to the right native op:
+  #
+  #   * char-run formatting (Bold/Italic/Underline/FontName/FontSize/TextColor/…)
+  #     goes through the `apply_char_format` op — the NIF's `set_properties`
+  #     REJECTS `kind:char` ("unknown set_properties kind: char"), so a char ref
+  #     (or `kind:"char"`) is dispatched to `apply_char_format` instead.
+  #   * picture/shape/table/cell/paragraph properties (incl. cell BackgroundColor,
+  #     paragraph Alignment/LineSpacing) go through `set_properties kind:<k>`,
+  #     which the NIF accepts.
+  #
+  # `kind` comes from the props map if the caller embedded it (e.g. {kind:"cell",
+  # BackgroundColor}), else it is inferred from the ref.
   def set(%{ehwp: ehwp_handle}, ref, props, _base_rev) when is_map(props) do
     {kind, prop_map} = pop_kind(props)
+    resolved = kind || ref_kind(ref)
 
-    %{op: "set_properties", props: prop_map, kind: kind || ref_kind(ref)}
-    |> Map.merge(flatten_ref(ref))
-    |> apply_one(ehwp_handle)
+    if resolved == "char" do
+      # Char-run formatting: the only working char path is apply_char_format,
+      # which is a RANGE op — `at` (flattened start) plus a nested `to` Ref at
+      # the run's end (start offset + run length, same paragraph/cell). The find
+      # ref carries the run length, so derive the end from it.
+      char_format_op(ref, prop_map)
+      |> apply_one(ehwp_handle)
+    else
+      %{op: "set_properties", props: prop_map, kind: resolved}
+      |> Map.merge(flatten_ref(ref))
+      |> apply_one(ehwp_handle)
+    end
   end
+
+  # Build the `apply_char_format` op for a char/cell-char ref. `at` is the
+  # flattened start position; `to` is a nested Ref at the run END (same
+  # paragraph/cell, offset = start + len). Falls back to a zero-length range
+  # (`to == at`) when the ref carries no length.
+  defp char_format_op(ref, prop_map) do
+    at = flatten_ref(ref)
+    len = ref_run_len(ref)
+    to = Map.update(at, :offset, len, &(&1 + len))
+
+    %{op: "apply_char_format", props: prop_map, to: to}
+    |> Map.merge(at)
+  end
+
+  # The run length encoded in a find ref (e.g. `hwp:s0/p0/c0+5` -> 5); 0 when the
+  # ref does not encode a span.
+  defp ref_run_len(ref) when is_binary(ref) do
+    case Ref.decode(ref) do
+      {:ok, %{len: len}} when is_integer(len) -> len
+      _ -> 0
+    end
+  end
+
+  defp ref_run_len(%{} = ref) do
+    case Map.get(ref, :len, Map.get(ref, "len")) do
+      len when is_integer(len) -> len
+      _ -> 0
+    end
+  end
+
+  defp ref_run_len(_ref), do: 0
 
   @impl true
   # IR-direct: the normalized op IS the engine op. Flatten its `ref` into the
@@ -293,17 +344,6 @@ defmodule Ecrits.Doc.Rhwp do
           {:error, reason}
       end
     end
-  end
-
-  @impl true
-  # IR-direct: apply character formatting over the ref's run via apply_op
-  # apply_char_format. `style` is a props map (Bold/FontSize/TextColor/...).
-  def apply_style(%{ehwp: ehwp_handle}, ref, style) do
-    props = if is_map(style), do: style, else: %{"style" => style}
-
-    %{op: "apply_char_format", props: props, to: ref}
-    |> Map.merge(flatten_ref(ref))
-    |> apply_one(ehwp_handle)
   end
 
   @impl true

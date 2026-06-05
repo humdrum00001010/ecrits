@@ -68,10 +68,6 @@ defmodule Ecrits.Doc.Editor do
   @spec apply(t(), map(), non_neg_integer() | nil) :: {:ok, map()} | {:error, term()}
   def apply(editor, op, base_rev), do: GenServer.call(editor, {:apply, op, base_rev})
 
-  @doc "Named-style edit (write)."
-  @spec apply_style(t(), term(), term()) :: {:ok, map()} | {:error, term()}
-  def apply_style(editor, ref, style), do: GenServer.call(editor, {:apply_style, ref, style})
-
   @doc "Persist (export) the document."
   @spec save(t(), keyword()) :: :ok | {:error, term()}
   def save(editor, opts \\ []), do: GenServer.call(editor, {:save, opts})
@@ -165,9 +161,6 @@ defmodule Ecrits.Doc.Editor do
 
   def handle_call({:get, ref, props}, _from, st),
     do: {:reply, st.backend.get(st.handle, ref, props), st}
-
-  def handle_call({:apply_style, ref, style}, _from, st),
-    do: {:reply, st.backend.apply_style(st.handle, ref, style), st}
 
   def handle_call({:save, opts}, _from, st),
     do: {:reply, save_via(st, opts), st}

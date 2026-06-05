@@ -5,8 +5,9 @@ defmodule Ecrits.Doc do
   This is the `Ecrits.Doc` behaviour from the document-editing MCP design
   (`docs/plans/2026-06-04-doc-editing-mcp-design.md`, §4.2). It mirrors each
   engine's own object/property model so that a *small* set of reflective MCP
-  tools (`doc.inspect`/`outline`/`read`/`find`/`get`/`set`/`edit`/`apply_style`/
-  `save`) can drive any backend without one tool per editing operation.
+  tools (`read`/`find`/`get` (type+values+settable+children)/`set` (universal,
+  incl. char formatting)/`edit`/`save`) can drive any backend without one tool
+  per editing operation.
 
   Implementations:
 
@@ -22,7 +23,7 @@ defmodule Ecrits.Doc do
 
   ## Revisions & conflicts
 
-  Every mutating callback (`set/4`, `edit/3`, `apply_style/3`) takes a
+  Every mutating callback (`set/4`, `edit/3`) takes a
   `base_revision` so the owning `Ecrits.Doc.Editor` can detect interleaved
   writers and rebase. The authoritative revision counter lives in the Editor,
   not the engine. Mutating callbacks return `{:ok, applied}` where `applied`
@@ -100,10 +101,6 @@ defmodule Ecrits.Doc do
 
   @doc "Structural verb (see `Ecrits.Doc.Op`)."
   @callback edit(handle(), op :: map(), base_revision :: integer() | nil) ::
-              {:ok, applied()} | {:error, term()}
-
-  @doc "Apply a named style to `ref`."
-  @callback apply_style(handle(), ref(), style :: String.t() | map()) ::
               {:ok, applied()} | {:error, term()}
 
   @doc "Persist to disk (or export bytes). May be unsupported on some engines."

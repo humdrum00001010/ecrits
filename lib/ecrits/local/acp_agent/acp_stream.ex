@@ -512,13 +512,39 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     """
     [System] A document is currently open in the editor#{doc}. You can read, edit,
     AND create documents through the document MCP tools served by the MCP server
-    named `doc`. These tools are `doc_context`, `doc_list`, `doc_open`,
+    named `doc`. These ten tools are `doc_context`, `doc_list`, `doc_open`,
     `doc_create`, `doc_find`, `doc_read`, `doc_edit`, `doc_set`, `doc_get`,
-    `doc_apply_style`, `doc_save` (the server registers them with a dot, e.g.
-    `doc.context`, and your client normalizes the `.` to `_` — treat `doc_<x>` and
-    `doc.<x>` as the SAME tool). They are the one and only way to touch documents.
-    Do NOT shell out to hwp5proc, LibreOffice, soffice, pandoc, cat/sed, or any
-    file reader/writer.
+    `doc_save` (the server registers them with a dot, e.g. `doc.context`, and your
+    client normalizes the `.` to `_` — treat `doc_<x>` and `doc.<x>` as the SAME
+    tool). They are the one and only way to touch documents. Do NOT shell out to
+    hwp5proc, LibreOffice, soffice, pandoc, cat/sed, or any file reader/writer.
+
+    WHAT EACH READ/WRITE TOOL DOES:
+    • `doc_read` = TEXT content (a paragraph chunk, ≤30 paragraphs/call; page with
+      `next_at`).
+    • `doc_find` = locate literal text -> returns refs (including cells inside
+      tables) you then act on.
+    • `doc_get` = INSPECT a ref: its element type, current property VALUES, the
+      SETTABLE property names for that element, and its child refs. Use it to
+      discover exactly which property names `doc_set` will accept before you set.
+    • `doc_set` = set ANY element's properties (the UNIVERSAL property tool). It
+      routes to the correct native setter automatically:
+        - char run / text: {Bold:true}, {TextColor:"#FF0000"}, {FontSize:12},
+          {Italic:true}, {Underline:true}, {FontName:"바탕"} …
+        - TABLE CELL fill/background: {kind:"cell", BackgroundColor:"#FFFF00"} —
+          to color a cell or a whole column, `doc_find` the cells first, then
+          `doc_set` each cell ref with {kind:"cell", BackgroundColor: …}. Do NOT
+          try to color a cell with char/text formatting.
+        - paragraph: {Alignment:"center"}, {LineSpacing:160} …
+        - picture/shape/table props likewise.
+    • `doc_edit` = STRUCTURE: insert/delete/replace text, insert paragraphs,
+      tables, rows/columns, pictures (one structural verb per call).
+    There is no separate "style" or "inspect" tool — formatting is `doc_set`,
+    inspection is `doc_get`.
+
+    If the open document/session is READ-ONLY, write tools (`doc_set`, `doc_edit`,
+    `doc_save`, `doc_create`) are REFUSED. When that happens, tell the user the
+    document is read-only — do NOT keep retrying the write.
 
     CHOOSING THE TARGET — read the user's intent before touching anything:
     • If they want to MODIFY the currently-open document (fill it in, fix it,
@@ -546,14 +572,16 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     them. The `doc` MCP server IS connected in this session and exposes all 10
     tools above — so NEVER claim the document tools are missing / not exposed /
     not loaded; if you can't see them yet, surface them via tool discovery first.
-    If a `doc_*` call ever errors, retry it — do not give up and do not substitute
-    another mechanism.
+    If a `doc_*` call errors transiently, retry it — do not give up and do not
+    substitute another mechanism. (The ONE exception: a read-only refusal is not
+    transient — report it instead of retrying.)
 
     Workflow: surface the `doc` tools if needed, then `doc_context` to orient,
-    then `doc_find` / `doc_read` to locate the target text, then APPLY the change
-    with `doc_edit` (or `doc_set`). You MUST follow through and actually call the
-    write tool — do not stop after reading. After editing, confirm the resulting
-    revision number to the user.
+    then `doc_find` / `doc_read` to locate the target, then APPLY the change with
+    `doc_edit` (structure) or `doc_set` (properties/formatting). When unsure which
+    property names an element accepts, `doc_get` the ref first. You MUST follow
+    through and actually call the write tool — do not stop after reading. After
+    editing, confirm the resulting revision number to the user.
     """ <> "\n"
   end
 
