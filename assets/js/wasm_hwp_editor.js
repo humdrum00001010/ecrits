@@ -65,6 +65,16 @@ const WasmHwpEditor = {
     //                     cellParaIndex, cellPath } | null,
     //             preferredX }   // sticky x for Up/Down vertical motion
     this.caret = null
+    // Active text selection (drag-select). null when there is no selection.
+    //   selection = { section, cell, anchor: {paragraph, offset},
+    //                 focus: {paragraph, offset} }
+    // anchor = where mousedown landed; focus = where the pointer is now. A
+    // selection collapses to a plain caret when anchor and focus coincide.
+    this.selection = null
+    // Live drag-select gesture (only set while the mouse button is held).
+    //   dragSelect = { pageIndex, section, cell, anchor: {paragraph, offset},
+    //                  moved }   // moved=true once the pointer actually dragged
+    this.dragSelect = null
     // Lamport-ish monotonic counter for op-log event ids (recovery stream).
     this.lamport = 0
     // Korean IME provisional composition region currently live in the document.
@@ -100,9 +110,16 @@ const WasmHwpEditor = {
     this.onResize = () => this.renderVisiblePages()
     window.addEventListener("resize", this.onResize)
 
-    // IME proxy focus + mouse hit-testing (caret placement).
+    // IME proxy focus + mouse hit-testing (caret placement / drag-select).
+    // mousedown anchors on the page canvas; mousemove/mouseup are bound on the
+    // document so a drag that leaves the canvas (or the window) still tracks and
+    // finalizes correctly.
     this.onMouseDown = event => this.onCanvasMouseDown(event)
+    this.onMouseMove = event => this.onCanvasMouseMove(event)
+    this.onMouseUp = event => this.onCanvasMouseUp(event)
     this.el.addEventListener("mousedown", this.onMouseDown)
+    document.addEventListener("mousemove", this.onMouseMove)
+    document.addEventListener("mouseup", this.onMouseUp)
 
     // Wire the edit loop to the IME proxy (the OS-focused editable element).
     this.bindEditing()
@@ -137,6 +154,8 @@ const WasmHwpEditor = {
     if (this.snapshotTimer) clearTimeout(this.snapshotTimer)
     window.removeEventListener("resize", this.onResize)
     this.el.removeEventListener("mousedown", this.onMouseDown)
+    document.removeEventListener("mousemove", this.onMouseMove)
+    document.removeEventListener("mouseup", this.onMouseUp)
     this.unbindEditing()
     if (this.doc) {
       try { this.doc.free() } catch (_) {}
@@ -288,25 +307,27 @@ const WasmHwpEditor = {
   // units, which is the coordinate space renderPageToCanvas/hitTest use.
   onCanvasMouseDown(event) {
     if (event.button !== 0 || !this.doc) return
-    const canvas = event.target.closest("[data-role='ehwp-canvas']")
-    const section = event.target.closest("[data-role='local-hwp-page']")
-    if (!canvas || !section) return
+    const hitInfo = this.hitTestEvent(event)
+    if (!hitInfo) return
+    const { hit, pageIndex } = hitInfo
+    window.__rhwpLastHit = hit
 
-    const pageIndex = Number(section.dataset.pageIndex)
-    const rect = canvas.getBoundingClientRect()
-    const backingRatio = canvas.width / rect.width
-    const x = ((event.clientX - rect.left) * backingRatio) / this.scale
-    const y = ((event.clientY - rect.top) * backingRatio) / this.scale
+    // Place the caret at the press point (this is also the selection anchor).
+    this.setCaretFromHit(hit, pageIndex)
 
-    try {
-      const raw = this.doc.hitTest(pageIndex, x, y)
-      if (!raw) return
-      const hit = JSON.parse(raw)
-      window.__rhwpLastHit = hit
-      this.setCaretFromHit(hit, pageIndex)
-    } catch (error) {
-      console.error("[wasm-hwp] hitTest failed", error)
+    // Arm a drag-select gesture. mousemove (while pressed) extends the focus;
+    // mouseup finalizes. `moved` stays false until the pointer actually moves to
+    // a different document offset, so a plain click leaves only a caret.
+    const c = this.caret
+    this.dragSelect = {
+      pageIndex,
+      section: c.section,
+      cell: c.cell,
+      anchor: { paragraph: c.paragraph, offset: c.offset },
+      moved: false
     }
+    // A fresh press clears any prior selection until the drag re-establishes one.
+    this.clearSelection()
 
     // Keep the OS IME composition target focused + anchored at the caret so the
     // Korean candidate window pops next to the cursor.
@@ -315,6 +336,249 @@ const WasmHwpEditor = {
       this.imeProxy.focus({ preventScroll: true })
       this.anchorProxy()
     }
+  },
+
+  // mousemove while the button is held: hit-test the current point and extend
+  // the selection from the drag anchor to the current (focus) offset.
+  onCanvasMouseMove(event) {
+    if (!this.dragSelect || !this.doc) return
+    // Only react while the primary button is still pressed (defensive: a mouseup
+    // outside the window can be missed).
+    if ((event.buttons & 1) === 0) {
+      this.onCanvasMouseUp(event)
+      return
+    }
+    const hitInfo = this.hitTestEvent(event, this.dragSelect.pageIndex)
+    if (!hitInfo) return
+    const { hit } = hitInfo
+    if (hit.sectionIndex !== undefined && hit.sectionIndex !== this.dragSelect.section) return
+
+    const focus = {
+      paragraph: hit.paragraphIndex !== undefined ? hit.paragraphIndex : 0,
+      offset: hit.charOffset !== undefined ? hit.charOffset : 0
+    }
+    const ds = this.dragSelect
+    const sameSpot = focus.paragraph === ds.anchor.paragraph && focus.offset === ds.anchor.offset
+    if (!sameSpot) ds.moved = true
+
+    // Update the live caret/focus position so the caret tracks the pointer and
+    // the IME proxy follows.
+    this.setCaretFromHit(hit, ds.pageIndex)
+
+    if (ds.moved) {
+      this.selection = {
+        section: ds.section,
+        cell: ds.cell,
+        anchor: { ...ds.anchor },
+        focus
+      }
+    } else {
+      this.clearSelection()
+    }
+    this.renderSelection()
+    // Re-draw the caret on top of the selection highlight.
+    if (this.caret) this.drawCaret(this.caret)
+    this.anchorProxy()
+    if (event.cancelable) event.preventDefault()
+  },
+
+  // mouseup: finalize (or discard) the drag-select gesture.
+  onCanvasMouseUp(_event) {
+    if (!this.dragSelect) return
+    const ds = this.dragSelect
+    this.dragSelect = null
+    if (!ds.moved) {
+      // Plain click — no drag — so leave just the caret (no selection).
+      this.clearSelection()
+      this.renderSelection()
+      if (this.caret) this.drawCaret(this.caret)
+    }
+    // A moved drag already established `this.selection` during mousemove; nothing
+    // more to do — the highlight stays until the next press.
+  },
+
+  // Map a pointer event to { hit, pageIndex } via the engine's hitTest. When the
+  // pointer is over a page canvas we use that page; otherwise (drag left the
+  // canvas) we fall back to `preferPage` and clamp coords into its box so the
+  // selection still extends to the nearest in-page offset.
+  hitTestEvent(event, preferPage) {
+    let section = event.target && event.target.closest
+      ? event.target.closest("[data-role='local-hwp-page']")
+      : null
+    let pageIndex = section ? Number(section.dataset.pageIndex) : preferPage
+    if (section == null && preferPage != null) section = this.pageSection(preferPage)
+    if (!section && typeof pageIndex === "number") section = this.pageSection(pageIndex)
+    if (!section) return null
+    if (typeof pageIndex !== "number" || Number.isNaN(pageIndex)) {
+      pageIndex = Number(section.dataset.pageIndex)
+    }
+    const canvas = section.querySelector("[data-role='ehwp-canvas']")
+    if (!canvas) return null
+
+    const rect = canvas.getBoundingClientRect()
+    const backingRatio = canvas.width / rect.width
+    // Clamp the pointer into the canvas box so a drag that runs past the page
+    // edge still resolves to the nearest in-page glyph.
+    const clientX = Math.min(Math.max(event.clientX, rect.left), rect.right)
+    const clientY = Math.min(Math.max(event.clientY, rect.top), rect.bottom)
+    const x = ((clientX - rect.left) * backingRatio) / this.scale
+    const y = ((clientY - rect.top) * backingRatio) / this.scale
+
+    try {
+      const raw = this.doc.hitTest(pageIndex, x, y)
+      if (!raw) return null
+      return { hit: JSON.parse(raw), pageIndex }
+    } catch (error) {
+      console.error("[wasm-hwp] hitTest failed", error)
+      return null
+    }
+  },
+
+  // ─── Selection rendering ─────────────────────────────────────────────────
+
+  // Drop the active selection (state only; caller re-renders).
+  clearSelection() {
+    this.selection = null
+    window.__rhwpSelection = null
+  },
+
+  // Ask the engine for the line-by-line rects of the current selection and paint
+  // a translucent highlight on each affected page's overlay canvas (the same
+  // overlay the caret uses). getSelectionRects returns page-coordinate rects
+  // `[{pageIndex, x, y, width, height}, ...]`; we scale them to the overlay
+  // backing store exactly like drawCaret does.
+  renderSelection() {
+    // Clear selection paint from every overlay we might have drawn on. Because a
+    // selection can span pages we clear the whole visible window, then the caret
+    // is redrawn by the caller.
+    this.clearSelectionOverlays()
+
+    const sel = this.selection
+    if (!sel) return
+    // Collapsed selection => nothing to paint.
+    if (sel.anchor.paragraph === sel.focus.paragraph && sel.anchor.offset === sel.focus.offset) {
+      return
+    }
+
+    // Normalize so start <= end in document order.
+    const [start, end] = this.orderedSelection(sel)
+    window.__rhwpSelection = { section: sel.section, start, end, cell: sel.cell || null }
+
+    let rects
+    try {
+      let raw
+      if (sel.cell) {
+        raw = this.doc.getSelectionRectsInCell(
+          sel.section, sel.cell.parentParaIndex, sel.cell.controlIndex,
+          sel.cell.cellIndex, start.paragraph, start.offset, end.paragraph, end.offset
+        )
+      } else {
+        raw = this.doc.getSelectionRects(
+          sel.section, start.paragraph, start.offset, end.paragraph, end.offset
+        )
+      }
+      rects = raw ? JSON.parse(raw) : []
+    } catch (error) {
+      console.error("[wasm-hwp] getSelectionRects failed", error)
+      return
+    }
+    window.__rhwpSelectionRects = rects
+    if (!Array.isArray(rects) || rects.length === 0) return
+
+    const s = this.scale
+    for (const r of rects) {
+      const overlay = this.pageOverlay(r.pageIndex)
+      if (!overlay) continue
+      const ctx = overlay.getContext("2d")
+      if (!ctx) continue
+      ctx.fillStyle = "rgba(29, 78, 216, 0.28)" // matches the caret blue
+      ctx.fillRect(r.x * s, r.y * s, Math.max(1, r.width) * s, Math.max(1, r.height) * s)
+    }
+  },
+
+  // Clear all overlay canvases (selection highlight + any stale caret) across the
+  // page stack so a moving selection doesn't leave streaks behind.
+  clearSelectionOverlays() {
+    if (!this.pageStack) return
+    const overlays = this.pageStack.querySelectorAll("[data-role='ehwp-caret-overlay']")
+    for (const overlay of overlays) {
+      const ctx = overlay.getContext("2d")
+      if (ctx) ctx.clearRect(0, 0, overlay.width, overlay.height)
+    }
+  },
+
+  pageOverlay(index) {
+    const section = this.pageSection(index)
+    return section ? section.querySelector("[data-role='ehwp-caret-overlay']") : null
+  },
+
+  // Order a selection's anchor/focus into [start, end] in document order.
+  orderedSelection(sel) {
+    const a = sel.anchor
+    const f = sel.focus
+    const before = a.paragraph < f.paragraph ||
+      (a.paragraph === f.paragraph && a.offset <= f.offset)
+    return before ? [a, f] : [f, a]
+  },
+
+  // True when a non-collapsed selection is active.
+  hasSelection() {
+    const sel = this.selection
+    return !!sel &&
+      !(sel.anchor.paragraph === sel.focus.paragraph && sel.anchor.offset === sel.focus.offset)
+  },
+
+  // Drop the selection highlight and repaint the overlays (keeps the caret).
+  collapseSelection() {
+    if (!this.selection) return
+    this.clearSelection()
+    this.clearSelectionOverlays()
+    if (this.caret) this.drawCaret(this.caret)
+  },
+
+  // Delete the active selection from the document and collapse the caret to the
+  // start of the deleted range. Used when typing / Backspace / Delete replaces a
+  // selection. The engine returns the collapse point `{paraIdx, charOffset}`.
+  deleteSelection() {
+    if (!this.hasSelection()) return
+    const sel = this.selection
+    const [start, end] = this.orderedSelection(sel)
+    const c = this.caret
+    try {
+      let raw
+      if (sel.cell && c.cell) {
+        raw = this.doc.deleteRangeInCell(
+          sel.section, c.cell.parentParaIndex, c.cell.controlIndex,
+          c.cell.cellIndex, start.paragraph, start.offset, end.paragraph, end.offset
+        )
+        const r = JSON.parse(raw)
+        c.cell.cellParaIndex = r.paraIdx !== undefined ? r.paraIdx : start.paragraph
+        c.offset = r.charOffset !== undefined ? r.charOffset : start.offset
+      } else {
+        raw = this.doc.deleteRange(
+          sel.section, start.paragraph, start.offset, end.paragraph, end.offset
+        )
+        const r = JSON.parse(raw)
+        c.paragraph = r.paraIdx !== undefined ? r.paraIdx : start.paragraph
+        c.offset = r.charOffset !== undefined ? r.charOffset : start.offset
+      }
+      this.recordOp("RangeDeleted", {
+        section: sel.section,
+        startPara: start.paragraph, startOffset: start.offset,
+        endPara: end.paragraph, endOffset: end.offset
+      })
+    } catch (error) {
+      console.error("[wasm-hwp] deleteRange failed", error)
+      return
+    }
+    c.preferredX = -1
+    this.clearSelection()
+    this.refreshCursorRect()
+    this.renderCaretPage()
+    this.clearSelectionOverlays()
+    this.drawCaret(c)
+    this.anchorProxy()
+    this.scheduleSnapshot()
   },
 
   // Normalize a hitTest / moveVertical result into caret state.
@@ -386,10 +650,52 @@ const WasmHwpEditor = {
     if (!ctx) return
 
     ctx.clearRect(0, 0, overlay.width, overlay.height)
+    // The caret and the selection highlight share this overlay; clearing it for
+    // the caret blink would wipe the highlight, so repaint the selection first.
+    if (this.selection) this.paintSelectionOnPage(rect.pageIndex)
     if (!this.caretBlinkOn) return
     const s = this.scale
     ctx.fillStyle = "#1d4ed8"
     ctx.fillRect(rect.x * s, rect.y * s, 1.5 * s, (rect.height || 16) * s)
+  },
+
+  // Paint just the selection rects that fall on `pageIndex` (used by drawCaret to
+  // restore the highlight after it clears the shared overlay for a blink frame).
+  paintSelectionOnPage(pageIndex) {
+    const sel = this.selection
+    if (!sel) return
+    if (sel.anchor.paragraph === sel.focus.paragraph && sel.anchor.offset === sel.focus.offset) {
+      return
+    }
+    const [start, end] = this.orderedSelection(sel)
+    let rects
+    try {
+      let raw
+      if (sel.cell) {
+        raw = this.doc.getSelectionRectsInCell(
+          sel.section, sel.cell.parentParaIndex, sel.cell.controlIndex,
+          sel.cell.cellIndex, start.paragraph, start.offset, end.paragraph, end.offset
+        )
+      } else {
+        raw = this.doc.getSelectionRects(
+          sel.section, start.paragraph, start.offset, end.paragraph, end.offset
+        )
+      }
+      rects = raw ? JSON.parse(raw) : []
+    } catch (_) {
+      return
+    }
+    if (!Array.isArray(rects)) return
+    const overlay = this.pageOverlay(pageIndex)
+    if (!overlay) return
+    const ctx = overlay.getContext("2d")
+    if (!ctx) return
+    const s = this.scale
+    ctx.fillStyle = "rgba(29, 78, 216, 0.28)"
+    for (const r of rects) {
+      if (r.pageIndex !== pageIndex) continue
+      ctx.fillRect(r.x * s, r.y * s, Math.max(1, r.width) * s, Math.max(1, r.height) * s)
+    }
   },
 
   // Position the hidden IME proxy textarea over the caret so the OS candidate
@@ -460,7 +766,11 @@ const WasmHwpEditor = {
     if (type === "insertText" || type === "insertFromPaste" ||
         type === "insertCompositionText" || type === "insertReplacementText") {
       const data = event.data != null ? event.data : this.imeProxy.value
-      if (data) this.insertAtCaret(data)
+      // Typing over a selection replaces it: delete the range, then insert.
+      if (data) {
+        if (this.hasSelection()) this.deleteSelection()
+        this.insertAtCaret(data)
+      }
     }
     // Always drain the proxy so it never accumulates state.
     this.imeProxy.value = ""
@@ -469,6 +779,8 @@ const WasmHwpEditor = {
   // Korean IME — compositionstart arms a provisional (empty) region at the caret.
   handleCompositionStart(_event) {
     if (!this.doc || !this.caret) return
+    // Composing over a selection replaces it first.
+    if (this.hasSelection()) this.deleteSelection()
     this.composing = { start: this.caret.offset, length: 0 }
   },
 
@@ -576,6 +888,15 @@ const WasmHwpEditor = {
     if (event.isComposing) return // IME owns the keystroke
     if (event.metaKey || event.ctrlKey || event.altKey) return // shortcuts pass through
 
+    // A non-empty selection makes Backspace/Delete/Enter act on the whole range.
+    if (this.hasSelection() &&
+        (event.key === "Backspace" || event.key === "Delete" || event.key === "Enter")) {
+      event.preventDefault()
+      this.deleteSelection()
+      if (event.key === "Enter") this.splitAtCaret()
+      return
+    }
+
     switch (event.key) {
       case "Backspace":
         event.preventDefault()
@@ -591,18 +912,22 @@ const WasmHwpEditor = {
         break
       case "ArrowLeft":
         event.preventDefault()
+        this.collapseSelection()
         this.moveHorizontal(-1)
         break
       case "ArrowRight":
         event.preventDefault()
+        this.collapseSelection()
         this.moveHorizontal(1)
         break
       case "ArrowUp":
         event.preventDefault()
+        this.collapseSelection()
         this.moveVertical(-1)
         break
       case "ArrowDown":
         event.preventDefault()
+        this.collapseSelection()
         this.moveVertical(1)
         break
       default:
