@@ -532,6 +532,10 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     To build a table from scratch use `doc_edit` `insert_table` {rows, cols} (it
     returns the new table's {paraIdx, controlIdx}); fill cells with `insert_text`
     using a ref that carries {paragraph: paraIdx, control: controlIdx, cell, cell_para}.
+    For prose with MULTIPLE paragraphs (a contract is many clauses), put `\\n`
+    between paragraphs in a single `insert_text` `text` — each `\\n` becomes a real
+    paragraph break. Do NOT cram a whole multi-clause body into one run-on
+    paragraph; give each clause / 조 its own line.
 
     IMPORTANT — these tools may NOT appear directly in your initial callable tool
     list: your client defers MCP server tools behind a tool-search / MCP-tool

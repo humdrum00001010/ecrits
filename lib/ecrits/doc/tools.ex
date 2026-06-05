@@ -223,7 +223,9 @@ defmodule Ecrits.Doc.Tools do
                 "`replacement` is SINGLE-paragraph text: do NOT put newlines in it (one paragraph per op; use `split` to add paragraphs). " <>
                 "By default only the FIRST match is replaced; scope to one paragraph with `ref` (from doc.find), or pass `all:true` to replace every match. " <>
                 "If `query` occurs in more than one place and neither `ref` nor `all` is given, the edit is REJECTED (so you never edit unrelated sample blocks by accident).\n" <>
-                "• insert_text {op, ref, text}\n" <>
+                "• insert_text {op, ref, text}: `text` MAY contain `\\n` — each newline starts a NEW paragraph " <>
+                  "(the body is expanded into real paragraphs). Use this to author multi-paragraph content " <>
+                  "(e.g. each contract clause / 조 on its own line) in ONE call instead of one giant run-on paragraph.\n" <>
                 "• delete_range {op, ref, count?}\n" <>
                 "• insert_paragraph {op, ref} • delete_paragraph {op, ref} • split {op, ref} • merge {op, ref}\n" <>
                 "• insert_table {op, ref, rows, cols}: create a NEW rows×cols table at `ref`. Returns native {paraIdx, controlIdx} — " <>

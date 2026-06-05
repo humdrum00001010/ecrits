@@ -89,10 +89,10 @@ defmodule Ecrits.Doc.Op do
       not is_binary(op[:text]) or op[:text] == "" ->
         {:error, {:invalid_op, "insert_text requires a non-empty string \"text\""}}
 
-      String.contains?(op[:text], "\n") ->
-        {:error, {:invalid_op, "insert_text \"text\" must be a single paragraph (no newlines); use \"split\" for new paragraphs"}}
-
       true ->
+        # `\n` in text is ALLOWED and meaningful: the backend expands it into one
+        # paragraph per line (insert + split), so the agent can author multi-
+        # paragraph bodies (e.g. each contract clause on its own line) in one call.
         {:ok, op}
     end
   end
