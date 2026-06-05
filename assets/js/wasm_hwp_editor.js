@@ -1179,6 +1179,42 @@ const WasmHwpEditor = {
         return { error: "replace_text replacement must be a single paragraph (no newlines); use one op per paragraph or 'split'" }
       }
 
+      // cell-scoped: the ref addresses text inside a TABLE CELL. Read/replace via
+      // the cell primitives (getTextInCell/deleteTextInCell/insertTextInCell) — the
+      // body getTextRange path can't see cell text, so without this the agent can
+      // never fill a table (signature block, 계약금액 table, …).
+      if (ref && ref.cell) {
+        const cl = ref.cell
+        let cellText = ""
+        try {
+          const len = this.doc.getCellParagraphLength(
+            ref.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, cl.cellParaIndex
+          )
+          cellText =
+            this.doc.getTextInCell(
+              ref.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, cl.cellParaIndex, 0, len
+            ) || ""
+        } catch (error) {
+          return { error: `cell read failed: ${String((error && error.message) || error)}` }
+        }
+        const idx = cellText.indexOf(query)
+        if (idx < 0) {
+          return { error: `replace_text: query not found in target cell (cell text: ${JSON.stringify(cellText.slice(0, 80))})` }
+        }
+        try {
+          this.doc.deleteTextInCell(
+            ref.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, cl.cellParaIndex, idx, query.length
+          )
+          this.doc.insertTextInCell(
+            ref.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, cl.cellParaIndex, idx, replacement
+          )
+        } catch (error) {
+          return { error: `cell replace failed: ${String((error && error.message) || error)}` }
+        }
+        this.recordOp("AgentReplaceText", { section: ref.section, cell: cl, offset: idx, query, replacement, replaced: 1 })
+        return this.finishAgentEdit(baseRev, { replaced: 1 })
+      }
+
       // ref-scoped: replace the query ONLY inside the referenced paragraph, so a
       // phrase that recurs across sample blocks is edited exactly where intended.
       if (ref) {
@@ -1246,6 +1282,18 @@ const WasmHwpEditor = {
       if (!text) return { error: "insert_text requires non-empty 'text'" }
       if (text.includes("\n")) return { error: "insert_text 'text' must be a single paragraph (no newlines); use 'split' for new paragraphs" }
       const offset = Number.isInteger(ref.offset) ? ref.offset : 0
+      if (ref.cell) {
+        const cl = ref.cell
+        try {
+          this.doc.insertTextInCell(
+            ref.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, cl.cellParaIndex, offset, text
+          )
+        } catch (error) {
+          return { error: `insertTextInCell failed: ${String((error && error.message) || error)}` }
+        }
+        this.recordOp("AgentInsertText", { section: ref.section, cell: cl, offset, text })
+        return this.finishAgentEdit(baseRev, { inserted: text.length })
+      }
       try {
         this.doc.insertText(ref.section, ref.paragraph, offset, text)
       } catch (error) {
@@ -1258,19 +1306,33 @@ const WasmHwpEditor = {
     if (verb === "delete_range") {
       if (!ref) return { error: "delete_range requires a ref {section,paragraph,offset} (from doc.find)" }
       const offset = Number.isInteger(ref.offset) ? ref.offset : 0
+      const cl = ref.cell
       // count defaults to "rest of the paragraph from offset" when omitted.
       let count = Number.isInteger(op.count) ? op.count : null
       if (count == null) {
-        const len = this.paragraphLength(ref.section, ref.paragraph)
+        let len = 0
+        try {
+          len = cl
+            ? this.doc.getCellParagraphLength(ref.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, cl.cellParaIndex)
+            : this.paragraphLength(ref.section, ref.paragraph)
+        } catch (_) {
+          len = 0
+        }
         count = Math.max(0, len - offset)
       }
       if (count <= 0) return { error: "delete_range: nothing to delete (count must be > 0)" }
       try {
-        this.doc.deleteText(ref.section, ref.paragraph, offset, count)
+        if (cl) {
+          this.doc.deleteTextInCell(
+            ref.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, cl.cellParaIndex, offset, count
+          )
+        } else {
+          this.doc.deleteText(ref.section, ref.paragraph, offset, count)
+        }
       } catch (error) {
         return { error: `deleteText failed: ${String((error && error.message) || error)}` }
       }
-      this.recordOp("AgentDeleteRange", { section: ref.section, para: ref.paragraph, offset, count })
+      this.recordOp("AgentDeleteRange", { section: ref.section, cell: cl, para: ref.paragraph, offset, count })
       return this.finishAgentEdit(baseRev, { deleted: count })
     }
 
@@ -1290,7 +1352,23 @@ const WasmHwpEditor = {
     const paragraph = Number(r.paragraph ?? r.paragraphIndex)
     if (!Number.isInteger(paragraph)) return null
     const offset = Number(r.offset ?? r.charOffset ?? 0)
-    return { section: Number.isInteger(section) ? section : 0, paragraph, offset: Number.isInteger(offset) ? offset : 0 }
+    const out = { section: Number.isInteger(section) ? section : 0, paragraph, offset: Number.isInteger(offset) ? offset : 0 }
+    // Table-cell address (from doc.find's cellContext). Accept both the bridge
+    // shape ({parentParaIndex,controlIndex,cellIndex,cellParaIndex}) and the raw
+    // rhwp shape ({parentPara,ctrlIdx,cellIdx,cellPara}).
+    const cell = r.cell
+    if (cell && typeof cell === "object") {
+      const ppi = Number(cell.parentParaIndex ?? cell.parentPara)
+      if (Number.isInteger(ppi)) {
+        out.cell = {
+          parentParaIndex: ppi,
+          controlIndex: Number(cell.controlIndex ?? cell.ctrlIdx ?? 0),
+          cellIndex: Number(cell.cellIndex ?? cell.cellIdx ?? 0),
+          cellParaIndex: Number(cell.cellParaIndex ?? cell.cellPara ?? 0)
+        }
+      }
+    }
+    return out
   },
 
   // Shared post-edit step: re-render the visible window (an edit can reflow any
@@ -1327,14 +1405,28 @@ const WasmHwpEditor = {
       const parsed = raw ? JSON.parse(raw) : []
       const list = Array.isArray(parsed) ? parsed : parsed.matches || []
       for (const m of list) {
-        matches.push({
-          ref: JSON.stringify({
-            section: m.section ?? m.sectionIndex ?? 0,
-            paragraph: m.paragraph ?? m.paragraphIndex ?? 0,
-            offset: m.offset ?? m.charOffset ?? 0
-          }),
-          text: m.text ?? pattern
-        })
+        // searchAllText (rhwp_core) returns {sec,para,charOffset,length,cellContext?}
+        // — NOT {section,paragraph,offset}. Read the real field names, else every
+        // ref collapses to {section:0,paragraph:0} and the agent can never target a
+        // specific paragraph (and table cells become unreachable entirely).
+        const refObj = {
+          section: m.sec ?? m.section ?? m.sectionIndex ?? 0,
+          paragraph: m.para ?? m.paragraph ?? m.paragraphIndex ?? 0,
+          offset: m.charOffset ?? m.offset ?? 0
+        }
+        // A match inside a table cell carries cellContext {parentPara,ctrlIdx,
+        // cellIdx,cellPara}. Surface it as `cell` so a follow-up replace/insert can
+        // route to the cell primitives instead of the body paragraph.
+        const cc = m.cellContext
+        if (cc && cc.parentPara != null) {
+          refObj.cell = {
+            parentParaIndex: cc.parentPara,
+            controlIndex: cc.ctrlIdx ?? 0,
+            cellIndex: cc.cellIdx ?? 0,
+            cellParaIndex: cc.cellPara ?? 0
+          }
+        }
+        matches.push({ ref: JSON.stringify(refObj), text: m.text ?? pattern })
       }
     } catch (error) {
       console.error("[wasm-hwp] searchAllText failed", error)
