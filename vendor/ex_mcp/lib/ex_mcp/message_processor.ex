@@ -93,6 +93,15 @@ defmodule ExMCP.MessageProcessor do
   # - :unknown - Cannot determine server type
   @spec detect_server_type(module()) :: :dsl_server | :handler_server | :unknown
   defp detect_server_type(handler_module) do
+    # `function_exported?/3` returns false for a module that has not been loaded
+    # yet. The doc-tools handler is not in the supervision tree, so right after a
+    # cold boot / code reload the first `initialize` can arrive before the module
+    # is loaded — detection would then wrongly fall through to `:unknown` and the
+    # `:direct` path (hardcoded protocol version + empty serverInfo), producing a
+    # schema-invalid InitializeResult and an intermittent handshake failure. Force
+    # the module to load first so detection is deterministic.
+    _ = Code.ensure_loaded(handler_module)
+
     cond do
       # DSL servers have getter functions
       function_exported?(handler_module, :get_tools, 0) and
@@ -169,6 +178,13 @@ defmodule ExMCP.MessageProcessor do
     handler = Map.get(opts, :handler)
     server = Map.get(opts, :server)
     server_info = Map.get(opts, :server_info, %{})
+
+    # Thread the configured server_info through to the initialize handler. It is
+    # carried in `opts` (set by the HTTP plug) but the initialize dispatch reads
+    # it from `conn.assigns[:server_info]`; without this it is always empty, so
+    # the `:direct` initialize path would emit an empty `serverInfo` (invalid per
+    # the MCP InitializeResult schema). Stash it so every path has a valid value.
+    conn = %{conn | assigns: Map.put(conn.assigns || %{}, :server_info, server_info)}
 
     cond do
       # If we have a server PID, use it directly

@@ -6,32 +6,35 @@ defmodule ExMCP.MessageProcessor.MethodHandlers do
 
   require Logger
 
+  alias ExMCP.Internal.VersionRegistry
+
   @default_protocol_version "2025-11-25"
+  @fallback_server_info %{"name" => "ex_mcp_server", "version" => "1.0.0"}
 
   # --- initialize ---
 
-  def handle_initialize(conn, handler, :direct, _params, id, server_info) do
+  def handle_initialize(conn, handler, :direct, params, id, server_info) do
     put_success(
       conn,
       %{
-        "protocolVersion" => @default_protocol_version,
+        "protocolVersion" => negotiate_protocol_version(params),
         "capabilities" => deep_stringify_keys(handler.get_capabilities()),
-        "serverInfo" => deep_stringify_keys(server_info)
+        "serverInfo" => ensure_server_info(server_info)
       },
       id
     )
   end
 
-  def handle_initialize(conn, server_pid, :genserver, _params, id, _server_info) do
+  def handle_initialize(conn, server_pid, :genserver, params, id, server_info) do
     info = GenServer.call(server_pid, :get_server_info, 5000)
     capabilities = GenServer.call(server_pid, :get_capabilities, 5000)
 
     put_success(
       conn,
       %{
-        "protocolVersion" => @default_protocol_version,
+        "protocolVersion" => negotiate_protocol_version(params),
         "capabilities" => deep_stringify_keys(capabilities),
-        "serverInfo" => deep_stringify_keys(info)
+        "serverInfo" => ensure_server_info(info, server_info)
       },
       id
     )
@@ -39,14 +42,14 @@ defmodule ExMCP.MessageProcessor.MethodHandlers do
     error -> put_error(conn, "Initialize failed", error, id)
   end
 
-  def handle_initialize(conn, server_pid, :handler, params, id, _server_info) do
+  def handle_initialize(conn, server_pid, :handler, params, id, server_info) do
     case GenServer.call(server_pid, {:initialize, params}, 5000) do
       {:ok, result} ->
-        normalized = normalize_initialize_result(result)
+        normalized = normalize_initialize_result(result, params, server_info)
         put_success(conn, deep_stringify_keys(normalized), id)
 
       {:ok, result, _state} ->
-        normalized = normalize_initialize_result(result)
+        normalized = normalize_initialize_result(result, params, server_info)
         put_success(conn, deep_stringify_keys(normalized), id)
 
       {:error, reason} ->
@@ -56,24 +59,76 @@ defmodule ExMCP.MessageProcessor.MethodHandlers do
     error -> put_error(conn, "Initialize failed", error, id)
   end
 
-  defp normalize_initialize_result(result) do
-    result =
-      result
-      |> Map.put_new("protocolVersion", @default_protocol_version)
-      |> Map.put_new(:protocolVersion, @default_protocol_version)
+  # Builds a schema-valid InitializeResult from whatever the handler returned.
+  #
+  # Two historical bugs are fixed here:
+  #
+  #   * Protocol version override — the previous `Map.put_new("protocolVersion",
+  #     ...)` + `Map.put_new(:protocolVersion, ...)` pair always injected the
+  #     hardcoded default. The handler sets the ATOM key, but the STRING-key
+  #     `put_new` still fired (different key), and after `deep_stringify_keys`
+  #     the two collided with the default winning. We now negotiate the version
+  #     explicitly (echo the client's requested version when supported) and only
+  #     fall back to a handler-provided / default version, never override one.
+  #
+  #   * Empty serverInfo — an InitializeResult without `serverInfo.name` is
+  #     invalid and makes strict clients (codex/rmcp) reject the handshake. We
+  #     guarantee a non-empty serverInfo.
+  defp normalize_initialize_result(result, params, server_info) do
+    {result, handler_version} = pop_any(result, "protocolVersion", :protocolVersion)
+    version = negotiate_protocol_version(params, handler_version)
 
-    if Map.has_key?(result, "serverInfo") or Map.has_key?(result, :serverInfo) do
-      result
-    else
-      name = Map.get(result, "name") || Map.get(result, :name)
-      version = Map.get(result, "version") || Map.get(result, :version)
+    result = Map.put(result, "protocolVersion", version)
 
-      if name && version do
-        Map.put(result, "serverInfo", %{"name" => name, "version" => version})
-      else
-        result
+    handler_server_info = Map.get(result, "serverInfo") || Map.get(result, :serverInfo)
+    name = Map.get(result, "name") || Map.get(result, :name)
+    version_field = Map.get(result, "version") || Map.get(result, :version)
+
+    server_info_value =
+      cond do
+        non_empty_map?(handler_server_info) -> handler_server_info
+        name && version_field -> %{"name" => name, "version" => version_field}
+        true -> ensure_server_info(server_info)
       end
+
+    result
+    |> Map.delete(:serverInfo)
+    |> Map.put("serverInfo", server_info_value)
+  end
+
+  # Echo the client's requested protocolVersion when ex_mcp supports it,
+  # otherwise prefer the handler's negotiated version (if supported), else the
+  # server's latest supported version. Never returns an unsupported version.
+  defp negotiate_protocol_version(params, handler_version \\ nil) do
+    requested = is_map(params) && Map.get(params, "protocolVersion")
+    supported = VersionRegistry.supported_versions()
+
+    cond do
+      is_binary(requested) and requested in supported -> requested
+      is_binary(handler_version) and handler_version in supported -> handler_version
+      true -> @default_protocol_version
     end
+  end
+
+  # Guarantees a non-empty serverInfo map (with at least a name). Prefers the
+  # primary value, falls back to the configured one, then a sane default.
+  defp ensure_server_info(primary, fallback \\ %{}) do
+    cond do
+      non_empty_map?(primary) -> deep_stringify_keys(primary)
+      non_empty_map?(fallback) -> deep_stringify_keys(fallback)
+      true -> @fallback_server_info
+    end
+  end
+
+  defp non_empty_map?(map) when is_map(map), do: map_size(map) > 0
+  defp non_empty_map?(_), do: false
+
+  # Removes both the string and atom variants of a key and returns the first
+  # value found, so a handler-provided value survives `deep_stringify_keys`
+  # without colliding with an injected default of the other key flavour.
+  defp pop_any(map, string_key, atom_key) do
+    value = Map.get(map, string_key) || Map.get(map, atom_key)
+    {map |> Map.delete(string_key) |> Map.delete(atom_key), value}
   end
 
   # --- tools/list ---
