@@ -452,10 +452,28 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   defp input_text(input), do: inspect(input)
 
   # Prepend a concise, provider-agnostic developer instruction so the agent knows
-  # the currently-open document is read/editable ONLY through the `doc.*` MCP
+  # the currently-open document is read/editable ONLY through the document MCP
   # tools — not by shelling out to hwp5proc / LibreOffice / file readers. Without
-  # this, codex (gpt-5.5) tends to ignore the doc.* tools and try shell tooling,
-  # or it reads with doc.context/doc.find but never follows through to doc.edit.
+  # this, codex (gpt-5.5) tends to ignore them and try shell tooling, or it reads
+  # but never follows through to the edit.
+  #
+  # CRITICAL — two confirmed failure modes this preamble defends against (verified
+  # live against codex gpt-5.5 via ~/.codex/logs_2.sqlite):
+  #
+  # 1. Name normalization: the MCP server registers tools with a DOT
+  #    (`doc.context`), but OpenAI/Anthropic function names can't contain a dot, so
+  #    clients expose them as `doc_context`. Naming them with dots here made the
+  #    model search for a literal `doc.context`, miss it, and refuse. So name them
+  #    with underscores (and state the two forms are the same tool).
+  #
+  # 2. Deferred MCP tools: with many MCP servers connected (the user's global
+  #    codex servers + our `doc`), codex does NOT inject every MCP tool into the
+  #    request — it defers them behind a tool-search / `list_mcp_resources`
+  #    discovery layer. The doc server connects and lists 12 tools
+  #    (`tool_count=12` in connection_manager) yet none appear in the request's
+  #    tools array. The earlier preamble FORBADE `tool_search`/`list_mcp_*`, so the
+  #    model never surfaced the deferred doc tools and declared them missing. The
+  #    fix REQUIRES the model to use discovery to load the `doc` tools first.
   defp build_prompt(turn) do
     doc_preamble(turn) <> input_text(turn.input)
   end
@@ -465,25 +483,32 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
 
     """
     [System] A document is currently open in the editor#{doc}. You can read AND
-    edit that open document ONLY through the `doc.*` MCP tools (e.g. `doc.context`,
-    `doc.list`, `doc.find`, `doc.read`, `doc.edit`, `doc.set`) — these are the one
-    and only way to touch it. Do NOT shell out to hwp5proc, LibreOffice, soffice,
-    pandoc, cat/sed, or any file reader/writer for the open document.
+    edit that open document through the document MCP tools served by the MCP
+    server named `doc`. These tools are `doc_context`, `doc_list`, `doc_find`,
+    `doc_read`, `doc_edit`, `doc_set`, `doc_outline`, `doc_get`, `doc_apply_style`,
+    `doc_save` (the server registers them with a dot, e.g. `doc.context`, and your
+    client normalizes the `.` to `_` — treat `doc_<x>` and `doc.<x>` as the SAME
+    tool). They are the one and only way to touch the open document. Do NOT shell
+    out to hwp5proc, LibreOffice, soffice, pandoc, cat/sed, or any file
+    reader/writer for the open document.
 
-    MANDATORY FIRST STEP: before doing anything else, call `doc.context` (and, if
-    needed, `doc.list`) to load the open document and PROVE the `doc.*` tools are
-    available. These tools ARE registered and available to you in this session —
-    they are provided directly, you do NOT need to search/discover/enable them
-    first. Never use any built-in MCP-listing or resource-listing tool (such as
-    `list_mcp_resources`, `list_mcp_tools`, `tool_search`, or any generic MCP
-    server browser) to look for them, and NEVER claim the `doc.*` tools are
-    missing / not exposed / not loaded. If a `doc.*` call ever errors, retry it —
-    do not give up and do not substitute another mechanism.
+    IMPORTANT — these tools may NOT appear directly in your initial callable tool
+    list: your client defers MCP server tools behind a tool-search / MCP-tool
+    discovery layer (e.g. `tool_search`, `list_mcp_resources`, or your MCP tool
+    loader). That is EXPECTED and does NOT mean they are missing. If you do not
+    already see a `doc_*` tool, your MANDATORY FIRST STEP is to use that discovery
+    mechanism to load the `doc` server's tools (search/list for "doc"), then call
+    them. The `doc` MCP server IS connected in this session and exposes all 10
+    tools above — so NEVER claim the document tools are missing / not exposed /
+    not loaded; if you can't see them yet, surface them via tool discovery first.
+    If a `doc_*` call ever errors, retry it — do not give up and do not substitute
+    another mechanism.
 
-    Workflow: `doc.context` to orient, then `doc.find` / `doc.read` to locate the
-    target text, then APPLY the change with `doc.edit` (or `doc.set`). You MUST
-    follow through and actually call the write tool — do not stop after reading.
-    After editing, confirm the resulting revision number to the user.
+    Workflow: surface the `doc` tools if needed, then `doc_context` to orient,
+    then `doc_find` / `doc_read` to locate the target text, then APPLY the change
+    with `doc_edit` (or `doc_set`). You MUST follow through and actually call the
+    write tool — do not stop after reading. After editing, confirm the resulting
+    revision number to the user.
     """ <> "\n"
   end
 
