@@ -78,9 +78,7 @@ defmodule Ecrits.MixProject do
       # Headless HWP/HWPX NIF runtime backing `Ecrits.Doc.Rhwp` (the server arm of
       # the doc-editing MCP). Provides the `Ehwp` facade used by the `doc.*` tools.
       {:ehwp, git: "https://storage.cloudxyz.org/IlYoung/ehwp", branch: "main"},
-      {:libreofficex,
-       git: "https://storage.cloudxyz.org/IlYoung/libreofficex",
-       branch: "main"},
+      {:libreofficex, git: "https://storage.cloudxyz.org/IlYoung/libreofficex", branch: "main"},
       {:orchex, git: "https://storage.cloudxyz.org/IlYoung/Orchex.git", branch: "main"},
       # ecrits extra deps.
       {:openai_ex, "~> 0.9"},
@@ -125,8 +123,8 @@ defmodule Ecrits.MixProject do
       # <script> tag at runtime (not bundled by esbuild) and fetches `soffice.wasm`
       # + `soffice.data` via `Module.locateFile`. All three are served statically
       # under `/assets/office/` (Plug.Static `only: ~w(assets ...)`). The copy is
-      # best-effort (`- cmd`) so a checkout without the (large, local-only) office
-      # artifacts still builds.
+      # best-effort (the shell loop skips missing files) so a checkout without the
+      # (large, local-only) office artifacts still builds.
       "assets.office_wasm": [
         ~s(cmd sh -c "mkdir -p priv/static/assets/office && for f in soffice.js soffice.wasm soffice.data; do [ -f assets/vendor/office/$f ] && cp assets/vendor/office/$f priv/static/assets/office/$f || true; done")
       ],

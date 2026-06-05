@@ -1,16 +1,20 @@
 defmodule EcritsWeb.LocalDocumentBytesController do
   @moduledoc """
-  Streams the raw bytes of a local workspace HWP/HWPX document to the browser so
-  the in-browser rhwp_core WASM engine can `new HwpDocument(bytes)` and render +
-  hit-test locally on a `<canvas>`. The server stays the source of truth for the
-  bytes (persistence); the browser owns render/hit-test/edit.
+  Streams the raw bytes of a local workspace document to the browser so an
+  in-browser WASM engine can render + edit it on a `<canvas>`:
+
+    * HWP/HWPX -> rhwp_core (`new HwpDocument(bytes)`)
+    * docx/pptx/xlsx (office) -> LibreOffice WASM (`loadFromBytes(bytes)`)
+
+  The server stays the source of truth for the bytes (persistence); the browser
+  owns render/hit-test/edit.
 
   Gating: the request carries the workspace root `path` and the document
   `document` relative path. Both are validated through `Document.open_args/3`,
   which normalizes the relative path (rejecting traversal), confirms it resolves
   to a regular file INSIDE the workspace root, and confirms the file is a
-  supported HWP/HWPX format by magic bytes. Anything else is a 404 — this route
-  never serves arbitrary filesystem paths.
+  supported HWP/HWPX or office format by magic bytes. Anything else is a 404 —
+  this route never serves arbitrary filesystem paths.
   """
 
   use EcritsWeb, :controller
@@ -22,7 +26,7 @@ defmodule EcritsWeb.LocalDocumentBytesController do
     with {:ok, args} <- Document.open_args(workspace_path, relative_path),
          path = Keyword.fetch!(args, :path),
          format = Keyword.fetch!(args, :format),
-         true <- Document.ehwp_format?(format),
+         true <- Document.ehwp_format?(format) or Document.libreoffice_format?(format),
          {:ok, bytes} <- File.read(path) do
       conn
       |> put_resp_content_type(Document.content_type(format))
