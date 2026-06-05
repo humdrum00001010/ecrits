@@ -454,36 +454,27 @@ const WasmOfficeEditor = {
   // Hand the document bytes to the engine, copying into the wasm heap when the
   // export expects a (ptr,len) pair rather than a JS typed array.
   openWithBytes(Module, bytes) {
+    // The embind `loadFromBytes` takes a SINGLE argument (the byte buffer); the
+    // format is auto-detected by LibreOffice's import-filter detection from the
+    // content — passing a 2nd `format` arg throws
+    // "called with 2 arguments, expected 1".
+    const arg = this.toEmbindBytes(Module, bytes)
+
     if (this.api.shape === "embind-class") {
       const ctor = this.api.ctor
-      // Try static factory first, then `new`.
       if (typeof ctor.loadFromBytes === "function") {
-        this.handle = ctor.loadFromBytes(this.toEmbindBytes(Module, bytes), this.format)
+        this.handle = ctor.loadFromBytes(arg)
       } else {
         this.handle = new ctor()
-        this.handle.loadFromBytes(this.toEmbindBytes(Module, bytes), this.format)
+        this.handle.loadFromBytes(arg)
       }
       return
     }
 
-    // module-functions shape: the embind `loadFromBytes(Uint8Array, fileName)`
-    // returns a bool (LokEditBindings.cxx) — true on success, false when
-    // documentLoad failed (the reason is on stderr, captured in the ring). Try
-    // the typed array first; on TypeError fall back to a (ptr,len) heap copy for
-    // a raw-C calling convention.
-    let ok
-    try {
-      ok = this.api.loadFromBytes(bytes, this.format)
-    } catch (e) {
-      if (!(e instanceof TypeError)) throw e
-      const ptr = Module._malloc(bytes.length)
-      Module.HEAPU8.set(bytes, ptr)
-      try {
-        ok = this.api.loadFromBytes(ptr, bytes.length, this.format)
-      } finally {
-        Module._free(ptr)
-      }
-    }
+    // module-functions shape: embind `loadFromBytes(bytes) -> bool`
+    // (LokEditBindings.cxx) — true on success, false when documentLoad failed
+    // (reason on stderr, captured in the ring).
+    const ok = this.api.loadFromBytes(arg)
     if (ok === false) {
       throw new Error("loadFromBytes returned false (open failed). Engine output:\n" + dumpLog())
     }
