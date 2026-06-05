@@ -573,10 +573,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
            |> assign(:local_agent_status, :cancelled)
            |> assign(:local_agent_turn_id, nil)
            |> assign(:local_agent_text, "")
-           |> stream_insert(
-             :local_agent_items,
-             cancelled_agent_item(turn_id, partial, segment)
-           )
+           |> finalize_cancelled_agent_text(turn_id, partial, segment)
            |> finalize_dangling_tools("Turn cancelled.")}
 
         {:error, reason} ->
@@ -1903,10 +1900,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
          |> assign(:local_agent_turn_id, nil)
          |> assign(:local_agent_text, "")
          |> assign(:local_agent_reasoning_text, "")
-         |> stream_insert(
-           :local_agent_items,
-           cancelled_agent_item(turn_id, partial, segment)
-         )}
+         |> finalize_cancelled_agent_text(turn_id, partial, segment)}
 
       {:error, :no_current_turn} ->
         {:ok, assign(socket, :local_agent_turn_id, nil)}
@@ -2085,10 +2079,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_status, :cancelled)
     |> maybe_remove_empty_reasoning(turn_id)
     |> assign(:local_agent_reasoning_text, "")
-    |> stream_insert(
-      :local_agent_items,
-      cancelled_agent_item(turn_id, partial, segment)
-    )
+    |> finalize_cancelled_agent_text(turn_id, partial, segment)
     |> finalize_dangling_tools("Turn cancelled.")
   end
 
@@ -3891,14 +3882,16 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp maybe_stream_final_agent_text(socket, _turn_id, _text), do: socket
 
-  # On cancel, keep what the agent already streamed instead of wiping it: finalize
-  # the in-flight bubble with the accumulated partial text, marked :cancelled.
-  # Reuses the same segment/dom_id so it finalizes the running placeholder in
-  # place — but now preserving the agent's own words. Only when nothing was
-  # streamed yet do we fall back to a bare "Cancelled." placeholder.
-  defp cancelled_agent_item(turn_id, partial_text, segment) do
-    body = if is_binary(partial_text) and partial_text != "", do: partial_text, else: "Cancelled."
-    agent_assistant_item(turn_id, body, :cancelled, segment)
+  # On cancel, keep what the agent already streamed (finalize the in-flight bubble
+  # with the accumulated partial text, in place). Do NOT emit any "Cancelled."
+  # placeholder — if nothing was streamed yet, just drop the empty running bubble
+  # so a cancel leaves no noise.
+  defp finalize_cancelled_agent_text(socket, turn_id, partial_text, segment) do
+    if is_binary(partial_text) and partial_text != "" do
+      stream_insert(socket, :local_agent_items, agent_assistant_item(turn_id, partial_text, :sent, segment))
+    else
+      stream_delete(socket, :local_agent_items, agent_assistant_item(turn_id, "", :running, segment))
+    end
   end
 
   defp agent_display_tool_name(name), do: name
