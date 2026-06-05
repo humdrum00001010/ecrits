@@ -21,6 +21,7 @@ import {hooks as colocatedHooks} from "phoenix-colocated/ecrits"
 import topbar from "topbar"
 import {WasmHwpEditor} from "./wasm_hwp_editor.js"
 import {OfficeEditor} from "./office_editor.js"
+import {WasmOfficeEditor} from "./wasm_office_editor.js"
 import {MarkdownEditor} from "./markdown_editor.js"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
@@ -520,7 +521,7 @@ const LocalChatRailResizer = {
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, DirectR2Upload, WasmHwpEditor, OfficeEditor, MarkdownEditor, LocalChatRailResizer, LazyOfficeTile},
+  hooks: {...colocatedHooks, DirectR2Upload, WasmHwpEditor, OfficeEditor, WasmOfficeEditor, MarkdownEditor, LocalChatRailResizer, LazyOfficeTile},
 })
 
 // Show progress bar on live navigation and form submits

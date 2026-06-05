@@ -1020,6 +1020,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               hwp_page_count={@local_hwp_page_count}
               hwp_stream_loading?={@local_hwp_stream_loading?}
               office_edit?={@local_hwp_stream_renderer == :libreofficex_edit}
+              office_wasm?={@local_hwp_stream_renderer == :office_wasm}
               markdown_source={@local_markdown_source}
               markdown_preview_html={@local_markdown_preview_html}
               save_state={
@@ -2792,6 +2793,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       |> clear_local_hwp_pages()
 
     cond do
+      # CLIENT INTERACTIVE ARM: when the LibreOffice->WASM client editor is
+      # enabled, route docx/pptx to the in-browser `WasmOfficeEditor` hook. It
+      # fetches the document's raw bytes from `/local/document-bytes` and renders
+      # pages/slides on a per-page <canvas> via the WASM `paintTile` — no server
+      # LOK session, no PDF-tile stream. Mirrors the HWP `:rhwp_wasm` branch.
+      office_wasm_enabled?() ->
+        render_local_office_wasm(socket, document)
+
       not connected?(socket) ->
         socket
         |> assign(:local_hwp_stream_renderer, :libreofficex)
@@ -2807,6 +2816,38 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       true ->
         subscribe_read_only_office(socket, document)
     end
+  end
+
+  # Route an office document to the in-browser LibreOffice WASM editor. Like the
+  # HWP `:rhwp_wasm` branch, the server only tells the hook where to fetch the
+  # raw bytes — all open/render happens client-side. No server stream/session.
+  defp render_local_office_wasm(socket, %Document{} = document) do
+    socket =
+      socket
+      |> assign(:local_hwp_stream_renderer, :office_wasm)
+      |> assign(:local_hwp_stream_document_id, document.id)
+      |> assign(:local_hwp_stream_revision, document.revision)
+      |> assign(:local_hwp_stream_loading?, false)
+
+    if connected?(socket) do
+      url = local_document_bytes_url(socket.assigns.workspace_path, document.relative_path)
+
+      push_event(socket, "office_wasm_load", %{
+        url: url,
+        document_id: document.id,
+        revision: document.revision
+      })
+    else
+      socket
+    end
+  end
+
+  # Feature flag for the client-WASM office arm. Off by default (the large WASM
+  # is local-only and the server-LOK edit path remains the production default);
+  # set `config :ecrits, :office_wasm_enabled, true` (or the OFFICE_WASM env) to
+  # route docx/pptx to the browser WASM editor.
+  defp office_wasm_enabled? do
+    Application.get_env(:ecrits, :office_wasm_enabled, false) == true
   end
 
   defp subscribe_read_only_office(socket, %Document{} = document) do

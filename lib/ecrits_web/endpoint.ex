@@ -15,6 +15,11 @@ defmodule EcritsWeb.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]
 
+  # Cross-origin isolation for the office WASM editor (COOP/COEP). Must run
+  # before Plug.Static so the `/assets/office/*` artifacts are served with the
+  # isolation headers too. Scoped to the workspace page + office assets only.
+  plug EcritsWeb.Plugs.CrossOriginIsolationPlug
+
   # Serve at "/" the static files from "priv/static" directory.
   #
   # When code reloading is disabled (e.g., in production),
