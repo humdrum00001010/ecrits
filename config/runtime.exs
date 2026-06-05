@@ -15,13 +15,6 @@ if System.get_env("PHX_SERVER") do
   config :ecrits, EcritsWeb.Endpoint, server: true
 end
 
-# Client-WASM office editor (LibreOffice->WASM in-browser). Off by default; set
-# OFFICE_WASM=1 to route docx/pptx to the `WasmOfficeEditor` hook instead of the
-# server-LOK edit / read-only tile surfaces.
-if System.get_env("OFFICE_WASM") in ~w(1 true yes) do
-  config :ecrits, :office_wasm_enabled, true
-end
-
 # Port override is dev/prod only. The `:test` env pins :4002 in
 # `config/test.exs` so browser tests target a stable endpoint, regardless
 # of whatever SERVER_PORT/PORT happens to be set in `.env` for the dev sprite.

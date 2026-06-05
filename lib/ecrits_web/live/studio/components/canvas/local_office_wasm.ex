@@ -1,20 +1,18 @@
 defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
   @moduledoc """
-  Client-WASM office document surface — the CLIENT INTERACTIVE ARM of the office
-  dual-arch (LibreOffice->WASM in the browser), the office counterpart to the
-  HWP `LocalHwpPages`/`WasmHwpEditor` path.
+  Client-WASM office document surface — the SOLE office renderer (LibreOffice->
+  WASM in the browser), the office counterpart to the HWP `LocalHwpPages`/
+  `WasmHwpEditor` path.
 
-  Unlike `LocalOfficeEditor` (server LOK session pushing PNG tiles) and
-  `LocalOfficeTiles` (read-only PDF tiles), this surface loads the document
-  bytes into a LibreOffice WASM build IN THE BROWSER and renders pages/slides to
-  per-page `<canvas>` elements via the build's `paintTile`/`getDocumentSize`/
-  `getParts` exports. The `WasmOfficeEditor` hook
-  (assets/js/wasm_office_editor.js) owns the DOM under
+  This surface loads the document bytes into a LibreOffice WASM build IN THE
+  BROWSER and renders pages/slides to per-page `<canvas>` elements via the
+  build's `paintTile`/`getDocumentSize`/`getParts` exports. The
+  `WasmOfficeEditor` hook (assets/js/wasm_office_editor.js) owns the DOM under
   `[data-role='office-wasm-pages']` and fetches the raw bytes from
   `bytes_url` (the same `/local/document-bytes` controller the HWP hook uses).
 
-  Enabled only when `@local_hwp_stream_renderer == :office_wasm` (a feature flag
-  on the workspace LiveView); otherwise the server-LOK / read-only surfaces show.
+  All office documents (docx/pptx/xlsx) route here; there is no server-side
+  LibreOfficeKit render/edit path.
   """
 
   use EcritsWeb, :html

@@ -7,8 +7,6 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
 
   alias EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages
   alias EcritsWeb.Live.Studio.Components.Canvas.LocalMarkdownEditor
-  alias EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeEditor
-  alias EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeTiles
   alias EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm
 
   attr :id, :string, default: "studio-root"
@@ -24,9 +22,6 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   attr :active_document_id, :string, default: nil
   attr :hwp_pages, :any, required: true
   attr :hwp_page_count, :integer, default: 0
-  attr :hwp_stream_loading?, :boolean, default: false
-  attr :office_edit?, :boolean, default: false
-  attr :office_wasm?, :boolean, default: false
   attr :markdown_source, :string, default: ""
   attr :markdown_preview_html, :any, default: ""
 
@@ -170,39 +165,13 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 <LocalOfficeWasm.render
                   :if={
                     not ehwp_format?(@document.format) and
-                      not markdown_format?(@document.format) and @office_wasm?
+                      not markdown_format?(@document.format)
                   }
                   id={@canvas_id}
                   document_id={@document.id}
                   local_document_format={@document.format}
                   local_document_revision={@document.revision}
                   bytes_url={@hwp_bytes_url}
-                />
-                <LocalOfficeEditor.render
-                  :if={
-                    not ehwp_format?(@document.format) and
-                      not markdown_format?(@document.format) and
-                      not @office_wasm? and @office_edit?
-                  }
-                  id={@canvas_id}
-                  document_id={@document.id}
-                  local_document_format={@document.format}
-                  local_document_revision={@document.revision}
-                  loading?={@hwp_stream_loading?}
-                />
-                <LocalOfficeTiles.render
-                  :if={
-                    not ehwp_format?(@document.format) and
-                      not markdown_format?(@document.format) and
-                      not @office_wasm? and not @office_edit?
-                  }
-                  id={@canvas_id}
-                  tiles={@hwp_pages}
-                  page_count={@hwp_page_count}
-                  document_id={@document.id}
-                  local_document_format={@document.format}
-                  local_document_revision={@document.revision}
-                  loading?={@hwp_stream_loading?}
                 />
               </div>
 

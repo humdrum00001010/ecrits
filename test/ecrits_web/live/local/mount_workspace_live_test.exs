@@ -62,54 +62,6 @@ defmodule EcritsWeb.LocalEhwpRuntimeStub do
   def close(_handle), do: :ok
 end
 
-defmodule EcritsWeb.LocalLibreOfficeRuntimeStub do
-  @png_1x1 Base.decode64!(
-             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-           )
-
-  def subscribe(path, opts) when is_binary(path) do
-    caller = self()
-    owner = Keyword.get(opts, :owner)
-    block? = Keyword.get(opts, :block?)
-    sub = %{path: path, ref: make_ref()}
-
-    {:ok, task} =
-      Task.start(fn ->
-        if is_pid(owner), do: send(owner, {:libreofficex_render_started, self(), path})
-
-        if block? do
-          receive do
-            :continue_libreofficex_render -> :ok
-          end
-        end
-
-        send(caller, {:libreofficex, sub, {:ready, %{path: path, page_count: 1}}})
-
-        send(caller, {
-          :libreofficex,
-          sub,
-          {:tile,
-           %{
-             id: "1:0:0:128:128",
-             page: 1,
-             x: 0,
-             y: 0,
-             width: 128,
-             height: 128,
-             format: :png,
-             data: @png_1x1
-           }}
-        })
-      end)
-
-    if is_pid(owner), do: send(owner, {:libreofficex_subscribed, task, path})
-
-    {:ok, sub}
-  end
-
-  def unsubscribe(_sub), do: :ok
-end
-
 defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   use EcritsWeb.ConnCase, async: false
 
@@ -127,22 +79,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     previous_agent = Application.get_env(:ecrits, :local_agent)
     previous_agent_ui = Application.get_env(:ecrits, :local_agent_ui)
     previous_local_ehwp_opts = Application.get_env(:ecrits, :local_ehwp_opts)
-
-    previous_local_libreofficex_runtime =
-      Application.get_env(:ecrits, :local_libreofficex_runtime)
-
-    previous_local_libreofficex_opts = Application.get_env(:ecrits, :local_libreofficex_opts)
     Application.put_env(:ecrits, :local_workspace_adapter, LocalWorkspaceAdapterStub)
     Application.put_env(:ecrits, :local_directory_picker, LocalDirectoryPickerStub)
     Application.put_env(:ecrits, :local_ehwp_opts, runtime: EcritsWeb.LocalEhwpRuntimeStub)
-
-    Application.put_env(
-      :ecrits,
-      :local_libreofficex_runtime,
-      EcritsWeb.LocalLibreOfficeRuntimeStub
-    )
-
-    Application.put_env(:ecrits, :local_libreofficex_opts, owner: self())
 
     Application.put_env(
       :ecrits,
@@ -193,22 +132,6 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         Application.put_env(:ecrits, :local_ehwp_opts, previous_local_ehwp_opts)
       else
         Application.delete_env(:ecrits, :local_ehwp_opts)
-      end
-
-      if previous_local_libreofficex_runtime do
-        Application.put_env(
-          :ecrits,
-          :local_libreofficex_runtime,
-          previous_local_libreofficex_runtime
-        )
-      else
-        Application.delete_env(:ecrits, :local_libreofficex_runtime)
-      end
-
-      if previous_local_libreofficex_opts do
-        Application.put_env(:ecrits, :local_libreofficex_opts, previous_local_libreofficex_opts)
-      else
-        Application.delete_env(:ecrits, :local_libreofficex_opts)
       end
     end)
   end
@@ -965,37 +888,29 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert has_element?(lv, ~s([data-role="local-hwp-pages"][phx-update="ignore"]))
   end
 
-  test "document query opens a local DOCX shell before LibreOffice tiles finish", %{
+  test "document query opens a local DOCX through the client WASM office editor", %{
     conn: conn
   } do
-    Application.put_env(:ecrits, :local_libreofficex_opts, owner: self(), block?: true)
-
     {:ok, lv, _html} =
       live(
         conn,
         ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/reference.docx"]}"
       )
 
-    root = LocalWorkspaceAdapterStub.valid_path()
-    path = Path.join(root, "drafts/reference.docx")
-    assert_receive {:libreofficex_render_started, render_task, ^path}, 1_000
-    assert Process.alive?(render_task)
-
     assert has_element?(lv, "#local-rhwp-shell")
     assert has_element?(lv, ~s(#studio-document-title-input[value="drafts/reference.docx"]))
 
+    # Office documents render SOLELY through the in-browser LibreOffice WASM
+    # editor (the `WasmOfficeEditor` hook); there is no server-side LOK tile
+    # render path.
     assert has_element?(
              lv,
-             ~s([data-role="local-office-viewer"][data-renderer="libreofficex-png-tiles"][data-local-document-format="docx"])
+             ~s([data-role="office-wasm-viewer"][data-renderer="libreoffice-wasm"][phx-hook="WasmOfficeEditor"][data-local-document-format="docx"])
            )
 
-    assert has_element?(lv, ~s([data-role="local-office-loading"]), "Rendering document...")
-    refute has_element?(lv, ~s([data-role="local-office-tile"]))
+    refute has_element?(lv, ~s([data-renderer="libreofficex-png-tiles"]))
+    refute has_element?(lv, ~s([data-renderer="libreofficex-lok-edit"]))
     refute has_element?(lv, ~s([data-role="local-hwp-editor"]))
-
-    send(render_task, :continue_libreofficex_render)
-    assert_eventually_has_element(lv, ~s([data-role="local-office-tile"][data-page-number="1"]))
-    assert_eventually_assign(lv, :local_hwp_stream_loading?, false)
   end
 
   test "local composer upload imports a selected HWPX into the workspace and opens it", %{

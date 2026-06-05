@@ -20,7 +20,6 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/ecrits"
 import topbar from "topbar"
 import {WasmHwpEditor} from "./wasm_hwp_editor.js"
-import {OfficeEditor} from "./office_editor.js"
 import {WasmOfficeEditor} from "./wasm_office_editor.js"
 import {MarkdownEditor} from "./markdown_editor.js"
 
@@ -96,46 +95,6 @@ const DirectR2Upload = {
   async sha256Hex(file) {
     const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer())
     return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")
-  },
-}
-
-// Office (libreofficex) page virtualization. Mirrors LazyEhwpPage: each page is
-// a box-reserving placeholder that asks the server to composite its (heavy
-// base64 PNG) tiles only when it scrolls near the viewport, and to release them
-// when it scrolls far away — so a 1000-tile deck never holds its full payload in
-// the DOM (which would overflow the LiveView socket frame and loop reconnects).
-const LazyOfficeTile = {
-  mounted() {
-    this.page = Number(this.el.dataset.pageNumber)
-    this.visible = false
-    // Track whether WE have asked the server to hydrate this page, independent of
-    // whether its <img> tiles have landed yet. Keying off `querySelector("img")`
-    // is wrong while a page is near-viewport but its tiles are still rasterizing
-    // (a hydrated-but-tileless slot has no img): it made the observer re-fire
-    // `hydrate_page` and never `release_page`. A single explicit `requested` flag
-    // means exactly one hydrate on enter and one release on leave.
-    this.requested = false
-    const root = this.el.closest("[data-role='local-office-viewer']")
-    this.io = new IntersectionObserver(
-      entries => {
-        for (const e of entries) {
-          this.visible = e.isIntersecting
-          if (e.isIntersecting && !this.requested) {
-            this.requested = true
-            this.pushEvent("office.local.hydrate_page", { page: this.page })
-          } else if (!e.isIntersecting && this.requested) {
-            this.requested = false
-            this.pushEvent("office.local.release_page", { page: this.page })
-          }
-        }
-      },
-      { root, rootMargin: "1200px 0px", threshold: 0 }
-    )
-    this.io.observe(this.el)
-  },
-
-  destroyed() {
-    this.io && this.io.disconnect()
   },
 }
 
@@ -521,7 +480,7 @@ const LocalChatRailResizer = {
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, DirectR2Upload, WasmHwpEditor, OfficeEditor, WasmOfficeEditor, MarkdownEditor, LocalChatRailResizer, LazyOfficeTile},
+  hooks: {...colocatedHooks, DirectR2Upload, WasmHwpEditor, WasmOfficeEditor, MarkdownEditor, LocalChatRailResizer},
 })
 
 // Show progress bar on live navigation and form submits

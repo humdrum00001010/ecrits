@@ -78,7 +78,6 @@ defmodule Ecrits.MixProject do
       # Headless HWP/HWPX NIF runtime backing `Ecrits.Doc.Rhwp` (the server arm of
       # the doc-editing MCP). Provides the `Ehwp` facade used by the `doc.*` tools.
       {:ehwp, git: "https://storage.cloudxyz.org/IlYoung/ehwp", branch: "main"},
-      {:libreofficex, git: "https://storage.cloudxyz.org/IlYoung/libreofficex", branch: "main"},
       {:orchex, git: "https://storage.cloudxyz.org/IlYoung/Orchex.git", branch: "main"},
       # ecrits extra deps.
       {:openai_ex, "~> 0.9"},
