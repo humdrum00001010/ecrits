@@ -201,6 +201,23 @@ defmodule ExMCP.MessageProcessor.MethodHandlers do
     error -> put_error(conn, "Resources list failed", error, id)
   end
 
+  # --- resources/templates/list ---
+  #
+  # Codex's MCP connection manager probes `resources/templates/list` on every
+  # server right after `initialize` (alongside `resources/list`). Before this
+  # route existed, the method fell through to `handle_custom_method`, which
+  # answered with a malformed JSON-RPC error (`-32603 "Unknown message"` from the
+  # handler GenServer's catch-all). codex logs that as a failure and treats the
+  # freshly-connected server as unhealthy during the exact window it uses to
+  # decide tool readiness, so the doc.* tools intermittently never reach the
+  # turn. The MCP spec lets a server that exposes no resource templates answer
+  # the probe with an empty list, so do exactly that — uniformly across modes —
+  # so the server presents as healthy the instant `initialize` completes.
+
+  def handle_resources_templates_list(conn, _handler, _mode, _params, id) do
+    put_success(conn, %{"resourceTemplates" => []}, id)
+  end
+
   # --- resources/read ---
 
   def handle_resources_read(conn, handler, :direct, params, id) do

@@ -332,6 +332,9 @@ defmodule ExMCP.MessageProcessor do
       "resources/list" ->
         MethodHandlers.handle_resources_list(conn, handler, mode, params, id)
 
+      "resources/templates/list" ->
+        MethodHandlers.handle_resources_templates_list(conn, handler, mode, params, id)
+
       "resources/read" ->
         MethodHandlers.handle_resources_read(conn, handler, mode, params, id)
 
