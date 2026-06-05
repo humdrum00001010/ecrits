@@ -595,25 +595,24 @@ defmodule Ecrits.Doc.Tools do
 
   # Active/focused document + cursor/selection. The active document is the one
   # the user is viewing in the workspace: `WorkspaceLive` registers the open
-  # document in the Pool and marks it active via `Pool.set_active/2`, so we read
-  # it back here with `Pool.active/1`. Older heuristics (single browser-backed
-  # doc, or the sole doc) are kept as a fallback when no explicit active doc has
-  # been set.
+  # document in the Pool and marks it active via `Pool.set_active/2` (and clears
+  # it via `Pool.clear_active/2` when the doc is closed or a non-pooled doc like
+  # Markdown is opened), so we read it back here with `Pool.active/1`.
+  #
+  # We resolve ONLY the explicitly-set active doc — no "first browser-backed" or
+  # "sole doc" guessing. Those heuristics resurrected stale Pool entries: after
+  # closing the doc (or opening a Markdown file, which has no Pool backend) the
+  # active marker is nil but old hwp entries linger in the pool, so a guess would
+  # wrongly report an hwp as "currently open". When nothing is active,
+  # `active_document` is nil — the agent must create/open a doc rather than edit a
+  # phantom.
   #
   # The `cursor`/`selection` refs still require browser->server caret reporting
   # (editors, owned separately) and remain null for now.
-  #
-  # TODO(browser-wiring): once the editors report the live caret/selection back
-  # to the server (e.g. Pool.attach_browser + a cursor-report message), surface
-  # the focused document's `cursor` ref and `selection` here.
   defp context_json(pool) do
     docs = Pool.list(pool)
     active_id = Pool.active(pool)
-
-    active =
-      Enum.find(docs, &(&1.id == active_id)) ||
-        Enum.find(docs, &(&1.backing == :browser)) ||
-        (length(docs) == 1 && hd(docs)) || nil
+    active = active_id && Enum.find(docs, &(&1.id == active_id))
 
     %{
       "active_document" => active && active.id,
