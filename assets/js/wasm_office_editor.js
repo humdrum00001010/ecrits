@@ -39,6 +39,23 @@ const GLUE_URL = OFFICE_BASE + "soffice.js"
 // across hook instances.
 let runtimePromise = null
 
+// Ring buffer of the last stderr/stdout lines. A WebAssembly `unreachable`
+// trap (e.g. `O3TL_UNREACHABLE`/`std::unreachable` in the headless VCL event
+// loop) reports only the generic "unreachable" — the REAL cause is whatever
+// LibreOffice logged to stderr (SAL_WARN / "Bootstrapping exception ..." /
+// documentLoad errors) immediately before. Keep them so we can surface them
+// alongside the trap.
+const stderrRing = []
+const RING_MAX = 80
+function pushLog(stream, text) {
+  const line = "[" + stream + "] " + text
+  stderrRing.push(line)
+  if (stderrRing.length > RING_MAX) stderrRing.shift()
+}
+function dumpLog() {
+  return stderrRing.slice(-40).join("\n")
+}
+
 function ensureRuntime() {
   if (runtimePromise) return runtimePromise
 
@@ -62,22 +79,110 @@ function ensureRuntime() {
       locateFile: (path) => OFFICE_BASE + path,
       // pthread workers re-load the SAME script; point them at the static glue.
       mainScriptUrlOrBlob: GLUE_URL,
-      // Don't run LibreOffice's `main()` (it would try to bring up the full Qt/VCL
-      // desktop UI). We only want the runtime + the document API exports.
-      noInitialRun: true,
-      print: (text) => console.log("[office-wasm:stdout]", text),
-      printErr: (text) => console.warn("[office-wasm:stderr]", text),
+      // CRITICAL: this headless LibreOffice->WASM build MUST run its `main()`
+      // (-> soffice_main -> Desktop::Main). Suppressing it (noInitialRun:true)
+      // is what traps `unreachable`:
+      //   * The LOK editing API (loadFromBytes -> lok_cpp_init ->
+      //     libreofficekit_hook_2 -> lo_initialize, see LokEditBindings.cxx +
+      //     desktop/source/lib/init.cxx) only works once the UNO component
+      //     context + SfxApplication/Desktop are up — which the desktop
+      //     bootstrap brings up.
+      //   * That bootstrap drives the headless VCL event loop via
+      //     SvpSalInstance::DoExecute (vcl/headless/svpinst.cxx), which calls
+      //     emscripten_set_main_loop_arg(..., simulateInfiniteLoop=1) and then
+      //     `O3TL_UNREACHABLE` (== std::unreachable == the wasm `unreachable`
+      //     instruction). set_main_loop is meant to unwind the stack by throwing
+      //     and KEEP the runtime alive via the JS event loop; that only works
+      //     when reached from the runtime's own `main()`. With noInitialRun the
+      //     loop machinery never gets a `main()` to unwind back to, so the
+      //     `unreachable` after it is what actually executes -> the trap.
+      //   * UNO bootstrap (initJsUnoScripting, desktop/source/app/
+      //     initjsunoscripting.cxx) runs on the soffice pthread and uses
+      //     emscripten_{sync,async}_run_in_main_runtime_thread — it REQUIRES the
+      //     JS main thread to be free + pumping its proxy queue (i.e. inside the
+      //     set_main_loop loop), not blocked inside a synchronous embind call.
+      // So we let main() run and instead gate the API on `Module.uno_init`
+      // (resolved by initJsUnoScripting once the bootstrap is ready) below.
+      noInitialRun: false,
+      // Standard soffice-WASM config: main() does not "exit" (it parks in the
+      // emscripten main loop); don't let Emscripten tear down the runtime.
+      ignoreApplicationExit: true,
+      // Force headless and skip the IPC/socket pipe the desktop would normally
+      // open (no UI / single instance handling in the browser).
+      arguments: ["--headless", "--invisible", "--nologo", "--norestore", "--nolockcheck"],
+      print: (text) => {
+        pushLog("stdout", text)
+        console.log("[office-wasm:stdout]", text)
+      },
+      printErr: (text) => {
+        pushLog("stderr", text)
+        console.warn("[office-wasm:stderr]", text)
+      },
       onAbort: (what) => {
-        console.error("[office-wasm] aborted", what)
-        reject(new Error("office WASM aborted: " + what))
+        const dump = dumpLog()
+        console.error("[office-wasm] ABORT:", what)
+        if (dump) console.error("[office-wasm] last engine output before abort:\n" + dump)
+        try {
+          console.error("[office-wasm] Module state:", {
+            calledRun: Module.calledRun,
+            runtimeInitialized: Module.runtimeInitialized,
+            hasLoadFromBytes: typeof Module.loadFromBytes,
+            hasUnoInit: typeof Module.uno_init,
+            crossOriginIsolated: self.crossOriginIsolated
+          })
+        } catch (_) {}
+        reject(
+          new Error(
+            "office WASM aborted: " + what + (dump ? " | last engine output: " + dump : "")
+          )
+        )
       },
       onRuntimeInitialized: () => {
-        console.log("[office-wasm] runtime initialized")
-        window.__officeWasmModule = Module
-        resolve(Module)
+        console.log("[office-wasm] runtime initialized (wasm instantiated); awaiting desktop bootstrap")
       }
     }
     window.Module = Module
+
+    // The runtime is usable for the LOK editing API only AFTER the desktop/UNO
+    // bootstrap finishes. The standard soffice-WASM glue exposes that as the
+    // `Module.uno_init` promise (static/emscripten/uno.js, resolved from
+    // initjsunoscripting.cxx). Prefer it; fall back to onRuntimeInitialized +
+    // a loadFromBytes-presence poll if this build doesn't expose uno_init.
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      window.__officeWasmModule = Module
+      console.log("[office-wasm] bootstrap ready; document API available")
+      resolve(Module)
+    }
+
+    Module.onRuntimeInitialized = () => {
+      console.log("[office-wasm] runtime initialized (wasm instantiated); awaiting desktop bootstrap")
+      if (Module.uno_init && typeof Module.uno_init.then === "function") {
+        Module.uno_init.then(finish, (err) => {
+          console.error("[office-wasm] uno_init rejected", err, "\n" + dumpLog())
+          reject(new Error("office WASM bootstrap (uno_init) failed: " + (err && err.message || err)))
+        })
+      } else {
+        // No uno_init in this build: wait until the embind export materializes
+        // (it registers during bootstrap), then proceed. Bounded poll so a
+        // never-arriving export becomes a clear error rather than a hang.
+        let tries = 0
+        const poll = () => {
+          if (typeof Module.loadFromBytes === "function" || typeof Module._loadFromBytes === "function") {
+            finish()
+          } else if (++tries > 600) {
+            reject(new Error(
+              "office WASM: desktop bootstrap did not expose loadFromBytes within 30s. Last engine output:\n" + dumpLog()
+            ))
+          } else {
+            setTimeout(poll, 50)
+          }
+        }
+        poll()
+      }
+    }
 
     const script = document.createElement("script")
     script.src = GLUE_URL
@@ -110,11 +215,19 @@ function resolveApi(Module) {
       saveToBytes: direct("saveToBytes"),
       paintTile: direct("paintTile"),
       getDocumentSize: direct("getDocumentSize"),
+      getDocumentType: direct("getDocumentType"),
       getParts: direct("getParts"),
+      getPart: direct("getPart"),
+      setPart: direct("setPart"),
+      getPartPageRectangles: direct("getPartPageRectangles"),
       hitTest: direct("hitTest"),
       setTextSelection: direct("setTextSelection"),
+      getTextSelection: direct("getTextSelection"),
       postKeyEvent: direct("postKeyEvent"),
-      postWindowExtTextInputEvent: direct("postWindowExtTextInputEvent")
+      postUnoCommand: direct("postUnoCommand"),
+      postWindowExtTextInputEvent: direct("postWindowExtTextInputEvent"),
+      getCursor: direct("getCursor"),
+      closeDocument: direct("closeDocument")
     }
   }
 
@@ -198,9 +311,16 @@ const WasmOfficeEditor = {
   },
 
   freeHandle() {
+    // embind-class shape: the handle is a real C++ object -> delete().
     if (this.handle && typeof this.handle.delete === "function") {
       try {
         this.handle.delete()
+      } catch (_) {}
+    } else if (this.handle && this.api && this.api.closeDocument) {
+      // module-functions shape: the single process-global doc is closed via the
+      // closeDocument() export (LokEditBindings.cxx) before loading the next.
+      try {
+        this.api.closeDocument()
       } catch (_) {}
     }
     this.handle = null
@@ -230,7 +350,9 @@ const WasmOfficeEditor = {
       this.buildPageStack()
       this.renderVisiblePages()
     } catch (error) {
+      const dump = dumpLog()
       console.error("[office-wasm] load failed", error)
+      if (dump) console.error("[office-wasm] last engine output:\n" + dump)
       this.setStatus("Office WASM failed to load: " + (error && error.message))
     }
   },
@@ -250,20 +372,28 @@ const WasmOfficeEditor = {
       return
     }
 
-    // module-functions shape: the export may accept (Uint8Array) [Embind] or
-    // (ptr, len) [raw C]. Try the typed array first; on TypeError fall back to a
-    // heap copy.
+    // module-functions shape: the embind `loadFromBytes(Uint8Array, fileName)`
+    // returns a bool (LokEditBindings.cxx) — true on success, false when
+    // documentLoad failed (the reason is on stderr, captured in the ring). Try
+    // the typed array first; on TypeError fall back to a (ptr,len) heap copy for
+    // a raw-C calling convention.
+    let ok
     try {
-      this.handle = this.api.loadFromBytes(bytes, this.format) || true
-    } catch (_) {
+      ok = this.api.loadFromBytes(bytes, this.format)
+    } catch (e) {
+      if (!(e instanceof TypeError)) throw e
       const ptr = Module._malloc(bytes.length)
       Module.HEAPU8.set(bytes, ptr)
       try {
-        this.handle = this.api.loadFromBytes(ptr, bytes.length, this.format) || true
+        ok = this.api.loadFromBytes(ptr, bytes.length, this.format)
       } finally {
         Module._free(ptr)
       }
     }
+    if (ok === false) {
+      throw new Error("loadFromBytes returned false (open failed). Engine output:\n" + dumpLog())
+    }
+    this.handle = ok || true
   },
 
   toEmbindBytes(Module, bytes) {
@@ -284,13 +414,20 @@ const WasmOfficeEditor = {
 
     let parts = []
     try {
+      // Embind getDocumentSize() takes NO args and returns the ACTIVE part's
+      // size; getParts() is the slide/sheet count (Impress/Calc) or 1 (Writer,
+      // where pages come from getPartPageRectangles()). Walk parts via setPart.
       const count = callDoc("getParts")
       const n = typeof count === "number" ? count : Number(count) || 1
-      const sizeRaw = callDoc("getDocumentSize", 0)
-      const size = this.parseSize(sizeRaw)
-      for (let i = 0; i < Math.max(1, n); i++) {
-        const ps = this.parseSize(callDoc("getDocumentSize", i)) || size
-        parts.push(ps || { width: 794, height: 1123 })
+      const baseSize = this.parseSize(callDoc("getDocumentSize")) || { width: 794, height: 1123 }
+      if (n > 1) {
+        for (let i = 0; i < n; i++) {
+          callDoc("setPart", i)
+          parts.push(this.parseSize(callDoc("getDocumentSize")) || baseSize)
+        }
+        callDoc("setPart", 0)
+      } else {
+        parts.push(baseSize)
       }
     } catch (error) {
       console.warn("[office-wasm] queryParts failed, defaulting to A4", error)
@@ -377,12 +514,12 @@ const WasmOfficeEditor = {
   },
 
   // Paint a page/slide via the engine's paintTile into the page <canvas>.
-  // paintTile is the LOK convention:
-  //   paintTile(part, buffer, canvasW, canvasH, tilePosX, tilePosY, tileW, tileH)
-  // where canvas px are device px and tilePos/tileW are in twips. The engine
-  // writes BGRA/RGBA into a heap buffer that we blit via ImageData. Because the
-  // exact binding shape is build-specific, we attempt the heap-buffer convention
-  // and surface any failure clearly.
+  // The embind binding (LokEditBindings.cxx) is:
+  //   paintTile(part, tileX, tileY, tileW, tileH, canvasW, canvasH) -> Uint8Array
+  // It RETURNS a canvasW*canvasH*4 RGBA buffer (already R/B-swapped from the
+  // platform BGRA tile mode), painting the document twip rectangle
+  // (tileX,tileY,tileW,tileH) into canvasW x canvasH device px. We blit the
+  // returned bytes straight into the page <canvas> via ImageData.
   renderPage(index) {
     if (!this.api) return
     const section = this.pageSection(index)
@@ -395,33 +532,32 @@ const WasmOfficeEditor = {
     const pxH = canvas.height
 
     try {
-      const Module = window.__officeWasmModule
+      // Whole-page tile: origin (0,0), extent = page size in twips.
+      const tileW = Math.round((part.width || 794) * 1440 / 96) // px -> twips
+      const tileH = Math.round((part.height || 1123) * 1440 / 96)
 
-      // Heap RGBA buffer the engine paints into.
-      const bytes = pxW * pxH * 4
-      const ptr = Module._malloc(bytes)
-      try {
-        const tileW = Math.round((part.width || 794) * 1440 / 96) // px -> twips
-        const tileH = Math.round((part.height || 1123) * 1440 / 96)
-
-        this.callPaintTile(Module, index, ptr, pxW, pxH, 0, 0, tileW, tileH)
-
-        const buf = new Uint8ClampedArray(Module.HEAPU8.buffer, ptr, bytes).slice()
-        const imageData = new ImageData(buf, pxW, pxH)
-        const ctx = canvas.getContext("2d")
-        if (ctx) ctx.putImageData(imageData, 0, 0)
-        this.rendered.set(index, true)
-      } finally {
-        Module._free(ptr)
+      const rgba = this.callPaintTile(index, 0, 0, tileW, tileH, pxW, pxH)
+      if (!rgba || !rgba.length) {
+        throw new Error("paintTile returned no pixels (document not loaded?). Engine output:\n" + dumpLog())
       }
+      // `rgba` is a Uint8Array view onto the wasm heap (typed_memory_view);
+      // copy into a Uint8ClampedArray that backs ImageData.
+      const buf = new Uint8ClampedArray(pxW * pxH * 4)
+      buf.set(rgba.subarray(0, buf.length))
+      const imageData = new ImageData(buf, pxW, pxH)
+      const ctx = canvas.getContext("2d")
+      if (ctx) ctx.putImageData(imageData, 0, 0)
+      this.rendered.set(index, true)
     } catch (error) {
       console.error(`[office-wasm] renderPage(${index}) failed`, error)
       this.setStatus("Render failed on page " + (index + 1) + ": " + (error && error.message))
     }
   },
 
-  callPaintTile(Module, part, ptr, canvasW, canvasH, tilePosX, tilePosY, tileW, tileH) {
-    const args = [part, ptr, canvasW, canvasH, tilePosX, tilePosY, tileW, tileH]
+  // Call paintTile with the embind signature
+  // (part, tileX, tileY, tileW, tileH, canvasW, canvasH) -> Uint8Array RGBA.
+  callPaintTile(part, tileX, tileY, tileW, tileH, canvasW, canvasH) {
+    const args = [part, tileX, tileY, tileW, tileH, canvasW, canvasH]
     if (this.api.shape === "embind-class" && this.handle && typeof this.handle.paintTile === "function") {
       return this.handle.paintTile(...args)
     }
