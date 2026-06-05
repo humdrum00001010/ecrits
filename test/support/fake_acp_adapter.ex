@@ -103,6 +103,19 @@ defmodule EcritsWeb.FakeAcpAdapter do
     })
   end
 
+  # Mirrors the real Codex adapter's terminal emit: after the streamed deltas,
+  # the provider re-sends the WHOLE message text once as a `final: true`
+  # `agent_message_chunk` (see `ExMCP.ACP.Adapters.Codex.handle_item_completed/2`
+  # for `agentMessage`). The consumer must treat this as a no-op when it already
+  # streamed the deltas, otherwise the reply is appended twice.
+  defp to_session_update({:final_message, text}, session_id) do
+    session_update(session_id, %{
+      "sessionUpdate" => "agent_message_chunk",
+      "content" => %{"type" => "text", "text" => text},
+      "final" => true
+    })
+  end
+
   defp to_session_update({:reasoning_delta, text}, session_id),
     do: to_session_update(%{type: :reasoning_delta, delta: text}, session_id)
 

@@ -191,6 +191,28 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
 
   # ── session/update -> normalized event ─────────────────────────────
 
+  # A `final: true` agent_message_chunk carries the WHOLE message text, not an
+  # incremental delta. The Codex adapter re-emits it after the streamed deltas
+  # (`ExMCP.ACP.Adapters.Codex.handle_item_completed/2`); appending it again
+  # would double the reply ("Hi there?Hi there?"). When deltas were already
+  # streamed (`saw_text?`), the full text is built — drop the terminal chunk.
+  # When NO deltas were seen (a provider that only sends a final message), emit
+  # it as the sole text. This mirrors the `saw_text?` guard on the
+  # `turn/completed` result text (see `result_text/2`). The Claude adapter never
+  # sets `final`, so this branch never affects it.
+  defp map_update(
+         %{"sessionUpdate" => "agent_message_chunk", "final" => true} = update,
+         %{saw_text?: saw_text?} = state
+       ) do
+    case update_text(update) do
+      text when is_binary(text) and text != "" and not saw_text? ->
+        {:event, %{type: :text_delta, delta: text}, %{state | saw_text?: true}}
+
+      _ ->
+        {:skip, state}
+    end
+  end
+
   defp map_update(%{"sessionUpdate" => "agent_message_chunk"} = update, state) do
     case update_text(update) do
       text when is_binary(text) and text != "" ->

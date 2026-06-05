@@ -1650,6 +1650,152 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
            )
   end
 
+  test "waiting indicator shows on the empty placeholder and drops once prose lands",
+       %{conn: conn} do
+    # Bug A: the bouncing-dots waiting indicator must render on the empty
+    # `running` placeholder, and must NOT be present once the assistant bubble
+    # carries body text — otherwise the server's debounced re-render re-creates
+    # the animated node every ~120ms (status stays `running`) and the CSS
+    # `animate-bounce` visibly freezes.
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_local_agent_ui,
+        script: [{:text_delta, "streaming reply"}]
+      ]
+    )
+
+    {:ok, lv, _html} =
+      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "go"})
+    |> render_submit()
+
+    assert_receive {:local_agent_adapter_waiting, stream_pid}, 1_000
+    sync_liveview(lv)
+
+    # Empty `running` placeholder: the waiting animation IS present.
+    assert has_element?(
+             lv,
+             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="running"] [data-role="agent-loading"])
+           )
+
+    # Release the turn; deltas stream and the bubble finalizes with body text.
+    send(stream_pid, :release_local_agent_ui)
+
+    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    sync_liveview(lv)
+
+    # Once the reply carries body text, the waiting indicator must be gone — a
+    # bubble that still rendered the dots while showing prose is the freeze bug.
+    assert has_element?(
+             lv,
+             ~s([data-role="local-agent-message"][data-message-role="agent"]),
+             "streaming reply"
+           )
+
+    refute has_element?(lv, ~s([data-role="local-agent-message"] [data-role="agent-loading"]))
+  end
+
+  test "agent sidebar renders the streamed reply once when codex re-emits a final full message",
+       %{conn: conn} do
+    # The real Codex adapter streams the message as deltas AND then re-sends the
+    # WHOLE message once as a `final: true` agent_message_chunk. The consumer
+    # must drop that terminal chunk (the deltas already produced the full text),
+    # otherwise the reply renders twice ("Hi there?Hi there?").
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          {:text_delta, "Hi "},
+          {:text_delta, "there?"},
+          {:final_message, "Hi there?"}
+        ]
+      ]
+    )
+
+    {:ok, lv, _html} =
+      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "hi"})
+    |> render_submit()
+
+    # Only the two streamed deltas should reach the browser as append events —
+    # the terminal `final: true` chunk must NOT produce a third append.
+    assert_push_event(lv, "local_agent_text_append", %{message_id: msg_id, piece: "Hi "}, 1_000)
+    assert_push_event(lv, "local_agent_text_append", %{message_id: ^msg_id, piece: "there?"}, 1_000)
+    refute_push_event(lv, "local_agent_text_append", %{piece: "Hi there?"}, 200)
+
+    # The accumulated turn text must be the single message, not the doubled one.
+    assert_receive {:local_agent_event,
+                    %{type: :turn_completed, session_id: ^session_id, text: "Hi there?"}},
+                   1_000
+
+    sync_liveview(lv)
+
+    final_body =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(
+        ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"])
+      )
+      |> LazyHTML.text()
+
+    assert final_body =~ "Hi there?"
+
+    # Exactly one occurrence — a doubled emit would render "Hi there?Hi there?".
+    occurrences = final_body |> String.split("Hi there?") |> length() |> Kernel.-(1)
+    assert occurrences == 1, "expected the reply once, got #{occurrences}x in: #{inspect(final_body)}"
+  end
+
+  test "agent sidebar renders a final-only message when no deltas were streamed",
+       %{conn: conn} do
+    # A provider that sends NO incremental deltas, only a terminal `final: true`
+    # full message, must still have its reply rendered (the guard only suppresses
+    # the final chunk when deltas already produced the text).
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          {:final_message, "Only final."}
+        ]
+      ]
+    )
+
+    {:ok, lv, _html} =
+      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "no deltas"})
+    |> render_submit()
+
+    assert_push_event(
+      lv,
+      "local_agent_text_append",
+      %{message_id: _msg_id, piece: "Only final."},
+      1_000
+    )
+
+    assert_receive {:local_agent_event,
+                    %{type: :turn_completed, session_id: ^session_id, text: "Only final."}},
+                   1_000
+
+    sync_liveview(lv)
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"]),
+             "Only final."
+           )
+  end
+
   test "agent sidebar renders markdown for local agent prose", %{conn: conn} do
     use_test_agent_adapter!(
       adapter_opts: [

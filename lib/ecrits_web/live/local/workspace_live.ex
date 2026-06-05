@@ -1210,7 +1210,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                           />
                         </div>
                         <span
-                          :if={agent_item_status(item) == "running"}
+                          :if={agent_item_loading?(item)}
                           data-role="agent-loading"
                           role="status"
                           aria-label="Agent responding"
@@ -3855,6 +3855,19 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp agent_item_status(%{status: status}), do: to_string(status)
   defp agent_item_status(_item), do: "idle"
+
+  # The bouncing-dots waiting indicator renders ONLY while the assistant
+  # placeholder is in-flight (`running`) AND has no body yet. Without the
+  # empty-body guard, every debounced `flush_local_agent_text/1` re-render
+  # (which carries a non-empty body but keeps `status: :running`) re-emits the
+  # span; morphdom then re-creates the animated node ~every 120ms, restarting
+  # the CSS `animate-bounce` from frame 0 so the dots visibly freeze. Dropping
+  # the indicator once the first token lands (matching the JS hook's
+  # `agent-loading` removal and `ChatRail.agent_loading?/1`) lets the animation
+  # play smoothly on the empty placeholder and resolve cleanly when prose flows.
+  defp agent_item_loading?(item) do
+    agent_item_status(item) == "running" and agent_item_body(item) == ""
+  end
 
   defp agent_item_title(%{title: title}) when is_binary(title), do: agent_display_tool_name(title)
   defp agent_item_title(_item), do: "Tool"
