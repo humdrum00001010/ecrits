@@ -321,9 +321,20 @@ defmodule Ecrits.Doc.Rhwp do
   end
 
   defp flatten_ref(ref) when is_binary(ref) do
-    case Jason.decode(ref) do
-      {:ok, %{} = m} -> flatten_ref(m)
-      _ -> %{}
+    # doc.find returns the canonical `hwp:s0/p6/c12+5` PositionalIndex for server
+    # docs; decode it to section/paragraph/offset so a ref'd edit hits the RIGHT
+    # paragraph (not the section-0/para-0 default). The browser backend uses a
+    # JSON `{section,paragraph,offset,...}` ref — accept that too.
+    case Ref.decode(ref) do
+      {:ok, %{kind: :char, sec: s, para: p, off: o}} -> %{section: s, paragraph: p, offset: o}
+      {:ok, %{kind: :paragraph, sec: s, para: p}} -> %{section: s, paragraph: p}
+      {:ok, %{kind: :section, sec: s}} -> %{section: s}
+      {:ok, %{kind: :document}} -> %{}
+      _ ->
+        case Jason.decode(ref) do
+          {:ok, %{} = m} -> flatten_ref(m)
+          _ -> %{}
+        end
     end
   end
 
