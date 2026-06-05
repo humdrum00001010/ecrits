@@ -72,91 +72,116 @@ defmodule EcritsWeb.Local.MountLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} variant="narrow" show_footer={false}>
-      <main id="local-mount-root" class="py-8">
-        <div class="mb-6">
-          <h1 class="text-2xl font-semibold tracking-tight text-base-content">
-            Mount workspace
-          </h1>
-          <p class="mt-2 text-sm leading-6 text-base-content/65">
-            Choose a local folder to use as the active contract workspace.
-          </p>
-        </div>
+    <Layouts.app flash={@flash} variant="default" show_footer={false}>
+      <main id="local-mount-root" class="mount-screen">
+        <section
+          id="local-native-directory-picker"
+          data-role="native-directory-picker"
+          class="mount-panel"
+          aria-label="Open workspace folder"
+        >
+          <%!-- Editor-style title bar: window controls + active "buffer" path. --%>
+          <div class="mount-panel__bar">
+            <span class="mount-panel__dots" aria-hidden="true">
+              <span class="mount-panel__dot"></span>
+              <span class="mount-panel__dot"></span>
+              <span class="mount-panel__dot"></span>
+            </span>
+            <span class="mount-panel__crumb">
+              <.icon name="hero-folder-micro" class="mount-panel__crumb-icon" />
+              <span>no folder open</span>
+            </span>
+          </div>
 
-        <div id="local-mount-picker" class="space-y-3">
-          <section
-            id="local-native-directory-picker"
-            data-role="native-directory-picker"
-            class="rounded border border-base-300 bg-base-100 p-3 shadow-sm"
+          <div
+            id="local-mount-picker-surface"
+            data-role="mount-picker-surface"
+            class="mount-panel__body"
           >
-            <div
-              id="local-mount-picker-surface"
-              data-role="mount-picker-surface"
-              class="flex flex-col gap-3"
-            >
-              <p id="local-native-directory-status" class="text-sm font-medium text-base-content">
-                Choose workspace folder
+            <header class="mount-head">
+              <h1 id="local-native-directory-status" class="mount-head__title">
+                Open a workspace folder
+              </h1>
+              <p class="mount-head__sub">
+                Point Ecrits at a folder on this machine to start editing. Everything
+                stays on disk.
               </p>
+            </header>
 
-              <div
-                id="local-mount-control-row"
-                data-role="mount-control-row"
-                class="flex flex-col gap-2 sm:flex-row sm:items-end"
+            <div
+              id="local-mount-control-row"
+              data-role="mount-control-row"
+              class="mount-actions"
+            >
+              <%!-- Primary action: the native directory picker. --%>
+              <button
+                id="local-mount-choose"
+                type="button"
+                phx-click="choose_mount_directory"
+                phx-disable-with="Opening picker…"
+                class="mount-open"
               >
-                <button
-                  id="local-mount-choose"
-                  type="button"
-                  phx-click="choose_mount_directory"
-                  phx-disable-with="Opening..."
-                  class="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-base-300 bg-base-100 px-3 text-sm font-medium text-base-content transition-colors hover:bg-base-200 focus:outline-none focus:ring-2 focus:ring-base-content/20 sm:mb-2 sm:w-auto"
-                >
-                  <.icon name="hero-folder-open" class="size-4" /> Choose folder
-                </button>
+                <.icon name="hero-folder-open-micro" class="mount-open__icon" />
+                <span>Open folder…</span>
+              </button>
 
-                <.form
-                  for={@path_form}
-                  id="local-path-form"
-                  action={~p"/workspace"}
-                  method="get"
-                  class="min-w-0 flex-1"
-                >
-                  <div class="flex flex-col gap-2 sm:flex-row sm:items-end">
-                    <div class="min-w-0 flex-1">
-                      <.input
-                        field={@path_form[:path]}
-                        id="local-path-input"
-                        name="path"
-                        type="text"
-                        label="Folder path"
-                        autocomplete="off"
-                        placeholder="/Users/name/workspace"
-                        class="h-10 w-full rounded-md border border-base-300 bg-base-100 px-3 text-sm text-base-content shadow-sm transition placeholder:text-base-content/40 focus:border-base-content/40 focus:outline-none focus:ring-2 focus:ring-base-content/10"
-                      />
-                    </div>
-
-                    <button
-                      id="local-path-submit"
-                      type="submit"
-                      aria-label="Open path"
-                      title="Open path"
-                      class="inline-flex size-10 shrink-0 items-center justify-center rounded-md bg-base-content text-base-100 transition-colors hover:bg-base-content/85 focus:outline-none focus:ring-2 focus:ring-base-content/20 sm:mb-2"
-                    >
-                      <.icon name="hero-arrow-turn-down-left" class="size-4" />
-                    </button>
-                  </div>
-                </.form>
-              </div>
+              <%!-- Secondary: type or paste a path, Enter to mount. --%>
+              <.form
+                for={@path_form}
+                id="local-path-form"
+                action={~p"/workspace"}
+                method="get"
+                class="mount-pathform"
+              >
+                <label for="local-path-input" class="mount-pathform__label">
+                  or enter a path
+                </label>
+                <div class="mount-field">
+                  <span class="mount-field__chevron" aria-hidden="true">&rsaquo;</span>
+                  <.input
+                    field={@path_form[:path]}
+                    id="local-path-input"
+                    name="path"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="/Users/name/workspace"
+                    class="mount-field__input"
+                  />
+                  <button
+                    id="local-path-submit"
+                    type="submit"
+                    aria-label="Open path"
+                    title="Open this path"
+                    class="mount-field__submit"
+                  >
+                    <.icon name="hero-arrow-turn-down-left-micro" class="size-3.5" />
+                    <span class="mount-field__submit-label">Open</span>
+                  </button>
+                </div>
+              </.form>
             </div>
-          </section>
 
-          <p
-            :if={@mount_error}
-            id="local-mount-error"
-            class="rounded-md border border-error/25 bg-error/10 px-3 py-2 text-sm text-error"
-          >
-            {@mount_error}
-          </p>
-        </div>
+            <p
+              :if={@mount_error}
+              id="local-mount-error"
+              role="alert"
+              class="mount-error"
+            >
+              <.icon name="hero-exclamation-triangle-micro" class="mount-error__icon" />
+              <span>{@mount_error}</span>
+            </p>
+
+            <footer class="mount-foot">
+              <span class="mount-foot__item">
+                <.icon name="hero-lock-closed-micro" class="mount-foot__icon" />
+                <span>Local-first</span>
+              </span>
+              <span class="mount-foot__sep" aria-hidden="true">&middot;</span>
+              <span class="mount-foot__item">Nothing leaves this device</span>
+            </footer>
+          </div>
+        </section>
       </main>
     </Layouts.app>
     """

@@ -565,3 +565,286 @@ body[data-chat-rail-dragging="true"] {
 
 /* Images shouldn't blow out the rail width. */
 .chat-markdown img { max-width: 100%; height: auto; }
+
+
+/* ---------------------------------------------------------------------------
+   Mount workspace  (EcritsWeb.Local.MountLive, served at "/")
+   ---------------------------------------------------------------------------
+   The editor's "open a workspace folder" screen — modeled on an IDE / text
+   editor welcome panel, NOT a marketing landing. Deliberately quiet, dense,
+   and utilitarian: a single restrained panel with an editor-style title bar,
+   a compact open-folder action, and a mono path input. All colour routes
+   through the --cs-* tokens / daisyUI base palette so it follows both the
+   `studio` and `studio-dark` themes. UI text uses the sans stack; the path
+   input and crumb use the mono stack (Iosevka) shared with StudioLive. */
+
+.mount-screen {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: calc(100vh - 60px);
+  padding: clamp(2.5rem, 8vh, 6rem) 1.25rem 2rem;
+}
+
+.mount-panel {
+  width: 100%;
+  max-width: 30rem;
+  border: 1px solid color-mix(in oklab, var(--cs-ink) 12%, transparent);
+  border-radius: var(--cs-radius-md);
+  background: var(--cs-surface);
+  box-shadow: var(--cs-shadow-card);
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mount-panel {
+    animation: mount-fade 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+@keyframes mount-fade {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* === Title bar — editor chrome ========================================== */
+.mount-panel__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  height: 2.1rem;
+  padding: 0 0.85rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--cs-ink) 8%, transparent);
+  background: color-mix(in oklab, var(--cs-ink) 2.5%, var(--cs-surface));
+}
+
+.mount-panel__dots {
+  display: inline-flex;
+  gap: 0.4rem;
+}
+
+.mount-panel__dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--cs-ink) 16%, transparent);
+}
+
+.mount-panel__crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  color: color-mix(in oklab, var(--cs-ink) 42%, transparent);
+}
+
+.mount-panel__crumb-icon {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex: none;
+}
+
+/* === Body =============================================================== */
+.mount-panel__body {
+  padding: 1.5rem 1.5rem 1.25rem;
+}
+
+.mount-head__title {
+  margin: 0;
+  font-size: 1.06rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--cs-ink);
+}
+
+.mount-head__sub {
+  margin: 0.4rem 0 0;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: color-mix(in oklab, var(--cs-ink) 58%, transparent);
+}
+
+.mount-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  margin-top: 1.35rem;
+}
+
+/* Primary affordance — native folder picker. */
+.mount-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  height: 2.5rem;
+  padding: 0 1rem;
+  border: 1px solid transparent;
+  border-radius: var(--cs-radius-sm);
+  background: var(--color-primary, var(--cs-blue));
+  color: var(--color-primary-content, #fff);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.mount-open:hover {
+  background: color-mix(in oklab, var(--color-primary, var(--cs-blue)) 90%, #000);
+}
+
+.mount-open:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary, var(--cs-blue)) 32%, transparent);
+}
+
+.mount-open:active { background: color-mix(in oklab, var(--color-primary, var(--cs-blue)) 82%, #000); }
+.mount-open[disabled] { opacity: 0.65; cursor: progress; }
+
+.mount-open__icon {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+}
+
+/* === Path entry ========================================================= */
+.mount-pathform { margin: 0; }
+
+.mount-pathform__label {
+  display: block;
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: color-mix(in oklab, var(--cs-ink) 50%, transparent);
+}
+
+.mount-field {
+  display: flex;
+  align-items: stretch;
+  height: 2.5rem;
+  padding-left: 0.65rem;
+  border: 1px solid color-mix(in oklab, var(--cs-ink) 16%, transparent);
+  border-radius: var(--cs-radius-sm);
+  background: color-mix(in oklab, var(--cs-ink) 2%, var(--cs-surface));
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.mount-field:focus-within {
+  border-color: var(--color-primary, var(--cs-blue));
+  background: var(--cs-surface);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary, var(--cs-blue)) 14%, transparent);
+}
+
+.mount-field__chevron {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  line-height: 1;
+  color: color-mix(in oklab, var(--cs-ink) 38%, transparent);
+  user-select: none;
+}
+
+/* Reset the daisyUI <.input> fieldset wrapper so the field lays out inline. */
+.mount-field .fieldset { margin: 0; flex: 1 1 auto; min-width: 0; }
+.mount-field .fieldset > label { display: block; margin: 0; height: 100%; }
+
+.mount-field__input {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--cs-ink);
+  outline: none;
+}
+
+.mount-field__input::placeholder {
+  color: color-mix(in oklab, var(--cs-ink) 32%, transparent);
+}
+
+.mount-field__submit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: none;
+  padding: 0 0.85rem;
+  margin: 0.3rem 0.3rem 0.3rem 0.3rem;
+  border-radius: calc(var(--cs-radius-sm) - 2px);
+  background: color-mix(in oklab, var(--cs-ink) 8%, transparent);
+  color: color-mix(in oklab, var(--cs-ink) 78%, transparent);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.mount-field__submit:hover {
+  background: var(--color-primary, var(--cs-blue));
+  color: var(--color-primary-content, #fff);
+}
+
+.mount-field__submit:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary, var(--cs-blue)) 35%, transparent);
+}
+
+.mount-field__submit-label { line-height: 1; }
+
+/* === Error ============================================================== */
+.mount-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  margin: 0.9rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid color-mix(in oklab, var(--cs-red) 32%, transparent);
+  border-radius: var(--cs-radius-sm);
+  background: color-mix(in oklab, var(--cs-red) 9%, var(--cs-surface));
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: color-mix(in oklab, var(--cs-red) 78%, var(--cs-ink));
+}
+
+.mount-error__icon {
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  margin-top: 0.08rem;
+  color: var(--cs-red);
+}
+
+/* === Footer ============================================================= */
+.mount-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid color-mix(in oklab, var(--cs-ink) 7%, transparent);
+  font-size: 0.74rem;
+  color: color-mix(in oklab, var(--cs-ink) 46%, transparent);
+}
+
+.mount-foot__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.mount-foot__icon {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex: none;
+  color: color-mix(in oklab, var(--color-primary, var(--cs-blue)) 75%, var(--cs-ink));
+}
+
+.mount-foot__sep {
+  color: color-mix(in oklab, var(--cs-ink) 24%, transparent);
+}
