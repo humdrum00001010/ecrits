@@ -125,7 +125,7 @@ defmodule Ecrits.MixProject do
       # best-effort (the shell loop skips missing files) so a checkout without the
       # (large, local-only) office artifacts still builds.
       "assets.office_wasm": [
-        ~s(cmd sh -c "mkdir -p priv/static/assets/office && for f in soffice.js soffice.wasm soffice.data; do [ -f assets/vendor/office/$f ] && cp assets/vendor/office/$f priv/static/assets/office/$f || true; done")
+        ~s(cmd sh -c "mkdir -p priv/static/assets/office && for f in soffice.js soffice.wasm soffice.data soffice.data.js.metadata; do [ -f assets/vendor/office/$f ] && cp assets/vendor/office/$f priv/static/assets/office/$f || true; done")
       ],
       "assets.build": [
         "compile",
