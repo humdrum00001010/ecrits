@@ -94,16 +94,33 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "create",
       "description" =>
-        "Create a NEW empty document (blank template) whose save target is `path` " <>
-          "(the file need not exist yet). Returns {document, kind}. Author content " <>
-          "with doc.edit (insert_text/insert_paragraph/split/insert_table_*/…) and " <>
-          "persist with doc.save.",
+        "Create a NEW document whose save target is `path` (the file need not exist " <>
+          "yet). Returns {document, kind}.\n" <>
+          "• WITHOUT `from`: a blank document. Author content with doc.edit " <>
+          "(insert_text/insert_paragraph/split/insert_table_*/…) and persist with doc.save.\n" <>
+          "• WITH `from` (CLONE A TEMPLATE — use this when asked to make a document " <>
+          "\"in the format of\" / \"같은 양식으로\" / \"…형식대로\" an existing doc): `from` is " <>
+          "an existing HWP document's file PATH or an open document id. The template " <>
+          "file is byte-copied to `path`, so the clone INHERITS ALL of the template's " <>
+          "formatting (column widths, cell/paragraph patterns, fonts, headers, tables). " <>
+          "Then REPLACE the template's content cell-by-cell (doc.find + doc.edit " <>
+          "replace_text / insert_text) preserving each cell's structure, and use " <>
+          "doc.edit insert_table_row to add rows that inherit the template's cell format " <>
+          "— do NOT rebuild a table from scratch.",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
           "path" => %{"type" => "string", "minLength" => 1},
-          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx"]}
+          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx"]},
+          "from" => %{
+            "type" => "string",
+            "minLength" => 1,
+            "description" =>
+              "Optional template to clone: an existing HWP document's file path OR an " <>
+                "open document id. The file is byte-copied to `path` so the new document " <>
+                "inherits all of the template's formatting."
+          }
         },
         "required" => ["path"]
       }
@@ -392,13 +409,10 @@ defmodule Ecrits.Doc.Tools do
     with {:ok, path} <- require_string(args, "path") do
       kind = args |> get(["kind"]) |> normalize_kind()
 
-      case Pool.create(pool(ctx), path, kind: kind) do
-        {:ok, doc_id} ->
-          _ = Pool.set_active(pool(ctx), doc_id)
-          {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind)}}
-
-        {:error, reason} ->
-          {:error, error_json(reason)}
+      case get(args, ["from"]) do
+        nil -> create_blank(ctx, path, kind)
+        from when is_binary(from) and from != "" -> create_from(ctx, path, kind, from)
+        _ -> {:error, error_json({:invalid_params, "from must be a non-empty string"})}
       end
     end
   end
@@ -554,6 +568,69 @@ defmodule Ecrits.Doc.Tools do
   end
 
   def call(_ctx, tool_name, _args), do: {:error, {:unknown_tool, tool_name}}
+
+  # --- doc.create helpers --------------------------------------------------
+
+  # doc.create without `from`: a blank engine template whose save target is `path`.
+  defp create_blank(ctx, path, kind) do
+    case Pool.create(pool(ctx), path, kind: kind) do
+      {:ok, doc_id} ->
+        _ = Pool.set_active(pool(ctx), doc_id)
+        {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind)}}
+
+      {:error, reason} ->
+        {:error, error_json(reason)}
+    end
+  end
+
+  # doc.create WITH `from`: CLONE a template. Resolve `from` (an open document id OR
+  # a file path) to a source path, byte-copy it to `path` (so the clone inherits
+  # EVERY bit of the template's formatting), then open the copy as an editable doc
+  # whose save target is `path`. The agent then REPLACES content cell-by-cell.
+  defp create_from(ctx, path, kind, from) do
+    with {:ok, source} <- resolve_template_path(ctx, from),
+         :ok <- copy_template(source, path) do
+      case Pool.open(pool(ctx), path, kind: kind) do
+        {:ok, doc_id} ->
+          _ = Pool.set_active(pool(ctx), doc_id)
+          {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind), "cloned_from" => source}}
+
+        {:error, reason} ->
+          {:error, error_json(reason)}
+      end
+    else
+      {:error, reason} -> {:error, error_json(reason)}
+    end
+  end
+
+  # `from` may be an open document id (look its path up in the Pool) or a file path.
+  defp resolve_template_path(ctx, from) do
+    case Pool.info(pool(ctx), from) do
+      {:ok, %{path: source}} when is_binary(source) and source != "" ->
+        {:ok, source}
+
+      _ ->
+        if File.regular?(from),
+          do: {:ok, from},
+          else: {:error, {:template_not_found, from}}
+    end
+  end
+
+  defp copy_template(source, path) do
+    with :ok <- ensure_parent_dir(path),
+         :ok <- File.cp(source, path) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:clone_failed, reason}}
+    end
+  end
+
+  defp ensure_parent_dir(path) do
+    case path |> Path.dirname() |> File.mkdir_p() do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:clone_failed, reason}}
+    end
+  end
 
   # --- doc.read / doc.find server arms -------------------------------------
 
@@ -1044,6 +1121,12 @@ defmodule Ecrits.Doc.Tools do
 
   defp error_json({:unsupported_kind, kind}),
     do: %{"error" => "unsupported_kind", "kind" => to_string(kind)}
+
+  defp error_json({:template_not_found, from}),
+    do: %{"error" => "template_not_found", "from" => from}
+
+  defp error_json({:clone_failed, reason}),
+    do: %{"error" => "clone_failed", "reason" => inspect(reason)}
 
   defp error_json(reason) when is_atom(reason), do: %{"error" => to_string(reason)}
   defp error_json(reason), do: %{"error" => inspect(reason)}

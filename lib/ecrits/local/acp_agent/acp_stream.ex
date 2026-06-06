@@ -576,9 +576,41 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       `kind` = "hwp"/"hwpx") to make a fresh blank document, then author into THAT
       new document. Do NOT overwrite or repurpose the currently-open document just
       because it happens to be open. A freshly-created doc is genuinely empty.
-    To build a table from scratch use `doc_edit` `insert_table` {rows, cols} (it
-    returns the new table's {paraIdx, controlIdx}); fill cells with `insert_text`
-    using a ref that carries {paragraph: paraIdx, control: controlIdx, cell, cell_para}.
+      If instead they want the new document in the FORMAT of an existing one, pass
+      `doc_create` the optional `from` arg (see "MAKING A DOCUMENT IN THE FORMAT
+      OF" below) — that clones the template so you keep all its formatting.
+    MAKING A DOCUMENT "IN THE FORMAT OF" AN EXISTING ONE — clone, do NOT rebuild:
+    When asked to produce a document in the FORMAT / 양식 / 형식 of an existing
+    document — "make a worksheet in the <X> format", "<X> 형식대로", "같은 양식으로",
+    "in the same layout as <X>" — you MUST `doc_create` with `from` set to that
+    template (its file path OR its open document id) and `path` set to the new
+    file. That byte-copies the template, so the new document INHERITS ALL of its
+    formatting (column widths, cell/paragraph patterns, fonts, header row, table
+    structure). Then REPLACE the template's content cell-by-cell:
+    • `doc_find` / `doc_read` the cloned doc to locate each cell, then `doc_edit`
+      `replace_text` (or `delete_range` + `insert_text`) to swap the old text for
+      the new content IN PLACE — this PRESERVES each cell's structure.
+    • PRESERVE the per-cell shape exactly: a sentence cell that held two paragraphs
+      ("① English sentence" ¶ "해석 (Korean translation)") must STILL hold both —
+      always write the 해석 line, never leave it English-only. A "Vocabulary" cell
+      that held a numbered "word : 뜻" list stays a numbered "word : 뜻" list. A
+      "< Grammar Point >" cell stays Q-format (numbered fill-in questions with
+      `______` blanks). Fill EVERY field — no empty Vocabulary cells, no missing
+      translations.
+    • Do NOT build the table from scratch (insert_table → fill) when cloning — that
+      discards the template's column widths, fonts, and header and is the WRONG
+      output. Clone first; replace content second.
+    • If the new lesson has MORE items than the template has cells/rows, add a
+      format-preserving row with `doc_edit` `insert_table_row` {ref of a cell in
+      the table, row: <existing row index>, below: true} — it CLONES an adjacent
+      data row's cell formatting (borders, widths, fonts) with empty text, which
+      you then fill. (Alternatively, append extra "English ¶ 해석" paragraph pairs
+      INTO an existing sentence cell with a multi-line `insert_text`.)
+
+    To build a table from scratch (only when NOT cloning a template) use `doc_edit`
+    `insert_table` {rows, cols} (it returns the new table's {paraIdx, controlIdx});
+    fill cells with `insert_text` using a ref that carries
+    {paragraph: paraIdx, control: controlIdx, cell, cell_para}.
     For prose with MULTIPLE paragraphs (a contract is many clauses), put `\\n`
     between paragraphs in a single `insert_text` `text` — each `\\n` becomes a real
     paragraph break. Do NOT cram a whole multi-clause body into one run-on

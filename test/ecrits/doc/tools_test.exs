@@ -66,6 +66,86 @@ defmodule Ecrits.Doc.ToolsTest do
     end
   end
 
+  describe "doc.create {from} — clone a template" do
+    test "byte-copies a template file to the new path and opens the clone", %{pool: pool} do
+      dir = Path.join(System.tmp_dir!(), "ecrits_clone_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      source = Path.join(dir, "template.hwp")
+      clone = Path.join(dir, "nested/clone.hwp")
+      bytes = :crypto.strong_rand_bytes(2048)
+      File.write!(source, bytes)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      assert {:ok, %{"document" => doc_id, "kind" => "hwp", "cloned_from" => ^source}} =
+               Tools.call(ctx(pool), "doc.create", %{"path" => clone, "from" => source})
+
+      # The clone is a BYTE-IDENTICAL copy (inherits all of the template's bytes,
+      # hence all of its formatting), written even into a not-yet-existing dir.
+      assert File.read!(clone) == bytes
+      # And it is opened + marked active as an editable doc whose save target is `clone`.
+      assert {:ok, %{"active_document" => ^doc_id}} = Tools.call(ctx(pool), "doc.context", %{})
+
+      assert {:ok, info} = Pool.info(pool, doc_id)
+      assert info.path == clone
+    end
+
+    test "resolves `from` as an already-open document id", %{pool: pool} do
+      dir = Path.join(System.tmp_dir!(), "ecrits_clone_id_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      source = Path.join(dir, "open_template.hwp")
+      clone = Path.join(dir, "clone_from_id.hwp")
+      bytes = :crypto.strong_rand_bytes(1024)
+      File.write!(source, bytes)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      {:ok, %{"document" => template_id}} =
+        Tools.call(ctx(pool), "doc.open", %{"path" => source})
+
+      assert {:ok, %{"document" => clone_id, "cloned_from" => ^source}} =
+               Tools.call(ctx(pool), "doc.create", %{"path" => clone, "from" => template_id})
+
+      assert clone_id != template_id
+      assert File.read!(clone) == bytes
+    end
+
+    test "an unknown template (not an open id, not a file) is a structured error", %{pool: pool} do
+      assert {:error, %{"error" => "template_not_found", "from" => "/no/such/template.hwp"}} =
+               Tools.call(ctx(pool), "doc.create", %{
+                 "path" => Path.join(System.tmp_dir!(), "x.hwp"),
+                 "from" => "/no/such/template.hwp"
+               })
+    end
+
+    test "without `from` it still routes to the blank-create path (regression)", %{pool: pool} do
+      # The `from` branch must not disturb the blank path: a create with no `from`
+      # goes straight to Pool.create (blank engine template), exactly as before.
+      # The in-process fake runtime has no engine `new/0`, so the blank path
+      # surfaces the engine's create-unsupported error here — the point is that
+      # the NO-`from` call reaches Pool.create unchanged (not the clone branch).
+      result =
+        Tools.call(ctx(pool), "doc.create", %{
+          "path" => Path.join(System.tmp_dir!(), "blank_#{System.unique_integer()}.hwp")
+        })
+
+      case result do
+        {:ok, %{"document" => doc_id}} ->
+          assert {:ok, %{"active_document" => ^doc_id}} =
+                   Tools.call(ctx(pool), "doc.context", %{})
+
+        {:error, %{"error" => err}} ->
+          # Reached the blank engine-create path (no clone/template error).
+          assert err =~ "create_unsupported" or err =~ "open_failed"
+          refute err =~ "template_not_found"
+      end
+    end
+
+    test "the create tool schema advertises the `from` clone param" do
+      create = Enum.find(Tools.tools(), &(&1["name"] == "create"))
+      assert Map.has_key?(create["inputSchema"]["properties"], "from")
+      assert create["description"] =~ "format of" or create["description"] =~ "CLONE"
+    end
+  end
+
   describe "doc.read / doc.find / doc.outline" do
     setup %{pool: pool} do
       {:ok, %{"document" => doc_id}} =
