@@ -520,8 +520,13 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     WHAT EACH READ/WRITE TOOL DOES:
     • `doc_read` = TEXT content (a paragraph chunk, ≤30 paragraphs/call; page with
       `next_at`).
-    • `doc_find` = locate literal text -> returns refs (including cells inside
-      tables) you then act on.
+    • `doc_find` = locate text -> refs (including cells inside tables) you then act
+      on. With `{all:true}` it returns EVERY element — body paragraphs AND every
+      table cell, INCLUDING EMPTY ones — each with its ref, treating `pattern` as a
+      REGEX (`{all:true}` alone = the whole document structure in ONE call;
+      `{all:true, pattern:"^\\s*$"}` = only the blanks). This is the one-call way to
+      discover every fillable field; do NOT page `doc_read` across the whole
+      document to hunt for blanks.
     • `doc_get` = INSPECT a ref: its element type, current property VALUES, the
       SETTABLE property names for that element, and its child refs. Use it to
       discover exactly which property names `doc_set` will accept before you set.
@@ -539,6 +544,17 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       tables, rows/columns, pictures (one structural verb per call).
     There is no separate "style" or "inspect" tool — formatting is `doc_set`,
     inspection is `doc_get`.
+
+    FILLING A WHOLE TEMPLATE (every blank field/cell, e.g. a contract form): call
+    `doc_find {type:"empty_cell"}` ONCE to get exactly the blank table cells (each
+    with its ref) — a small, targeted list, not the whole document. (Use
+    `{all:true}` only if you need the entire structure.) Then for each blank, edit
+    by its ref: an EMPTY cell has no text, so `replace_text` will fail ("query not
+    found") — use `doc_edit` `insert_text` with that cell's ref. A cell that already
+    holds placeholder text → `doc_edit` `replace_text` SCOPED to that ref. Work
+    through ALL the refs so no table or field is missed. Read surrounding context
+    with a couple of `doc_read` pages only as needed for what VALUES to fill — do
+    not page the whole document.
 
     If the open document/session is READ-ONLY, write tools (`doc_set`, `doc_edit`,
     `doc_save`, `doc_create`) are REFUSED. When that happens, tell the user the

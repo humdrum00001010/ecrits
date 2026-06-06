@@ -1462,8 +1462,8 @@ const WasmHwpEditor = {
   // element — body paragraphs AND table cells (empty ones included, which the
   // literal searchAllText can never surface) — and filter by `pattern` as a
   // regex. This is what lets the agent see the blank boxes in a form template.
-  applyAgentFind({ pattern, case_sensitive, all, regex }) {
-    if (all || regex) return this.applyAgentFindAll(pattern, !!case_sensitive)
+  applyAgentFind({ pattern, case_sensitive, all, regex, type }) {
+    if (all || regex || type) return this.applyAgentFindAll(pattern, !!case_sensitive, type)
     const matches = []
     try {
       const raw = this.doc.searchAllText(String(pattern || ""), !!case_sensitive, true)
@@ -1502,7 +1502,7 @@ const WasmHwpEditor = {
   // Discovery search: enumerate every element (collectElements) and keep those
   // whose text matches `pattern` as a regex. An empty/missing pattern becomes
   // [\s\S]* so {all:true} lists the WHOLE structure, including empty cells.
-  applyAgentFindAll(pattern, caseSensitive) {
+  applyAgentFindAll(pattern, caseSensitive, type) {
     const src = pattern == null || pattern === "" ? "[\\s\\S]*" : String(pattern)
     let re
     try {
@@ -1510,14 +1510,30 @@ const WasmHwpEditor = {
     } catch (error) {
       return { pattern, error: String(error && error.message ? error.message : error), matches: [] }
     }
+    // Optional element-TYPE filter so the agent can pull just the slice it needs
+    // (e.g. {type:"empty_cell"} = the blank table cells to fill) instead of the
+    // whole structure.
+    const t = String(type || "").toLowerCase()
+    const typeOk = (el) => {
+      const isCell = !!(el.ref && el.ref.cell)
+      const isEmpty = !el.text || el.text.trim() === ""
+      switch (t) {
+        case "cell": return isCell
+        case "empty_cell": case "blank_cell": return isCell && isEmpty
+        case "filled_cell": return isCell && !isEmpty
+        case "paragraph": return !isCell
+        case "empty": case "blank": return isEmpty
+        default: return true
+      }
+    }
     const MATCH_CAP = 2000
     const matches = []
     let truncated = false
     for (const el of this.collectElements()) {
       // Stateless test: no global flag, so lastIndex never advances between calls.
-      if (re.test(el.text)) {
+      if (typeOk(el) && re.test(el.text)) {
         if (matches.length >= MATCH_CAP) { truncated = true; break }
-        matches.push({ ref: JSON.stringify(el.ref), text: el.text })
+        matches.push({ ref: JSON.stringify(el.ref), text: el.text, table_cell: !!(el.ref && el.ref.cell) })
       }
     }
     const out = { pattern, matches }

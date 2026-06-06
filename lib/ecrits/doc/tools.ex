@@ -153,7 +153,12 @@ defmodule Ecrits.Doc.Tools do
           "as a REGULAR EXPRESSION — use it to discover blanks to fill: " <>
           "`{all:true}` lists the whole document structure; " <>
           "`{all:true, pattern:\"^\\\\s*$\"}` lists only the empty elements. " <>
-          "In `all` mode `pattern` is optional (omit it to match everything).",
+          "In `all` mode `pattern` is optional (omit it to match everything). " <>
+          "Pass `type` to fetch just one slice by element type — `\"empty_cell\"` " <>
+          "(blank table cells to fill), `\"cell\"` (all table cells), " <>
+          "`\"filled_cell\"`, `\"paragraph\"` (body), or `\"empty\"` — combinable " <>
+          "with `pattern`. To FILL a form, call `{type:\"empty_cell\"}` once to get " <>
+          "exactly the blanks (with refs), then insert_text into each.",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
@@ -173,6 +178,14 @@ defmodule Ecrits.Doc.Tools do
             "type" => "boolean",
             "default" => false,
             "description" => "Treat `pattern` as a regular expression (implied by `all`)."
+          },
+          "type" => %{
+            "type" => "string",
+            "enum" => ["empty_cell", "cell", "filled_cell", "paragraph", "empty"],
+            "description" =>
+              "Return only elements of this type (with refs). `empty_cell` = blank " <>
+                "table cells to fill; `cell`/`filled_cell` = table cells; `paragraph` " <>
+                "= body paragraphs; `empty` = any blank element. Combine with `pattern`."
           }
         },
         "required" => ["document"]
@@ -361,18 +374,20 @@ defmodule Ecrits.Doc.Tools do
   def call(ctx, "doc.find", args) do
     all = get(args, ["all"]) || false
     regex = get(args, ["regex"]) || false
+    type = get(args, ["type"])
 
     # `pattern` is required for a literal search, but optional in discovery mode
-    # (`all`/`regex`): {all:true} with no pattern enumerates the whole structure,
-    # so default to "" rather than hard-failing require_string.
-    with {:ok, pattern} <- find_pattern(args, all || regex) do
+    # (`all`/`regex`/`type`): {all:true} or {type:"empty_cell"} with no pattern
+    # enumerates by structure, so default to "" rather than hard-failing.
+    with {:ok, pattern} <- find_pattern(args, all || regex || (is_binary(type) and type != "")) do
       route_doc(ctx, args,
         browser: fn lv ->
           browser_call(lv, args, :find, %{
             pattern: pattern,
             case_sensitive: get(args, ["case_sensitive"]) || false,
             all: all,
-            regex: regex
+            regex: regex,
+            type: type
           })
         end,
         server: fn editor ->
