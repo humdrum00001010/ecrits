@@ -388,10 +388,17 @@ defmodule Ecrits.Doc.Tools do
   def call(ctx, "doc.set", args) do
     with {:ok, ref} <- require_string(args, "ref"),
          {:ok, props} <- require_map(args, "props") do
-      with_editor(ctx, args, fn editor ->
-        base_rev = get(args, ["base_revision"])
-        write_result(Editor.set(editor, ref, props, base_rev))
-      end)
+      base_rev = get(args, ["base_revision"])
+
+      route_doc(ctx, args,
+        # Viewed-HWP authority is the browser WASM model (design §6.2): deliver the
+        # property set to the owning LiveView -> WasmHwpEditor applies it
+        # (setCellProperties / applyCharFormat) so the change RENDERS in the viewer.
+        # A server-NIF set would mutate the unedited server copy the user never
+        # sees — invisible — so set MUST route to the browser for an open doc.
+        browser: fn lv -> browser_set(lv, args, ref, props) end,
+        server: fn editor -> write_result(Editor.set(editor, ref, props, base_rev)) end
+      )
     end
   end
 
@@ -474,6 +481,21 @@ defmodule Ecrits.Doc.Tools do
         {:ok,
          %{"ok" => true, "revision" => Map.get(applied, "revision") || Map.get(applied, :revision)}
          |> maybe_put("replaced", Map.get(applied, "replaced") || Map.get(applied, :replaced))}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # doc.set for a browser-backed doc: deliver the property set to the viewer's
+  # authoritative WASM model and adopt the revision it reports. The ref (doc.find's
+  # positional ref, incl. cell address) is parsed browser-side by the SAME parseRef
+  # the edit verbs use, so there is no ref-format round-trip mismatch with the
+  # server `hwp:` grammar — the reason a server-routed set rejected find's ref.
+  defp browser_set(lv, args, ref, props) do
+    case browser_call(lv, args, :set, %{ref: ref, props: props}) do
+      {:ok, %{} = applied} ->
+        {:ok, %{"ok" => true, "revision" => Map.get(applied, "revision") || Map.get(applied, :revision)}}
 
       {:error, _reason} = error ->
         error

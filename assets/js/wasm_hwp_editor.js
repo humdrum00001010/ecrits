@@ -1135,6 +1135,9 @@ const WasmHwpEditor = {
         case "edit":
           reply(this.applyAgentEdit(payload))
           break
+        case "set":
+          reply(this.applyAgentSet(payload))
+          break
         case "find":
           reply({ result: this.applyAgentFind(payload) })
           break
@@ -1337,6 +1340,62 @@ const WasmHwpEditor = {
     }
 
     return { error: `unsupported_op:${verb}` }
+  },
+
+  // Universal property set (doc.set) over the viewed WASM model, so a property
+  // change RENDERS in the viewer — the server NIF copy is NOT what the user sees,
+  // which is why server-side doc.set was invisible for an open doc. `props` is the
+  // agent's property map; a `kind` discriminator (if present) is stripped — the
+  // engine reads the property KEYS (BackgroundColor/fillColor for a cell;
+  // Bold/TextColor/FontSize for a char run). `ref` is doc.find's positional ref; a
+  // cell ref carries {parentParaIndex,controlIndex,cellIndex,cellParaIndex}.
+  applyAgentSet({ ref, props, base_revision }) {
+    const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const parsed = this.parseRef(ref)
+    if (!parsed) return { error: "set requires a ref {section,paragraph,offset[,cell]} (from doc.find)" }
+    if (props == null || typeof props !== "object") return { error: "set requires a 'props' object" }
+
+    const { kind: rawKind, ...rest } = props
+    if (Object.keys(rest).length === 0) return { error: "set requires at least one property in 'props'" }
+    const propJson = JSON.stringify(rest)
+    // Default the kind from the ref (a cell ref -> cell properties, e.g. a yellow
+    // BackgroundColor), mirroring the server resolver; pass kind:"char" to format a
+    // run that lives inside a cell instead of filling the cell.
+    const kind = rawKind || (parsed.cell ? "cell" : "char")
+
+    if (kind === "cell") {
+      const cl = parsed.cell
+      if (!cl) return { error: "set kind:cell needs a cell ref (doc.find a cell, then set its BackgroundColor)" }
+      try {
+        this.doc.setCellProperties(parsed.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, propJson)
+      } catch (error) {
+        return { error: `setCellProperties failed: ${String((error && error.message) || error)}` }
+      }
+      this.recordOp("AgentSetCell", { section: parsed.section, cell: cl, props: rest })
+      return this.finishAgentEdit(baseRev, {})
+    }
+
+    if (kind === "char") {
+      const start = Number.isInteger(parsed.offset) ? parsed.offset : 0
+      const span = Number(parsed.length ?? parsed.len ?? 0)
+      const end = start + (Number.isFinite(span) && span > 0 ? span : 0)
+      const cl = parsed.cell
+      try {
+        if (cl) {
+          this.doc.applyCharFormatInCell(
+            parsed.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, cl.cellParaIndex, start, end, propJson
+          )
+        } else {
+          this.doc.applyCharFormat(parsed.section, parsed.paragraph, start, end, propJson)
+        }
+      } catch (error) {
+        return { error: `applyCharFormat failed: ${String((error && error.message) || error)}` }
+      }
+      this.recordOp("AgentSetChar", { section: parsed.section, para: parsed.paragraph, cell: cl, start, end, props: rest })
+      return this.finishAgentEdit(baseRev, {})
+    }
+
+    return { error: `set: unsupported kind '${kind}' in the browser editor (supported: cell, char)` }
   },
 
   // A ref is the positional index doc.find returns (a JSON string
