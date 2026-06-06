@@ -26,6 +26,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # through MDEx so the visible body becomes progressively-formatted markdown
   # without thrashing on every token.
   @local_agent_text_flush_ms 120
+  # Idle window before a dirty viewed document is auto-saved. Each user/agent
+  # edit (re)arms a per-document timer; when it fires and the doc is still dirty
+  # we fire a canonical `doc.save` (the same path Ctrl/Cmd+S uses).
+  @autosave_idle_ms 4_000
   @employment_contract_type_key "employment_v1"
   @selectable_local_agent_provider_ids ~w(codex claude)
   @local_agent_models [
@@ -131,8 +135,21 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      # returns), seeded at 0 on open and bumped per applied op.
      |> assign(:doc_browser_pending, %{})
      |> assign(:browser_revision, 0)
+     # Unsaved-changes tracking (LiveView is the source of truth). A document id
+     # is in `dirty_document_ids` once it is touched (user edit via
+     # `rhwp.text.mutated`, or an agent doc.edit/doc.set routed through the browser
+     # bridge) and removed once saved (Ctrl+S/auto-save, or an agent doc.save) —
+     # so the tab dot reflects user AND agent ops uniformly. `autosave_timers`
+     # holds the per-document debounce timer that fires a canonical save on idle.
+     |> assign(:dirty_document_ids, MapSet.new())
+     |> assign(:autosave_timers, %{})
      |> assign(:fs_watcher_pid, nil)
      |> assign(:fs_refresh_timer, nil)
+     # Subscribed-once flag for the agent-file-write PubSub topic
+     # (`Ecrits.Doc.Tools.workspace_files_topic/0`): an agent doc.create-clone /
+     # doc.save broadcasts the written path there, and we refresh the tree LIVE
+     # (mid-turn) when the path is under this workspace's root.
+     |> assign(:workspace_files_subscribed?, false)
      |> assign(:local_document_error, nil)
      |> assign(:local_document_status, :none)
      |> assign(:local_document_snapshot, nil)
@@ -319,6 +336,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   def handle_event("rhwp.text.mutated", %{"documentId" => document_id} = params, socket) do
     with :ok <- verify_active_document(socket, document_id),
          {:ok, response} <- RhwpAdapter.record_mutation(document_id, params) do
+      socket = socket |> mark_doc_dirty(document_id) |> arm_autosave(document_id)
       {:reply, %{ok: true, local: true, mutation: mutation_reply(response.mutation)}, socket}
     else
       {:error, reason} ->
@@ -331,6 +349,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     with :ok <- verify_active_document(socket, document_id),
          {:ok, response} <- RhwpAdapter.record_mutation(document_id, params) do
+      socket = socket |> mark_doc_dirty(document_id) |> arm_autosave(document_id)
       {:reply, %{ok: true, local: true, mutation: mutation_reply(response.mutation)}, socket}
     else
       {:error, reason} ->
@@ -344,7 +363,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # adopt the revision the WASM model reports so doc.edit returns the real value.
   def handle_event("doc.browser_reply", %{"request_id" => request_id} = params, socket) do
     case Map.pop(socket.assigns.doc_browser_pending, request_id) do
-      {{from, ref}, pending} ->
+      {{from, ref, verb}, pending} ->
         result = doc_browser_result(params)
         send(from, {:doc_browser_reply, ref, result})
 
@@ -352,6 +371,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           socket
           |> assign(:doc_browser_pending, pending)
           |> maybe_adopt_browser_revision(result)
+          |> apply_browser_op_dirty(verb, result)
 
         {:noreply, socket}
 
@@ -359,6 +379,21 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         {:noreply, socket}
     end
   end
+
+  # Ctrl/Cmd+S over the editor shell. The `phx-key="s"` filter narrows the
+  # window keydown to the "s" key; the modifier check guards against a bare "s"
+  # keystroke triggering a save. NOTE: a save only fires when the keydown
+  # payload carries `ctrlKey`/`metaKey` — see the second clause for plain "s".
+  def handle_event("rhwp_save", %{"key" => key} = params, socket)
+      when key in ["s", "S"] do
+    if params["ctrlKey"] || params["metaKey"] do
+      {:noreply, save_active_document(socket)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("rhwp_save", _params, socket), do: {:noreply, socket}
 
   def handle_event("rhwp.local.snapshot.checkpoint", params, socket) do
     persist_local_rhwp_snapshot(:checkpoint, params, socket)
@@ -603,7 +638,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     socket =
       socket
-      |> update(:doc_browser_pending, &Map.put(&1, request_id, {from, ref}))
+      |> update(:doc_browser_pending, &Map.put(&1, request_id, {from, ref, verb}))
       |> push_event("doc.apply_edit", %{
         request_id: request_id,
         verb: to_string(verb),
@@ -611,6 +646,19 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       })
 
     {:noreply, socket}
+  end
+
+  # Debounced auto-save tick: the per-document timer fired. Drop it from the
+  # timer map and, if the doc is still dirty, run a canonical save (the dot
+  # clears via the `doc.save` browser_reply, verb `:save`).
+  def handle_info({:autosave, id}, socket) do
+    socket = update(socket, :autosave_timers, &Map.delete(&1, id))
+
+    if MapSet.member?(socket.assigns.dirty_document_ids, id) do
+      {:noreply, save_document(socket, id)}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info({:local_document_saved, %Document{} = document, snapshot}, socket) do
@@ -647,6 +695,20 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       |> reconcile_open_documents()
 
     {:noreply, socket}
+  end
+
+  # An agent doc.create-clone / doc.save wrote a file (broadcast by
+  # `Ecrits.Doc.Tools`). Refresh the tree the instant the write lands — but ONLY
+  # when the file is under THIS workspace's root, so a write in some other open
+  # workspace (or a scratch/temp path) never refreshes the wrong tree. Debounced
+  # via the same timer the FS watcher uses, so a burst (clone-then-save, or a
+  # batch save) collapses into one re-list.
+  def handle_info({:workspace_file_written, path}, socket) when is_binary(path) do
+    if workspace_contains_path?(socket, path) do
+      {:noreply, schedule_tree_refresh(socket)}
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
@@ -784,6 +846,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               }
               open_documents={@open_documents}
               active_document_id={@active_document_id}
+              dirty_document_ids={@dirty_document_ids}
               hwp_pages={@streams.local_hwp_pages}
               hwp_page_count={@local_hwp_page_count}
               markdown_source={@local_markdown_source}
@@ -1408,6 +1471,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         |> assign(:workspace_error, nil)
         |> assign(:page_title, workspace_title(workspace))
         |> maybe_start_fs_watcher()
+        |> maybe_subscribe_workspace_files()
 
       {:error, _reason} ->
         # Workspace failed to mount (bad / inaccessible path) — send the user
@@ -1489,7 +1553,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       index ->
         active? = socket.assigns.active_document_id == id
         remaining = List.delete_at(tabs, index)
-        socket = assign(socket, :open_documents, remaining)
+
+        socket =
+          socket
+          |> assign(:open_documents, remaining)
+          # A closed doc must never linger as dirty (and its auto-save timer
+          # would otherwise fire against a doc with no open tab).
+          |> mark_doc_clean(id)
 
         cond do
           not active? ->
@@ -1948,6 +2018,17 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> maybe_stream_final_agent_text(turn_id, pending)
     |> finalize_dangling_tools("Turn ended before the tool finished.")
     |> persist_pending_agent_docs()
+    # ALWAYS re-list the tree on turn end, independent of whether the auto-save
+    # net above persisted anything. The agent may have created/saved its own
+    # file (doc.create + doc.save) during the turn — that leaves NO dirty doc, so
+    # persist_pending_agent_docs is a no-op and never refreshed. Without this the
+    # new/changed file only appeared after a manual refresh. The PubSub
+    # broadcast (see handle_info {:workspace_file_written, _}) already refreshes
+    # mid-turn; this is the turn-end backstop for any write that didn't broadcast
+    # (e.g. an older code path or a missed message). refresh_tree just re-reads
+    # the dir + reassigns :tree, so it's safe to run after the auto-save refresh
+    # and does NOT touch the auto-save flash.
+    |> refresh_tree(socket.assigns.expanded_paths)
   end
 
   defp apply_local_agent_event(socket, %{type: :turn_failed, turn_id: turn_id, reason: reason}) do
@@ -2054,10 +2135,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp auto_save_format(:hwpx), do: :hwpx
   defp auto_save_format(_kind), do: :hwp
 
+  # NOTE: the tree refresh that used to live here moved to the `:turn_completed`
+  # handler, which now ALWAYS re-lists after persist_pending_agent_docs/1 (so a
+  # turn that created+saved its own file — leaving nothing dirty here — still
+  # refreshes). This callback just surfaces the auto-save flash.
   defp after_auto_save(socket, paths) do
-    socket
-    |> refresh_tree(socket.assigns.expanded_paths)
-    |> put_flash(
+    put_flash(
+      socket,
       :info,
       "Saved #{length(paths)} document#{if length(paths) == 1, do: "", else: "s"} the agent left unsaved."
     )
@@ -2293,6 +2377,43 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp stop_fs_watcher(_socket), do: :ok
 
+  # Subscribe (once) to the agent-file-write topic so a server-side doc.create /
+  # doc.save shows up in the tree LIVE. Idempotent: the flag guards against a
+  # second subscribe on a same-process re-mount (which would deliver every
+  # broadcast twice). Gated on `connected?` — there's no point subscribing the
+  # throwaway static-render process.
+  defp maybe_subscribe_workspace_files(%{assigns: %{workspace_files_subscribed?: true}} = socket),
+    do: socket
+
+  defp maybe_subscribe_workspace_files(socket) do
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Ecrits.PubSub, Ecrits.Doc.Tools.workspace_files_topic())
+      assign(socket, :workspace_files_subscribed?, true)
+    else
+      socket
+    end
+  end
+
+  # True when `path` (the absolute file an agent just wrote) lives under the
+  # currently-mounted workspace root. Both sides are expanded so a relative /
+  # symlinked / `..`-laden path still compares correctly, and we reject the root
+  # itself / unrelated siblings (Path.relative_to leaves an absolute path or a
+  # leading ".." when `path` is NOT under `root`).
+  defp workspace_contains_path?(socket, path) do
+    root = workspace_root_path(socket.assigns.workspace)
+
+    if is_binary(root) and root != "" and is_binary(path) and path != "" do
+      abs_root = Path.expand(root)
+      abs_path = Path.expand(path)
+      relative = Path.relative_to(abs_path, abs_root)
+
+      relative != abs_path and relative != "." and
+        not String.starts_with?(relative, "..")
+    else
+      false
+    end
+  end
+
   # Ignore the metadata tree, dotfiles, and editor swap files; everything else
   # is a workspace change worth re-listing.
   #
@@ -2353,6 +2474,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       true ->
         active_id = socket.assigns.active_document_id
         active_dropped? = Enum.any?(dropped, &(&1.id == active_id))
+
+        # Drop dirty state + cancel auto-save timers for tabs that vanished
+        # from disk so a removed doc never lingers dirty or auto-saves.
+        socket =
+          Enum.reduce(dropped, socket, fn tab, acc -> mark_doc_clean(acc, tab.id) end)
+
         socket = assign(socket, :open_documents, kept)
 
         cond do
@@ -2495,6 +2622,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         |> assign(:local_document_status, action_status(action))
         |> assign(:local_document_snapshot, response.snapshot)
         |> assign(:local_document_error, nil)
+        |> maybe_clear_dirty_on_save(action, document_id)
         |> maybe_render_active_local_hwp_pages(document_id)
 
       {:reply,
@@ -2527,6 +2655,86 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp active_document_id(%{assigns: %{active_document: %{id: id}}}) when is_binary(id), do: id
   defp active_document_id(_socket), do: nil
+
+  # --- Unsaved-changes (dirty) tracking + debounced auto-save ----------------
+  # `:dirty_document_ids` (a MapSet) is the single source of truth for which
+  # tabs render the "unsaved changes" dot. A doc becomes dirty on a user edit
+  # (`rhwp.text.mutated`) or an agent `doc.edit`/`doc.set` routed through the
+  # browser bridge, and clean on a save (Ctrl/Cmd+S, auto-save, or `doc.save`).
+
+  defp mark_doc_dirty(socket, nil), do: socket
+
+  defp mark_doc_dirty(socket, id),
+    do: update(socket, :dirty_document_ids, &MapSet.put(&1, id))
+
+  defp mark_doc_clean(socket, nil), do: socket
+
+  defp mark_doc_clean(socket, id) do
+    socket
+    |> update(:dirty_document_ids, &MapSet.delete(&1, id))
+    |> cancel_autosave(id)
+  end
+
+  # (Re)arm the idle auto-save timer for `id`, cancelling any prior one so the
+  # window is measured from the most recent edit.
+  defp arm_autosave(socket, nil), do: socket
+
+  defp arm_autosave(socket, id) do
+    socket = cancel_autosave(socket, id)
+    ref = Process.send_after(self(), {:autosave, id}, @autosave_idle_ms)
+    update(socket, :autosave_timers, &Map.put(&1, id, ref))
+  end
+
+  # Cancel + drop any pending auto-save timer for `id`.
+  defp cancel_autosave(socket, id) do
+    update(socket, :autosave_timers, fn timers ->
+      case Map.pop(timers, id) do
+        {nil, rest} ->
+          rest
+
+        {ref, rest} ->
+          _ = Process.cancel_timer(ref)
+          rest
+      end
+    end)
+  end
+
+  defp maybe_clear_dirty_on_save(socket, :save, id), do: mark_doc_clean(socket, id)
+  defp maybe_clear_dirty_on_save(socket, _action, _id), do: socket
+
+  # Reflect an agent-routed browser op's result in the dirty set. Edits/sets
+  # that succeeded mark the active doc dirty (and arm auto-save); a successful
+  # save marks it clean. Reads and failures leave the set untouched.
+  defp apply_browser_op_dirty(socket, verb, result) do
+    id = active_document_id(socket)
+
+    if match?({:ok, _}, result) do
+      cond do
+        verb in [:edit, :set] -> socket |> mark_doc_dirty(id) |> arm_autosave(id)
+        verb == :save -> mark_doc_clean(socket, id)
+        true -> socket
+      end
+    else
+      socket
+    end
+  end
+
+  defp save_active_document(socket), do: save_document(socket, active_document_id(socket))
+
+  defp save_document(socket, nil), do: socket
+
+  defp save_document(socket, id) do
+    # Fire-and-forget in a SEPARATE process: `Ecrits.Doc.Tools.call/3` for a
+    # browser-backed doc sends `{:doc_browser_request, ...}` to THIS LiveView
+    # pid and blocks in `receive`, so calling it inline here would deadlock.
+    # The dot clears when the resulting `doc.save` round-trips back through
+    # `doc.browser_reply` (verb `:save`).
+    Task.start(fn ->
+      Ecrits.Doc.Tools.call(%{pool: DocPool}, "doc.save", %{"document" => id})
+    end)
+
+    socket
+  end
 
   defp action_status(:checkpoint), do: :checkpointed
   defp action_status(:save), do: :saved

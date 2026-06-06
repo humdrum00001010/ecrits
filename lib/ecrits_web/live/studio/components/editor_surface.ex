@@ -20,6 +20,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   attr :save_state, :string, default: nil
   attr :open_documents, :list, default: []
   attr :active_document_id, :string, default: nil
+  attr :dirty_document_ids, :any, default: nil
   attr :hwp_pages, :any, required: true
   attr :hwp_page_count, :integer, default: 0
   attr :markdown_source, :string, default: ""
@@ -33,6 +34,8 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
     <div
       id={@shell_id}
       data-component="studio-local-document-surface"
+      phx-window-keydown="rhwp_save"
+      phx-key="s"
       class="h-[calc(100vh-60px)] min-h-[calc(100vh-60px)] w-full overflow-hidden"
     >
       <div
@@ -72,6 +75,14 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                     )
                   ]}
                 >
+                  <span
+                    :if={@dirty_document_ids && MapSet.member?(@dirty_document_ids, tab.id)}
+                    data-role="document-dirty-dot"
+                    class="size-1.5 shrink-0 rounded-full bg-primary"
+                    title="Unsaved changes"
+                    aria-label="Unsaved changes"
+                  >
+                  </span>
                   <button
                     type="button"
                     phx-click="tab_switch"
