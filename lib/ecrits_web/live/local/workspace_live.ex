@@ -94,8 +94,15 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   def mount(_params, _session, socket) do
     {:ok,
      socket
-     |> stream_configure(:local_agent_items, dom_id: & &1.dom_id)
-     |> stream_configure(:local_hwp_pages, dom_id: & &1.id)
+     # NAMED captures (not anon closures): a stream `dom_id` resolver is stored on
+     # the long-lived LiveView at mount. An anonymous `& &1.dom_id` is compiled
+     # INTO this module, so a dev hot-reload that purges the old module version
+     # while the LiveView is still alive turns it into a stale function reference
+     # ("points to an old version of the code" -> BadFunctionError on the next
+     # stream_insert). A remote capture `&__MODULE__.fun/1` is resolved by name at
+     # call time and therefore survives recompiles.
+     |> stream_configure(:local_agent_items, dom_id: &__MODULE__.local_agent_item_dom_id/1)
+     |> stream_configure(:local_hwp_pages, dom_id: &__MODULE__.local_hwp_page_dom_id/1)
      |> stream(:local_agent_items, [])
      |> stream(:local_hwp_pages, [])
      # Markdown (.md/.markdown) editor: plain-text source + live MDEx preview.
@@ -3333,6 +3340,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       body: body || ""
     }
   end
+
+  # Stream dom_id resolvers — PUBLIC so they can be captured as `&__MODULE__.../1`
+  # in stream_configure (see mount/3). Named captures survive dev hot-reloads,
+  # unlike anonymous closures compiled into this module.
+  @doc false
+  def local_agent_item_dom_id(%{dom_id: dom_id}), do: dom_id
+  @doc false
+  def local_hwp_page_dom_id(%{id: id}), do: id
 
   defp agent_item_data_role(%{role: :tool}), do: "local-agent-tool"
   defp agent_item_data_role(%{role: :thinking}), do: "local-agent-thinking"
