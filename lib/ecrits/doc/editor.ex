@@ -80,6 +80,23 @@ defmodule Ecrits.Doc.Editor do
   @spec save(t(), keyword()) :: :ok | {:error, term()}
   def save(editor, opts \\ []), do: GenServer.call(editor, {:save, opts})
 
+  @doc """
+  Whether the document has unsaved edits: its current revision is ahead of the
+  revision at the last successful `save`. A freshly-opened/cloned doc with no
+  edits (rev == saved_revision == 0) is NOT dirty.
+  """
+  @spec dirty?(t()) :: boolean()
+  def dirty?(editor), do: GenServer.call(editor, :dirty?)
+
+  @doc """
+  Save target for an autonomous (turn-end) persist: `{:ok, path}` when the
+  document carries a real on-disk path it can be exported to, otherwise
+  `{:error, :no_save_target}`. Used by the Pool/turn handler to decide whether a
+  dirty doc can be auto-persisted without guessing a path.
+  """
+  @spec save_target(t()) :: {:ok, String.t()} | {:error, :no_save_target}
+  def save_target(editor), do: GenServer.call(editor, :save_target)
+
   @doc "Subscribe the caller to `{:doc_applied, info}` broadcasts."
   @spec subscribe(t()) :: :ok
   def subscribe(editor), do: GenServer.call(editor, {:subscribe, self()})
@@ -125,6 +142,10 @@ defmodule Ecrits.Doc.Editor do
            handle: handle,
            path: path,
            rev: 0,
+           # Revision at the last successful `save`. A doc is *dirty* when
+           # `rev > saved_revision`; both start at 0 so a freshly-opened/cloned
+           # doc with no edits is clean (not dirty).
+           saved_revision: 0,
            history: [],
            subscribers: MapSet.new()
          }}
@@ -147,8 +168,20 @@ defmodule Ecrits.Doc.Editor do
 
   def handle_call(:info, _from, st) do
     {:reply,
-     %{id: st.document_id, kind: st.kind, path: st.path, revision: st.rev, backing: :server}, st}
+     %{
+       id: st.document_id,
+       kind: st.kind,
+       path: st.path,
+       revision: st.rev,
+       saved_revision: st.saved_revision,
+       dirty: st.rev > st.saved_revision,
+       backing: :server
+     }, st}
   end
+
+  def handle_call(:dirty?, _from, st), do: {:reply, st.rev > st.saved_revision, st}
+
+  def handle_call(:save_target, _from, st), do: {:reply, save_target_of(st), st}
 
   def handle_call({:subscribe, pid}, _from, st) do
     Process.monitor(pid)
@@ -180,8 +213,18 @@ defmodule Ecrits.Doc.Editor do
   def handle_call({:get, ref, props}, _from, st),
     do: {:reply, st.backend.get(st.handle, ref, props), st}
 
-  def handle_call({:save, opts}, _from, st),
-    do: {:reply, save_via(st, opts), st}
+  def handle_call({:save, opts}, _from, st) do
+    case save_via(st, opts) do
+      :ok ->
+        {:reply, :ok, %{st | saved_revision: st.rev}}
+
+      {:ok, _} = ok ->
+        {:reply, ok, %{st | saved_revision: st.rev}}
+
+      {:error, _} = error ->
+        {:reply, error, st}
+    end
+  end
 
   def handle_call({:set, ref, props, base_rev}, _from, st) do
     write(st, base_rev, %{kind: :set, ref: ref, props: props}, fn ->
@@ -327,6 +370,13 @@ defmodule Ecrits.Doc.Editor do
       {:error, {:not_supported, "backend #{inspect(st.backend)} has no save/2"}}
     end
   end
+
+  # A server-backed doc can be autonomously persisted iff it carries a real
+  # on-disk path (the create/clone/open target). Editors that hold no path
+  # (`nil`/blank) have no safe destination, so the turn-end auto-save MUST skip
+  # them rather than write to a guessed location.
+  defp save_target_of(%{path: path}) when is_binary(path) and path != "", do: {:ok, path}
+  defp save_target_of(_st), do: {:error, :no_save_target}
 
   defp broadcast(st, info) do
     Enum.each(st.subscribers, fn pid -> send(pid, {:doc_applied, info}) end)

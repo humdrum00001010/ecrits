@@ -5,6 +5,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   use EcritsWeb, :live_view
 
+  require Logger
+
+  alias Ecrits.Doc.Editor, as: DocEditor
   alias Ecrits.Doc.Pool, as: DocPool
   alias Ecrits.Local.AcpAgent, as: ACP
   alias Ecrits.Local.Document
@@ -1944,6 +1947,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_reasoning_text, "")
     |> maybe_stream_final_agent_text(turn_id, pending)
     |> finalize_dangling_tools("Turn ended before the tool finished.")
+    |> persist_pending_agent_docs()
   end
 
   defp apply_local_agent_event(socket, %{type: :turn_failed, turn_id: turn_id, reason: reason}) do
@@ -1980,6 +1984,84 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp apply_local_agent_event(socket, %{type: :turn_cancelled}), do: socket
 
   defp apply_local_agent_event(socket, _event), do: socket
+
+  # Turn-completion auto-save safety net. The agent may stall/stop BEFORE its
+  # final `doc_save` (observed with codex/gpt-5.5 on "make a worksheet …"),
+  # leaving in-memory edits that never reach disk — so the file the user opens
+  # stays the unedited template. On turn end we persist any server-backed pooled
+  # doc that is *dirty* (current revision > last-saved) AND carries a real
+  # save-target path (the created/cloned/headless worksheet case). It is
+  # idempotent: a turn that already `doc_save`d leaves nothing dirty -> no-op.
+  # `Pool.dirty_docs/1` already excludes browser-backed (viewed) docs, so a doc
+  # the agent did not edit through the server Editor is never auto-overwritten.
+  defp persist_pending_agent_docs(socket) do
+    case safe_dirty_docs() do
+      [] ->
+        socket
+
+      docs ->
+        saved =
+          Enum.reduce(docs, [], fn doc, acc ->
+            case auto_save_doc(doc) do
+              :ok -> [doc.path | acc]
+              :error -> acc
+            end
+          end)
+
+        case saved do
+          [] -> socket
+          paths -> after_auto_save(socket, Enum.reverse(paths))
+        end
+    end
+  end
+
+  defp safe_dirty_docs do
+    DocPool.dirty_docs()
+  rescue
+    error ->
+      Logger.warning("auto-save: dirty_docs enumeration failed: #{inspect(error)}")
+      []
+  catch
+    :exit, reason ->
+      Logger.warning("auto-save: dirty_docs enumeration exited: #{inspect(reason)}")
+      []
+  end
+
+  defp auto_save_doc(%{editor: editor, kind: kind, path: path}) do
+    case DocEditor.save(editor, format: auto_save_format(kind), path: path) do
+      :ok ->
+        Logger.info("auto-save: persisted dirty doc to #{path} on turn end")
+        :ok
+
+      {:ok, _} ->
+        Logger.info("auto-save: persisted dirty doc to #{path} on turn end")
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("auto-save: failed to persist #{path}: #{inspect(reason)}")
+        :error
+    end
+  rescue
+    error ->
+      Logger.warning("auto-save: exception persisting doc: #{inspect(error)}")
+      :error
+  catch
+    :exit, reason ->
+      Logger.warning("auto-save: editor exited while persisting: #{inspect(reason)}")
+      :error
+  end
+
+  defp auto_save_format(:hwpx), do: :hwpx
+  defp auto_save_format(_kind), do: :hwp
+
+  defp after_auto_save(socket, paths) do
+    socket
+    |> refresh_tree(socket.assigns.expanded_paths)
+    |> put_flash(
+      :info,
+      "Saved #{length(paths)} document#{if length(paths) == 1, do: "", else: "s"} the agent left unsaved."
+    )
+  end
 
   defp handle_local_document_upload(:local_document_import, entry, socket) do
     if entry.done? do

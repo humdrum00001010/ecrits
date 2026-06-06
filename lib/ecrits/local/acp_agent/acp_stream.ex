@@ -635,12 +635,26 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     substitute another mechanism. (The ONE exception: a read-only refusal is not
     transient — report it instead of retrying.)
 
+    PERSISTENCE — THIS IS A HARD RULE, NOT A SUGGESTION:
+    `doc_edit`, `doc_set` and the cells you fill after `doc_create` mutate the
+    document IN MEMORY ONLY. Those edits are NOT written to disk — and the file
+    the user opens is NOT updated — until you call `doc_save`. A created/cloned
+    document that you filled in but never `doc_save`d is lost: the file on disk is
+    still the blank/unedited template. Therefore, completing ANY task that creates
+    or edits a document REQUIRES `doc_save` as the FINAL step before you report
+    done: call `doc_save` with the document's path (the same `path` you passed to
+    `doc_create`, or the open document's path). Do NOT announce that you created /
+    filled in / finished a document until AFTER `doc_save` has succeeded. If you
+    are about to end the turn and you have made edits you have not yet saved, save
+    them first.
+
     Workflow: surface the `doc` tools if needed, then `doc_context` to orient,
     then `doc_find` / `doc_read` to locate the target, then APPLY the change with
     `doc_edit` (structure) or `doc_set` (properties/formatting). When unsure which
     property names an element accepts, `doc_get` the ref first. You MUST follow
     through and actually call the write tool — do not stop after reading. After
-    editing, confirm the resulting revision number to the user.
+    editing, call `doc_save` (mandatory, see above) and confirm the resulting
+    revision number to the user.
     """ <> "\n"
   end
 

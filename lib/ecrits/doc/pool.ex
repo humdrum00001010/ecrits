@@ -85,6 +85,25 @@ defmodule Ecrits.Doc.Pool do
   @spec list(GenServer.server()) :: [map()]
   def list(pool \\ @default_name), do: GenServer.call(pool, :list)
 
+  @doc """
+  Enumerate the **server-backed** documents that have unsaved agent edits AND a
+  real save-target path — the set the turn-end auto-save should persist.
+
+  Each entry is `%{id, kind, editor, path}`. The predicate is deliberately
+  conservative:
+
+    * `:server` backing only — a **browser-backed** (currently-viewed) doc is
+      NEVER auto-overwritten here; its authority is the WASM model, not the
+      Editor, so persisting the (unedited) server copy would clobber it.
+    * `dirty` only — current revision ahead of the last `save` (so a doc that
+      already `doc.save`d, or one that was opened/cloned but never edited, is
+      excluded → the auto-save is idempotent and a no-op).
+    * `save_target` only — a doc with no on-disk path is skipped rather than
+      written to a guessed location.
+  """
+  @spec dirty_docs(GenServer.server()) :: [%{id: document_id(), kind: atom(), editor: pid(), path: String.t()}]
+  def dirty_docs(pool \\ @default_name), do: GenServer.call(pool, :dirty_docs)
+
   @spec with_doc(GenServer.server(), document_id(), (Editor.t() -> term())) ::
           term() | {:error, :not_found}
   def with_doc(pool \\ @default_name, document_id, fun) when is_function(fun, 1) do
@@ -209,6 +228,14 @@ defmodule Ecrits.Doc.Pool do
           backing: backing(doc)
         }
       end)
+
+    {:reply, entries, st}
+  end
+
+  def handle_call(:dirty_docs, _from, st) do
+    entries =
+      st.docs
+      |> Enum.flat_map(fn {id, doc} -> dirty_entry(id, doc) end)
 
     {:reply, entries, st}
   end
@@ -379,6 +406,27 @@ defmodule Ecrits.Doc.Pool do
         {:reply, {:error, {:open_failed, reason}}, st}
     end
   end
+
+  # A pooled doc qualifies for turn-end auto-save iff it is server-backed (no
+  # attached browser viewer), its Editor is alive and dirty, and it has a real
+  # save-target path. Anything else yields [] so the turn handler skips it.
+  defp dirty_entry(id, %{browser: lv}) when is_pid(lv), do: dirty_entry_browser(id, lv)
+
+  defp dirty_entry(id, %{editor: editor, kind: kind}) when is_pid(editor) do
+    if Process.alive?(editor) and Editor.dirty?(editor) do
+      case Editor.save_target(editor) do
+        {:ok, path} -> [%{id: id, kind: kind, editor: editor, path: path}]
+        {:error, _} -> []
+      end
+    else
+      []
+    end
+  end
+
+  defp dirty_entry(_id, _doc), do: []
+
+  # Browser-backed docs are never auto-persisted from the server copy.
+  defp dirty_entry_browser(_id, _lv), do: []
 
   defp fetch_editor(st, document_id) do
     case Map.get(st.docs, document_id) do

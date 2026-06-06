@@ -741,8 +741,6 @@ defmodule Ecrits.Doc.Rhwp do
     end
   end
 
-  defp unnest_cell(ref), do: ref
-
   defp maybe_put_flat(map, _k, nil), do: map
   defp maybe_put_flat(map, k, v), do: Map.put(map, k, v)
 
