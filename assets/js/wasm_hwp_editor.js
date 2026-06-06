@@ -1133,10 +1133,20 @@ const WasmHwpEditor = {
     try {
       switch (verb) {
         case "edit":
-          reply(this.applyAgentEdit(payload))
+          // Batch form (doc_edit {ops:[...]}) vs. single op (doc_edit {op}).
+          reply(
+            Array.isArray(payload && payload.ops)
+              ? this.applyAgentEditBatch(payload)
+              : this.applyAgentEdit(payload)
+          )
           break
         case "set":
-          reply(this.applyAgentSet(payload))
+          // Batch form (doc_set {sets:[{ref,props}]}) vs. single (doc_set {ref,props}).
+          reply(
+            Array.isArray(payload && payload.sets)
+              ? this.applyAgentSetBatch(payload)
+              : this.applyAgentSet(payload)
+          )
           break
         case "find":
           reply({ result: this.applyAgentFind(payload) })
@@ -1163,9 +1173,24 @@ const WasmHwpEditor = {
   // ({section, paragraph, offset} from doc.find) so the agent can target ONE
   // paragraph instead of the whole document. `replace_text` may also run without
   // a ref (global), but only replaces >1 match when `all:true` is set.
+  //
+  // Single-op entry point: apply the MUTATION (applyOneOp, no render) then run
+  // the shared finish (re-render + revision bump) ONCE. The mutation and the
+  // finish are deliberately split so the BATCH path (applyAgentEditBatch) can
+  // mutate many ops and finish a single time.
   applyAgentEdit({ op, base_revision }) {
-    const verb = op && op.op
     const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const r = this.applyOneOp(op)
+    if (r.error) return { error: r.error }
+    return this.finishAgentEdit(baseRev, r.extra || {})
+  },
+
+  // Apply ONE structural edit op to the WASM model and return either
+  // `{ ok: true, extra }` (the per-verb result fields the finish should echo) or
+  // `{ error }`. This function NEVER renders or bumps the revision — that is the
+  // caller's job via finishAgentEdit, so a batch can mutate N ops and finish once.
+  applyOneOp(op) {
+    const verb = op && op.op
     const ref = this.parseRef(op && op.ref)
 
     if (verb === "replace_text") {
@@ -1215,7 +1240,7 @@ const WasmHwpEditor = {
           return { error: `cell replace failed: ${String((error && error.message) || error)}` }
         }
         this.recordOp("AgentReplaceText", { section: ref.section, cell: cl, offset: idx, query, replacement, replaced: 1 })
-        return this.finishAgentEdit(baseRev, { replaced: 1 })
+        return { ok: true, extra: { replaced: 1 } }
       }
 
       // ref-scoped: replace the query ONLY inside the referenced paragraph, so a
@@ -1237,7 +1262,7 @@ const WasmHwpEditor = {
             return { error: `scoped replace failed: ${String((error && error.message) || error)}` }
           }
           this.recordOp("AgentReplaceText", { section: ref.section, para: ref.paragraph, offset: idx, query, replacement, replaced: 1 })
-          return this.finishAgentEdit(baseRev, { replaced: 1 })
+          return { ok: true, extra: { replaced: 1 } }
         }
         // Body-paragraph miss — the text most likely lives inside a TABLE CELL,
         // which getTextRange(section,paragraph) does not read. Don't error: fall
@@ -1276,7 +1301,7 @@ const WasmHwpEditor = {
         return { error: `replaceAll failed: ${String((error && error.message) || error)}` }
       }
       this.recordOp("AgentReplaceText", { query, replacement, replaced })
-      return this.finishAgentEdit(baseRev, { replaced })
+      return { ok: true, extra: { replaced } }
     }
 
     if (verb === "insert_text") {
@@ -1295,7 +1320,7 @@ const WasmHwpEditor = {
           return { error: `insertTextInCell failed: ${String((error && error.message) || error)}` }
         }
         this.recordOp("AgentInsertText", { section: ref.section, cell: cl, offset, text })
-        return this.finishAgentEdit(baseRev, { inserted: text.length })
+        return { ok: true, extra: { inserted: text.length } }
       }
       try {
         this.doc.insertText(ref.section, ref.paragraph, offset, text)
@@ -1303,7 +1328,7 @@ const WasmHwpEditor = {
         return { error: `insertText failed: ${String((error && error.message) || error)}` }
       }
       this.recordOp("AgentInsertText", { section: ref.section, para: ref.paragraph, offset, text })
-      return this.finishAgentEdit(baseRev, { inserted: text.length })
+      return { ok: true, extra: { inserted: text.length } }
     }
 
     if (verb === "delete_range") {
@@ -1336,10 +1361,97 @@ const WasmHwpEditor = {
         return { error: `deleteText failed: ${String((error && error.message) || error)}` }
       }
       this.recordOp("AgentDeleteRange", { section: ref.section, cell: cl, para: ref.paragraph, offset, count })
-      return this.finishAgentEdit(baseRev, { deleted: count })
+      return { ok: true, extra: { deleted: count } }
     }
 
     return { error: `unsupported_op:${verb}` }
+  },
+
+  // Batch structural edit (doc_edit {ops:[...]}). Apply every op to the WASM
+  // model with ONE re-render/revision bump at the end (finishAgentEdit). This is
+  // best-effort: each op is applied independently, a bad ref does NOT abort the
+  // rest, and the result carries a per-op `results` array.
+  //
+  // ORDERING — index-shifting body ops vs. order-independent cell ops:
+  // a verb that inserts/removes BODY paragraphs (insert_text whose text has a
+  // newline, insert_paragraph, delete_paragraph, split, merge, delete_range on a
+  // body paragraph) shifts the paragraph indices AFTER it, invalidating other
+  // body refs the agent computed against the pre-edit document. So body
+  // index-shifting ops run in REVERSE document order (section desc, then
+  // paragraph desc): editing the LAST paragraph first leaves every earlier ref
+  // still valid. Cell-targeted ops (ref carries `.cell`) and pure in-place ops
+  // address a fixed cell/offset and never move another op's target, so they are
+  // order-independent and run first (in their given order).
+  applyAgentEditBatch({ ops, base_revision }) {
+    const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const list = Array.isArray(ops) ? ops : []
+    if (list.length === 0) return { error: "edit batch requires a non-empty 'ops' array" }
+
+    // Tag each op with its original index + whether it shifts body indices, then
+    // order: order-independent ops first (original order), index-shifting body
+    // ops last in REVERSE document order so earlier body refs stay valid.
+    const tagged = list.map((op, idx) => ({ op, idx, shift: this.opShiftsBodyIndices(op) }))
+    const stable = tagged.filter((t) => !t.shift)
+    const shifting = tagged
+      .filter((t) => t.shift)
+      .sort((a, b) => {
+        const ra = this.parseRef(a.op && a.op.ref) || { section: 0, paragraph: 0 }
+        const rb = this.parseRef(b.op && b.op.ref) || { section: 0, paragraph: 0 }
+        if ((rb.section || 0) !== (ra.section || 0)) return (rb.section || 0) - (ra.section || 0)
+        return (rb.paragraph || 0) - (ra.paragraph || 0)
+      })
+    const ordered = stable.concat(shifting)
+
+    const results = new Array(list.length)
+    let applied = 0
+    let failed = 0
+    for (const { op, idx } of ordered) {
+      const refStr = op && op.ref != null ? (typeof op.ref === "string" ? op.ref : JSON.stringify(op.ref)) : null
+      let r
+      try {
+        r = this.applyOneOp(op)
+      } catch (error) {
+        r = { error: String((error && error.message) || error) }
+      }
+      if (r && r.ok) {
+        applied++
+        results[idx] = Object.assign({ ref: refStr, ok: true }, r.extra || {})
+      } else {
+        failed++
+        results[idx] = { ref: refStr, error: (r && r.error) || "unknown_error" }
+      }
+    }
+
+    const finished = this.finishAgentEdit(baseRev, {})
+    return {
+      ok: true,
+      result: { ok: true, revision: finished.result.revision, applied, failed, results }
+    }
+  },
+
+  // Does this op shift BODY paragraph indices after its target? insert_paragraph,
+  // delete_paragraph, split and merge always restructure the body; insert_text
+  // only when it authors >1 paragraph (its text contains a newline); delete_range
+  // can collapse a paragraph. Cell-targeted ops (ref has `.cell`) never move
+  // another op's body target, so they are order-independent. Used only to ORDER a
+  // batch — never to reject an op.
+  opShiftsBodyIndices(op) {
+    if (!op || typeof op !== "object") return false
+    const ref = this.parseRef(op.ref)
+    if (ref && ref.cell) return false // cell-targeted: order-independent
+    switch (op.op) {
+      case "insert_paragraph":
+      case "delete_paragraph":
+      case "split":
+      case "merge":
+        return true
+      case "insert_text":
+        return typeof op.text === "string" && op.text.includes("\n")
+      case "delete_range":
+        return true
+      default:
+        return false
+    }
   },
 
   // Universal property set (doc.set) over the viewed WASM model, so a property
@@ -1351,6 +1463,15 @@ const WasmHwpEditor = {
   // cell ref carries {parentParaIndex,controlIndex,cellIndex,cellParaIndex}.
   applyAgentSet({ ref, props, base_revision }) {
     const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const r = this.applySetOne(ref, props)
+    if (r.error) return { error: r.error }
+    return this.finishAgentEdit(baseRev, {})
+  },
+
+  // Apply ONE property set to the WASM model and return `{ ok: true }` or
+  // `{ error }`. Mutate-only — no render / revision bump (the caller finishes
+  // once), so a batch of sets renders a single time.
+  applySetOne(ref, props) {
     const parsed = this.parseRef(ref)
     if (!parsed) return { error: "set requires a ref {section,paragraph,offset[,cell]} (from doc.find)" }
     if (props == null || typeof props !== "object") return { error: "set requires a 'props' object" }
@@ -1372,7 +1493,7 @@ const WasmHwpEditor = {
         return { error: `setCellProperties failed: ${String((error && error.message) || error)}` }
       }
       this.recordOp("AgentSetCell", { section: parsed.section, cell: cl, props: rest })
-      return this.finishAgentEdit(baseRev, {})
+      return { ok: true }
     }
 
     if (kind === "char") {
@@ -1392,10 +1513,48 @@ const WasmHwpEditor = {
         return { error: `applyCharFormat failed: ${String((error && error.message) || error)}` }
       }
       this.recordOp("AgentSetChar", { section: parsed.section, para: parsed.paragraph, cell: cl, start, end, props: rest })
-      return this.finishAgentEdit(baseRev, {})
+      return { ok: true }
     }
 
     return { error: `set: unsupported kind '${kind}' in the browser editor (supported: cell, char)` }
+  },
+
+  // Batch property set (doc_set {sets:[{ref,props}, ...]}). Apply every set to
+  // the WASM model with ONE re-render/revision bump at the end. Best-effort: a
+  // bad ref does NOT abort the rest; the result carries a per-set `results`
+  // array. Sets address fixed cells/runs and never move another set's target, so
+  // order is irrelevant (applied in the given order).
+  applyAgentSetBatch({ sets, base_revision }) {
+    const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const list = Array.isArray(sets) ? sets : []
+    if (list.length === 0) return { error: "set batch requires a non-empty 'sets' array" }
+
+    const results = []
+    let applied = 0
+    let failed = 0
+    for (const entry of list) {
+      const ref = entry && entry.ref
+      const refStr = ref != null ? (typeof ref === "string" ? ref : JSON.stringify(ref)) : null
+      let r
+      try {
+        r = this.applySetOne(ref, entry && entry.props)
+      } catch (error) {
+        r = { error: String((error && error.message) || error) }
+      }
+      if (r && r.ok) {
+        applied++
+        results.push({ ref: refStr, ok: true })
+      } else {
+        failed++
+        results.push({ ref: refStr, error: (r && r.error) || "unknown_error" })
+      }
+    }
+
+    const finished = this.finishAgentEdit(baseRev, {})
+    return {
+      ok: true,
+      result: { ok: true, revision: finished.result.revision, applied, failed, results }
+    }
   },
 
   // A ref is the positional index doc.find returns (a JSON string
@@ -1518,13 +1677,23 @@ const WasmHwpEditor = {
     const typeOk = (el) => {
       const isCell = !!(el.ref && el.ref.cell)
       const isEmpty = !el.text || el.text.trim() === ""
+      // A REAL form field self-describes: it has a column header and/or a row
+      // label (collectElements stashes that in `el.context`). A blank cell with
+      // NO context is structural/merged noise (a spacer/merged span), not a field
+      // to fill — exclude it from `empty_cell` so the agent only gets genuine
+      // blanks. `cell`/`all` still include it.
+      const isFormField = !!el.context
+      // Engine enumeration tags every node with its IR kind; the positional-probe
+      // fallback has none, so derive cell/paragraph from the ref.
+      const kind = el.type || (isCell ? "cell" : "paragraph")
       switch (t) {
         case "cell": return isCell
-        case "empty_cell": case "blank_cell": return isCell && isEmpty
+        case "empty_cell": case "blank_cell": return isCell && isEmpty && isFormField
         case "filled_cell": return isCell && !isEmpty
-        case "paragraph": return !isCell
+        case "paragraph": return kind === "paragraph"
         case "empty": case "blank": return isEmpty
-        default: return true
+        // Any IR kind: field, form, picture, shape, table, equation, header, …
+        default: return kind === t
       }
     }
     const MATCH_CAP = 2000
@@ -1535,6 +1704,7 @@ const WasmHwpEditor = {
       if (typeOk(el) && re.test(el.text)) {
         if (matches.length >= MATCH_CAP) { truncated = true; break }
         const m = { ref: JSON.stringify(el.ref), text: el.text, table_cell: !!(el.ref && el.ref.cell) }
+        if (el.type) m.type = el.type
         // For a cell, surface what it IS (column header / row label) so a blank is
         // self-describing and the agent fills it without reading the table.
         if (el.context) m.context = el.context
@@ -1558,10 +1728,76 @@ const WasmHwpEditor = {
   // last control/cell — that throw is the loop bound. If c===0&&i===0 throws there
   // is no table at (s,p), so we stop probing this paragraph entirely (cheap).
   collectElements() {
-    // Memoized: this is called on every doc.read page and doc.find, and now does
-    // getTableDimensions/getCellInfo per cell — cache until the next edit clears it
-    // (finishAgentEdit / a fresh load resets `_elementsCache`).
     if (this._elementsCache) return this._elementsCache
+    let out = null
+    try { out = this.collectElementsViaEngine() } catch (e) {
+      console.warn("[wasm-hwp] enumerateElements failed; falling back to probe", e)
+      out = null
+    }
+    if (!out || out.length === 0) out = this.collectElementsProbe()
+    this._elementsCache = out
+    return out
+  },
+
+  // Engine-native enumeration: the rhwp_core `enumerateElements()` WASM export
+  // walks the FULL IR (every Control kind — table/picture/shape/equation/field/
+  // form/header/footer/… plus paragraph/cell) and returns typed nodes. We attach
+  // per-cell `context` ("<table title> › <column header> / <row label>") so a
+  // blank cell self-describes, and skip pure-layout controls that aren't agent
+  // targets. Returns null when the export is absent (older wasm) so collectElements
+  // can fall back to the positional probe.
+  collectElementsViaEngine() {
+    if (!this.doc || typeof this.doc.enumerateElements !== "function") return null
+    let raw
+    try { raw = JSON.parse(this.doc.enumerateElements() || "[]") } catch (_) { return null }
+    if (!Array.isArray(raw) || raw.length === 0) return null
+
+    const SKIP = new Set([
+      "section_def", "column_def", "page_number_pos",
+      "auto_number", "new_number", "char_overlap", "page_hide"
+    ])
+    // Pass 1: per-table grid (row,col)->text + the nearest preceding heading.
+    const grids = {}
+    let lastHeading = ""
+    for (const el of raw) {
+      const isCell = !!(el.ref && el.ref.cell)
+      if (el.type === "paragraph" && !isCell) {
+        const t = (el.text || "").trim()
+        if (t) lastHeading = t
+      } else if (el.type === "cell" && isCell && el.row != null && el.col != null) {
+        const key = el.ref.cell.parentParaIndex + ":" + el.ref.cell.controlIndex
+        if (!grids[key]) grids[key] = { byRC: {}, caption: lastHeading }
+        grids[key].byRC[el.row + "," + el.col] = el.text || ""
+      }
+    }
+    // Pass 2: emit, attaching cell context.
+    const out = []
+    for (const el of raw) {
+      if (SKIP.has(el.type)) continue
+      const isCell = !!(el.ref && el.ref.cell)
+      const o = { ref: el.ref, text: el.text || "", type: el.type }
+      if (isCell && el.row != null && el.col != null) {
+        o.row = el.row
+        o.col = el.col
+        const g = grids[el.ref.cell.parentParaIndex + ":" + el.ref.cell.controlIndex]
+        if (g) {
+          const header = el.row > 0 ? g.byRC["0," + el.col] || "" : ""
+          const rowLabel = el.col > 0 ? g.byRC[el.row + ",0"] || "" : ""
+          const hr = [header, rowLabel].map((x) => (x || "").trim()).filter(Boolean).join(" / ")
+          const parts = []
+          if (g.caption) parts.push(g.caption)
+          if (hr) parts.push(hr)
+          if (parts.length) o.context = parts.join(" › ")
+        }
+      }
+      out.push(o)
+    }
+    return out
+  },
+
+  // Fallback positional probe (paragraphs + table cells only) for builds whose
+  // wasm predates enumerateElements.
+  collectElementsProbe() {
     const ELEM_CAP = 5000
     const out = []
     let sectionCount = 1
@@ -1648,6 +1884,7 @@ const WasmHwpEditor = {
     const nextAt = at + window.length < total ? at + window.length : null
     const paragraphs = window.map((el) => {
       const o = { text: el.text, ref: JSON.stringify(el.ref), table_cell: !!(el.ref && el.ref.cell) }
+      if (el.type) o.type = el.type
       if (el.context) o.context = el.context
       return o
     })

@@ -47,6 +47,14 @@ defmodule Ecrits.Test.FakeEhwpRuntime do
 
   def find(_handle, _pattern, _opts), do: {:error, :invalid_handle}
 
+  # IR read-query surface. This fake predates the real NIF's `{"q":"elements"}`
+  # enumerator (and the other read verbs), so it answers with an error — exactly
+  # how an OLDER deployed NIF reports an unknown verb. That drives the
+  # backward-compat fallback in `Ecrits.Doc.Rhwp.elements/2` (which must degrade
+  # to find/read, never crash) without taking the session down.
+  def query(%{agent: _}, _query), do: {:error, :unsupported_query}
+  def query(_handle, _query), do: {:error, :invalid_handle}
+
   def write(%{agent: agent}, {:replace_one, query, replacement}, opts) do
     case_sensitive = Keyword.get(opts, :case_sensitive, false)
     body = text(agent)

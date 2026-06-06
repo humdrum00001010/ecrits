@@ -148,6 +148,166 @@ defmodule Ecrits.Doc.Rhwp do
   def find(_handle, _pattern, _opts), do: {:error, :invalid_pattern}
 
   @impl true
+  # Full-IR element enumeration via the ehwp NIF `{"q":"elements"}` verb (the
+  # shared core enumerator, identical JSON to the browser's `enumerateElements`).
+  #
+  # Returns `{:ok, nodes}` with each node carrying `ref`/`type`/`text`
+  # (+`row`/`col` for cells) plus a per-cell `context` breadcrumb
+  # ("<table caption> › <column header> / <row label>"). Guarded for backward
+  # compatibility: if the DEPLOYED NIF lacks the `elements` verb, `Ehwp.query`
+  # errors and we surface `{:error, {:not_supported, _}}` so the Tools layer
+  # falls back to `find/3`/`read/2`.
+  def elements(%{ehwp: ehwp_handle}, _opts) do
+    # A NIF predating the `elements` verb may not just return an error — it can
+    # raise (UndefinedFunctionError) or exit. Treat EVERY non-`{:ok, list/json}`
+    # outcome as a capability gap so the Tools layer cleanly falls back to
+    # find/read instead of crashing the owning Editor process.
+    case safe_query(ehwp_handle, %{q: "elements"}) do
+      {:ok, json} when is_binary(json) ->
+        case Jason.decode(json) do
+          {:ok, nodes} when is_list(nodes) -> {:ok, attach_context(nodes)}
+          _ -> {:error, {:not_supported, "elements query returned non-array"}}
+        end
+
+      {:ok, nodes} when is_list(nodes) ->
+        {:ok, attach_context(nodes)}
+
+      {:error, reason} ->
+        {:error, {:not_supported, inspect(reason)}}
+
+      other ->
+        {:error, {:not_supported, inspect(other)}}
+    end
+  end
+
+  def elements(_handle, _opts), do: {:error, {:not_supported, "no ehwp handle"}}
+
+  # Run an ehwp read query, converting a raise/exit (older NIF without the verb,
+  # crashed session) into an `{:error, _}` so the caller never propagates it.
+  defp safe_query(ehwp_handle, query) do
+    Ehwp.query(ehwp_handle, query)
+  rescue
+    e -> {:error, {:query_raised, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:query_exit, reason}}
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  # Walk the DFS-ordered enumerator nodes and attach a `context` breadcrumb to
+  # every in-table BODY cell. Cells arrive grouped after their `table` node, so a
+  # first pass indexes, per table, the row-0 cells (column headers) and col-0
+  # cells (row labels). A body cell at (r,c) with r>0,c>0 is then annotated
+  # "<column header> / <row label>", letting the agent see WHICH column/row a
+  # match sits in (e.g. "5월 / 품질관리협의체 운영계획 수립"). Header/label cells
+  # (row 0 or col 0) are their OWN context, so they are left unannotated rather
+  # than self-referencing.
+  defp attach_context(nodes) do
+    {headers, labels} = index_table_axes(nodes)
+
+    nodes
+    |> Enum.map_reduce(nil, fn node, current_table ->
+      table_key = table_key_of(node, current_table)
+      annotated = annotate_node(node, table_key, headers, labels)
+      {annotated, table_key}
+    end)
+    |> elem(0)
+  end
+
+  # Per-table axis index: column headers by col index (row-0 cells) and row
+  # labels by row index (col-0 cells), keyed by the owning `table` node's ref.
+  defp index_table_axes(nodes) do
+    {headers, labels, _cur} =
+      Enum.reduce(nodes, {%{}, %{}, nil}, fn node, {h, l, cur} ->
+        type = node["type"] || node[:type]
+        text = node["text"] || node[:text] || ""
+
+        case type do
+          "table" ->
+            {h, l, node["ref"] || node[:ref]}
+
+          "cell" ->
+            row = node["row"] || node[:row]
+            col = node["col"] || node[:col]
+
+            h2 = if row == 0 and is_integer(col), do: deep_put(h, cur, col, text), else: h
+            l2 = if col == 0 and is_integer(row), do: deep_put(l, cur, row, text), else: l
+            {h2, l2, cur}
+
+          _ ->
+            {h, l, cur}
+        end
+      end)
+
+    {headers, labels}
+  end
+
+  defp deep_put(map, nil, _k, _v), do: map
+  defp deep_put(map, table, k, v), do: Map.update(map, table, %{k => v}, &Map.put(&1, k, v))
+
+  # The owning-table identity for a node: a `table` node IS its own table; a
+  # `cell` (or anything until the next table) keeps the current table. A
+  # top-level paragraph between tables clears the scope so a later cell can't
+  # borrow a stale table.
+  defp table_key_of(node, current_table) do
+    case node["type"] || node[:type] do
+      "table" -> node["ref"] || node[:ref]
+      "cell" -> current_table
+      "paragraph" -> nil
+      _ -> current_table
+    end
+  end
+
+  defp annotate_node(node, table_key, headers, labels)
+       when not is_nil(table_key) do
+    case node["type"] || node[:type] do
+      "cell" ->
+        row = node["row"] || node[:row]
+        col = node["col"] || node[:col]
+
+        # Only body cells (past BOTH the header row and the label column) get a
+        # breadcrumb; the row-0 headers and col-0 labels are self-evident.
+        if is_integer(row) and is_integer(col) and row > 0 and col > 0 do
+          ctx = [table_axis(headers, table_key, col), table_axis(labels, table_key, row)]
+
+          case build_breadcrumb(ctx) do
+            "" -> node
+            breadcrumb -> Map.put(node, "context", breadcrumb)
+          end
+        else
+          node
+        end
+
+      _ ->
+        node
+    end
+  end
+
+  defp annotate_node(node, _table_key, _headers, _labels), do: node
+
+  # Look up an axis label (column header / row label) for `index` within the
+  # given table's axis map. `table_key` is the table's ref (a map or string), so
+  # fetch the per-table map first, then the index.
+  defp table_axis(axis_map, table_key, index) do
+    case Map.get(axis_map, table_key) do
+      %{} = per_table -> Map.get(per_table, index)
+      _ -> nil
+    end
+  end
+
+  # "<column header> / <row label>": the header/label pair joined by " / ",
+  # dropping blank segments so a header-only or label-only cell still reads well.
+  defp build_breadcrumb([header, label]) do
+    [header, label]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join(" / ")
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(""), do: true
+  defp blank?(s) when is_binary(s), do: String.trim(s) == ""
+  defp blank?(_), do: false
+
+  @impl true
   def outline(%{ehwp: ehwp_handle} = handle, ref, _opts) do
     with {:ok, scope} <- scope_ref(ref),
          {:ok, text} <- read_text(ehwp_handle) do
@@ -196,15 +356,20 @@ defmodule Ecrits.Doc.Rhwp do
   # (for container refs) its immediate children. This is the rhwp analogue of
   # Office's `XServiceInfo`/`XPropertySetInfo`/children discovery (design §4.4).
   defp build_inspect(handle, ehwp_handle, ref, %{kind: kind} = decoded) do
-    type = element_type(kind)
+    # A non-cell IR control ref (`kind: :control`) carries the concrete element
+    # type ("picture"/"shape"/"field"/…) in `:type`; resolve it to the atom the
+    # type/interface/property vocabulary is keyed on so e.g. a picture ref reports
+    # picture props. Other kinds map straight through.
+    eff_kind = effective_kind(decoded)
+    type = element_type(eff_kind)
     canonical_ref = if is_binary(ref), do: ref, else: Ref.encode(decoded)
 
     base = %{
       ref: canonical_ref,
       type: type,
-      kind: Atom.to_string(kind),
-      interfaces: interfaces_for(kind),
-      properties: native_props(kind)
+      kind: Atom.to_string(eff_kind),
+      interfaces: interfaces_for(eff_kind),
+      properties: native_props(eff_kind)
     }
 
     case kind do
@@ -215,11 +380,38 @@ defmodule Ecrits.Doc.Rhwp do
         end
 
       _ ->
-        # leaf-ish element (char run, picture, shape, cell): no child enumeration
+        # leaf-ish element (char run, picture, shape, cell, field, …): no child
+        # enumeration.
         _ = ehwp_handle
         Map.put(base, :children, [])
     end
   end
+
+  # The concrete element-type atom a decoded ref reports. For a `:control` ref
+  # the enumerator's `:type` string (e.g. "picture") is the real kind; fall back
+  # to `:control` when it is missing/unknown. Every other decoded ref keeps its
+  # own `:kind`.
+  defp effective_kind(%{kind: :control, type: type}) when is_binary(type) do
+    case type do
+      "picture" -> :picture
+      "shape" -> :shape
+      "cell" -> :cell
+      "paragraph" -> :paragraph
+      other -> safe_kind_atom(other)
+    end
+  end
+
+  defp effective_kind(%{kind: kind}), do: kind
+
+  # Map an enumerator type string to an atom WITHOUT minting new atoms at runtime
+  # (avoids atom-table exhaustion from untrusted input): only known IR kinds are
+  # converted; anything else stays the generic `:control`.
+  @ir_control_kinds ~w(table field form equation header footer footnote endnote
+                       bookmark hyperlink ruby char_overlap auto_number new_number
+                       page_number_pos page_hide hidden_comment section_def
+                       column_def unknown)
+  defp safe_kind_atom(type) when type in @ir_control_kinds, do: String.to_atom(type)
+  defp safe_kind_atom(_type), do: :control
 
   defp document_or_self(%{kind: :document}), do: nil
   defp document_or_self(decoded), do: Ref.encode(decoded)
@@ -238,6 +430,8 @@ defmodule Ecrits.Doc.Rhwp do
   defp element_type(:shape), do: "shape"
   defp element_type(:cell), do: "cell"
   defp element_type(:cell_char), do: "cell"
+  # Every other IR control kind (table/field/form/equation/header/footer/…)
+  # reports its own snake_case name; `:control` is the generic fallback.
   defp element_type(other), do: Atom.to_string(other)
 
   # Conceptual interface set, mirroring how Office reports XServiceInfo. For
@@ -249,6 +443,16 @@ defmodule Ecrits.Doc.Rhwp do
   defp interfaces_for(:picture), do: ["Picture", "Positioned"]
   defp interfaces_for(:shape), do: ["Shape", "Positioned"]
   defp interfaces_for(:cell), do: ["Cell", "Container", "CharProperties"]
+  # New full-IR control kinds surfaced by the element enumerator.
+  defp interfaces_for(:table), do: ["Table", "Container"]
+  defp interfaces_for(:field), do: ["Field"]
+  defp interfaces_for(:form), do: ["Form"]
+  defp interfaces_for(:equation), do: ["Equation"]
+  defp interfaces_for(:header), do: ["Header", "Container"]
+  defp interfaces_for(:footer), do: ["Footer", "Container"]
+  defp interfaces_for(:footnote), do: ["Footnote", "Container"]
+  defp interfaces_for(:endnote), do: ["Endnote", "Container"]
+  defp interfaces_for(:control), do: ["Control"]
   defp interfaces_for(_other), do: []
 
   @impl true
@@ -444,6 +648,12 @@ defmodule Ecrits.Doc.Rhwp do
       {:ok, %{kind: :char, sec: s, para: p, off: o}} ->
         %{section: s, paragraph: p, offset: o}
 
+      # A non-cell IR control ref from the element enumerator: flatten its
+      # verbatim parsed object (section/paragraph/control + any subParagraph/
+      # cellPath) so a follow-up edit/get hits exactly that control.
+      {:ok, %{kind: :control, fields: fields}} when is_map(fields) ->
+        flatten_ref(fields)
+
       {:ok, %{kind: :paragraph, sec: s, para: p}} ->
         %{section: s, paragraph: p}
 
@@ -462,15 +672,34 @@ defmodule Ecrits.Doc.Rhwp do
   end
 
   defp flatten_ref(%{} = ref) do
-    Enum.reduce([:section, :paragraph, :offset, :control, :cell, :cell_para], %{}, fn k, acc ->
-      case Map.get(ref, k, Map.get(ref, Atom.to_string(k))) do
-        nil -> acc
-        v -> Map.put(acc, k, v)
-      end
-    end)
+    base =
+      Enum.reduce([:section, :paragraph, :offset, :control, :cell, :cell_para], %{}, fn k, acc ->
+        case Map.get(ref, k, Map.get(ref, Atom.to_string(k))) do
+          nil -> acc
+          v -> Map.put(acc, k, v)
+        end
+      end)
+
+    # The element enumerator also emits container/nested addressing keys
+    # (`subParagraph` for header/footer/footnote sub-paragraphs, `cellPath` for
+    # controls/cells nested inside cells or textboxes). Pass them through under
+    # their original keys so an edit/get can target the nested element when the
+    # NIF supports it; absent keys are simply omitted.
+    base
+    |> put_if_present(:sub_paragraph, ref, "subParagraph")
+    |> put_if_present(:cell_path, ref, "cellPath")
   end
 
   defp flatten_ref(_ref), do: %{}
+
+  # Copy `src_key` (camelCase JSON or its atom form) from `ref` into `acc` under
+  # `dest_key` when present.
+  defp put_if_present(acc, dest_key, ref, src_key) do
+    case Map.get(ref, src_key, Map.get(ref, String.to_atom(src_key))) do
+      nil -> acc
+      v -> Map.put(acc, dest_key, v)
+    end
+  end
 
   # `insert_picture` carries image bytes as base64 in `:bins`; pull them into the
   # binary list `apply_op` takes (the op references them by `bin_index`).
@@ -520,6 +749,10 @@ defmodule Ecrits.Doc.Rhwp do
     case Ref.decode(ref) do
       {:ok, %{kind: :paragraph}} -> "paragraph"
       {:ok, %{kind: :cell_char}} -> "cell"
+      # A non-cell IR control ref (picture/shape/table/…): the property kind is
+      # the control's own type, so get/set_properties route to the right native
+      # handler. Falls back to "char" when the enumerator gave no type.
+      {:ok, %{kind: :control, type: type}} when is_binary(type) -> type
       _ -> "char"
     end
   end

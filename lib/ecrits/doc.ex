@@ -106,7 +106,19 @@ defmodule Ecrits.Doc do
   @doc "Persist to disk (or export bytes). May be unsupported on some engines."
   @callback save(handle(), opts :: keyword()) :: :ok | {:error, term()}
 
-  @optional_callbacks save: 2, new: 1
+  @doc """
+  Full-IR element enumeration (design's `doc.find {type:…}`/`doc.read` over the
+  whole taxonomy).
+
+  Returns `{:ok, [node]}` where each node is a map with at least `:ref`,
+  `:type`, and `:text` (plus `:row`/`:col` for table cells and a `:context`
+  breadcrumb for in-table elements). Backends whose engine cannot enumerate the
+  full IR return `{:error, {:not_supported, _}}` so callers fall back to
+  `find/3`/`read/2`. Optional.
+  """
+  @callback elements(handle(), opts :: keyword()) :: {:ok, [map()]} | {:error, term()}
+
+  @optional_callbacks save: 2, new: 1, elements: 2
 
   @doc "Backends registered for each document kind."
   @spec backend_for(kind()) :: module() | nil

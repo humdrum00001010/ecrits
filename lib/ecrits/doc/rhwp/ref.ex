@@ -36,6 +36,21 @@ defmodule Ecrits.Doc.Rhwp.Ref do
               off: non_neg_integer(),
               len: non_neg_integer()
             }
+          | %{
+              # A non-cell IR Control (picture/shape/field/form/equation/header/
+              # footer/…) emitted by the full-IR element enumerator. The enumerator
+              # gives a JSON-object ref `{"section":S,"paragraph":P,"control":C}`
+              # (plus optional `"subParagraph"`/`"cellPath"` for sub-paragraphs and
+              # nested controls). We carry the original parsed map so the edit
+              # pipeline can flatten every positional key verbatim, and the element
+              # `:type` (e.g. "picture") when the node provided it.
+              kind: :control,
+              sec: non_neg_integer(),
+              para: non_neg_integer(),
+              control: non_neg_integer(),
+              type: String.t() | nil,
+              fields: map()
+            }
 
   @scheme "hwp:"
 
@@ -59,19 +74,58 @@ defmodule Ecrits.Doc.Rhwp.Ref do
       }),
       do: "#{@scheme}s#{sec}/p#{para}/tbl#{control}/cell#{cell}/cp#{cell_para}/c#{off}+#{len}"
 
+  # A non-cell IR control ref is canonically the enumerator's JSON object; round
+  # it back to that exact JSON string. Prefer the verbatim parsed `fields` map
+  # (preserves `subParagraph`/`cellPath`), falling back to the minimal triple.
+  def encode(%{kind: :control, fields: fields}) when is_map(fields) and map_size(fields) > 0,
+    do: Jason.encode!(fields)
+
+  def encode(%{kind: :control, sec: sec, para: para, control: control}),
+    do: Jason.encode!(%{"section" => sec, "paragraph" => para, "control" => control})
+
   @spec decode(t()) :: {:ok, decoded()} | {:error, term()}
   def decode(@scheme <> rest) when is_binary(rest), do: decode_body(rest)
 
-  # doc.find on a BROWSER-backed doc returns positional refs as JSON OBJECTS
-  # (`{"section","paragraph","offset"[,"length"][,"cell":{parentParaIndex,
-  # controlIndex,cellIndex,cellParaIndex}]}`), not the `hwp:` grammar. Accept that
-  # form too so the server-side inspect/get/set tools consume a doc.find ref
-  # directly instead of rejecting it as invalid — a nested `cell` decodes to a
-  # `:cell_char` ref (the table cell), otherwise a `:char` ref.
+  # Both arms' refs are JSON OBJECTS, not the `hwp:` grammar: doc.find on a
+  # BROWSER-backed doc and the full-IR element enumerator (WASM `enumerateElements`
+  # / ehwp NIF `{"q":"elements"}`) both emit them. Discriminate on a top-level
+  # integer `"control"` (which ONLY a non-cell IR control carries — a table cell
+  # nests its control index inside `"cell"`): that decodes to a `:control` ref;
+  # every other object (a `cell` ref → `:cell_char`, a plain `{section,paragraph,
+  # offset}` body ref → `:char`) decodes via `from_json_map/1`. So a doc.find ref
+  # — cell, control, or positional — round-trips straight into the server
+  # inspect/get/set tools instead of being rejected as invalid.
   def decode("{" <> _ = json) when is_binary(json), do: decode_json(json)
 
   def decode(value) when is_binary(value), do: {:error, {:invalid_ref, value}}
   def decode(value), do: {:error, {:invalid_ref, value}}
+
+  # Decode an enumerator JSON-object ref. A `"control"` key (and NO `"cell"`)
+  # marks a non-cell IR control (or a container sub-paragraph when `subParagraph`
+  # is present); everything else (cell refs, plain body-paragraph refs) is left
+  # to the existing `flatten_ref` JSON path in `Ecrits.Doc.Rhwp`, which already
+  # spreads section/paragraph/offset/control/cell/cell_para — so we only claim
+  # the genuinely new `:control` shape here and otherwise report invalid_ref.
+  defp decode_object(%{"control" => control} = obj) when is_integer(control) do
+    sec = obj["section"] || 0
+    para = obj["paragraph"] || 0
+
+    if is_integer(sec) and is_integer(para) do
+      {:ok,
+       %{
+         kind: :control,
+         sec: sec,
+         para: para,
+         control: control,
+         type: obj["type"],
+         fields: obj
+       }}
+    else
+      {:error, {:invalid_ref, obj}}
+    end
+  end
+
+  defp decode_object(obj), do: {:error, {:invalid_ref, obj}}
 
   @doc "Like `decode/1` but raises on error. Useful inside backend pipelines."
   @spec decode!(t()) :: decoded()
@@ -131,6 +185,9 @@ defmodule Ecrits.Doc.Rhwp.Ref do
 
   defp decode_json(json) do
     case Jason.decode(json) do
+      # A top-level integer `control` (a non-cell IR control from the enumerator)
+      # -> `:control`; every other object form -> the `:char`/`:cell_char` shapes.
+      {:ok, %{"control" => control} = obj} when is_integer(control) -> decode_object(obj)
       {:ok, %{} = map} -> from_json_map(map)
       _ -> {:error, {:invalid_ref, json}}
     end

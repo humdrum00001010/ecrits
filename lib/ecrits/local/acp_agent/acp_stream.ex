@@ -556,6 +556,13 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     field is missed; read at most a page or two only for a value you can't infer
     from `context`.
 
+    NO FABRICATION: fill a blank ONLY when the document gives a sensible value.
+    If a field — or a whole table — does not apply to THIS contract (e.g. a
+    raw-material price-variation table inside a software contract), leave it blank
+    or write 해당 없음; do NOT invent data to fill it. Prefer filling all blanks
+    of one table in a single `doc_edit {ops:[…]}` call (one round-trip, applied
+    best-effort with a per-op result) rather than one `doc_edit` per cell.
+
     If the open document/session is READ-ONLY, write tools (`doc_set`, `doc_edit`,
     `doc_save`, `doc_create`) are REFUSED. When that happens, tell the user the
     document is read-only — do NOT keep retrying the write.

@@ -184,11 +184,18 @@ defmodule Ecrits.Doc.Tools do
           },
           "type" => %{
             "type" => "string",
-            "enum" => ["empty_cell", "cell", "filled_cell", "paragraph", "empty"],
+            "enum" =>
+              ~w(empty_cell cell filled_cell paragraph empty
+                 table picture shape equation field form
+                 header footer footnote endnote bookmark hyperlink
+                 ruby auto_number new_number section_def column_def
+                 page_number_pos page_hide hidden_comment char_overlap unknown),
             "description" =>
-              "Return only elements of this type (with refs). `empty_cell` = blank " <>
-                "table cells to fill; `cell`/`filled_cell` = table cells; `paragraph` " <>
-                "= body paragraphs; `empty` = any blank element. Combine with `pattern`."
+              "Return only elements of this IR type (with refs). Cell-state filters: " <>
+                "`empty_cell` = blank table cells to fill; `cell`/`filled_cell` = table " <>
+                "cells; `paragraph` = body paragraphs; `empty` = any blank element. Also " <>
+                "spans the FULL document taxonomy — table/picture/shape/equation/field/" <>
+                "form/header/footer/footnote/endnote/… Combine with `pattern`."
           }
         },
         "required" => ["document"]
@@ -204,16 +211,22 @@ defmodule Ecrits.Doc.Tools do
           "Bold/Italic/FontSize for a char run, BackgroundColor for a cell, " <>
           "Alignment/LineSpacing for a paragraph), and child `refs`. Use this to discover " <>
           "what you can set and read current values in one call. `props?` narrows the " <>
-          "returned values to those names.",
+          "returned values to those names. Pass `refs:[...]` to inspect many elements in " <>
+          "ONE call (best-effort, per-ref result). Supply EITHER `ref` (single) OR `refs`.",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
           "document" => %{"type" => "string"},
           "ref" => %{"type" => "string"},
+          "refs" => %{
+            "type" => "array",
+            "description" => "Batch form: inspect every ref in this array; per-ref result.",
+            "items" => %{"type" => "string"}
+          },
           "props" => %{"type" => "array", "items" => %{"type" => "string"}}
         },
-        "required" => ["document", "ref"]
+        "required" => ["document"]
       },
       "annotations" => %{"readOnlyHint" => true}
     },
@@ -226,7 +239,10 @@ defmodule Ecrits.Doc.Tools do
           "FontSize:12}; a TABLE CELL -> {kind:\"cell\", BackgroundColor:\"#FFFF00\"} (to fill " <>
           "a cell/column, doc.find the cells then doc.set kind:cell BackgroundColor); a " <>
           "PARAGRAPH -> {Alignment:\"center\", LineSpacing:160}; table/picture/shape props " <>
-          "likewise. Routes to the right native setter automatically. Honours base_revision.",
+          "likewise. Routes to the right native setter automatically. Honours base_revision. " <>
+          "Pass `sets:[{ref,props}, ...]` to set many elements in ONE call (best-effort, " <>
+          "per-set result, one bad ref does not abort the others). Supply EITHER " <>
+          "`ref`+`props` (single) OR `sets`.",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
@@ -234,9 +250,22 @@ defmodule Ecrits.Doc.Tools do
           "document" => %{"type" => "string"},
           "ref" => %{"type" => "string"},
           "props" => %{"type" => "object"},
+          "sets" => %{
+            "type" => "array",
+            "description" =>
+              "Batch form: an array of `{ref, props}` objects, each like the single form.",
+            "items" => %{
+              "type" => "object",
+              "properties" => %{
+                "ref" => %{"type" => "string"},
+                "props" => %{"type" => "object"}
+              },
+              "required" => ["ref", "props"]
+            }
+          },
           "base_revision" => %{"type" => "integer", "minimum" => 0}
         },
-        "required" => ["document", "ref", "props"]
+        "required" => ["document"]
       },
       "annotations" => %{"readOnlyHint" => false}
     },
@@ -244,12 +273,22 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "edit",
       "description" =>
-        "Apply ONE structural edit, discriminated by op.op. Honours base_revision.",
+        "Apply ONE structural edit (`op`), discriminated by op.op. Honours base_revision. " <>
+          "Pass `ops:[...]` to apply many edits in ONE call (e.g. fill every blank cell) — " <>
+          "far fewer round-trips. Best-effort: each op is applied independently and you get " <>
+          "a per-op result; one bad ref does not abort the others.",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
           "document" => %{"type" => "string"},
+          "ops" => %{
+            "type" => "array",
+            "description" =>
+              "Batch form: an array of op objects (each shaped like `op`). Applied " <>
+                "best-effort with a per-op result; supply EITHER `op` (single) OR `ops`.",
+            "items" => %{"type" => "object"}
+          },
           "op" => %{
             "type" => "object",
             "description" =>
@@ -292,7 +331,7 @@ defmodule Ecrits.Doc.Tools do
           },
           "base_revision" => %{"type" => "integer", "minimum" => 0}
         },
-        "required" => ["document", "op"]
+        "required" => ["document"]
       },
       "annotations" => %{"readOnlyHint" => false}
     },
@@ -369,7 +408,14 @@ defmodule Ecrits.Doc.Tools do
       browser: fn lv -> browser_call(lv, args, :read, %{opts: take_opts(args, ["at", "size", "ref"])}) end,
       server: fn editor ->
         opts = take_opts(args, ["at", "size", "ref"])
-        wrap(Editor.read(editor, opts), &Map.merge(%{}, stringify(&1)))
+        # Keep the windowed-text contract (≤#{@read_cap} paragraphs + cursor) and
+        # ADDITIVELY enrich it with the full-IR element list (incl. per-cell
+        # `context`) when the NIF `elements` verb is available — so a read surfaces
+        # tables/cells/pictures/fields in the window, not just flat text. An older
+        # NIF (no elements verb) simply omits `elements`.
+        wrap(Editor.read(editor, opts), fn result ->
+          result |> stringify() |> attach_read_elements(editor)
+        end)
       end
     )
   end
@@ -393,17 +439,7 @@ defmodule Ecrits.Doc.Tools do
             type: type
           })
         end,
-        server: fn editor ->
-          opts = take_opts(args, ["case_sensitive"])
-
-          case Editor.find(editor, pattern, opts) do
-            {:ok, matches} ->
-              {:ok, %{"pattern" => pattern, "matches" => Enum.map(matches, &stringify/1)}}
-
-            {:error, reason} ->
-              {:error, error_json(reason)}
-          end
-        end
+        server: fn editor -> server_find(editor, pattern, type, args) end
       )
     end
   end
@@ -413,56 +449,90 @@ defmodule Ecrits.Doc.Tools do
   # This folds the former standalone `doc.inspect` into the one read-properties
   # tool, so the agent has a single place to discover what it can set and what
   # the current values are.
+  # `refs:[...]` (batch) takes precedence over `ref` (single). Server-only
+  # (with_editor): inspect each ref best-effort and return a per-ref `results`.
   def call(ctx, "doc.get", args) do
-    with {:ok, ref} <- require_string(args, "ref") do
-      with_editor(ctx, args, fn editor ->
-        props = get(args, ["props"])
+    props = get(args, ["props"])
 
-        # Reflective metadata (type + settable property NAMES + child refs) is the
-        # backbone of the merged tool — it needs no value NIF, so it anchors the
-        # result. The live property VALUES are best-effort layered on top: if the
-        # engine can't read them yet, the agent still learns what it CAN set.
-        case Editor.inspect_element(editor, ref) do
-          {:ok, meta} ->
-            values = best_effort_values(editor, ref, props)
-            {:ok, merge_get_inspect(values, stringify(meta))}
+    case get(args, ["refs"]) do
+      refs when is_list(refs) ->
+        with_editor(ctx, args, fn editor ->
+          results =
+            Enum.map(refs, fn ref ->
+              case inspect_one(editor, ref, props) do
+                {:ok, info} -> Map.put(info, "ref", ref)
+                {:error, err} -> %{"ref" => ref, "error" => err}
+              end
+            end)
 
-          {:error, reason} ->
-            {:error, error_json(reason)}
+          {:ok, %{"results" => results}}
+        end)
+
+      _ ->
+        with {:ok, ref} <- require_string(args, "ref") do
+          with_editor(ctx, args, fn editor ->
+            case inspect_one(editor, ref, props) do
+              {:ok, info} -> {:ok, info}
+              {:error, err} -> {:error, err}
+            end
+          end)
         end
-      end)
     end
   end
 
+  # `sets:[{ref,props}, ...]` (batch) takes precedence over `ref`+`props` (single).
   def call(ctx, "doc.set", args) do
-    with {:ok, ref} <- require_string(args, "ref"),
-         {:ok, props} <- require_map(args, "props") do
-      base_rev = get(args, ["base_revision"])
+    base_rev = get(args, ["base_revision"])
 
-      route_doc(ctx, args,
-        # Viewed-HWP authority is the browser WASM model (design §6.2): deliver the
-        # property set to the owning LiveView -> WasmHwpEditor applies it
-        # (setCellProperties / applyCharFormat) so the change RENDERS in the viewer.
-        # A server-NIF set would mutate the unedited server copy the user never
-        # sees — invisible — so set MUST route to the browser for an open doc.
-        browser: fn lv -> browser_set(lv, args, ref, props) end,
-        server: fn editor -> write_result(Editor.set(editor, ref, props, base_rev)) end
-      )
+    case get(args, ["sets"]) do
+      sets when is_list(sets) ->
+        # Batch form: set many elements in one call, best-effort per-set result.
+        route_doc(ctx, args,
+          browser: fn lv -> browser_set_batch(lv, args, sets) end,
+          server: fn editor -> set_batch_server(editor, sets, base_rev) end
+        )
+
+      _ ->
+        with {:ok, ref} <- require_string(args, "ref"),
+             {:ok, props} <- require_map(args, "props") do
+          route_doc(ctx, args,
+            # Viewed-HWP authority is the browser WASM model (design §6.2): deliver the
+            # property set to the owning LiveView -> WasmHwpEditor applies it
+            # (setCellProperties / applyCharFormat) so the change RENDERS in the viewer.
+            # A server-NIF set would mutate the unedited server copy the user never
+            # sees — invisible — so set MUST route to the browser for an open doc.
+            browser: fn lv -> browser_set(lv, args, ref, props) end,
+            server: fn editor -> write_result(Editor.set(editor, ref, props, base_rev)) end
+          )
+        end
     end
   end
 
+  # `ops:[...]` (batch) takes precedence over `op` (single) when present.
   def call(ctx, "doc.edit", args) do
-    with {:ok, op} <- require_map(args, "op") do
-      base_rev = get(args, ["base_revision"])
+    base_rev = get(args, ["base_revision"])
 
-      route_doc(ctx, args,
-        # Viewed-HWP authority is the browser WASM model: deliver the structural
-        # edit to the owning LiveView -> WasmHwpEditor hook applies it to the rhwp
-        # WASM doc and reports the new revision. We do NOT touch the server NIF
-        # for a browser-backed doc (design §6.2) so the two models can't diverge.
-        browser: fn lv -> browser_write(lv, args, op) end,
-        server: fn editor -> write_result(Editor.apply(editor, op, base_rev)) end
-      )
+    case get(args, ["ops"]) do
+      ops when is_list(ops) ->
+        # Batch form: apply many edits in one call, best-effort with a per-op
+        # result. Each op is normalised per-op for the browser payload (same as
+        # the single path), so a malformed op is rejected individually.
+        route_doc(ctx, args,
+          browser: fn lv -> browser_write_batch(lv, args, ops) end,
+          server: fn editor -> edit_batch_server(editor, ops, base_rev) end
+        )
+
+      _ ->
+        with {:ok, op} <- require_map(args, "op") do
+          route_doc(ctx, args,
+            # Viewed-HWP authority is the browser WASM model: deliver the structural
+            # edit to the owning LiveView -> WasmHwpEditor hook applies it to the rhwp
+            # WASM doc and reports the new revision. We do NOT touch the server NIF
+            # for a browser-backed doc (design §6.2) so the two models can't diverge.
+            browser: fn lv -> browser_write(lv, args, op) end,
+            server: fn editor -> write_result(Editor.apply(editor, op, base_rev)) end
+          )
+        end
     end
   end
 
@@ -484,6 +554,128 @@ defmodule Ecrits.Doc.Tools do
   end
 
   def call(_ctx, tool_name, _args), do: {:error, {:unknown_tool, tool_name}}
+
+  # --- doc.read / doc.find server arms -------------------------------------
+
+  # Layer the enumerated elements onto a read result when available. The text
+  # window/cap is unchanged; we just add an `elements` array so the agent sees
+  # structured content (tables/cells/pictures/fields, with per-cell `context`)
+  # alongside text. Best-effort: an older NIF (no elements verb) omits it.
+  defp attach_read_elements(read, editor) do
+    case Editor.elements(editor) do
+      {:ok, nodes} when is_list(nodes) ->
+        Map.put(read, "elements", Enum.map(nodes, &element_to_match/1))
+
+      _ ->
+        read
+    end
+  end
+
+  # Server-arm `doc.find`. Enumerate the full IR via the NIF `elements` verb and
+  # filter by `type` and/or `pattern` (so each match carries its IR type, row/col
+  # and per-cell `context`). If the verb is unavailable (older NIF) FALL BACK to
+  # the literal `Editor.find`.
+  defp server_find(editor, pattern, type, args) do
+    case maybe_elements(editor, type) do
+      {:ok, nodes} ->
+        matches =
+          nodes
+          |> filter_by_type(type)
+          |> filter_by_pattern(pattern, find_case_sensitive?(args))
+          |> Enum.map(&element_to_match/1)
+
+        {:ok, %{"pattern" => pattern, "type" => type, "matches" => matches}}
+
+      :fallback ->
+        literal_find(editor, pattern, args)
+    end
+  end
+
+  # Try the full-IR enumerator. `:fallback` signals the verb is unavailable so the
+  # caller uses literal find.
+  defp maybe_elements(editor, _type) do
+    case Editor.elements(editor) do
+      {:ok, nodes} when is_list(nodes) -> {:ok, nodes}
+      {:error, {:not_supported, _}} -> :fallback
+      {:error, _other} -> :fallback
+    end
+  end
+
+  defp literal_find(editor, pattern, args) when is_binary(pattern) and pattern != "" do
+    case Editor.find(editor, pattern, take_opts(args, ["case_sensitive"])) do
+      {:ok, matches} -> {:ok, %{"pattern" => pattern, "matches" => Enum.map(matches, &stringify/1)}}
+      {:error, reason} -> {:error, error_json(reason)}
+    end
+  end
+
+  # `type`-only query but the NIF can't enumerate: be honest rather than dumping
+  # everything.
+  defp literal_find(_editor, _pattern, _args),
+    do: {:error, error_json({:not_supported, "element-type find needs the NIF elements verb"})}
+
+  # Filter enumerator nodes by IR `type`. The cell-state filters (empty_cell/
+  # filled_cell/empty) map onto the enumerator's `cell` shape + text; any other
+  # type matches the node's own IR kind; nil/"" keeps everything.
+  defp filter_by_type(nodes, nil), do: nodes
+  defp filter_by_type(nodes, ""), do: nodes
+  defp filter_by_type(nodes, "empty"), do: Enum.filter(nodes, &blank_node_text?/1)
+
+  defp filter_by_type(nodes, "empty_cell"),
+    do: Enum.filter(nodes, &(node_type(&1) == "cell" and blank_node_text?(&1)))
+
+  defp filter_by_type(nodes, "filled_cell"),
+    do: Enum.filter(nodes, &(node_type(&1) == "cell" and not blank_node_text?(&1)))
+
+  defp filter_by_type(nodes, type) when is_binary(type),
+    do: Enum.filter(nodes, &(node_type(&1) == type))
+
+  defp filter_by_pattern(nodes, nil, _cs), do: nodes
+  defp filter_by_pattern(nodes, "", _cs), do: nodes
+
+  defp filter_by_pattern(nodes, pattern, case_sensitive?) do
+    needle = if case_sensitive?, do: pattern, else: String.downcase(pattern)
+
+    Enum.filter(nodes, fn node ->
+      text = node_text(node)
+      hay = if case_sensitive?, do: text, else: String.downcase(text)
+      String.contains?(hay, needle)
+    end)
+  end
+
+  # Project an enumerator node into the doc.find match shape: ref/text/type plus
+  # row/col and the per-cell `context` breadcrumb when present.
+  defp element_to_match(node) do
+    %{
+      "ref" => node_field(node, "ref"),
+      "text" => node_text(node),
+      "type" => node_type(node)
+    }
+    |> maybe_put("row", node_field(node, "row"))
+    |> maybe_put("col", node_field(node, "col"))
+    |> maybe_put("context", node_field(node, "context"))
+  end
+
+  defp node_type(node), do: node_field(node, "type")
+  defp node_text(node), do: node_field(node, "text") || ""
+  defp blank_node_text?(node), do: String.trim(node_text(node)) == ""
+
+  # Enumerator nodes are JSON-decoded (string keys); tolerate atom keys too.
+  defp node_field(node, key) when is_map(node) do
+    case Map.fetch(node, key) do
+      {:ok, v} -> v
+      :error -> Map.get(node, safe_existing_atom(key))
+    end
+  end
+
+  defp node_field(_node, _key), do: nil
+
+  defp safe_existing_atom(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp find_case_sensitive?(args), do: get(args, ["case_sensitive"]) == true
 
   # --- dispatch helpers ----------------------------------------------------
 
@@ -536,6 +728,49 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
+  # Batch doc.edit for a browser-backed doc: normalise EACH op (per-op, like the
+  # single path) then hand the whole `ops` array to the WASM hook's
+  # applyAgentEditBatch in ONE round-trip. A normalisation failure for one op is
+  # recorded as that op's result (it is NOT sent to the browser) so the rest still
+  # apply. The hook applies body index-shifting ops in reverse document order and
+  # cell ops order-independently, then finishes (re-renders) once.
+  defp browser_write_batch(lv, args, ops) do
+    # Split the ops into the ones that normalise cleanly (sent to the browser) and
+    # the ones that don't (recorded as local failures), preserving order metadata
+    # so the merged result keeps every op accounted for.
+    {ok_ops, bad_results} =
+      ops
+      |> Enum.map(fn op ->
+        case normalize_browser_op(op) do
+          {:ok, normalized} -> {:ok, normalized}
+          {:error, reason} -> {:error, %{"ref" => op_ref(op), "error" => error_json(reason)}}
+        end
+      end)
+      |> Enum.split_with(&match?({:ok, _}, &1))
+
+    normalized_ops = Enum.map(ok_ops, fn {:ok, op} -> op end)
+    local_failures = Enum.map(bad_results, fn {:error, res} -> res end)
+
+    case browser_call(lv, args, :edit, %{ops: normalized_ops, base_revision: get(args, ["base_revision"])}) do
+      {:ok, %{} = applied} ->
+        {:ok, merge_browser_batch(applied, local_failures)}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # Merge the browser's batch result with any locally-rejected (un-normalisable)
+  # ops so `failed`/`results` account for EVERY op the agent submitted.
+  defp merge_browser_batch(applied, local_failures) do
+    results = (Map.get(applied, "results") || Map.get(applied, :results) || []) ++ local_failures
+    applied_n = Map.get(applied, "applied") || Map.get(applied, :applied) || 0
+    failed_n = (Map.get(applied, "failed") || Map.get(applied, :failed) || 0) + length(local_failures)
+    revision = Map.get(applied, "revision") || Map.get(applied, :revision)
+
+    batch_result(results, applied_n, failed_n, revision)
+  end
+
   # doc.set for a browser-backed doc: deliver the property set to the viewer's
   # authoritative WASM model and adopt the revision it reports. The ref (doc.find's
   # positional ref, incl. cell address) is parsed browser-side by the SAME parseRef
@@ -545,6 +780,20 @@ defmodule Ecrits.Doc.Tools do
     case browser_call(lv, args, :set, %{ref: ref, props: props}) do
       {:ok, %{} = applied} ->
         {:ok, %{"ok" => true, "revision" => Map.get(applied, "revision") || Map.get(applied, :revision)}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # Batch doc.set for a browser-backed doc: hand the `sets` array to the hook's
+  # applyAgentSetBatch in ONE round-trip (each set addresses a fixed cell/run, so
+  # order is irrelevant). The hook applies all of them best-effort and finishes
+  # (re-renders) once, returning {applied, failed, results, revision}.
+  defp browser_set_batch(lv, args, sets) do
+    case browser_call(lv, args, :set, %{sets: sets, base_revision: get(args, ["base_revision"])}) do
+      {:ok, %{} = applied} ->
+        {:ok, merge_browser_batch(applied, [])}
 
       {:error, _reason} = error ->
         error
@@ -646,6 +895,87 @@ defmodule Ecrits.Doc.Tools do
 
   defp wrap({:ok, value}, mapper) when is_function(mapper, 1), do: {:ok, mapper.(value)}
   defp wrap({:error, reason}, _mapper), do: {:error, error_json(reason)}
+
+  # Inspect ONE ref for doc.get (single + batch share this). Reflective metadata
+  # (type + settable property NAMES + child refs) anchors the result; live
+  # property VALUES are best-effort layered on top. Returns {:ok, info_map} (the
+  # merged shape) or {:error, error_json} so the batch can collect per-ref errors
+  # without aborting the others.
+  defp inspect_one(editor, ref, props) do
+    case Editor.inspect_element(editor, ref) do
+      {:ok, meta} ->
+        values = best_effort_values(editor, ref, props)
+        {:ok, merge_get_inspect(values, stringify(meta))}
+
+      {:error, reason} ->
+        {:error, error_json(reason)}
+    end
+  end
+
+  # Server-arm batch doc.edit: apply each op via Editor.apply best-effort, collect
+  # per-op results, return the same shape the browser batch does. base_revision is
+  # passed unchanged to every op (the engine rebases internally); a per-op failure
+  # is recorded but does NOT abort the rest. `revision` is the LAST applied op's
+  # revision (or the conflict's current revision), so the agent learns where it
+  # landed.
+  defp edit_batch_server(editor, ops, base_rev) do
+    {results, applied, failed, last_rev} =
+      Enum.reduce(ops, {[], 0, 0, nil}, fn op, {acc, ok_n, bad_n, rev} ->
+        op_ref = op_ref(op)
+
+        case Editor.apply(editor, op, base_rev) do
+          {:ok, applied_map} ->
+            new_rev = Map.get(applied_map, :revision) || rev
+            {[%{"ref" => op_ref, "ok" => true} | acc], ok_n + 1, bad_n, new_rev}
+
+          {:error, reason} ->
+            {[%{"ref" => op_ref, "error" => error_json(reason)} | acc], ok_n, bad_n + 1, rev}
+        end
+      end)
+
+    {:ok, batch_result(Enum.reverse(results), applied, failed, last_rev)}
+  end
+
+  # Server-arm batch doc.set: apply each {ref, props} via Editor.set best-effort.
+  defp set_batch_server(editor, sets, base_rev) do
+    {results, applied, failed, last_rev} =
+      Enum.reduce(sets, {[], 0, 0, nil}, fn entry, {acc, ok_n, bad_n, rev} ->
+        ref = get(entry, ["ref"])
+        props = get(entry, ["props"])
+
+        case set_one_server(editor, ref, props, base_rev) do
+          {:ok, applied_map} ->
+            new_rev = Map.get(applied_map, :revision) || rev
+            {[%{"ref" => ref, "ok" => true} | acc], ok_n + 1, bad_n, new_rev}
+
+          {:error, reason} ->
+            {[%{"ref" => ref, "error" => error_json(reason)} | acc], ok_n, bad_n + 1, rev}
+        end
+      end)
+
+    {:ok, batch_result(Enum.reverse(results), applied, failed, last_rev)}
+  end
+
+  # One server set with the same ref/props validation the single path uses, so a
+  # malformed entry in the batch is an :invalid_params error for THAT entry only.
+  defp set_one_server(_editor, ref, _props, _base_rev) when not is_binary(ref) or ref == "",
+    do: {:error, {:invalid_params, "ref (non-empty string) is required"}}
+
+  defp set_one_server(_editor, _ref, props, _base_rev) when not is_map(props),
+    do: {:error, {:invalid_params, "props (object) is required"}}
+
+  defp set_one_server(editor, ref, props, base_rev), do: Editor.set(editor, ref, props, base_rev)
+
+  # The ref carried on an op (for the per-op result label); nil when absent.
+  defp op_ref(op) when is_map(op), do: get(op, ["ref"])
+  defp op_ref(_op), do: nil
+
+  # The shared best-effort batch result shape (browser + server use it):
+  # `applied`/`failed` counts, the per-op `results`, and the landing `revision`.
+  defp batch_result(results, applied, failed, revision) do
+    %{"ok" => true, "applied" => applied, "failed" => failed, "results" => results}
+    |> maybe_put("revision", revision)
+  end
 
   # Live property values for doc.get, best-effort: nil when the engine can't read
   # them yet, so the reflective discovery still stands.

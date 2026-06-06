@@ -48,6 +48,14 @@ defmodule Ecrits.Doc.Editor do
   @spec find(t(), String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def find(editor, pattern, opts \\ []), do: GenServer.call(editor, {:find, pattern, opts})
 
+  @doc """
+  Full-IR element enumeration through the owned handle (the backend's optional
+  `elements/2`). Returns `{:error, {:not_supported, _}}` when the backend (or
+  its deployed NIF) can't enumerate, so callers fall back to `find`/`read`.
+  """
+  @spec elements(t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def elements(editor, opts \\ []), do: GenServer.call(editor, {:elements, opts})
+
   @doc "Structural tree through the owned handle."
   @spec outline(t(), term() | nil, keyword()) :: {:ok, map()} | {:error, term()}
   def outline(editor, ref \\ nil, opts \\ []), do: GenServer.call(editor, {:outline, ref, opts})
@@ -152,6 +160,16 @@ defmodule Ecrits.Doc.Editor do
 
   def handle_call({:find, pattern, opts}, _from, st),
     do: {:reply, st.backend.find(st.handle, pattern, opts), st}
+
+  def handle_call({:elements, opts}, _from, st) do
+    # Optional backend capability: surface a clean not_supported error when the
+    # backend doesn't implement `elements/2` so the Tools layer falls back.
+    if function_exported?(st.backend, :elements, 2) do
+      {:reply, st.backend.elements(st.handle, opts), st}
+    else
+      {:reply, {:error, {:not_supported, "backend has no elements/2"}}, st}
+    end
+  end
 
   def handle_call({:outline, ref, opts}, _from, st),
     do: {:reply, st.backend.outline(st.handle, ref, opts), st}
