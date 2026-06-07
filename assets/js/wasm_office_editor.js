@@ -406,7 +406,14 @@ function resolveApi(Module) {
       postUnoCommand: direct("postUnoCommand"),
       postWindowExtTextInputEvent: direct("postWindowExtTextInputEvent"),
       getCursor: direct("getCursor"),
-      closeDocument: direct("closeDocument")
+      closeDocument: direct("closeDocument"),
+      // O5b agent-edit verbs (LokEditBindings embind free-functions): the IR
+      // read, the structured edit, and the property set the office `doc.*`
+      // browser arm drives. The build registers `getElements` (NOT `elements`);
+      // probe `elements` too so a future rename still resolves.
+      getElements: direct("getElements") || direct("elements"),
+      unoApply: direct("uno_apply"),
+      unoSet: direct("uno_set")
     }
   }
 
@@ -476,6 +483,18 @@ const WasmOfficeEditor = {
     // Pre-warm + load on mount. The host element carries the bytes URL; the
     // server also pushes `office_wasm_load` (re-open / revision change).
     this.handleEvent("office_wasm_load", (payload) => this.loadDocument(payload))
+
+    // Agent edit/read/find/set/save routed from the server because THIS office
+    // document is `:browser`-backed (a human viewer is registered, so its WASM
+    // model is the authority — design §6.2 / O5b). Apply against the same WASM
+    // doc the user is viewing, re-render, and reply with the result so the
+    // agent's `doc.*` MCP tool returns it. Mirrors the HWP hook's
+    // `doc.apply_edit` -> handleAgentOp -> `doc.browser_reply` round-trip exactly;
+    // the server side (Ecrits.Doc.Tools.browser_call + WorkspaceLive relay) is
+    // engine-agnostic, so the only office-specific part is THIS handler mapping
+    // verbs onto getElements/uno_apply/uno_set/saveToBytes.
+    this.handleEvent("doc.apply_edit", (payload) => this.handleAgentOp(payload))
+
     const bytesUrl = this.el.dataset.bytesUrl
     if (bytesUrl) this.loadDocument({ url: bytesUrl })
 
@@ -1368,6 +1387,504 @@ const WasmOfficeEditor = {
     if (this.imeProxy) this.imeProxy.value = ""
     this.renderCaretWindow()
     this.refreshCaret()
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // AGENT-EDIT BRIDGE (O5b) — the office twin of wasm_hwp_editor.js's
+  // handleAgentOp. The server routes a viewed office doc's `doc.*` calls HERE
+  // (because a viewer is registered, so the browser WASM model is authority);
+  // we apply them to the SAME LibreOffice->WASM doc the user sees and reply.
+  //
+  // HOW OFFICE DIFFERS FROM HWP. The HWP arm owns a structural rhwp model and
+  // addresses text positionally ({section,paragraph,offset} refs) via per-verb
+  // WASM accessors. The office arm instead drives the build's IR + UNO verbs:
+  //
+  //   doc.find / doc.read / doc.get  -> getElements()  (IR JSON; filter/window)
+  //   doc.edit (insert/replace/delete, single + ops:[…]) -> uno_apply(opJson)
+  //   doc.set  (ref+props, single + sets:[…])            -> uno_set(ref, propsJson)
+  //   doc.save                                           -> saveToBytes(format)
+  //
+  // Office refs are STRINGS the IR emits: "p<idx>" (paragraph), "tbl[<Name>]",
+  // "tbl[<Name>]/cell[<B2>]", "page[<Slide>]/shape[<N>]". So office does NOT use
+  // the HWP parseRef ({section,paragraph,offset}); the verbs take the ref string
+  // (and JSON args) straight through.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Entry point for a server-routed agent op. `verb` is read|find|get|edit|set|
+  // save. ALWAYS reply (even on error) so the blocked MCP caller never hangs to
+  // its timeout. Serialize ops through a promise chain so a save can never race a
+  // still-pending edit (uno_apply dispatches onto the LOK worker — saveToBytes
+  // immediately after an edit can otherwise read an inconsistent buffer).
+  handleAgentOp({ request_id, verb, payload }) {
+    const reply = (body) => this.pushEvent("doc.browser_reply", { request_id, ...body })
+    if (!this.api || !this.handle) {
+      reply({ error: "document_not_loaded" })
+      return
+    }
+    // Chain on the previous agent op (and any in-flight load) so edits + the
+    // save settle in submission order.
+    const prior = this._agentInFlight || Promise.resolve()
+    this._agentInFlight = prior
+      .catch(() => {})
+      .then(async () => {
+        if (this._loadInFlight) { try { await this._loadInFlight } catch (_) {} }
+        try {
+          switch (verb) {
+            case "edit": {
+              const body = Array.isArray(payload && payload.ops)
+                ? await this.officeApplyEditBatch(payload)
+                : await this.officeApplyEdit(payload)
+              reply(body)
+              break
+            }
+            case "set": {
+              const body = Array.isArray(payload && payload.sets)
+                ? await this.officeApplySetBatch(payload)
+                : await this.officeApplySet(payload)
+              reply(body)
+              break
+            }
+            case "find":
+              reply({ result: this.officeFind(payload) })
+              break
+            case "read":
+              reply({ result: this.officeRead(payload) })
+              break
+            case "get":
+              reply({ result: this.officeGet(payload) })
+              break
+            case "save":
+              // The viewer's WASM model is authority for an open doc — settle
+              // pending edits FIRST (await the chain we're already in + a
+              // microtask flush), then export its CURRENT edited bytes.
+              reply({ result: await this.officeSave() })
+              break
+            default:
+              reply({ error: `unsupported_verb:${verb}` })
+          }
+        } catch (error) {
+          console.error("[office-wasm] agent op failed", verb, error)
+          reply({ error: String((error && error.message) || error) })
+        }
+      })
+  },
+
+  // ─── IR read (getElements) ─────────────────────────────────────────────────
+
+  // Parse the build's IR JSON once and cache it; invalidated after any edit/set.
+  // Each element is normalized to { ref, text, type, context?, row?, col? } so the
+  // find/read/get projections below are engine-shape agnostic (the build may key
+  // the IR as {ref,text,type} or nest text under {content}).
+  officeElements() {
+    if (this._elementsCache) return this._elementsCache
+    const fn = this.api && this.api.getElements
+    if (typeof fn !== "function") {
+      throw new Error("getElements export not found in this office WASM build")
+    }
+    let raw
+    try {
+      raw = fn()
+    } catch (error) {
+      throw new Error("getElements failed: " + String((error && error.message) || error))
+    }
+    let parsed
+    try {
+      parsed = typeof raw === "string" ? JSON.parse(raw || "[]") : raw
+    } catch (_) {
+      throw new Error("getElements returned non-JSON: " + String(raw).slice(0, 120))
+    }
+    const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.elements) ? parsed.elements : [])
+    const norm = list.map((el) => this.normElement(el)).filter(Boolean)
+    this._elementsCache = norm
+    return norm
+  },
+
+  // Normalize one IR element to the find/read match shape. Tolerant of field
+  // aliases so a small IR schema drift in the parallel wasm build doesn't break
+  // the bridge.
+  normElement(el) {
+    if (!el || typeof el !== "object") return null
+    const ref = el.ref != null ? String(el.ref) : null
+    if (!ref) return null
+    const text = el.text != null ? String(el.text)
+      : el.content != null ? String(el.content) : ""
+    const type = el.type != null ? String(el.type)
+      : el.kind != null ? String(el.kind) : this.refType(ref)
+    const out = { ref, text, type }
+    if (el.context != null) out.context = String(el.context)
+    if (el.row != null) out.row = el.row
+    if (el.col != null) out.col = el.col
+    return out
+  },
+
+  // Infer an element TYPE from its ref string when the IR omits one:
+  //   p<idx>                       -> paragraph
+  //   tbl[Name]                    -> table
+  //   tbl[Name]/cell[B2]           -> cell
+  //   page[N]/shape[M]             -> shape
+  refType(ref) {
+    if (/\/cell\[/.test(ref)) return "cell"
+    if (/^tbl\[/.test(ref)) return "table"
+    if (/\/shape\[/.test(ref)) return "shape"
+    if (/^page\[/.test(ref)) return "page"
+    if (/^p\d+$/.test(ref)) return "paragraph"
+    return "unknown"
+  },
+
+  blankText(el) {
+    return String(el.text || "").trim() === ""
+  },
+
+  // ─── doc.find -> getElements + filter ──────────────────────────────────────
+  // Mirrors the HWP arm: literal substring search by default; `all`/`regex`/`type`
+  // flips to discovery mode (enumerate every element, filter by `type`, and treat
+  // `pattern` as a regex). Returns { matches: [{ref,text,type,…}] }.
+  officeFind({ pattern, case_sensitive, all, regex, type }) {
+    const elements = this.officeElements()
+    const cs = !!case_sensitive
+
+    let matches = elements
+    if (type) matches = this.filterByType(matches, String(type))
+
+    const pat = pattern != null ? String(pattern) : ""
+    if (all || regex || type) {
+      // discovery mode: pattern optional, regex when present.
+      if (pat) {
+        let re
+        try { re = new RegExp(pat, cs ? "" : "i") } catch (_) { re = null }
+        matches = re ? matches.filter((el) => re.test(el.text)) : matches
+      }
+    } else {
+      // literal substring search (pattern required by the server schema).
+      const needle = cs ? pat : pat.toLowerCase()
+      matches = matches.filter((el) => {
+        const hay = cs ? el.text : el.text.toLowerCase()
+        return hay.includes(needle)
+      })
+    }
+    return { pattern: pat, type: type || null, matches: matches.map((el) => ({ ...el })) }
+  },
+
+  // The server's element-type taxonomy, mapped onto office IR types. Cell-state
+  // filters (empty_cell/filled_cell/empty) key off the cell text being blank.
+  filterByType(elements, type) {
+    if (!type) return elements
+    switch (type) {
+      case "empty": return elements.filter((el) => this.blankText(el))
+      case "cell": return elements.filter((el) => el.type === "cell")
+      case "empty_cell": return elements.filter((el) => el.type === "cell" && this.blankText(el))
+      case "filled_cell": return elements.filter((el) => el.type === "cell" && !this.blankText(el))
+      case "paragraph": return elements.filter((el) => el.type === "paragraph")
+      default: return elements.filter((el) => el.type === type)
+    }
+  },
+
+  // ─── doc.read -> windowed getElements ──────────────────────────────────────
+  // Incremental: ≤30 elements/call + a next_at cursor (mirrors the HWP arm and
+  // the server's read cap). Each entry carries its `ref` so the agent can edit it.
+  officeRead({ opts }) {
+    const o = opts || {}
+    const at = Math.max(0, Number(o.at || 0))
+    const size = Math.min(30, Math.max(1, Number(o.size || 30)))
+    const elements = this.officeElements()
+    const total = elements.length
+    const win = elements.slice(at, at + size)
+    const nextAt = at + win.length < total ? at + win.length : null
+    const paragraphs = win.map((el) => {
+      const p = { text: el.text, ref: el.ref, table_cell: el.type === "cell" }
+      if (el.type) p.type = el.type
+      if (el.context) p.context = el.context
+      return p
+    })
+    return {
+      text: win.map((el) => (el.type === "cell" ? `[cell] ${el.text}` : el.text)).join("\n"),
+      at,
+      size: win.length,
+      paragraphs,
+      total,
+      next_at: nextAt
+    }
+  },
+
+  // ─── doc.get -> inspect one (or many) IR elements ──────────────────────────
+  // Best-effort reflective read off the IR: the element's type + current text.
+  // (The office IR doesn't expose a settable-property vocabulary the way the HWP
+  // engine does, so `settable` is omitted; the agent sets via doc.set's known
+  // UNO property names.)
+  officeGet({ ref, refs }) {
+    const byRef = new Map(this.officeElements().map((el) => [el.ref, el]))
+    const one = (r) => {
+      const el = byRef.get(String(r))
+      if (!el) return { ref: String(r), error: "unresolved ref" }
+      return { ref: el.ref, type: el.type, values: { text: el.text }, properties: { text: el.text }, children: [] }
+    }
+    if (Array.isArray(refs)) return { results: refs.map(one) }
+    return one(ref)
+  },
+
+  // ─── doc.edit -> uno_apply(opJson) ─────────────────────────────────────────
+  // Single op. uno_apply takes the op as a JSON string (the SAME op the server
+  // normalised: {op, ref, text|query|replacement|count, …}). Settle the edit,
+  // invalidate the IR cache, re-render, and report a bumped revision.
+  async officeApplyEdit({ op, base_revision }) {
+    const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const r = await this.officeApplyOneOp(op)
+    if (r.error) return { error: r.error }
+    return this.finishAgentEdit(baseRev, r.extra || {})
+  },
+
+  // Apply ONE edit op via uno_apply. NEVER renders / bumps the revision — the
+  // caller does that once (so a batch applies N ops and finishes once). uno_apply
+  // may return a JSON status string ({ok}/{error}) or throw; treat a thrown error
+  // OR an {error:…} payload as a per-op failure.
+  async officeApplyOneOp(op) {
+    const fn = this.api && this.api.unoApply
+    if (typeof fn !== "function") return { error: "uno_apply export not found in this office WASM build" }
+    const verb = op && op.op
+    if (!verb) return { error: "edit op requires an 'op' verb" }
+    let res
+    try {
+      res = fn(JSON.stringify(op))
+      // uno_apply dispatches onto the LOK worker; await a possible thenable.
+      if (res && typeof res.then === "function") res = await res
+    } catch (error) {
+      return { error: `${verb} failed: ${String((error && error.message) || error)}` }
+    }
+    const status = this.parseStatus(res)
+    if (status && status.error) return { error: `${verb} failed: ${status.error}` }
+    return { ok: true, extra: status && typeof status === "object" ? this.editExtra(status) : {} }
+  },
+
+  // Project the verb-specific count fields uno_apply may echo back into the
+  // result the agent sees (replaced/inserted/deleted), best-effort.
+  editExtra(status) {
+    const extra = {}
+    for (const k of ["replaced", "inserted", "deleted"]) {
+      if (typeof status[k] === "number") extra[k] = status[k]
+    }
+    return extra
+  },
+
+  // Batch doc.edit (ops:[…]). Apply every op via uno_apply with ONE re-render +
+  // revision bump at the end. Best-effort: a bad op does NOT abort the rest; the
+  // result carries a per-op `results` array, mirroring the HWP batch shape.
+  async officeApplyEditBatch({ ops, base_revision }) {
+    const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const list = Array.isArray(ops) ? ops : []
+    if (list.length === 0) return { error: "edit batch requires a non-empty 'ops' array" }
+    const results = []
+    let applied = 0
+    let failed = 0
+    for (const op of list) {
+      const refStr = op && op.ref != null ? String(op.ref) : null
+      let r
+      try {
+        r = await this.officeApplyOneOp(op)
+      } catch (error) {
+        r = { error: String((error && error.message) || error) }
+      }
+      if (r && r.ok) {
+        applied++
+        results.push(Object.assign({ ref: refStr, ok: true }, r.extra || {}))
+      } else {
+        failed++
+        results.push({ ref: refStr, error: (r && r.error) || "unknown_error" })
+      }
+    }
+    const finished = this.finishAgentEdit(baseRev, {})
+    return { ok: true, result: { ok: true, revision: finished.result.revision, applied, failed, results } }
+  },
+
+  // ─── doc.set -> uno_set(ref, propsJson) ────────────────────────────────────
+  // Single set. CHAR properties must address the PARAGRAPH ref `p<idx>` (verified:
+  // a run ref like "p0/r0" returns {"error":"unresolved ref"}), so we coerce a
+  // run ref down to its paragraph for the uno_set call.
+  async officeApplySet({ ref, props, base_revision }) {
+    const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const r = await this.officeApplySetOne(ref, props)
+    if (r.error) return { error: r.error }
+    return this.finishAgentEdit(baseRev, {})
+  },
+
+  async officeApplySetOne(ref, props) {
+    const fn = this.api && this.api.unoSet
+    if (typeof fn !== "function") return { error: "uno_set export not found in this office WASM build" }
+    if (ref == null || String(ref) === "") return { error: "set requires a 'ref' (from doc.find/doc.read)" }
+    if (props == null || typeof props !== "object") return { error: "set requires a 'props' object" }
+    // Strip the server's `kind` discriminator (office reads the property KEYS).
+    const { kind: _kind, ...rest } = props
+    if (Object.keys(rest).length === 0) return { error: "set requires at least one property in 'props'" }
+    // Translate the engine-agnostic property vocabulary the doc.set schema + HWP
+    // arm use (Bold/Italic/TextColor/FontSize/Alignment) into the UNO-native names
+    // office uno_set expects (VERIFIED in-browser: it accepts CharWeight/CharPosture/
+    // CharColor/CharHeight/ParaAdjust and REJECTS Bold/TextColor with "names not
+    // settable on this ref"). Names already in UNO form pass through unchanged.
+    const unoProps = this.toUnoProps(rest)
+    // Char-property sets resolve only against the PARAGRAPH ref, never a run ref.
+    const target = this.paragraphRefFor(String(ref))
+    let res
+    try {
+      res = fn(target, JSON.stringify(unoProps))
+      if (res && typeof res.then === "function") res = await res
+    } catch (error) {
+      return { error: `uno_set failed: ${String((error && error.message) || error)}` }
+    }
+    const status = this.parseStatus(res)
+    if (status && status.error) return { error: `uno_set failed: ${status.error}` }
+    return { ok: true }
+  },
+
+  // Map the cross-engine doc.set property vocabulary onto UNO property names +
+  // values for office uno_set. Booleans/strings the HWP arm accepts become the UNO
+  // numeric enums (FontWeight.BOLD=150, FontSlant.ITALIC=2, ParagraphAdjust),
+  // colors become a packed 0xRRGGBB long, font size stays points. Names already in
+  // UNO form (CharWeight, CharColor, ParaAdjust, …) pass through.
+  toUnoProps(props) {
+    const out = {}
+    for (const [k, v] of Object.entries(props)) {
+      switch (k) {
+        case "Bold":
+          out.CharWeight = v ? 150 : 100 // com.sun.star.awt.FontWeight NORMAL=100 BOLD=150
+          break
+        case "Italic":
+          out.CharPosture = v ? 2 : 0 // com.sun.star.awt.FontSlant NONE=0 ITALIC=2
+          break
+        case "Underline":
+          out.CharUnderline = v ? 1 : 0 // com.sun.star.awt.FontUnderline SINGLE=1 NONE=0
+          break
+        case "TextColor":
+        case "FontColor":
+          out.CharColor = this.colorToLong(v)
+          break
+        case "FontSize":
+          out.CharHeight = Number(v)
+          break
+        case "FontName":
+          out.CharFontName = String(v)
+          break
+        case "Alignment":
+          out.ParaAdjust = this.alignToParaAdjust(v)
+          break
+        default:
+          out[k] = v // raw UNO name (CharWeight/CharColor/ParaAdjust/…) passes through
+      }
+    }
+    return out
+  },
+
+  // "#RRGGBB" / "#RGB" / a number -> a packed 0xRRGGBB long the UNO CharColor
+  // property takes. A non-parseable value is returned as-is (best-effort).
+  colorToLong(v) {
+    if (typeof v === "number") return v
+    if (typeof v === "string") {
+      let h = v.trim().replace(/^#/, "")
+      if (h.length === 3) h = h.split("").map((c) => c + c).join("")
+      const n = parseInt(h, 16)
+      if (Number.isFinite(n)) return n
+    }
+    return v
+  },
+
+  // doc.set alignment vocabulary -> com.sun.star.style.ParagraphAdjust enum
+  // (LEFT=0, RIGHT=1, BLOCK/justify=2, CENTER=3, STRETCH=4).
+  alignToParaAdjust(v) {
+    if (typeof v === "number") return v
+    switch (String(v).toLowerCase()) {
+      case "left": return 0
+      case "right": return 1
+      case "justify": case "both": case "block": return 2
+      case "center": case "centre": return 3
+      default: return 0
+    }
+  },
+
+  // A run ref ("p0/r3") collapses to its paragraph ("p0") because uno_set only
+  // resolves char props against the paragraph ref. A cell/table/shape ref passes
+  // through unchanged.
+  paragraphRefFor(ref) {
+    const m = /^(p\d+)\/r\d+$/.exec(ref)
+    return m ? m[1] : ref
+  },
+
+  // Batch doc.set (sets:[{ref,props}, …]). Apply every set with ONE finish.
+  async officeApplySetBatch({ sets, base_revision }) {
+    const baseRev = typeof base_revision === "number" ? base_revision : 0
+    const list = Array.isArray(sets) ? sets : []
+    if (list.length === 0) return { error: "set batch requires a non-empty 'sets' array" }
+    const results = []
+    let applied = 0
+    let failed = 0
+    for (const entry of list) {
+      const refStr = entry && entry.ref != null ? String(entry.ref) : null
+      let r
+      try {
+        r = await this.officeApplySetOne(entry && entry.ref, entry && entry.props)
+      } catch (error) {
+        r = { error: String((error && error.message) || error) }
+      }
+      if (r && r.ok) {
+        applied++
+        results.push({ ref: refStr, ok: true })
+      } else {
+        failed++
+        results.push({ ref: refStr, error: (r && r.error) || "unknown_error" })
+      }
+    }
+    const finished = this.finishAgentEdit(baseRev, {})
+    return { ok: true, result: { ok: true, revision: finished.result.revision, applied, failed, results } }
+  },
+
+  // ─── doc.save -> saveToBytes(format) ───────────────────────────────────────
+  // Export the open doc's CURRENT edited bytes for the server to write to disk.
+  // Pending edits are already settled (handleAgentOp serialises the op chain and
+  // we await it here too); flush a microtask so the LOK worker's last uno_apply
+  // commit is visible before we read the buffer.
+  async officeSave() {
+    const fn = this.api && this.api.saveToBytes
+    if (typeof fn !== "function") throw new Error("saveToBytes export not found in this office WASM build")
+    // Microtask flush: let any just-resolved edit's worker commit land before
+    // reading the export buffer (the saveToBytes-vs-pending-edit race).
+    await Promise.resolve()
+    let bytes = fn(this.format || "docx")
+    if (bytes && typeof bytes.then === "function") bytes = await bytes
+    if (!bytes || !bytes.length) throw new Error("saveToBytes returned no bytes")
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+    return { format: this.format || "docx", bytes_base64: this.bytesToBase64(u8), bytes: u8.length }
+  },
+
+  // ─── shared edit-finish + helpers ──────────────────────────────────────────
+
+  // Post-edit step (mirrors the HWP finishAgentEdit): the IR changed so the
+  // cached element list is stale; re-render the visible pages so the edit shows
+  // in the viewer, and report a monotonically bumped revision.
+  finishAgentEdit(baseRev, extra) {
+    this._elementsCache = null
+    this.rendered.clear()
+    this.renderVisiblePages()
+    if (this.caret) this.refreshCaret()
+    return { ok: true, result: { ok: true, revision: baseRev + 1, ...extra } }
+  },
+
+  // uno_apply/uno_set may return a JSON status string, a plain object, or
+  // undefined (= applied with no payload). Normalise to an object or null.
+  parseStatus(res) {
+    if (res == null) return null
+    if (typeof res === "object") return res
+    if (typeof res === "string") {
+      const s = res.trim()
+      if (!s) return null
+      try { return JSON.parse(s) } catch (_) { return { raw: s } }
+    }
+    return null
+  },
+
+  bytesToBase64(bytes) {
+    let binary = ""
+    const chunk = 0x8000
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk))
+    }
+    return btoa(binary)
   }
 }
 

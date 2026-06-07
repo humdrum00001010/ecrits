@@ -1824,10 +1824,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # it the ACTIVE document, so the chat agent's `doc.*` MCP tools (which operate
   # against the Pool) can see, read and edit the document the user is viewing.
   #
-  # HWP/HWPX route to the browser-WASM model (this clause); Office docx/pptx route
-  # to the server libreofficex UNO NIF (separate clause below). Other formats
-  # (Markdown) have no Pool backend yet, so we just clear any stale active doc for
-  # them. The Pool keys by absolute path, so re-opening the same file reuses the handle.
+  # HWP/HWPX route to the browser-WASM model (this clause); a VIEWED office
+  # docx/pptx ALSO routes to its browser-WASM model (separate clause below, O5b) —
+  # a headless office doc (no viewer) falls back to the server libreofficex UNO
+  # NIF. Other formats (Markdown) have no Pool backend yet, so we just clear any
+  # stale active doc for them. The Pool keys by absolute path, so re-opening the
+  # same file reuses the handle.
   defp register_pool_document(socket, %Document{path: path, format: format})
        when format in ["hwp", "hwpx"] do
     kind = String.to_existing_atom(format)
@@ -1856,21 +1858,22 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  # Office formats (docx/pptx) are :server-backed via the libreofficex UNO NIF
-  # (Ecrits.Doc.Office) — register + activate them too so the chat agent's doc.*
-  # tools can read/edit the open Office doc. No `attach_browser`: Office has no
-  # browser-WASM authority arm (display is the client office WASM; edits go to
-  # the server NIF), so the agent's doc.* edits route straight to Ecrits.Doc.Office.
+  # Office formats (docx/pptx) — a VIEWED office doc has a browser-WASM authority
+  # arm too (the `WasmOfficeEditor` hook's LibreOffice->WASM model, O5b), exactly
+  # like the HWP clause above. Register THIS connected LiveView as the viewer so
+  # the agent's doc.* edits route to the WASM model the user is viewing (the hook
+  # applies them via getElements/uno_apply/uno_set/saveToBytes) instead of the
+  # divergent server NIF copy. On the dead static render we register no viewer, so
+  # a doc opened headlessly (no viewer) still falls back to the Ecrits.Doc.Office
+  # libreofficex NIF arm — that COLD path is unchanged.
   defp register_pool_document(socket, %Document{path: path, format: format})
        when format in ["docx", "pptx"] do
     kind = String.to_existing_atom(format)
 
     case DocPool.open(path, kind: kind) do
       {:ok, doc_id} ->
-        # Office docs have no browser-WASM authority arm (display is the client
-        # office WASM; agent edits go to the server libreofficex NIF), so we do
-        # NOT register a viewer — the agent's doc.* edits route straight to
-        # Ecrits.Doc.Office (now governed by Office.Instance). No global active.
+        if connected?(socket), do: attach_session_viewer(socket, doc_id)
+
         socket
         |> assign(:pool_document_id, doc_id)
         |> assign(:browser_revision, 0)
