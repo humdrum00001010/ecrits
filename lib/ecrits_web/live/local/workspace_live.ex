@@ -1653,16 +1653,15 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     case DocPool.open(path, kind: kind) do
       {:ok, doc_id} ->
-        previous = socket.assigns[:pool_document_id]
-        if previous && previous != doc_id, do: DocPool.clear_active(previous)
-        :ok = DocPool.set_active(doc_id)
-
-        # Mark the doc `:browser`-backed and record THIS LiveView as the owner so
-        # the agent's doc.* edits route to the WASM model the user is viewing
-        # (design §6.2) instead of a divergent server NIF copy. attach_browser is
-        # only meaningful for a connected viewer (the hook lives in the browser);
-        # on the dead static render we leave it `:server`-backed.
-        if connected?(socket), do: DocPool.attach_browser(doc_id, self())
+        # Register THIS LiveView as the human viewer of the doc in the workspace
+        # Session (the real home of `viewers` since Phase 3) so the agent's doc.*
+        # edits route to the WASM model the user is viewing (design §6.2) instead
+        # of a divergent server NIF copy. attach_viewer is only meaningful for a
+        # connected viewer (the hook lives in the browser); on the dead static
+        # render we leave the doc `:server`-backed. There is NO global active doc
+        # anymore — the agent's active doc is its own `pool_document_id`, applied
+        # live via `maybe_restart_local_agent_for_document`.
+        if connected?(socket), do: attach_session_viewer(socket, doc_id)
 
         socket
         |> assign(:pool_document_id, doc_id)
@@ -1687,10 +1686,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     case DocPool.open(path, kind: kind) do
       {:ok, doc_id} ->
-        previous = socket.assigns[:pool_document_id]
-        if previous && previous != doc_id, do: DocPool.clear_active(previous)
-        :ok = DocPool.set_active(doc_id)
-
+        # Office docs have no browser-WASM authority arm (display is the client
+        # office WASM; agent edits go to the server libreofficex NIF), so we do
+        # NOT register a viewer — the agent's doc.* edits route straight to
+        # Ecrits.Doc.Office (now governed by Office.Instance). No global active.
         socket
         |> assign(:pool_document_id, doc_id)
         |> assign(:browser_revision, 0)
@@ -1703,21 +1702,44 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp register_pool_document(socket, %Document{}), do: clear_pool_document(socket)
 
-  # Drop the active-document marker for the doc this LiveView registered, AND
-  # relinquish this viewer's `:browser` authority over it. We leave the Editor in
-  # the Pool (other sessions may share it); we only give up the "active" claim
-  # `doc.context` surfaces and the browser-routing claim. Without the detach a
-  # closed/navigated-away doc would stay `:browser`-backed by this (now stale)
-  # viewer, so the agent's reads/edits for THAT doc would route to the browser
-  # and be redirected to whatever is currently open — the multi-doc bug.
+  # Register this connected LiveView as the Session viewer for `doc_id`, keyed by
+  # the workspace path (the Session is the home of `viewers`). Best-effort: a
+  # missing/erroring Session must never break the viewer render.
+  defp attach_session_viewer(socket, doc_id) do
+    case socket.assigns[:workspace_path] do
+      path when is_binary(path) and path != "" ->
+        _ = WorkspaceSession.attach_viewer(path, doc_id, self())
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  # Relinquish this viewer's browser authority over the doc it registered. We
+  # leave the Editor in the Pool (other sessions may share it); we only give up
+  # the viewer claim in the workspace Session. Without the detach a closed/
+  # navigated-away doc would stay `:browser`-backed by this (now stale) viewer, so
+  # the agent's reads/edits for THAT doc would route to the browser and be
+  # redirected to whatever is currently open — the multi-doc bug.
   defp clear_pool_document(%{assigns: %{pool_document_id: doc_id}} = socket)
        when is_binary(doc_id) do
-    _ = DocPool.clear_active(doc_id)
-    if connected?(socket), do: DocPool.detach_browser(doc_id, self())
+    if connected?(socket), do: detach_session_viewer(socket, doc_id)
     assign(socket, :pool_document_id, nil)
   end
 
   defp clear_pool_document(socket), do: assign(socket, :pool_document_id, nil)
+
+  defp detach_session_viewer(socket, doc_id) do
+    case socket.assigns[:workspace_path] do
+      path when is_binary(path) and path != "" ->
+        _ = WorkspaceSession.detach_viewer(path, doc_id, self())
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
 
   # --- browser-backed agent edit bridge (design §6.2) ------------------------
 

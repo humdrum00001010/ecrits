@@ -77,7 +77,11 @@ defmodule Ecrits.Local.AcpAgent.Session do
   — never a global `Pool.active`. `active_doc` is nil before any document is
   bound.
   """
-  @spec tool_context(pid()) :: %{active_doc: String.t() | nil, agent_id: String.t()}
+  @spec tool_context(pid()) :: %{
+          active_doc: String.t() | nil,
+          agent_id: String.t(),
+          workspace_root: String.t() | nil
+        }
   def tool_context(pid) when is_pid(pid), do: GenServer.call(pid, :tool_context)
 
   def send_turn(pid, ctx, input, opts \\ []),
@@ -197,7 +201,12 @@ defmodule Ecrits.Local.AcpAgent.Session do
   end
 
   def handle_call(:tool_context, _from, state) do
-    {:reply, %{active_doc: state.pool_document_id, agent_id: state.id}, state}
+    {:reply,
+     %{
+       active_doc: state.pool_document_id,
+       agent_id: state.id,
+       workspace_root: state.workspace_root
+     }, state}
   end
 
   def handle_call(:title, _from, state) do

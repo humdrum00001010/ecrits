@@ -23,12 +23,15 @@ defmodule Ecrits.SupervisionTest do
              Ecrits.Repo,
              Ecrits.Loader,
              Ecrits.RhwpSnapshot.Materializer,
+             Ecrits.Doc.Office.Instance,
              Ecrits.Doc.Pool,
              EcritsWeb.Endpoint,
              Ecrits.Local.Document.Registry,
              Ecrits.Local.Document.Supervisor,
              Ecrits.Local.AcpAgent.SessionRegistry,
-             Ecrits.Local.AcpAgent.SessionSupervisor
+             Ecrits.Local.AcpAgent.SessionSupervisor,
+             Ecrits.Workspace.SessionRegistry,
+             Ecrits.Workspace.SessionSupervisor
            ]
   end
 end

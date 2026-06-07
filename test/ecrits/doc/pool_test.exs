@@ -86,49 +86,12 @@ defmodule Ecrits.Doc.PoolTest do
     end
   end
 
-  describe "active document tracking (the viewed doc)" do
-    test "set_active/2 marks a pooled doc active; active/1 reads it back", %{pool: pool} do
-      assert Pool.active(pool) == nil
-      {:ok, doc_id} = Pool.open(pool, "a.hwp", kind: :hwp, open_opts: [__text__: "x"])
-      assert :ok = Pool.set_active(pool, doc_id)
-      assert Pool.active(pool) == doc_id
-    end
-
-    test "set_active/2 rejects an unknown document", %{pool: pool} do
-      assert {:error, :not_found} = Pool.set_active(pool, "ghost")
-      assert Pool.active(pool) == nil
-    end
-
-    test "switching the active doc follows document selection", %{pool: pool} do
-      {:ok, a} = Pool.open(pool, "a.hwp", kind: :hwp, open_opts: [__text__: "x"])
-      {:ok, b} = Pool.open(pool, "b.hwp", kind: :hwp, open_opts: [__text__: "y"])
-
-      assert :ok = Pool.set_active(pool, a)
-      assert Pool.active(pool) == a
-      assert :ok = Pool.set_active(pool, b)
-      assert Pool.active(pool) == b
-    end
-
-    test "clear_active/2 only clears when it owns the active claim", %{pool: pool} do
-      {:ok, a} = Pool.open(pool, "a.hwp", kind: :hwp, open_opts: [__text__: "x"])
-      {:ok, b} = Pool.open(pool, "b.hwp", kind: :hwp, open_opts: [__text__: "y"])
-
-      :ok = Pool.set_active(pool, b)
-      # clearing a non-active doc is a no-op
-      assert :ok = Pool.clear_active(pool, a)
-      assert Pool.active(pool) == b
-      # clearing the active doc relinquishes it
-      assert :ok = Pool.clear_active(pool, b)
-      assert Pool.active(pool) == nil
-    end
-
-    test "closing the active document clears the active marker", %{pool: pool} do
-      {:ok, doc_id} = Pool.open(pool, "a.hwp", kind: :hwp, open_opts: [__text__: "x"])
-      :ok = Pool.set_active(pool, doc_id)
-      assert :ok = Pool.close(pool, doc_id)
-      assert Pool.active(pool) == nil
-    end
-  end
+  # NOTE (Phase 3): the global "active document" concept was DELETED from the
+  # Pool — each agent's active doc now lives in its own AgentLive state, and the
+  # per-doc viewer/ownership maps moved to `Ecrits.Workspace.Session`. The Pool is
+  # now a pure server-side doc-runtime registry, so its old `set_active/active/
+  # clear_active` tests were removed (see `workspace/session_test.exs` for the new
+  # homes).
 
   describe "default-name convenience API (design spec: Pool.open(path))" do
     setup do

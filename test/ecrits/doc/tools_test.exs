@@ -4,15 +4,24 @@ defmodule Ecrits.Doc.ToolsTest do
   alias Ecrits.Doc.Pool
   alias Ecrits.Doc.Tools
   alias Ecrits.Test.FakeEhwpRuntime
+  alias Ecrits.Workspace.Session
 
   setup do
     prev = Application.get_env(:ehwp, :runtime)
     Application.put_env(:ehwp, :runtime, FakeEhwpRuntime)
 
     {:ok, pool} = start_supervised({Pool, name: nil})
+    # A unique per-test workspace path keys the `Workspace.Session` that holds
+    # per-agent ownership (invariant 2) since Phase 3. Started lazily by the
+    # ownership calls; killed on exit.
+    path = Path.join(System.tmp_dir!(), "ws_tools_#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> restore(:ehwp, :runtime, prev) end)
-    {:ok, pool: pool}
+    on_exit(fn ->
+      if pid = Session.whereis(path), do: Process.exit(pid, :kill)
+      restore(:ehwp, :runtime, prev)
+    end)
+
+    {:ok, pool: pool, path: path}
   end
 
   defp ctx(pool), do: %{pool: pool}
@@ -82,8 +91,10 @@ defmodule Ecrits.Doc.ToolsTest do
       # The clone is a BYTE-IDENTICAL copy (inherits all of the template's bytes,
       # hence all of its formatting), written even into a not-yet-existing dir.
       assert File.read!(clone) == bytes
-      # And it is opened + marked active as an editable doc whose save target is `clone`.
-      assert {:ok, %{"active_document" => ^doc_id}} = Tools.call(ctx(pool), "doc.context", %{})
+      # And it is opened as an editable doc whose save target is `clone` (it shows
+      # up in the open-documents list — there is no global active to set anymore).
+      assert {:ok, %{"documents" => docs}} = Tools.call(ctx(pool), "doc.context", %{})
+      assert Enum.any?(docs, &(&1["document"] == doc_id))
 
       assert {:ok, info} = Pool.info(pool, doc_id)
       assert info.path == clone
@@ -129,8 +140,8 @@ defmodule Ecrits.Doc.ToolsTest do
 
       case result do
         {:ok, %{"document" => doc_id}} ->
-          assert {:ok, %{"active_document" => ^doc_id}} =
-                   Tools.call(ctx(pool), "doc.context", %{})
+          assert {:ok, %{"documents" => docs}} = Tools.call(ctx(pool), "doc.context", %{})
+          assert Enum.any?(docs, &(&1["document"] == doc_id))
 
         {:error, %{"error" => err}} ->
           # Reached the blank engine-create path (no clone/template error).
@@ -351,7 +362,7 @@ defmodule Ecrits.Doc.ToolsTest do
   end
 
   describe "doc.context — active document + cursor" do
-    test "reports the available active-doc state (cursor wiring is a server-side TODO)", %{
+    test "reports the calling context's active doc (per-caller, not a global active)", %{
       pool: pool
     } do
       {:ok, %{"document" => doc_id}} =
@@ -360,28 +371,33 @@ defmodule Ecrits.Doc.ToolsTest do
           "open_opts" => [__text__: "제1조 본문"]
         })
 
-      assert {:ok, ctx_result} = Tools.call(ctx(pool), "doc.context", %{})
+      # The active doc is per-CALLER (`ctx.active_doc`) since Phase 3 — there is no
+      # global active. A ctx that names its active doc surfaces it; the cursor
+      # wiring is still a server-side TODO.
+      ctx = %{pool: pool, agent_id: "fg", active_doc: doc_id}
+      assert {:ok, ctx_result} = Tools.call(ctx, "doc.context", %{})
       assert ctx_result["active_document"] == doc_id
       assert ctx_result["cursor"] == nil
       assert ctx_result["selection"] == nil
       assert ctx_result["cursor_reporting"] == "todo:browser_wiring"
     end
 
-    test "with multiple docs open, the explicitly-set active doc wins", %{pool: pool} do
+    test "each caller sees its OWN active doc, independent of what is open", %{pool: pool} do
       {:ok, %{"document" => a}} =
         Tools.call(ctx(pool), "doc.open", %{"path" => "a.hwp", "open_opts" => [__text__: "x"]})
 
       {:ok, %{"document" => b}} =
         Tools.call(ctx(pool), "doc.open", %{"path" => "b.hwp", "open_opts" => [__text__: "y"]})
 
-      # No active set yet + >1 doc => no inference.
+      # A bare ctx names no active doc → none reported (no global active to infer).
       assert {:ok, %{"active_document" => nil}} = Tools.call(ctx(pool), "doc.context", %{})
 
-      :ok = Ecrits.Doc.Pool.set_active(pool, b)
-      assert {:ok, %{"active_document" => ^b}} = Tools.call(ctx(pool), "doc.context", %{})
+      # Each caller's own `active_doc` wins.
+      assert {:ok, %{"active_document" => ^b}} =
+               Tools.call(%{pool: pool, agent_id: "x", active_doc: b}, "doc.context", %{})
 
-      :ok = Ecrits.Doc.Pool.set_active(pool, a)
-      assert {:ok, %{"active_document" => ^a}} = Tools.call(ctx(pool), "doc.context", %{})
+      assert {:ok, %{"active_document" => ^a}} =
+               Tools.call(%{pool: pool, agent_id: "y", active_doc: a}, "doc.context", %{})
     end
 
     test "context + get are exposed in the tool catalog as read tools" do
@@ -391,68 +407,73 @@ defmodule Ecrits.Doc.ToolsTest do
     end
   end
 
-  # Per-agent MCP isolation + the open/ownership invariants (Phase 2). An "agent
-  # context" is a ctx map carrying `:agent_id` (+ `:active_doc`); a bare
-  # `%{pool: pool}` keeps the legacy global-Pool behaviour the rest of the suite
-  # relies on.
-  describe "per-agent context (Phase 2 isolation + invariants)" do
-    defp agent_ctx(pool, agent_id, active_doc \\ nil),
-      do: %{pool: pool, agent_id: agent_id, active_doc: active_doc}
+  # Per-agent MCP isolation + the open/ownership invariants. An "agent context" is
+  # a ctx map carrying `:agent_id` + `:active_doc` + `:session_path` (the
+  # workspace `Session` that holds ownership since Phase 3); a bare `%{pool: pool}`
+  # keeps the legacy pool-only behaviour the rest of the suite relies on.
+  describe "per-agent context (isolation + invariants)" do
+    defp agent_ctx(pool, path, agent_id, active_doc \\ nil),
+      do: %{pool: pool, agent_id: agent_id, active_doc: active_doc, session_path: path}
 
-    test "doc.context returns THIS agent's active doc, not the global Pool.active", %{pool: pool} do
+    test "doc.context returns THIS agent's OWN active doc (there is no global active)", %{
+      pool: pool,
+      path: path
+    } do
       {:ok, %{"document" => a}} =
         Tools.call(ctx(pool), "doc.open", %{"path" => "a.hwp", "open_opts" => [__text__: "x"]})
 
       {:ok, %{"document" => b}} =
         Tools.call(ctx(pool), "doc.open", %{"path" => "b.hwp", "open_opts" => [__text__: "y"]})
 
-      # The GLOBAL active is `a`, but each agent sees only its OWN bound doc.
-      :ok = Pool.set_active(pool, a)
-
+      # Each agent sees ONLY its own bound doc — there is no global active to leak.
       assert {:ok, %{"active_document" => ^a}} =
-               Tools.call(agent_ctx(pool, "agent-1", a), "doc.context", %{})
+               Tools.call(agent_ctx(pool, path, "agent-1", a), "doc.context", %{})
 
       assert {:ok, %{"active_document" => ^b}} =
-               Tools.call(agent_ctx(pool, "agent-2", b), "doc.context", %{})
+               Tools.call(agent_ctx(pool, path, "agent-2", b), "doc.context", %{})
 
-      # An agent with no bound doc sees none (never the global active).
+      # An agent with no bound doc sees none.
       assert {:ok, %{"active_document" => nil}} =
-               Tools.call(agent_ctx(pool, "agent-3", nil), "doc.context", %{})
+               Tools.call(agent_ctx(pool, path, "agent-3", nil), "doc.context", %{})
     end
 
     test "doc.open of an ALREADY-OPEN doc FAILS with already_open + held_by (invariant 1)", %{
-      pool: pool
+      pool: pool,
+      path: path
     } do
       # agent-1 opens it (and so owns it).
       assert {:ok, %{"document" => doc_id}} =
-               Tools.call(agent_ctx(pool, "agent-1"), "doc.open", %{
+               Tools.call(agent_ctx(pool, path, "agent-1"), "doc.open", %{
                  "path" => "shared.hwp",
                  "open_opts" => [__text__: "제1조"]
                })
 
       # agent-1 re-opening the SAME doc fails (held by self).
       assert {:error, %{"error" => "already_open", "document" => ^doc_id, "held_by" => held}} =
-               Tools.call(agent_ctx(pool, "agent-1"), "doc.open", %{"path" => "shared.hwp"})
+               Tools.call(agent_ctx(pool, path, "agent-1"), "doc.open", %{"path" => "shared.hwp"})
 
       assert held["kind"] == "self"
 
       # agent-2 cannot grab it either — held_by names the other agent.
       assert {:error, %{"error" => "already_open", "document" => ^doc_id, "held_by" => held2}} =
-               Tools.call(agent_ctx(pool, "agent-2"), "doc.open", %{"path" => "shared.hwp"})
+               Tools.call(agent_ctx(pool, path, "agent-2"), "doc.open", %{"path" => "shared.hwp"})
 
       assert held2 == %{"kind" => "agent", "agent_id" => "agent-1"}
     end
 
-    test "doc.edit is :forbidden when another agent owns the doc (invariant 2)", %{pool: pool} do
+    test "doc.edit is :forbidden when another agent owns the doc (invariant 2)", %{
+      pool: pool,
+      path: path
+    } do
       {:ok, %{"document" => doc_id}} =
-        Tools.call(agent_ctx(pool, "owner"), "doc.open", %{
+        Tools.call(agent_ctx(pool, path, "owner"), "doc.open", %{
           "path" => "owned.hwp",
           "open_opts" => [__text__: "제2조 (계약기간) 본문"]
         })
 
       # The owner can edit.
       assert {:ok, %{"ok" => true}} =
-               Tools.call(agent_ctx(pool, "owner", doc_id), "doc.edit", %{
+               Tools.call(agent_ctx(pool, path, "owner", doc_id), "doc.edit", %{
                  "document" => doc_id,
                  "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "제3조"},
                  "base_revision" => 0
@@ -460,7 +481,7 @@ defmodule Ecrits.Doc.ToolsTest do
 
       # A different agent is fenced out.
       assert {:error, %{"error" => "forbidden", "document" => ^doc_id, "owned_by" => owned}} =
-               Tools.call(agent_ctx(pool, "intruder", doc_id), "doc.edit", %{
+               Tools.call(agent_ctx(pool, path, "intruder", doc_id), "doc.edit", %{
                  "document" => doc_id,
                  "op" => %{"op" => "replace_text", "query" => "제3조", "replacement" => "X"},
                  "base_revision" => 1
@@ -469,26 +490,27 @@ defmodule Ecrits.Doc.ToolsTest do
       assert owned == %{"agent_id" => "owner"}
     end
 
-    test "doc.edit of an UNOWNED (human-opened) doc lazily claims it and succeeds", %{pool: pool} do
+    test "doc.edit of an UNOWNED (human-opened) doc lazily claims it and succeeds", %{
+      pool: pool,
+      path: path
+    } do
       # Opened WITHOUT an agent (the LiveView/human path) — no owner recorded.
       {:ok, doc_id} = Pool.open(pool, "viewed.hwp", kind: :hwp, open_opts: [__text__: "제1조 본문"])
-      assert Pool.owner(pool, doc_id) == nil
+      assert Session.owner(path, doc_id) == nil
 
       # The single foreground agent edits it (the critical path) — allowed, and it
       # claims ownership lazily.
       assert {:ok, %{"ok" => true}} =
-               Tools.call(agent_ctx(pool, "fg", doc_id), "doc.edit", %{
+               Tools.call(agent_ctx(pool, path, "fg", doc_id), "doc.edit", %{
                  "document" => doc_id,
                  "op" => %{"op" => "replace_text", "query" => "제1조", "replacement" => "제1조 (목적)"},
                  "base_revision" => 0
                })
 
-      assert Pool.owner(pool, doc_id) == "fg"
+      assert Session.owner(path, doc_id) == "fg"
     end
 
-    test "a bare pool-only context still uses the global Pool.active + legacy open reuse", %{
-      pool: pool
-    } do
+    test "a bare pool-only context has no ownership fence + legacy open reuse", %{pool: pool} do
       {:ok, %{"document" => doc_id}} =
         Tools.call(ctx(pool), "doc.open", %{"path" => "legacy.hwp", "open_opts" => [__text__: "x"]})
 
@@ -496,8 +518,8 @@ defmodule Ecrits.Doc.ToolsTest do
       assert {:ok, %{"document" => ^doc_id}} =
                Tools.call(ctx(pool), "doc.open", %{"path" => "legacy.hwp"})
 
-      :ok = Pool.set_active(pool, doc_id)
-      assert {:ok, %{"active_document" => ^doc_id}} = Tools.call(ctx(pool), "doc.context", %{})
+      # A bare ctx sets no active doc, so doc.context reports none (no global active).
+      assert {:ok, %{"active_document" => nil}} = Tools.call(ctx(pool), "doc.context", %{})
     end
   end
 

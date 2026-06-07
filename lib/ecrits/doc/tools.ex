@@ -56,6 +56,7 @@ defmodule Ecrits.Doc.Tools do
 
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
+  alias Ecrits.Workspace.Session
 
   @namespace "doc"
 
@@ -683,11 +684,10 @@ defmodule Ecrits.Doc.Tools do
   #     it (this agent / another agent / a human viewer), so the agent references
   #     the existing id instead of grabbing a second handle (invariant 1).
   defp open_preflight(%{agent_id: agent_id} = ctx, path, kind) do
-    pool = pool(ctx)
     doc_id = Pool.document_id_for(path, kind)
 
-    if document_open?(pool, doc_id) do
-      {:error, already_open_json(pool, doc_id, agent_id)}
+    if document_open?(ctx, doc_id) do
+      {:error, already_open_json(ctx, doc_id, agent_id)}
     else
       :ok
     end
@@ -709,10 +709,10 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
-  # A doc is "open" iff the Pool has a live model for it (route resolves to a
-  # server editor or an alive browser viewer).
-  defp document_open?(pool, doc_id) do
-    case Pool.route(pool, doc_id) do
+  # A doc is "open" iff there is a live model for it (route resolves to a server
+  # editor or an alive browser viewer).
+  defp document_open?(ctx, doc_id) do
+    case route(ctx, doc_id) do
       {:error, :not_found} -> false
       _ -> true
     end
@@ -721,16 +721,16 @@ defmodule Ecrits.Doc.Tools do
   # The `already_open` structured error: the existing document id + who holds it.
   # held_by is `self` (this agent already owns it), `{:agent, id}` (another
   # agent), or `:viewer` (a human-viewed/browser-backed doc with no agent owner).
-  defp already_open_json(pool, doc_id, agent_id) do
+  defp already_open_json(ctx, doc_id, agent_id) do
     %{
       "error" => "already_open",
       "document" => doc_id,
-      "held_by" => held_by(pool, doc_id, agent_id)
+      "held_by" => held_by(ctx, doc_id, agent_id)
     }
   end
 
-  defp held_by(pool, doc_id, agent_id) do
-    case Pool.owner(pool, doc_id) do
+  defp held_by(ctx, doc_id, agent_id) do
+    case owner(ctx, doc_id) do
       ^agent_id ->
         %{"kind" => "self", "agent_id" => agent_id}
 
@@ -738,7 +738,7 @@ defmodule Ecrits.Doc.Tools do
         %{"kind" => "agent", "agent_id" => owner}
 
       nil ->
-        case Pool.route(pool, doc_id) do
+        case route(ctx, doc_id) do
           {:browser, _lv} -> %{"kind" => "viewer"}
           _ -> %{"kind" => "unowned"}
         end
@@ -746,9 +746,30 @@ defmodule Ecrits.Doc.Tools do
   end
 
   defp maybe_claim_owner(%{agent_id: agent_id} = ctx, doc_id) when is_binary(agent_id),
-    do: Pool.claim_owner(pool(ctx), doc_id, agent_id)
+    do: claim_owner(ctx, doc_id, agent_id)
 
   defp maybe_claim_owner(_ctx, _doc_id), do: :ok
+
+  # Per-doc ownership (invariant 2) lives in the per-workspace
+  # `Ecrits.Workspace.Session` (the real home of `owners` since Phase 3). It is
+  # consulted ONLY when the ctx carries a `:session_path` — the production agent
+  # path always does. A bare pool-only context (legacy mount / a direct
+  # `Tools.call(%{pool: …})` in a test) has no Session, so ownership is not
+  # enforced there (it never was isolated): `owner` reports none and `claim`
+  # always succeeds, preserving the legacy permissive behaviour.
+  defp owner(ctx, doc_id) do
+    case Map.get(ctx, :session_path) do
+      path when is_binary(path) and path != "" -> Session.owner(path, doc_id)
+      _ -> nil
+    end
+  end
+
+  defp claim_owner(ctx, doc_id, agent_id) do
+    case Map.get(ctx, :session_path) do
+      path when is_binary(path) and path != "" -> Session.claim_owner(path, doc_id, agent_id)
+      _ -> :ok
+    end
+  end
 
   # --- doc.edit ownership enforcement (invariant 2) ------------------------
 
@@ -758,7 +779,7 @@ defmodule Ecrits.Doc.Tools do
   # AND lazily claims an unowned doc for the editing agent. A bare pool-only
   # context (no agent_id) skips ownership entirely.
   defp enforce_ownership(%{agent_id: agent_id} = ctx, document) when is_binary(agent_id) do
-    case Pool.claim_owner(pool(ctx), document, agent_id) do
+    case claim_owner(ctx, document, agent_id) do
       :ok ->
         :ok
 
@@ -776,7 +797,6 @@ defmodule Ecrits.Doc.Tools do
   defp create_blank(ctx, path, kind) do
     case Pool.create(pool(ctx), path, kind: kind) do
       {:ok, doc_id} ->
-        _ = Pool.set_active(pool(ctx), doc_id)
         _ = maybe_claim_owner(ctx, doc_id)
         {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind)}}
 
@@ -798,7 +818,6 @@ defmodule Ecrits.Doc.Tools do
 
       case Pool.open(pool(ctx), path, kind: kind) do
         {:ok, doc_id} ->
-          _ = Pool.set_active(pool(ctx), doc_id)
           _ = maybe_claim_owner(ctx, doc_id)
           {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind), "cloned_from" => source}}
 
@@ -971,11 +990,32 @@ defmodule Ecrits.Doc.Tools do
   # editor even for browser-backed docs — the structure is identical on open).
   defp route_doc(ctx, args, opts) do
     with {:ok, document} <- require_string(args, "document") do
-      case Pool.route(pool(ctx), document) do
+      case route(ctx, document) do
         {:browser, lv} -> Keyword.fetch!(opts, :browser).(lv)
         {:server, editor} -> Keyword.fetch!(opts, :server).(editor)
         {:error, :not_found} -> {:error, error_json(:not_found)}
       end
+    end
+  end
+
+  # The wasm/NIF routing decision (design invariant 4). The per-workspace
+  # `Ecrits.Workspace.Session` owns the `viewers` map and decides browser-vs-not:
+  # a doc with a live human viewer routes `{:browser, lv}` (its WASM model). The
+  # server-editor side is resolved from the ctx's OWN Pool (`pool(ctx)`), so the
+  # decision (Session) and the Editor registry (this caller's pool) compose
+  # cleanly. A bare pool-only context (no `:session_path`) has no viewers, so it
+  # routes straight to its Pool's server Editor.
+  defp route(ctx, document) do
+    case session_viewer(ctx, document) do
+      lv when is_pid(lv) -> {:browser, lv}
+      nil -> Pool.route(pool(ctx), document)
+    end
+  end
+
+  defp session_viewer(ctx, document) do
+    case Map.get(ctx, :session_path) do
+      path when is_binary(path) and path != "" -> Session.viewer(path, document)
+      _ -> nil
     end
   end
 
@@ -1170,7 +1210,7 @@ defmodule Ecrits.Doc.Tools do
 
   defp with_editor(ctx, args, fun) do
     with {:ok, document} <- require_string(args, "document") do
-      case Pool.route(pool(ctx), document) do
+      case route(ctx, document) do
         {:server, editor} ->
           fun.(editor)
 
@@ -1321,19 +1361,15 @@ defmodule Ecrits.Doc.Tools do
     }
   end
 
-  # Active/focused document + cursor/selection. The active document is the one
-  # the user is viewing in the workspace: `WorkspaceLive` registers the open
-  # document in the Pool and marks it active via `Pool.set_active/2` (and clears
-  # it via `Pool.clear_active/2` when the doc is closed or a non-pooled doc like
-  # Markdown is opened), so we read it back here with `Pool.active/1`.
+  # Active/focused document + cursor/selection. The active document is per-CALLER
+  # (design invariant 3 / Phase 3): the agent's OWN active doc, read from the
+  # AgentLive (`ctx.active_doc`) — there is no global active anymore. `WorkspaceLive`
+  # follows the user's open doc onto the foreground agent live (`update_options`),
+  # so `doc.context` returns the doc this agent is bound to.
   #
-  # We resolve ONLY the explicitly-set active doc — no "first browser-backed" or
-  # "sole doc" guessing. Those heuristics resurrected stale Pool entries: after
-  # closing the doc (or opening a Markdown file, which has no Pool backend) the
-  # active marker is nil but old hwp entries linger in the pool, so a guess would
-  # wrongly report an hwp as "currently open". When nothing is active,
-  # `active_document` is nil — the agent must create/open a doc rather than edit a
-  # phantom.
+  # We resolve ONLY the explicitly-set active doc — no "first" or "sole doc"
+  # guessing. When nothing is active, `active_document` is nil — the agent must
+  # create/open a doc rather than edit a phantom.
   #
   # The `cursor`/`selection` refs still require browser->server caret reporting
   # (editors, owned separately) and remain null for now.
@@ -1352,13 +1388,12 @@ defmodule Ecrits.Doc.Tools do
     }
   end
 
-  # The active doc for THIS call: in an agent context (the ctx carries an
-  # `:agent_id`, design invariant 3) it is the agent's OWN active doc
-  # (`ctx.active_doc`), so two agents never see each other's. In a bare
-  # pool-only context (legacy bare MCP mount, or a direct `Tools.call(%{pool:
-  # …}, …)` from a test) it falls back to the global `Pool.active`.
-  defp active_doc_id(%{agent_id: _} = ctx, _pool), do: Map.get(ctx, :active_doc)
-  defp active_doc_id(_ctx, pool), do: Pool.active(pool)
+  # The active doc for THIS call is ALWAYS the per-caller `ctx.active_doc`: in an
+  # agent context (design invariant 3) that is the agent's OWN active doc, read
+  # from the AgentLive, so two agents never see each other's. The global
+  # `Pool.active` is GONE (design Phase 3): a bare pool-only context (legacy mount
+  # / test) that sets no `:active_doc` simply reports no active document.
+  defp active_doc_id(ctx, _pool), do: Map.get(ctx, :active_doc)
 
   defp error_json({:not_supported, reason}),
     do: %{"not_supported" => true, "reason" => to_string(reason)}

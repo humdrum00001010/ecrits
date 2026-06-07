@@ -2,24 +2,31 @@ defmodule Ecrits.Doc.Pool do
   @moduledoc """
   Multi-document registry (design §4.3).
 
-  The Pool maps `document_id => %{kind, backing, editor_pid, path, revision}`
-  and starts exactly one `Ecrits.Doc.Editor` per document. Documents run in
-  parallel (separate Editors), while a single document's ops are serial (its
-  Editor's mailbox).
+  The Pool maps `document_id => %{kind, editor_pid, path, revision}` and starts
+  exactly one `Ecrits.Doc.Editor` per document. Documents run in parallel
+  (separate Editors), while a single document's ops are serial (its Editor's
+  mailbox).
 
     * `open/3`     — load a document into the pool (need not be the one the
       session is viewing).
     * `list/1`     — `[%{id, kind, path, revision, backing}]`.
     * `with_doc/3` — run a function against a document's Editor (serial).
-    * `route/2`    — where the authoritative model lives: `{:server, editor}`
-      for headless/Office docs, `{:browser, lv_pid}` for a viewed HWP doc.
+    * `route/2`    — where the authoritative SERVER model lives: `{:server,
+      editor}` for an open doc, `{:error, :not_found}` otherwise.
     * `close/2`    — drop a document.
 
-  `backing` is `:server` for the headless HWP/Office case (NIF authority). The
-  `:browser` backing (viewed HWP → WASM authority, agent ops pushed to the
-  LiveView) is represented but not exercised here: browser registration is the
-  live LiveView wiring left for follow-up. `route/2` returns `{:browser, pid}`
-  once a viewer registers via `attach_browser/3`.
+  Since Phase 3 the Pool is a **server-side doc-runtime registry ONLY**. Three
+  cross-cutting concerns that the design assigns to the *edges* moved out of it:
+
+    * the **wasm/NIF routing decision** + the human-viewer registry (`viewers`)
+      → `Ecrits.Workspace.Session` (it calls back to `route/2` for the server
+      editor when no viewer is attached);
+    * **per-agent doc ownership** (`owners`, invariant 2) → `Ecrits.Workspace.Session`;
+    * the **global active document** — DELETED; each agent's active doc is its
+      own AgentLive state (`pool_document_id`).
+
+  `backing` in `list/1`/`info/2` is therefore always `:server` here (the Pool
+  never holds the browser arm); the Session overlays the browser view on top.
   """
 
   use GenServer
@@ -113,88 +120,24 @@ defmodule Ecrits.Doc.Pool do
     end
   end
 
-  @doc "Authoritative location of a document's model."
+  @doc """
+  Authoritative location of a document's SERVER model: `{:server, editor}` for an
+  open doc, `{:error, :not_found}` otherwise.
+
+  Since Phase 3 the Pool is a server-side doc-runtime registry ONLY — it no
+  longer knows about human viewers / the browser WASM arm. The wasm/NIF routing
+  decision (`{:browser, lv}` vs `{:server, editor}`) is made by
+  `Ecrits.Workspace.Session`, which holds the `viewers` map and falls back to
+  THIS `route/2` for the server editor.
+  """
   @spec route(GenServer.server(), document_id()) ::
-          {:server, Editor.t()} | {:browser, pid()} | {:error, :not_found}
+          {:server, Editor.t()} | {:error, :not_found}
   def route(pool \\ @default_name, document_id),
     do: GenServer.call(pool, {:route, document_id})
-
-  @doc """
-  Register a viewing LiveView as the browser authority for `document_id`.
-
-  A viewer is the browser authority for AT MOST ONE document — the one it is
-  currently rendering in its WASM model. Attaching `lv_pid` to a document
-  therefore *detaches* it from any OTHER document it was previously the browser
-  authority for, so navigating between documents in one viewer never leaves a
-  stale `:browser` backing behind. (The viewer's browser bridge always targets
-  its single open doc, so a stale attachment would otherwise route an unrelated
-  doc's edits to the wrong, currently-viewed document — design §6.2.)
-  """
-  @spec attach_browser(GenServer.server(), document_id(), pid()) :: :ok | {:error, :not_found}
-  def attach_browser(pool \\ @default_name, document_id, lv_pid) when is_pid(lv_pid),
-    do: GenServer.call(pool, {:attach_browser, document_id, lv_pid})
-
-  @doc """
-  Relinquish `lv_pid`'s browser authority over `document_id` (if it holds it).
-
-  The document falls back to its server NIF editor. Used when a viewer closes a
-  document or navigates to a non-pooled file. A no-op when `lv_pid` is not the
-  current browser owner of `document_id`.
-  """
-  @spec detach_browser(GenServer.server(), document_id(), pid()) :: :ok
-  def detach_browser(pool \\ @default_name, document_id, lv_pid) when is_pid(lv_pid),
-    do: GenServer.call(pool, {:detach_browser, document_id, lv_pid})
 
   @spec info(GenServer.server(), document_id()) :: {:ok, map()} | {:error, :not_found}
   def info(pool \\ @default_name, document_id),
     do: GenServer.call(pool, {:info, document_id})
-
-  @doc """
-  Mark `document_id` as the active/focused document (the one the user is
-  viewing). `doc.context` surfaces this as `active_document`. Returns
-  `{:error, :not_found}` if the document is not in the pool.
-  """
-  @spec set_active(GenServer.server(), document_id()) :: :ok | {:error, :not_found}
-  def set_active(pool \\ @default_name, document_id),
-    do: GenServer.call(pool, {:set_active, document_id})
-
-  @doc "Clear the active document if (and only if) it is `document_id`."
-  @spec clear_active(GenServer.server(), document_id()) :: :ok
-  def clear_active(pool \\ @default_name, document_id),
-    do: GenServer.call(pool, {:clear_active, document_id})
-
-  @doc "The active document id, or nil when none is set / it is gone."
-  @spec active(GenServer.server()) :: document_id() | nil
-  def active(pool \\ @default_name), do: GenServer.call(pool, :active)
-
-  @doc """
-  Per-agent document ownership (design invariant 2 — "one agent per doc").
-
-  Records `agent_id` as the unique owner of `document_id`. Idempotent for the
-  current owner (re-claiming a doc you already own succeeds). Returns
-  `{:error, {:owned, other_agent_id}}` when a DIFFERENT agent already owns it,
-  so `doc.edit` can refuse and `doc.open` can report `held_by`.
-
-  Phase 2 keeps the `owners` map in the (single, global) Pool — the runtime both
-  agents' MCP calls reach — so ownership is globally unique per doc id. A later
-  phase moves this to `Ecrits.Workspace.Session`.
-  """
-  @spec claim_owner(GenServer.server(), document_id(), String.t()) ::
-          :ok | {:error, {:owned, String.t()}}
-  def claim_owner(pool \\ @default_name, document_id, agent_id)
-      when is_binary(document_id) and is_binary(agent_id),
-      do: GenServer.call(pool, {:claim_owner, document_id, agent_id})
-
-  @doc "The agent id that owns `document_id`, or nil when unowned."
-  @spec owner(GenServer.server(), document_id()) :: String.t() | nil
-  def owner(pool \\ @default_name, document_id) when is_binary(document_id),
-    do: GenServer.call(pool, {:owner, document_id})
-
-  @doc "Release `agent_id`'s ownership of `document_id` (no-op if it isn't the owner)."
-  @spec release_owner(GenServer.server(), document_id(), String.t()) :: :ok
-  def release_owner(pool \\ @default_name, document_id, agent_id)
-      when is_binary(document_id) and is_binary(agent_id),
-      do: GenServer.call(pool, {:release_owner, document_id, agent_id})
 
   @spec close(GenServer.server(), document_id()) :: :ok | {:error, :not_found}
   def close(pool \\ @default_name, document_id),
@@ -205,9 +148,7 @@ defmodule Ecrits.Doc.Pool do
   @impl true
   def init(_opts) do
     {:ok, sup} = DynamicSupervisor.start_link(strategy: :one_for_one)
-    # `owners`: %{document_id => agent_id} — per-agent doc ownership (design
-    # invariant 2). Populated by `claim_owner/3`, cleared on close/owner-release.
-    {:ok, %{sup: sup, docs: %{}, by_path: %{}, active: nil, owners: %{}}}
+    {:ok, %{sup: sup, docs: %{}, by_path: %{}}}
   end
 
   @impl true
@@ -278,50 +219,11 @@ defmodule Ecrits.Doc.Pool do
   def handle_call({:route, document_id}, _from, st) do
     reply =
       case Map.get(st.docs, document_id) do
-        # A doc routes to the browser WASM ONLY while its viewer is alive. If the
-        # LiveView that claimed it has died (an orphaned attachment — pre-fix
-        # legacy, or a navigate/close race before {:DOWN} is processed), fall back
-        # to the headless server editor so the doc stays reachable instead of
-        # routing to a dead pid.
-        %{browser: lv} = doc when is_pid(lv) ->
-          cond do
-            Process.alive?(lv) -> {:browser, lv}
-            is_pid(doc[:editor]) -> {:server, doc[:editor]}
-            true -> {:error, :not_found}
-          end
-
         %{editor: editor} when is_pid(editor) -> {:server, editor}
         _ -> {:error, :not_found}
       end
 
     {:reply, reply, st}
-  end
-
-  def handle_call({:attach_browser, document_id, lv_pid}, _from, st) do
-    case Map.get(st.docs, document_id) do
-      nil ->
-        {:reply, {:error, :not_found}, st}
-
-      _doc ->
-        Process.monitor(lv_pid)
-        # A viewer authoritatively renders ONE document. Drop any other doc this
-        # same lv_pid was browser-backing (a previously-viewed doc it navigated
-        # away from) before claiming this one, so exactly the currently-viewed
-        # doc routes `:browser` and everything else routes to its server editor.
-        docs = detach_pid_everywhere(st.docs, lv_pid)
-        docs = put_in(docs[document_id].browser, lv_pid)
-        {:reply, :ok, %{st | docs: docs}}
-    end
-  end
-
-  def handle_call({:detach_browser, document_id, lv_pid}, _from, st) do
-    docs =
-      case Map.get(st.docs, document_id) do
-        %{browser: ^lv_pid} = doc -> Map.put(st.docs, document_id, Map.put(doc, :browser, nil))
-        _ -> st.docs
-      end
-
-    {:reply, :ok, %{st | docs: docs}}
   end
 
   def handle_call({:info, document_id}, _from, st) do
@@ -344,50 +246,6 @@ defmodule Ecrits.Doc.Pool do
     {:reply, reply, st}
   end
 
-  def handle_call({:set_active, document_id}, _from, st) do
-    if Map.has_key?(st.docs, document_id) do
-      {:reply, :ok, %{st | active: document_id}}
-    else
-      {:reply, {:error, :not_found}, st}
-    end
-  end
-
-  def handle_call({:clear_active, document_id}, _from, st) do
-    active = if st.active == document_id, do: nil, else: st.active
-    {:reply, :ok, %{st | active: active}}
-  end
-
-  def handle_call(:active, _from, st) do
-    {:reply, st.active, st}
-  end
-
-  def handle_call({:claim_owner, document_id, agent_id}, _from, st) do
-    case Map.get(st.owners, document_id) do
-      nil ->
-        {:reply, :ok, %{st | owners: Map.put(st.owners, document_id, agent_id)}}
-
-      ^agent_id ->
-        {:reply, :ok, st}
-
-      other_agent ->
-        {:reply, {:error, {:owned, other_agent}}, st}
-    end
-  end
-
-  def handle_call({:owner, document_id}, _from, st) do
-    {:reply, Map.get(st.owners, document_id), st}
-  end
-
-  def handle_call({:release_owner, document_id, agent_id}, _from, st) do
-    owners =
-      case Map.get(st.owners, document_id) do
-        ^agent_id -> Map.delete(st.owners, document_id)
-        _ -> st.owners
-      end
-
-    {:reply, :ok, %{st | owners: owners}}
-  end
-
   def handle_call({:close, document_id}, _from, st) do
     case Map.pop(st.docs, document_id) do
       {nil, _docs} ->
@@ -399,46 +257,22 @@ defmodule Ecrits.Doc.Pool do
         end
 
         by_path = Map.delete(st.by_path, doc.path)
-        active = if st.active == document_id, do: nil, else: st.active
-        owners = Map.delete(st.owners, document_id)
-        {:reply, :ok, %{st | docs: docs, by_path: by_path, active: active, owners: owners}}
+        {:reply, :ok, %{st | docs: docs, by_path: by_path}}
     end
   end
 
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, _reason}, st) do
-    # an editor or an attached browser LV went down
+    # an editor went down — drop its doc from the registry
     docs =
       st.docs
-      |> Enum.reduce(%{}, fn {id, doc}, acc ->
-        cond do
-          doc.editor == pid -> acc
-          true -> Map.put(acc, id, doc)
-        end
-      end)
-      # A crashed viewer relinquishes its browser claim on every doc it backed
-      # (set to nil, keeping the uniform doc shape) so those docs fall back to
-      # their server editors.
-      |> detach_pid_everywhere(pid)
+      |> Enum.reject(fn {_id, doc} -> doc.editor == pid end)
+      |> Map.new()
 
-    active = if st.active && Map.has_key?(docs, st.active), do: st.active, else: nil
-    # A doc whose editor died is gone from `docs`; drop any ownership of it so a
-    # stale owner can never block re-opening it.
-    owners = Map.take(st.owners, Map.keys(docs))
-    {:noreply, %{st | docs: docs, active: active, owners: owners}}
+    {:noreply, %{st | docs: docs}}
   end
 
   # --- helpers -------------------------------------------------------------
-
-  # Clear `lv_pid`'s `:browser` claim from EVERY document it currently backs.
-  # Keeps the `:browser` key (set to nil) so the doc shape stays uniform and
-  # `route/2` falls back to the server editor for it.
-  defp detach_pid_everywhere(docs, lv_pid) do
-    Map.new(docs, fn
-      {id, %{browser: ^lv_pid} = doc} -> {id, %{doc | browser: nil}}
-      {id, doc} -> {id, doc}
-    end)
-  end
 
   defp do_open(st, document_id, path, kind, backend, opts) do
     editor_opts = [
@@ -454,7 +288,7 @@ defmodule Ecrits.Doc.Pool do
       {:ok, editor} ->
         Process.monitor(editor)
 
-        doc = %{kind: kind, backend: backend, path: path, editor: editor, browser: nil}
+        doc = %{kind: kind, backend: backend, path: path, editor: editor}
 
         st = %{
           st
@@ -469,11 +303,11 @@ defmodule Ecrits.Doc.Pool do
     end
   end
 
-  # A pooled doc qualifies for turn-end auto-save iff it is server-backed (no
-  # attached browser viewer), its Editor is alive and dirty, and it has a real
-  # save-target path. Anything else yields [] so the turn handler skips it.
-  defp dirty_entry(id, %{browser: lv}) when is_pid(lv), do: dirty_entry_browser(id, lv)
-
+  # A pooled doc qualifies for turn-end auto-save iff its Editor is alive and
+  # dirty AND it has a real save-target path. A doc the user is VIEWING (browser
+  # WASM authority) has an unedited server Editor — the agent's edits went to the
+  # browser, not the NIF — so it is rev-0/clean and excluded here too, without the
+  # Pool needing to know about viewers (that lives in the Session now).
   defp dirty_entry(id, %{editor: editor, kind: kind}) when is_pid(editor) do
     if Process.alive?(editor) and Editor.dirty?(editor) do
       case Editor.save_target(editor) do
@@ -486,9 +320,6 @@ defmodule Ecrits.Doc.Pool do
   end
 
   defp dirty_entry(_id, _doc), do: []
-
-  # Browser-backed docs are never auto-persisted from the server copy.
-  defp dirty_entry_browser(_id, _lv), do: []
 
   defp fetch_editor(st, document_id) do
     case Map.get(st.docs, document_id) do
@@ -503,7 +334,8 @@ defmodule Ecrits.Doc.Pool do
 
   defp revision(_doc), do: 0
 
-  defp backing(%{browser: lv}) when is_pid(lv), do: :browser
+  # The Pool only ever holds the server NIF arm; the browser view is overlaid by
+  # the Session, so a Pool entry's backing is always `:server`.
   defp backing(_doc), do: :server
 
   @doc """

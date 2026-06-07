@@ -116,13 +116,18 @@ defmodule Ecrits.Doc.MCPServer do
   defp resolve_tool_context(agent_id) when is_binary(agent_id) do
     case WorkspaceSession.fetch_agent(agent_id) do
       {:ok, pid} ->
-        %{active_doc: active_doc} = AgentLive.tool_context(pid)
+        %{active_doc: active_doc, workspace_root: workspace_root} = AgentLive.tool_context(pid)
 
         {:ok,
          %{
            pool: Ecrits.Doc.Pool,
            agent_id: agent_id,
-           active_doc: active_doc
+           active_doc: active_doc,
+           # The workspace path that keys this agent's `Ecrits.Workspace.Session`,
+           # so the doc.* tools reach Session for per-doc ownership (invariant 2),
+           # the human-viewer registry, and the wasm/NIF routing decision — the
+           # real home of what Phase 2 parked in the global Pool.
+           session_path: workspace_root
          }}
 
       :error ->

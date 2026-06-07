@@ -58,12 +58,22 @@ defmodule Ecrits.Doc.Office do
 
   @behaviour Ecrits.Doc
 
+  alias Ecrits.Doc.Office.Instance
   alias Ecrits.Doc.Office.Ref
   alias Ecrits.Doc.Op
   alias Libreofficex.LokBackend.Native
 
-  @typedoc "Engine handle: the opaque UNO session resource plus the doc kind."
-  @type handle :: %{session: term(), kind: :docx | :pptx, path: String.t() | nil}
+  @typedoc """
+  Engine handle: a STABLE token for the document plus its kind/path.
+
+  Since Phase 3 the office NIF is owned by the single serializing
+  `Ecrits.Doc.Office.Instance`; the backend no longer holds the raw UNO `session`
+  resource (which the Instance may release + reopen under its LRU budget). The
+  handle the Editor holds is the Instance's stable `doc` token — every op routes
+  through `Instance.run/3`, which resolves the token to a live session, serialises
+  the call, and transparently rematerialises an evicted doc first.
+  """
+  @type handle :: %{doc: reference(), kind: :docx | :pptx, path: String.t() | nil}
 
   # Export filter names the UNO arm needs for storeToURL (M2/M3 verified).
   @docx_filter "MS Word 2007 XML"
@@ -82,41 +92,20 @@ defmodule Ecrits.Doc.Office do
   def kind, do: :office
 
   @impl true
-  # Open a docx/pptx purely via UNO. The kind (docx vs pptx) is carried on the
-  # handle so `save/2` picks the right export filter; it comes from `opts[:kind]`
-  # (the Pool/Tools layer) or the path extension.
+  # Open a docx/pptx purely via UNO, THROUGH the single serializing governor
+  # (`Ecrits.Doc.Office.Instance`). The governor boots/loads the UNO session,
+  # applies its LRU budget, and returns a STABLE handle token (`%{doc, kind,
+  # path}`) — the raw NIF session lives inside the governor, not on this handle,
+  # so an LRU eviction never invalidates the Editor's handle. The kind (docx vs
+  # pptx) is carried on the handle so `save/2` picks the right export filter; it
+  # comes from `opts[:kind]` (the Pool/Tools layer) or the path extension.
   def open(path, opts \\ []) do
-    with {:ok, install_dir} <- install_dir(),
-         {:ok, abs} <- absolute_path(path) do
-      profile = profile_url(abs)
-
-      case Native.uno_open(install_dir, abs, profile) do
-        {:ok, session} ->
-          {:ok, %{session: session, kind: doc_kind(opts, path), path: abs}}
-
-        {:error, :uno_unavailable} ->
-          {:error, {:office_unavailable, "libreofficex UNO arm not built (no LO SDK at build time)"}}
-
-        {:error, {:open_failed, msg}} ->
-          {:error, {:open_failed, to_string(msg)}}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end
-  rescue
-    # The NIF stubs raise :nif_not_loaded when the native lib could not load at
-    # all (no LibreOffice headers at build time). Surface it as a clean error so
-    # the rest of the app is unaffected.
-    e in ErlangError -> {:error, {:office_unavailable, inspect(e.original)}}
+    Instance.open(path, opts)
   end
 
   @impl true
-  def close(%{session: session}) do
-    _ = Native.uno_close(session)
-    :ok
-  rescue
-    _ -> :ok
+  def close(%{doc: _} = handle) do
+    Instance.close(handle)
   end
 
   def close(_handle), do: :ok
@@ -191,16 +180,18 @@ defmodule Ecrits.Doc.Office do
   # Native property read: `uno_get(ref)` returns `{ref, type, text, props}`. We
   # surface the `props` map (UNO property name -> value); `props` (a name list)
   # narrows the returned set when given.
-  def get(%{session: session}, ref, props) when is_binary(ref) do
-    case Native.uno_get(session, ref) do
-      {:ok, json} ->
-        decoded = decode_json(json)
-        values = Map.get(decoded, "props", decoded)
-        {:ok, narrow(values, props)}
+  def get(%{doc: _} = handle, ref, props) when is_binary(ref) do
+    Instance.run(handle, fn session ->
+      case Native.uno_get(session, ref) do
+        {:ok, json} ->
+          decoded = decode_json(json)
+          values = Map.get(decoded, "props", decoded)
+          {:ok, narrow(values, props)}
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
   end
 
   def get(_handle, _ref, _props), do: {:error, :invalid_ref}
@@ -210,14 +201,21 @@ defmodule Ecrits.Doc.Office do
   # which calls `XPropertySet::setPropertyValue` for each entry. A `kind`
   # discriminator (when the caller embeds one, e.g. {kind:"cell", BackColor})
   # is stripped — UNO routes by the ref/object, not a kind tag.
-  def set(%{session: session}, ref, props, _base_rev) when is_binary(ref) and is_map(props) do
+  def set(%{doc: _} = handle, ref, props, _base_rev) when is_binary(ref) and is_map(props) do
     prop_map = props |> Map.delete("kind") |> Map.delete(:kind)
 
-    case Native.uno_set(session, ref, Jason.encode!(prop_map)) do
-      :ok -> {:ok, %{ref: ref, set: Map.keys(prop_map)}}
-      {:error, {kind, msg}} -> {:error, %{kind: to_string(kind), message: to_string(msg)}}
-      {:error, reason} -> {:error, reason}
-    end
+    Instance.run(
+      Instance,
+      handle,
+      fn session ->
+        case Native.uno_set(session, ref, Jason.encode!(prop_map)) do
+          :ok -> {:ok, %{ref: ref, set: Map.keys(prop_map)}}
+          {:error, {kind, msg}} -> {:error, %{kind: to_string(kind), message: to_string(msg)}}
+          {:error, reason} -> {:error, reason}
+        end
+      end,
+      write?: true
+    )
   end
 
   def set(_handle, _ref, _props, _base_rev), do: {:error, :invalid_ref}
@@ -232,14 +230,21 @@ defmodule Ecrits.Doc.Office do
   #   delete_range  -> delete {ref}                 (clear the element's text)
   #
   # The UNO arm is text-level (no caret offsets); we operate on whole elements.
-  def edit(%{session: session}, op, _base_rev) do
+  def edit(%{doc: _} = handle, op, _base_rev) do
     with {:ok, op} <- Op.normalize(op),
          {:ok, uno_op} <- to_uno_op(op) do
-      case Native.uno_apply(session, Jason.encode!(uno_op)) do
-        :ok -> {:ok, %{op: op.op, native: uno_op}}
-        {:error, {kind, msg}} -> {:error, %{kind: to_string(kind), message: to_string(msg)}}
-        {:error, reason} -> {:error, reason}
-      end
+      Instance.run(
+        Instance,
+        handle,
+        fn session ->
+          case Native.uno_apply(session, Jason.encode!(uno_op)) do
+            :ok -> {:ok, %{op: op.op, native: uno_op}}
+            {:error, {kind, msg}} -> {:error, %{kind: to_string(kind), message: to_string(msg)}}
+            {:error, reason} -> {:error, reason}
+          end
+        end,
+        write?: true
+      )
     end
   end
 
@@ -247,20 +252,22 @@ defmodule Ecrits.Doc.Office do
   # Persist via `uno_save(path, filter)`. `format`/`path` come from the Tools
   # layer; the export filter is chosen from the doc kind (docx vs pptx). An empty
   # `path` saves to the document's own URL.
-  def save(%{session: session} = handle, opts) do
+  def save(%{doc: _} = handle, opts) do
     path = Keyword.get(opts, :path) || handle.path || ""
     filter = filter_for(opts[:format] || handle.kind)
 
-    case Native.uno_save(session, path, filter) do
-      :ok ->
-        {:ok, %{"path" => path, "filter" => filter}}
+    Instance.run(handle, fn session ->
+      case Native.uno_save(session, path, filter) do
+        :ok ->
+          {:ok, %{"path" => path, "filter" => filter}}
 
-      {:error, {kind, msg}} ->
-        {:error, %{kind: to_string(kind), message: to_string(msg)}}
+        {:error, {kind, msg}} ->
+          {:error, %{kind: to_string(kind), message: to_string(msg)}}
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
   end
 
   @doc """
@@ -269,23 +276,25 @@ defmodule Ecrits.Doc.Office do
   the walker provides them. Public so tests/callers can read the raw IR.
   """
   @spec elements(handle()) :: {:ok, [map()]} | {:error, term()}
-  def elements(%{session: session}) do
-    case Native.uno_elements(session) do
-      {:ok, json} ->
-        case Jason.decode(json) do
-          {:ok, list} when is_list(list) -> {:ok, list}
-          _ -> {:ok, []}
-        end
+  def elements(%{doc: _} = handle) do
+    Instance.run(handle, fn session ->
+      case Native.uno_elements(session) do
+        {:ok, json} ->
+          case Jason.decode(json) do
+            {:ok, list} when is_list(list) -> {:ok, list}
+            _ -> {:ok, []}
+          end
 
-      # The UNO arm wasn't built (no LO SDK at NIF build time): surface it as a
-      # capability gap so the Tools layer falls back to find/3 instead of failing
-      # the whole call.
-      {:error, :uno_unavailable} ->
-        {:error, {:not_supported, "libreofficex UNO arm not built"}}
+        # The UNO arm wasn't built (no LO SDK at NIF build time): surface it as a
+        # capability gap so the Tools layer falls back to find/3 instead of failing
+        # the whole call.
+        {:error, :uno_unavailable} ->
+          {:error, {:not_supported, "libreofficex UNO arm not built"}}
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
   end
 
   def elements(_handle), do: {:error, :invalid_handle}
@@ -504,38 +513,11 @@ defmodule Ecrits.Doc.Office do
 
   defp lok_present?(_dir), do: false
 
-  # A per-document writable UserInstallation profile. LO needs a writable profile
-  # dir; we hand it a unique `file://` URL under the OS temp dir so concurrent
-  # documents don't contend (the office boot is a process-wide singleton, but the
-  # profile URL is only consulted on first boot — passing "" also works once the
-  # singleton is up). A stable, path-derived dir keeps reopen cheap.
-  defp profile_url(abs_path) do
-    hash = :crypto.hash(:sha256, abs_path) |> Base.url_encode64(padding: false) |> String.slice(0, 16)
-    dir = Path.join([System.tmp_dir!(), "ecrits_office_profile", hash])
-    File.mkdir_p(dir)
-    "file://" <> dir
-  end
-
-  defp absolute_path(path) when is_binary(path), do: {:ok, Path.expand(path)}
-  defp absolute_path(_path), do: {:error, :invalid_path}
-
   # --- kind / filter helpers -----------------------------------------------
-
-  defp doc_kind(opts, path) do
-    case Keyword.get(opts, :kind) do
-      :pptx -> :pptx
-      :docx -> :docx
-      _ -> from_extension(path)
-    end
-  end
-
-  defp from_extension(path) do
-    case path |> Path.extname() |> String.downcase() do
-      ".pptx" -> :pptx
-      ".ppt" -> :pptx
-      _ -> :docx
-    end
-  end
+  # The UNO session lifecycle (open/reopen/save/close, install-dir + profile +
+  # kind resolution) now lives in `Ecrits.Doc.Office.Native`, owned by the
+  # serializing `Ecrits.Doc.Office.Instance`. The backend keeps only the export
+  # filter mapping (used by `save/2` to label the result) here.
 
   defp filter_for(:pptx), do: @pptx_filter
   defp filter_for(:docx), do: @docx_filter

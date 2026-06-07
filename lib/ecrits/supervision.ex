@@ -89,6 +89,12 @@ defmodule Ecrits.Supervision do
   defp document_service_children do
     [
       Ecrits.RhwpSnapshot.Materializer,
+      # The single serializing governor for the in-process LibreOffice UNO NIF
+      # (one LO instance, SolarMutex-serialised, crash-coupled). ALL office ops
+      # route through its mailbox; it caps simultaneously-materialised UNO docs
+      # with an LRU budget (save-then-close eviction, transparent reopen). HWP/
+      # ehwp is cheap-per-doc and parallel, so it is NOT routed through here.
+      Ecrits.Doc.Office.Instance,
       # Multi-document MCP registry: one Editor per open document, browser/server
       # backing, revision/rebase. See `Ecrits.Doc.Pool` (doc-editing MCP design §4.3).
       Ecrits.Doc.Pool

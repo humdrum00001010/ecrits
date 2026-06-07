@@ -50,12 +50,11 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
              Jason.decode!(content.text)
   end
 
-  test "doc.context resolves to the calling agent's OWN active doc, not Pool.active" do
-    # The (default-named, global) Pool has TWO docs; the GLOBAL active is `a`.
+  test "doc.context resolves to the calling agent's OWN active doc (no global active)" do
+    # The (default-named, global) Pool has TWO docs open.
     {:ok, a} = Pool.open("ctx_a.hwp", kind: :hwp, open_opts: [__text__: "A"])
     {:ok, b} = Pool.open("ctx_b.hwp", kind: :hwp, open_opts: [__text__: "B"])
     on_exit(fn -> Enum.each([a, b], &Pool.close/1) end)
-    :ok = Pool.set_active(a)
 
     # Two agents, each bound to a DIFFERENT doc.
     id1 = "fg-ctx-#{System.unique_integer([:positive])}"
@@ -72,13 +71,17 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
              call_tool("doc.context", %{"_agent_id" => id2})
   end
 
-  test "an absent _agent_id keeps the legacy global-Pool context (back-compat)" do
+  test "an absent _agent_id keeps the legacy pool-only context (back-compat)" do
     {:ok, doc} = Pool.open("ctx_legacy.hwp", kind: :hwp, open_opts: [__text__: "L"])
     on_exit(fn -> Pool.close(doc) end)
-    :ok = Pool.set_active(doc)
 
-    assert {:ok, %{structuredContent: %{"active_document" => ^doc}}, _} =
+    # A bare (agent-less) context has no active doc — the global active is gone —
+    # but the open doc is still listed in `documents`, so the legacy mount keeps
+    # working without a per-agent context.
+    assert {:ok, %{structuredContent: %{"active_document" => nil, "documents" => docs}}, _} =
              call_tool("doc.context", %{})
+
+    assert Enum.any?(docs, &(&1["document"] == doc))
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
