@@ -47,10 +47,30 @@ let runtimePromise = null
 // alongside the trap.
 const stderrRing = []
 const RING_MAX = 80
+// Monotonic engine-output activity: bumped on every stdout/stderr line so the
+// document-load watchdog can tell a still-working import (engine chattering)
+// from a DEADLOCKED one (engine went silent while loadStatus stays "loading").
+// The LibreOffice-WASM worker can wedge mid table-import (the writerfilter
+// `createTextCursorByRange() failed` / "End of content node doesn't have the
+// proper start node" path on VML-heavy / malformed-nesting docx): it emits its
+// whole warning flood within the first seconds, then the worker neither finishes
+// nor reports failure — loadStatus() is pinned at 1 forever. Native LibreOffice
+// recovers from the same exception in <300ms, so this is a WASM-only import hang
+// we cannot fix in the prebuilt binary; the watchdog turns the silent 120s hang
+// into a fast, specific error.
+let engineActivityAt = 0
+const stallSeen = { cursorFail: false, badStartNode: false }
+function noteEngineActivity(text) {
+  engineActivityAt = performance.now()
+  // Latch the table-import wedge signature so the watchdog error can be specific.
+  if (/createTextCursorByRange\(\) failed/.test(text)) stallSeen.cursorFail = true
+  if (/proper start node/.test(text)) stallSeen.badStartNode = true
+}
 function pushLog(stream, text) {
   const line = "[" + stream + "] " + text
   stderrRing.push(line)
   if (stderrRing.length > RING_MAX) stderrRing.shift()
+  noteEngineActivity(text)
 }
 function dumpLog() {
   return stderrRing.slice(-40).join("\n")
@@ -586,9 +606,26 @@ const WasmOfficeEditor = {
 
     // module-functions shape: async loadFromBytes(bytes, fileName) -> void;
     // poll loadStatus() for completion.
+    // Reset the per-load stall signal so a PRIOR document's wedge signature /
+    // engine chatter never bleeds into this load's watchdog decision.
+    stallSeen.cursorFail = false
+    stallSeen.badStartNode = false
+    engineActivityAt = 0
     this.api.loadFromBytes(arg, fileName)
     if (typeof this.api.loadStatus === "function") {
-      const deadline = performance.now() + 120000 // 2 min: large Impress imports
+      const start = performance.now()
+      const deadline = start + 120000 // 2 min hard ceiling: large Impress imports
+      // Idle-stall watchdog. The import runs on a LOK worker pthread; a wedged
+      // table-import deadlocks the worker (loadStatus pinned at 1) while it stops
+      // emitting ANY output. We detect that by watching engine-output activity:
+      // once the engine has spoken (warning flood) AND then gone quiet for
+      // STALL_IDLE_MS with no forward status change, the load is dead — bail fast
+      // with a specific error instead of blocking the user for the full 120s.
+      const STALL_IDLE_MS = 25000
+      // Don't arm the watchdog until the engine has produced SOME output for this
+      // load (so a clean, fast, silent load is never misjudged as stalled) and a
+      // floor of wall time has passed (the worker needs a beat to spin up).
+      const STALL_ARM_MS = 8000
       // eslint-disable-next-line no-constant-condition
       while (true) {
         const st = this.api.loadStatus()
@@ -596,8 +633,34 @@ const WasmOfficeEditor = {
         if (st === 3) {
           throw new Error("loadFromBytes failed (documentLoad). Engine output:\n" + dumpLog())
         }
-        if (performance.now() >= deadline) {
+        const now = performance.now()
+        if (now >= deadline) {
           throw new Error("loadFromBytes timed out after 120s. Engine output:\n" + dumpLog())
+        }
+        // Stall detection: still "loading" (st === 1), the engine emitted output
+        // earlier in THIS load, and it has been silent past the idle window.
+        if (
+          st === 1 &&
+          now - start >= STALL_ARM_MS &&
+          engineActivityAt > 0 &&
+          now - engineActivityAt >= STALL_IDLE_MS
+        ) {
+          const tableWedge = stallSeen.cursorFail || stallSeen.badStartNode
+          const detail = tableWedge
+            ? "the document's table layout wedged LibreOffice's importer " +
+              "(createTextCursorByRange/\"proper start node\") — this docx can't be " +
+              "opened in the in-browser office viewer"
+            : "the office engine stopped responding mid-import"
+          throw new Error(
+            "loadFromBytes stalled after " +
+              Math.round((now - start) / 1000) +
+              "s (engine silent " +
+              Math.round((now - engineActivityAt) / 1000) +
+              "s): " +
+              detail +
+              ".\nEngine output:\n" +
+              dumpLog()
+          )
         }
         await new Promise((r) => setTimeout(r, 50))
       }
