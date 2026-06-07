@@ -415,7 +415,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     refute has_element?(
              workspace_lv,
-             "#local-agent-model-select button#local-agent-inline-model-claude-default"
+             "#local-agent-model-select button#local-agent-inline-model-claude-opus-4-7"
            )
 
     assert has_element?(
@@ -567,13 +567,13 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert_patch(
       lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "claude", model: "claude-default", reasoning: "medium", access: "read-only"]}"
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "claude", model: "claude-opus-4-7", reasoning: "medium", access: "read-only"]}"
     )
 
     assert has_element?(
              lv,
-             "#local-agent-provider-options[data-selected-provider='claude'][data-selected-model='claude-default'] #local-agent-model-select[data-selected-provider='claude'][data-selected-model='claude-default']",
-             "Claude"
+             "#local-agent-provider-options[data-selected-provider='claude'][data-selected-model='claude-opus-4-7'] #local-agent-model-select[data-selected-provider='claude'][data-selected-model='claude-opus-4-7']",
+             "Claude Opus 4.7"
            )
 
     refute has_element?(

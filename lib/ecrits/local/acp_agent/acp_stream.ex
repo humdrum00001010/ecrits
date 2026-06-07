@@ -83,7 +83,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
 
     case open_provider_session(client, cwd, prior_session_id, timeout, mcp_servers) do
       {:ok, session_id} when is_binary(session_id) and session_id != "" ->
-        input = build_prompt(turn)
+        input = build_prompt(turn, opts)
 
         prompt_task =
           Task.async(fn -> Client.prompt(client, session_id, input, timeout: timeout) end)
@@ -438,6 +438,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   defp exmcp_adapter_opts(Claude, cwd, opts) do
     [cwd: cwd]
     |> maybe_put(:model, Keyword.get(opts, :model))
+    |> maybe_put(:max_thinking_tokens, claude_thinking_budget(Keyword.get(opts, :reasoning_effort)))
     |> maybe_put(:mcp_servers, present_list(Keyword.get(opts, :mcp_servers)))
   end
 
@@ -446,6 +447,21 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   defp exmcp_adapter_opts(_other, cwd, opts) do
     Keyword.put(opts, :cwd, cwd)
   end
+
+  # Map the rail's Claude effort tier onto the thinking-token budget the Claude
+  # adapter forwards to the CLI as `--max-thinking-tokens` (a flag the `claude`
+  # binary still accepts). The adapter does NOT forward `--effort`, so the budget
+  # is how the chosen tier actually reaches the model. "ultracode" is the top
+  # tier; it ALSO injects the `ultrathink` workflow keyword into the prompt
+  # (see build_prompt/claude_ultracode?) for Claude's most exhaustive run.
+  defp claude_thinking_budget("low"), do: 4_000
+  defp claude_thinking_budget("medium"), do: 10_000
+  defp claude_thinking_budget("high"), do: 21_333
+  defp claude_thinking_budget("xhigh"), do: 31_999
+  defp claude_thinking_budget("ultracode"), do: 60_000
+  defp claude_thinking_budget(_effort), do: nil
+
+  defp claude_ultracode?(opts), do: Keyword.get(opts, :reasoning_effort) == "ultracode"
 
   defp codex_approval_policy(nil), do: nil
   defp codex_approval_policy(:never), do: "never"
@@ -501,11 +517,26 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # yields `preamble <> string` (UNCHANGED — `ExMCP.ACP.Client` auto-wraps it as
   # one text block, exactly as before); a block list yields a leading preamble
   # text block followed by one ACP block per input block.
-  defp build_prompt(turn) do
-    Ecrits.Local.AcpAgent.Prompt.to_acp_content(turn.input, doc_preamble(turn))
+  defp build_prompt(turn, opts) do
+    Ecrits.Local.AcpAgent.Prompt.to_acp_content(turn.input, doc_preamble(turn, opts))
   end
 
-  defp doc_preamble(turn) do
+  # When the rail's top "ultracode" tier is selected (Claude only), append the
+  # `ultrathink` workflow keyword. The Claude CLI recognizes this literal keyword
+  # in the turn text — it injects a system message ("The user included the keyword
+  # 'ultrathink', requesting deeper reasoning on this turn") that raises the
+  # thinking budget for the turn. Verified present in claude 2.1.153's binary
+  # (`workflow_keyword_request`). This is the real, supported way to engage the
+  # most exhaustive reasoning per turn; there is NO `ultracode`/`--ultracode` flag.
+  defp ultracode_keyword(opts) do
+    if claude_ultracode?(opts) do
+      "\n\n[System] ultrathink\n"
+    else
+      ""
+    end
+  end
+
+  defp doc_preamble(turn, opts) do
     doc = open_document_label(turn)
 
     """
@@ -656,7 +687,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     through and actually call the write tool — do not stop after reading. After
     editing, call `doc_save` (mandatory, see above) and confirm the resulting
     revision number to the user.
-    """ <> "\n"
+    """ <> "\n" <> ultracode_keyword(opts)
   end
 
   defp open_document_label(%{document_id: id}) when is_binary(id) and id != "", do: " (#{id})"

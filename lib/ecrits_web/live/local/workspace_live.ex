@@ -62,11 +62,40 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       label: "GPT-5.3 Codex Spark",
       description: "Fast coding model"
     },
+    # Claude model ids the `claude` CLI (`--model`) actually accepts. Aliases
+    # (`opus`/`sonnet`/`haiku`) resolve to the latest of each family; pinned full
+    # ids (`claude-opus-4-7`, …) are forwarded verbatim. Confirmed against
+    # `claude --help` (`--model` doc) + a live `claude -p --model <id>` probe
+    # (an unknown id errors "It may not exist or you may not have access to it").
     %{
-      id: "claude-default",
+      id: "claude-opus-4-7",
       provider: "claude",
-      label: "Claude",
-      description: "Claude CLI default"
+      label: "Claude Opus 4.7",
+      description: "Most capable Claude model"
+    },
+    %{
+      id: "claude-opus-4-6",
+      provider: "claude",
+      label: "Claude Opus 4.6",
+      description: "Prior frontier Opus"
+    },
+    %{
+      id: "claude-sonnet-4-6",
+      provider: "claude",
+      label: "Claude Sonnet 4.6",
+      description: "Balanced speed and capability"
+    },
+    %{
+      id: "claude-haiku-4-5",
+      provider: "claude",
+      label: "Claude Haiku 4.5",
+      description: "Fastest, lowest cost"
+    },
+    %{
+      id: "opusplan",
+      provider: "claude",
+      label: "Claude Opus Plan",
+      description: "Opus to plan, Sonnet to execute"
     }
   ]
   @local_agent_access_controls [
@@ -3181,12 +3210,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     Enum.filter(@local_agent_models, &(&1.provider == provider_id))
   end
 
-  defp default_agent_model_id("claude"), do: "claude-default"
+  defp default_agent_model_id("claude"), do: "claude-opus-4-7"
   defp default_agent_model_id(_provider), do: "gpt-5.5"
 
+  # The model id forwarded to the adapter (→ `--model <id>` on the provider CLI).
+  # Every catalog id is a real, accepted model id now, so forward it verbatim;
+  # only an unknown/blank id yields nil (let the CLI fall back to its default).
   defp local_agent_adapter_model(model_id) do
     case local_agent_model(model_id) do
-      %{id: "claude-default"} -> nil
       %{id: id} -> id
       _model -> nil
     end
@@ -3338,11 +3369,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   defp normalize_reasoning_effort_value(effort)
-       when effort in ["minimal", "low", "medium", "high", "xhigh"],
+       when effort in ["minimal", "low", "medium", "high", "xhigh", "ultracode"],
        do: effort
 
   defp normalize_reasoning_effort_value(effort)
-       when effort in [:minimal, :low, :medium, :high, :xhigh],
+       when effort in [:minimal, :low, :medium, :high, :xhigh, :ultracode],
        do: Atom.to_string(effort)
 
   defp normalize_reasoning_effort_value(_effort), do: "medium"
@@ -3351,7 +3382,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     if effort in local_agent_reasoning_efforts(provider), do: effort, else: "medium"
   end
 
-  defp local_agent_reasoning_efforts("claude"), do: ~w(low medium high)
+  # Claude's `--effort` tiers are low|medium|high|xhigh|max (per `claude --help`).
+  # We surface `max` as the top "Ultracode" tier in the rail — Claude Code's most
+  # exhaustive reasoning mode — and additionally fire the `ultrathink` workflow
+  # keyword for it (see acp_stream). Internally the tier id is "ultracode".
+  defp local_agent_reasoning_efforts("claude"), do: ~w(low medium high xhigh ultracode)
   defp local_agent_reasoning_efforts(_provider), do: ~w(minimal low medium high xhigh)
 
   defp local_agent_reasoning_label("minimal"), do: "Minimal - fastest, least tokens"
@@ -3359,6 +3394,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp local_agent_reasoning_label("medium"), do: "Medium - balanced reasoning/tokens"
   defp local_agent_reasoning_label("high"), do: "High - deeper reasoning, more tokens"
   defp local_agent_reasoning_label("xhigh"), do: "XHigh - maximum reasoning/tokens"
+
+  defp local_agent_reasoning_label("ultracode"),
+    do: "Ultracode - exhaustive multi-step reasoning"
+
   defp local_agent_reasoning_label(reasoning), do: reasoning
 
   defp local_agent_reasoning_short_label("minimal"), do: "Minimal"
@@ -3366,6 +3405,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp local_agent_reasoning_short_label("medium"), do: "Medium"
   defp local_agent_reasoning_short_label("high"), do: "High"
   defp local_agent_reasoning_short_label("xhigh"), do: "XHigh"
+  defp local_agent_reasoning_short_label("ultracode"), do: "Ultracode"
   defp local_agent_reasoning_short_label(reasoning), do: reasoning
 
   defp local_agent_reasoning_title("minimal"),
@@ -3377,6 +3417,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp local_agent_reasoning_title("medium"), do: "Balanced reasoning depth and token usage."
   defp local_agent_reasoning_title("high"), do: "More planning tokens for harder document work."
   defp local_agent_reasoning_title("xhigh"), do: "Maximum reasoning budget for complex tasks."
+
+  defp local_agent_reasoning_title("ultracode"),
+    do: "Claude's most exhaustive mode: top effort tier plus the ultrathink keyword."
+
   defp local_agent_reasoning_title(reasoning), do: reasoning
 
   defp local_agent_integrations, do: ACP.integration_options()
