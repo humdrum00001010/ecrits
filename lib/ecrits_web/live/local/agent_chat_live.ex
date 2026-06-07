@@ -62,6 +62,10 @@ defmodule EcritsWeb.Local.AgentChatLive do
      |> assign(:local_agent_status, :starting)
      |> assign(:local_agent_error, nil)
      |> assign(:local_agent_turn_id, nil)
+     # Count of mid-turn sends still queued behind the running turn (Phase 5
+     # FIFO queue). Drives the "N 대기" pending indicator; decremented as each
+     # queued turn drains.
+     |> assign(:local_agent_pending, 0)
      |> assign(:local_agent_text, "")
      |> assign(:local_agent_text_segment, 0)
      |> assign(:local_agent_text_flush_ref, nil)
@@ -139,18 +143,59 @@ defmodule EcritsWeb.Local.AgentChatLive do
     message = String.trim(message || "")
 
     cond do
+      # Re-Enter gesture (Phase 5 FIFO queue): an empty Enter while a message is
+      # queued FLUSHES the head — cancel the in-flight turn and run the next
+      # queued message NOW instead of waiting for the running turn to finish.
+      message == "" and socket.assigns.local_agent_pending > 0 ->
+        flush_local_agent_queue(socket)
+
       message == "" ->
         {:noreply, assign(socket, :local_agent_form, local_agent_form())}
 
       is_nil(socket.assigns.local_agent_session_id) ->
         {:noreply, assign(socket, :local_agent_error, "Agent session is not ready.")}
 
+      # A turn is in flight (or a message is already queued): ENQUEUE this send
+      # behind the running turn rather than cancelling it (Phase 5). It drains in
+      # order when the running turn finishes.
+      socket.assigns.local_agent_status == :running or socket.assigns.local_agent_pending > 0 ->
+        enqueue_local_agent_turn(socket, message)
+
       true ->
-        with {:ok, socket} <- maybe_cancel_active_local_agent_for_new_turn(socket) do
-          send_local_agent_turn(socket, message)
-        else
-          {:error, socket} -> {:noreply, socket}
-        end
+        send_local_agent_turn(socket, message)
+    end
+  end
+
+  # Enqueue a mid-turn send: record the user bubble immediately (so the user sees
+  # their message), bump the pending count, and let the durable agent drain it
+  # when the running turn terminates. The placeholders (reasoning / assistant
+  # bubble) are rendered later, when the queued turn actually drains (its
+  # `turn_started` event arrives with `local_agent_turn_id` nil).
+  defp enqueue_local_agent_turn(socket, message) do
+    case WorkspaceSession.send_turn(ws(socket), message) do
+      {:ok, %{id: queued_id}} ->
+        {:noreply,
+         socket
+         |> stream_insert(:local_agent_items, agent_user_item(queued_id, message))
+         |> assign(:local_agent_pending, socket.assigns.local_agent_pending + 1)
+         |> assign(:local_agent_error, nil)
+         |> assign(:local_agent_form, local_agent_form())}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
+    end
+  end
+
+  defp flush_local_agent_queue(socket) do
+    case WorkspaceSession.flush_queue(ws(socket)) do
+      {:ok, _turn} ->
+        {:noreply, assign(socket, :local_agent_form, local_agent_form())}
+
+      {:error, :empty_queue} ->
+        {:noreply, assign(socket, :local_agent_pending, 0)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
     end
   end
 
@@ -216,6 +261,9 @@ defmodule EcritsWeb.Local.AgentChatLive do
         |> assign(:local_agent_session_id, agent_id)
         |> assign(:local_agent_error, nil)
         |> assign(:local_agent_status, snapshot.status)
+        # Restore the pending-queue count after a refresh (Phase 5). A snapshot
+        # from a pre-Phase-5 agent has no `:pending` key → default 0.
+        |> assign(:local_agent_pending, Map.get(snapshot, :pending, 0))
         |> maybe_restore_agent_title(snapshot.title)
         |> stream(:local_agent_items, [], reset: true)
         # codex `thread/resume` restores MEMORY but does NOT re-stream past
@@ -314,32 +362,6 @@ defmodule EcritsWeb.Local.AgentChatLive do
 
   defp maybe_cancel_active_local_agent(_socket), do: :ok
 
-  defp maybe_cancel_active_local_agent_for_new_turn(
-         %{assigns: %{workspace_session: %{} = ws, local_agent_turn_id: turn_id}} = socket
-       )
-       when is_binary(turn_id) do
-    case WorkspaceSession.cancel(ws, turn_id) do
-      {:ok, _turn} ->
-        partial = socket.assigns.local_agent_text
-        segment = socket.assigns.local_agent_text_segment
-
-        {:ok,
-         socket
-         |> assign(:local_agent_turn_id, nil)
-         |> assign(:local_agent_text, "")
-         |> assign(:local_agent_reasoning_text, "")
-         |> finalize_cancelled_agent_text(turn_id, partial, segment)}
-
-      {:error, :no_current_turn} ->
-        {:ok, assign(socket, :local_agent_turn_id, nil)}
-
-      {:error, reason} ->
-        {:error, assign(socket, :local_agent_error, local_agent_error(reason))}
-    end
-  end
-
-  defp maybe_cancel_active_local_agent_for_new_turn(socket), do: {:ok, socket}
-
   defp send_local_agent_turn(socket, message) do
     case WorkspaceSession.send_turn(ws(socket), message) do
       {:ok, %{id: turn_id}} ->
@@ -361,6 +383,14 @@ defmodule EcritsWeb.Local.AgentChatLive do
     end
   end
 
+  # A mid-turn send was enqueued behind the running turn (Phase 5). The agent is
+  # the source of truth for the pending count; sync it from the event so a flush
+  # / drain elsewhere never drifts the indicator.
+  defp apply_local_agent_event(socket, %{type: :turn_queued, pending: pending})
+       when is_integer(pending) do
+    assign(socket, :local_agent_pending, pending)
+  end
+
   # `send_local_agent_turn/2` already set `local_agent_turn_id` (and :running)
   # from the synchronous send_turn reply, which carries the SAME id this event
   # echoes. So a turn_started whose id != the current turn is stale and must be
@@ -374,6 +404,12 @@ defmodule EcritsWeb.Local.AgentChatLive do
     |> assign(:local_agent_status, :running)
   end
 
+  # A QUEUED turn just drained (Phase 5): `local_agent_turn_id` was nil (the prior
+  # turn cleared it) and this is a fresh id. The user bubble was already rendered
+  # when the message was enqueued; render the reasoning + assistant placeholders
+  # now (the synchronous send path renders them for a non-queued turn, so the
+  # adopt path renders them for a drained one), reset the per-turn buffers, and
+  # decrement the pending count.
   defp apply_local_agent_event(
          %{assigns: %{local_agent_turn_id: nil}} = socket,
          %{type: :turn_started, turn_id: turn_id}
@@ -382,6 +418,12 @@ defmodule EcritsWeb.Local.AgentChatLive do
     socket
     |> assign(:local_agent_turn_id, turn_id)
     |> assign(:local_agent_status, :running)
+    |> assign(:local_agent_text, "")
+    |> assign(:local_agent_text_segment, 0)
+    |> assign(:local_agent_reasoning_text, "")
+    |> assign(:local_agent_pending, max(socket.assigns.local_agent_pending - 1, 0))
+    |> stream_insert(:local_agent_items, agent_reasoning_item(turn_id, "", :pending))
+    |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "", :running, 0))
   end
 
   defp apply_local_agent_event(socket, %{type: type, title: title})
@@ -596,6 +638,17 @@ defmodule EcritsWeb.Local.AgentChatLive do
           class="sr-only"
         >
           {agent_status_label(@local_agent_status)}
+        </span>
+        <span
+          :if={@local_agent_pending > 0}
+          id="local-agent-pending"
+          data-role="local-agent-pending"
+          data-pending={@local_agent_pending}
+          aria-live="polite"
+          title="Queued messages waiting for the current turn"
+          class="inline-flex h-5 shrink-0 items-center rounded-full border border-base-content/20 bg-base-100 px-2 text-[11px] font-medium text-base-content/70"
+        >
+          {@local_agent_pending} 대기
         </span>
         <button
           id="local-mobile-open-document"

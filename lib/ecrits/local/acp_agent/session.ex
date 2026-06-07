@@ -29,6 +29,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
   alias Ecrits.Context
   alias Ecrits.Local.AcpAgent.AcpStream
+  alias Ecrits.Local.AcpAgent.Prompt
 
   @registry Ecrits.Local.AcpAgent.SessionRegistry
   @pubsub Ecrits.PubSub
@@ -86,6 +87,13 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
   def send_turn(pid, ctx, input, opts \\ []),
     do: GenServer.call(pid, {:send_turn, ctx, input, opts})
+
+  @doc """
+  Re-Enter on a queued message (Phase 5 FIFO queue): cancel the in-flight turn
+  and run the queue head NOW instead of waiting for the running turn to finish.
+  `{:error, :empty_queue}` when nothing is queued.
+  """
+  def flush_queue(pid, ctx), do: GenServer.call(pid, {:flush_queue, ctx})
 
   def cancel(pid, ctx, turn_id \\ nil), do: GenServer.call(pid, {:cancel, ctx, turn_id})
 
@@ -172,6 +180,12 @@ defmodule Ecrits.Local.AcpAgent.Session do
        # first turn establishes it.
        provider_session_id: nil,
        current: nil,
+       # FIFO queue of messages received WHILE a turn was in flight (Phase 5). A
+       # mid-turn send ENQUEUES instead of cancelling the running turn; the head
+       # drains automatically when the running turn reaches a terminal state. A
+       # re-Enter (`flush_queue/2`) on a queued message cancels the current turn
+       # and runs the head immediately. Each entry: %{turn_id, input}.
+       queue: [],
        # Display-only transcript of COMPLETED turns (oldest first), so a browser
        # refresh can repaint the prior bubbles. codex `thread/resume` restores the
        # agent's memory but does NOT re-stream past messages, so without this the
@@ -241,40 +255,19 @@ defmodule Ecrits.Local.AcpAgent.Session do
      %{state | adapter_opts: merged, document_id: document_id, pool_document_id: pool_document_id}}
   end
 
-  def handle_call({:send_turn, ctx, input, _opts}, _from, state) do
+  def handle_call({:send_turn, ctx, raw_input, _opts}, _from, state) do
     cond do
       not authorized?(ctx, state) ->
         {:reply, {:error, :forbidden}, state}
 
-      state.current != nil ->
-        {:reply, {:error, :turn_in_progress}, state}
-
       true ->
-        turn_id = Ecto.UUID.generate()
-        parent = self()
-
-        task =
-          Task.async(fn ->
-            run_turn(parent, turn_id, input, state)
-          end)
-
-        Process.unlink(task.pid)
-
-        state = %{
-          state
-          | current: %{
-              turn_id: turn_id,
-              task_ref: task.ref,
-              task_pid: task.pid,
-              text: "",
-              input: input
-            }
-        }
-
-        state = emit(state, %{type: :turn_started, turn_id: turn_id, input: input})
-        state = maybe_emit_thread_title(state, input)
-
-        {:reply, {:ok, %{id: turn_id, session_id: state.id, status: :running}}, state}
+        # Normalize the input at the boundary (Phase 5 multi-modal seam): a bare
+        # string stays a bare string (the byte-for-byte-unchanged legacy path), a
+        # block list is validated. A malformed multi-modal send fails fast here.
+        case Prompt.normalize(raw_input) do
+          {:ok, input} -> start_turn(input, ensure_queue(state))
+          {:error, reason} -> {:reply, {:error, {:invalid_input, reason}}, state}
+        end
     end
   end
 
@@ -312,8 +305,49 @@ defmodule Ecrits.Local.AcpAgent.Session do
           |> record_transcript_turn(cancelled_current)
           |> emit(%{type: :turn_cancelled, turn_id: cancelled_turn_id})
           |> Map.put(:current, nil)
+          |> drain_queue()
 
         {:reply, {:ok, %{id: cancelled_turn_id, session_id: state.id, status: :cancelled}}, state}
+    end
+  end
+
+  # Re-Enter on a queued message (Phase 5): flush the FIFO head NOW by cancelling
+  # the in-flight turn and launching the head immediately, instead of waiting for
+  # the running turn to finish. No-op when the queue is empty. When no turn is in
+  # flight the head simply launches.
+  def handle_call({:flush_queue, ctx}, _from, state) do
+    state = ensure_queue(state)
+
+    cond do
+      not authorized?(ctx, state) ->
+        {:reply, {:error, :forbidden}, state}
+
+      state.queue == [] ->
+        {:reply, {:error, :empty_queue}, state}
+
+      true ->
+        # Gracefully cancel the in-flight turn (same teardown as a normal cancel)
+        # so the conversation can resume, record it, then drain the queue head.
+        state =
+          case state.current do
+            %{turn_id: cancelled_turn_id} = current ->
+              if current.task_pid do
+                send(current.task_pid, :acp_cancel_turn)
+                Process.send_after(self(), {:force_kill_turn, current.task_pid}, @cancel_grace_ms)
+              end
+
+              state
+              |> record_transcript_turn(current)
+              |> emit(%{type: :turn_cancelled, turn_id: cancelled_turn_id})
+              |> Map.put(:current, nil)
+
+            nil ->
+              state
+          end
+          |> drain_queue()
+
+        flushed = state.current && state.current.turn_id
+        {:reply, {:ok, %{id: flushed, session_id: state.id, status: :running}}, state}
     end
   end
 
@@ -339,6 +373,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
         |> record_transcript_turn(current)
         |> emit(%{type: :turn_completed, turn_id: turn_id, text: current.text})
         |> Map.put(:current, nil)
+        |> drain_queue()
 
       {:noreply, state}
     else
@@ -353,6 +388,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
         |> record_transcript_turn(current)
         |> emit(%{type: :turn_failed, turn_id: turn_id, reason: inspect(reason)})
         |> Map.put(:current, nil)
+        |> drain_queue()
 
       {:noreply, state}
     else
@@ -384,11 +420,79 @@ defmodule Ecrits.Local.AcpAgent.Session do
       |> record_transcript_turn(current)
       |> emit(%{type: :turn_failed, turn_id: turn_id, reason: inspect(reason)})
       |> Map.put(:current, nil)
+      |> drain_queue()
 
     {:noreply, state}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # Pop the FIFO queue head (if any) and launch it as the next turn. Called on
+  # every turn terminal (done/failed/cancelled/crash) — so a mid-turn send that
+  # was enqueued runs as soon as the running turn finishes, in send order. A
+  # no-op when no turn is in flight is impossible here: callers clear `current`
+  # to nil before draining, so the head always launches into an idle session.
+  defp drain_queue(%{current: nil, queue: [next | rest]} = state) do
+    {_turn_id, state} = launch_turn(next.input, %{state | queue: rest})
+    state
+  end
+
+  defp drain_queue(state), do: state
+
+  # ── send-turn helpers (FIFO queue) ─────────────────────────────────
+
+  # Backfill the Phase 5 `:queue` key onto a Session GenServer hot-reloaded from
+  # before this phase (the live :4000 server recompiles in place, not restarts),
+  # so the first send into an upgraded process never crashes on a missing key.
+  defp ensure_queue(state), do: Map.put_new(state, :queue, [])
+
+  defp start_turn(input, %{current: current} = state) when current != nil do
+    # A turn is already in flight — ENQUEUE rather than cancel (Phase 5 FIFO
+    # queue). The pending message drains when the running turn reaches a terminal
+    # state. A re-Enter on a queued message flushes it (see `:flush_queue`).
+    queued = %{turn_id: Ecto.UUID.generate(), input: input}
+    state = %{state | queue: state.queue ++ [queued]}
+
+    state =
+      emit(state, %{type: :turn_queued, turn_id: queued.turn_id, pending: length(state.queue)})
+
+    {:reply, {:ok, %{id: queued.turn_id, session_id: state.id, status: :queued}}, state}
+  end
+
+  defp start_turn(input, state) do
+    {turn_id, state} = launch_turn(input, state)
+    {:reply, {:ok, %{id: turn_id, session_id: state.id, status: :running}}, state}
+  end
+
+  # Spawn the per-turn streaming task and record it as the current turn. Shared by
+  # a fresh send and by draining the FIFO queue on a turn terminal.
+  defp launch_turn(input, state) do
+    turn_id = Ecto.UUID.generate()
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        run_turn(parent, turn_id, input, state)
+      end)
+
+    Process.unlink(task.pid)
+
+    state = %{
+      state
+      | current: %{
+          turn_id: turn_id,
+          task_ref: task.ref,
+          task_pid: task.pid,
+          text: "",
+          input: input
+        }
+    }
+
+    state = emit(state, %{type: :turn_started, turn_id: turn_id, input: input})
+    state = maybe_emit_thread_title(state, input)
+
+    {turn_id, state}
+  end
 
   # ── turn streaming (in a Task) ─────────────────────────────────────
 
@@ -476,7 +580,9 @@ defmodule Ecrits.Local.AcpAgent.Session do
   # `transcript/1` reverses to oldest-first). Skips an empty turn (no user text
   # and no agent text) so a no-op turn never leaves a blank pair on repaint.
   defp record_transcript_turn(state, current) do
-    user = current[:input]
+    # The transcript bubble shows the typed text regardless of input modality
+    # (string sugar OR a multi-modal block list), so derive the display text.
+    user = Prompt.display_text(current[:input])
     agent = current[:text]
 
     if blank?(user) and blank?(agent) do
@@ -507,7 +613,10 @@ defmodule Ecrits.Local.AcpAgent.Session do
     %{
       transcript: Enum.reverse(state.transcript),
       status: status(state),
-      title: state.title
+      title: state.title,
+      # Number of mid-turn sends still queued (Phase 5), so a refresh can repaint
+      # the "N 대기" pending state.
+      pending: length(state.queue)
     }
   end
 
@@ -535,7 +644,9 @@ defmodule Ecrits.Local.AcpAgent.Session do
   defp maybe_emit_thread_title(%{title_emitted?: true} = state, _input), do: state
 
   defp maybe_emit_thread_title(state, input) do
-    case derive_title(input) do
+    # Derive from the display text so a multi-modal turn titles from its typed
+    # text; a bare-string input passes through `display_text/1` unchanged.
+    case derive_title(Prompt.display_text(input)) do
       title when is_binary(title) and title != "" ->
         # RETAIN the title on the durable agent (so a re-attach recovers it) AND
         # emit it once so attached LiveViews update their header.

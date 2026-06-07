@@ -154,13 +154,29 @@ defmodule Ecrits.Workspace.Session do
 
   def snapshot(_ws), do: %{transcript: [], status: :offline, title: nil}
 
-  @doc "Delegate a chat turn to the foreground agent."
-  @spec send_turn(ws(), String.t()) :: {:ok, map()} | {:error, term()}
-  def send_turn(%{agent_id: agent_id}, message) when is_binary(agent_id) do
-    AcpAgent.send_turn(nil, agent_id, message)
+  @doc """
+  Delegate a chat turn to the foreground agent. `input` is a bare **string**
+  (sugar — the common case) OR a list of multi-modal **content blocks**
+  (`%{type: :text | :image | :audio | :file | :doc_ref, …}`, Phase 5). The
+  foreground agent normalizes + maps it onto the ACP prompt content shape.
+  """
+  @spec send_turn(ws(), String.t() | [map()]) :: {:ok, map()} | {:error, term()}
+  def send_turn(%{agent_id: agent_id}, input) when is_binary(agent_id) do
+    AcpAgent.send_turn(nil, agent_id, input)
   end
 
-  def send_turn(_ws, _message), do: {:error, :no_agent}
+  def send_turn(_ws, _input), do: {:error, :no_agent}
+
+  @doc """
+  Re-Enter on a queued message: flush the foreground agent's FIFO queue head NOW
+  (cancel the in-flight turn + run the head immediately).
+  """
+  @spec flush_queue(ws()) :: {:ok, map()} | {:error, term()}
+  def flush_queue(%{agent_id: agent_id}) when is_binary(agent_id) do
+    AcpAgent.flush_queue(agent_id)
+  end
+
+  def flush_queue(_ws), do: {:error, :no_agent}
 
   @doc "Cancel the foreground agent's in-flight turn."
   @spec cancel(ws(), String.t() | nil) :: {:ok, map()} | {:error, term()}

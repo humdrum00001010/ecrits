@@ -159,6 +159,16 @@ defmodule Ecrits.Local.AcpAgent do
   end
 
   @doc """
+  Flush the session's FIFO queue head immediately (Phase 5 re-Enter): cancel the
+  in-flight turn and run the next queued message now.
+  """
+  def flush_queue(session_id, ctx \\ nil) do
+    with {:ok, pid} <- fetch_session(session_id) do
+      Session.flush_queue(pid, ctx)
+    end
+  end
+
+  @doc """
   Terminate a session GenServer (and its provider subprocess). Needed for a
   GENUINE restart (provider/workspace switch): the Session is keyed by the stable
   per-browser `ws_id`, so the old one must be stopped before a fresh conversation
