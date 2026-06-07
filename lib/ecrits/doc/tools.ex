@@ -348,9 +348,9 @@ defmodule Ecrits.Doc.Tools do
                 "• insert_table_row / delete_table_row / insert_table_column / delete_table_column / merge_cells / split_cell {op, ref}: modify an EXISTING table.\n" <>
                 "• delete_node {op, ref} • insert_picture {op, ref, bins}\n" <>
                 "• insert_equation {op, ref, script, font_size?, color?}: insert an inline equation at `ref`; `script` is HWP equation markup (e.g. \"x^2 + y^2 = z^2\").\n" <>
-                "• insert_footnote {op, ref} • insert_endnote {op, ref}: insert a footnote/endnote anchor at `ref` (number auto-assigned).\n" <>
+                "• insert_footnote {op, ref, text?} • insert_endnote {op, ref, text?}: insert a footnote/endnote anchor at `ref` (number auto-assigned); pass `text` to fill the note's body (otherwise the note is empty — do NOT fake notes as body paragraphs).\n" <>
                 "• insert_shape {op, ref, width, height, shape_type?, x?, y?}: insert a drawing shape (rectangle/ellipse/line/textbox) at `ref`; width/height in HWPUNIT.\n" <>
-                "• set_columns {op, ref, count, column_type?, same_width?, spacing?}: set the section's multi-column layout (`count` columns); `ref`'s section selects the section.",
+                "• set_columns {op, ref, count, column_type?, same_width?, spacing?}: set the section's multi-column layout — `count` is the NUMBER of columns (2 = two columns / 2단). It applies from `ref`'s paragraph ONWARD, so to make the WHOLE body multi-column, call set_columns at the FIRST body paragraph (section 0, paragraph 0) BEFORE inserting the body text. `same_width?` defaults true; `spacing?` is the inter-column gap in HWPUNIT.",
             "properties" => %{
               "op" => %{
                 "type" => "string",
