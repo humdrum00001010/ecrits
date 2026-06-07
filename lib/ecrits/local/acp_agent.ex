@@ -130,7 +130,11 @@ defmodule Ecrits.Local.AcpAgent do
         adapter_opts: adapter_opts,
         workspace_root: Keyword.get(opts, :workspace_root),
         document_id: Keyword.get(opts, :document_id),
-        mcp_servers: mcp_servers()
+        pool_document_id: Keyword.get(opts, :pool_document_id),
+        # Per-agent MCP url (design invariant 3): the agent's own id keys its
+        # `/mcp/doc-tools/<id>` endpoint, so a tool call resolves back to THIS
+        # agent and runs in its own doc context — never a shared global pool.
+        mcp_servers: mcp_servers(id)
       ]
 
       case SessionSupervisor.start_session(args) do
@@ -223,23 +227,35 @@ defmodule Ecrits.Local.AcpAgent do
   # ── doc.* MCP server descriptor ────────────────────────────────────
 
   @doc """
-  The `mcpServers` descriptor list passed to every ACP session — currently the
-  in-process `doc.*` MCP server served over HTTP by the Phoenix endpoint.
+  The `mcpServers` descriptor list passed to an ACP session — the in-process
+  `doc.*` MCP server served over HTTP by the Phoenix endpoint, at the calling
+  agent's OWN per-agent url (`/mcp/doc-tools/<agent_id>`). The agent id in the
+  url is how a tool call resolves back to this agent (design invariant 3), so
+  each agent's doc.* tools run isolated in its own document context.
   """
-  def mcp_servers do
-    case doc_tools_mcp_url() do
+  def mcp_servers(agent_id) when is_binary(agent_id) and agent_id != "" do
+    case doc_tools_mcp_url(agent_id) do
       nil -> []
       url -> [%{"name" => @doc_tools_mcp_name, "url" => url}]
     end
   end
 
-  @doc "Absolute URL of the locally-served `doc.*` MCP server (HTTP transport)."
-  def doc_tools_mcp_url do
+  def mcp_servers(_agent_id), do: []
+
+  @doc """
+  Absolute per-agent URL of the locally-served `doc.*` MCP server (HTTP
+  transport): `<base>/mcp/doc-tools/<agent_id>`. The trailing agent id is
+  extracted by the router/plug and threaded to the tool call so it runs in that
+  agent's context.
+  """
+  def doc_tools_mcp_url(agent_id) when is_binary(agent_id) and agent_id != "" do
     case endpoint_base_url() do
       nil -> nil
-      base -> base <> "/mcp/doc-tools"
+      base -> base <> "/mcp/doc-tools/" <> URI.encode(agent_id)
     end
   end
+
+  def doc_tools_mcp_url(_agent_id), do: nil
 
   defp endpoint_base_url do
     case endpoint_http_port() do

@@ -391,6 +391,116 @@ defmodule Ecrits.Doc.ToolsTest do
     end
   end
 
+  # Per-agent MCP isolation + the open/ownership invariants (Phase 2). An "agent
+  # context" is a ctx map carrying `:agent_id` (+ `:active_doc`); a bare
+  # `%{pool: pool}` keeps the legacy global-Pool behaviour the rest of the suite
+  # relies on.
+  describe "per-agent context (Phase 2 isolation + invariants)" do
+    defp agent_ctx(pool, agent_id, active_doc \\ nil),
+      do: %{pool: pool, agent_id: agent_id, active_doc: active_doc}
+
+    test "doc.context returns THIS agent's active doc, not the global Pool.active", %{pool: pool} do
+      {:ok, %{"document" => a}} =
+        Tools.call(ctx(pool), "doc.open", %{"path" => "a.hwp", "open_opts" => [__text__: "x"]})
+
+      {:ok, %{"document" => b}} =
+        Tools.call(ctx(pool), "doc.open", %{"path" => "b.hwp", "open_opts" => [__text__: "y"]})
+
+      # The GLOBAL active is `a`, but each agent sees only its OWN bound doc.
+      :ok = Pool.set_active(pool, a)
+
+      assert {:ok, %{"active_document" => ^a}} =
+               Tools.call(agent_ctx(pool, "agent-1", a), "doc.context", %{})
+
+      assert {:ok, %{"active_document" => ^b}} =
+               Tools.call(agent_ctx(pool, "agent-2", b), "doc.context", %{})
+
+      # An agent with no bound doc sees none (never the global active).
+      assert {:ok, %{"active_document" => nil}} =
+               Tools.call(agent_ctx(pool, "agent-3", nil), "doc.context", %{})
+    end
+
+    test "doc.open of an ALREADY-OPEN doc FAILS with already_open + held_by (invariant 1)", %{
+      pool: pool
+    } do
+      # agent-1 opens it (and so owns it).
+      assert {:ok, %{"document" => doc_id}} =
+               Tools.call(agent_ctx(pool, "agent-1"), "doc.open", %{
+                 "path" => "shared.hwp",
+                 "open_opts" => [__text__: "제1조"]
+               })
+
+      # agent-1 re-opening the SAME doc fails (held by self).
+      assert {:error, %{"error" => "already_open", "document" => ^doc_id, "held_by" => held}} =
+               Tools.call(agent_ctx(pool, "agent-1"), "doc.open", %{"path" => "shared.hwp"})
+
+      assert held["kind"] == "self"
+
+      # agent-2 cannot grab it either — held_by names the other agent.
+      assert {:error, %{"error" => "already_open", "document" => ^doc_id, "held_by" => held2}} =
+               Tools.call(agent_ctx(pool, "agent-2"), "doc.open", %{"path" => "shared.hwp"})
+
+      assert held2 == %{"kind" => "agent", "agent_id" => "agent-1"}
+    end
+
+    test "doc.edit is :forbidden when another agent owns the doc (invariant 2)", %{pool: pool} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(agent_ctx(pool, "owner"), "doc.open", %{
+          "path" => "owned.hwp",
+          "open_opts" => [__text__: "제2조 (계약기간) 본문"]
+        })
+
+      # The owner can edit.
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(agent_ctx(pool, "owner", doc_id), "doc.edit", %{
+                 "document" => doc_id,
+                 "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "제3조"},
+                 "base_revision" => 0
+               })
+
+      # A different agent is fenced out.
+      assert {:error, %{"error" => "forbidden", "document" => ^doc_id, "owned_by" => owned}} =
+               Tools.call(agent_ctx(pool, "intruder", doc_id), "doc.edit", %{
+                 "document" => doc_id,
+                 "op" => %{"op" => "replace_text", "query" => "제3조", "replacement" => "X"},
+                 "base_revision" => 1
+               })
+
+      assert owned == %{"agent_id" => "owner"}
+    end
+
+    test "doc.edit of an UNOWNED (human-opened) doc lazily claims it and succeeds", %{pool: pool} do
+      # Opened WITHOUT an agent (the LiveView/human path) — no owner recorded.
+      {:ok, doc_id} = Pool.open(pool, "viewed.hwp", kind: :hwp, open_opts: [__text__: "제1조 본문"])
+      assert Pool.owner(pool, doc_id) == nil
+
+      # The single foreground agent edits it (the critical path) — allowed, and it
+      # claims ownership lazily.
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(agent_ctx(pool, "fg", doc_id), "doc.edit", %{
+                 "document" => doc_id,
+                 "op" => %{"op" => "replace_text", "query" => "제1조", "replacement" => "제1조 (목적)"},
+                 "base_revision" => 0
+               })
+
+      assert Pool.owner(pool, doc_id) == "fg"
+    end
+
+    test "a bare pool-only context still uses the global Pool.active + legacy open reuse", %{
+      pool: pool
+    } do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{"path" => "legacy.hwp", "open_opts" => [__text__: "x"]})
+
+      # Legacy reuse: re-open returns the SAME id, no already_open error.
+      assert {:ok, %{"document" => ^doc_id}} =
+               Tools.call(ctx(pool), "doc.open", %{"path" => "legacy.hwp"})
+
+      :ok = Pool.set_active(pool, doc_id)
+      assert {:ok, %{"active_document" => ^doc_id}} = Tools.call(ctx(pool), "doc.context", %{})
+    end
+  end
+
   describe "dispatch errors" do
     test "unknown tool", %{pool: pool} do
       assert {:error, {:unknown_tool, "doc.bogus"}} = Tools.call(ctx(pool), "doc.bogus", %{})

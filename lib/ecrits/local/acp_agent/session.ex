@@ -69,6 +69,17 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
   def snapshot(pid), do: GenServer.call(pid, :snapshot)
 
+  @doc """
+  The agent's private doc.* tool context (design invariant 3 — "assigns ARE the
+  MCP tool context"). Returns `%{active_doc, agent_id}` read from THIS agent's
+  own state, so a `doc.*` call resolved to this agent via its MCP url operates on
+  the document THIS agent is bound to (`state.pool_document_id`, the Pool doc id)
+  — never a global `Pool.active`. `active_doc` is nil before any document is
+  bound.
+  """
+  @spec tool_context(pid()) :: %{active_doc: String.t() | nil, agent_id: String.t()}
+  def tool_context(pid) when is_pid(pid), do: GenServer.call(pid, :tool_context)
+
   def send_turn(pid, ctx, input, opts \\ []),
     do: GenServer.call(pid, {:send_turn, ctx, input, opts})
 
@@ -143,6 +154,14 @@ defmodule Ecrits.Local.AcpAgent.Session do
        adapter_opts: Keyword.get(opts, :adapter_opts, []),
        workspace_root: Keyword.get(opts, :workspace_root),
        document_id: Keyword.get(opts, :document_id),
+       # The agent's ACTIVE doc for the doc.* MCP tools: the `Ecrits.Doc.Pool`
+       # document id (`d_<kind>_<hash>`) of the doc this agent is bound to —
+       # distinct from `document_id` (the LiveView Document id used as provider
+       # prompt context). `doc.context` returns THIS (per-agent, not the global
+       # `Pool.active`); `doc.open`/`doc.edit` honour ownership against it. The
+       # workspace LiveView sets it from `register_pool_document` and follows doc
+       # switches live via `update_options`. nil until a doc is bound.
+       pool_document_id: Keyword.get(opts, :pool_document_id),
        mcp_servers: Keyword.get(opts, :mcp_servers, []),
        # The provider's session/thread id, captured on turn 1 and RESUMED on
        # turns 2+ so the conversation keeps cross-turn memory. `nil` until the
@@ -177,6 +196,10 @@ defmodule Ecrits.Local.AcpAgent.Session do
     {:reply, agent_snapshot_payload(state), state}
   end
 
+  def handle_call(:tool_context, _from, state) do
+    {:reply, %{active_doc: state.pool_document_id, agent_id: state.id}, state}
+  end
+
   def handle_call(:title, _from, state) do
     {:reply, state.title, state}
   end
@@ -195,11 +218,18 @@ defmodule Ecrits.Local.AcpAgent.Session do
     # The active document is per-turn context, NOT a reason to recreate the
     # session — switching the document in the workspace must preserve the
     # conversation (mirrors the access/reasoning live-update path). When the
-    # caller passes a `:document_id`, follow it on the live session so the next
-    # turn's doc.* tools target what the user is now viewing.
-    {document_id, adapter_opts} = Keyword.pop(new_opts, :document_id, state.document_id)
+    # caller passes a `:document_id` (LiveView Document id, provider prompt
+    # context) and/or `:pool_document_id` (the Pool doc id the doc.* tools target),
+    # follow them on the live session so the next turn's doc.* tools operate on
+    # what the user is now viewing.
+    {document_id, new_opts} = Keyword.pop(new_opts, :document_id, state.document_id)
+    {pool_document_id, adapter_opts} =
+      Keyword.pop(new_opts, :pool_document_id, state.pool_document_id)
+
     merged = Keyword.merge(state.adapter_opts, adapter_opts)
-    {:reply, :ok, %{state | adapter_opts: merged, document_id: document_id}}
+
+    {:reply, :ok,
+     %{state | adapter_opts: merged, document_id: document_id, pool_document_id: pool_document_id}}
   end
 
   def handle_call({:send_turn, ctx, input, _opts}, _from, state) do

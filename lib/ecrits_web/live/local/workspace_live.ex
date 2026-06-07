@@ -2429,6 +2429,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> Keyword.put(:document_path, socket.assigns.active_document_path)
     |> Keyword.put(:workspace_path, workspace_path)
     |> put_current_document_id(active_document_id(socket))
+    |> put_pool_document_id(socket.assigns[:pool_document_id])
 
     # NOTE: no `:id` here. The durable foreground-agent id is derived from the
     # canonical workspace PATH by `Ecrits.Workspace.Session` (cookieless), so a
@@ -2441,6 +2442,16 @@ defmodule EcritsWeb.Local.WorkspaceLive do
        do: Keyword.put(opts, :document_id, document_id)
 
   defp put_current_document_id(opts, _document_id), do: opts
+
+  # The agent's doc.* ACTIVE doc is the `Ecrits.Doc.Pool` id (what doc.context
+  # returns and doc.edit/doc.open target), distinct from the LiveView document_id.
+  # register_pool_document stores it in :pool_document_id; seed/forward it so the
+  # agent's tool context points at the doc this viewer opened.
+  defp put_pool_document_id(opts, pool_document_id)
+       when is_binary(pool_document_id) and pool_document_id != "",
+       do: Keyword.put(opts, :pool_document_id, pool_document_id)
+
+  defp put_pool_document_id(opts, _pool_document_id), do: opts
 
   # Selecting/opening a document must NOT recreate the agent (that would wipe the
   # chat-rail conversation). The active document is per-turn context, so apply it
@@ -2462,9 +2473,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         socket
 
       true ->
+        # Follow BOTH the LiveView document_id (provider prompt context) and the
+        # Pool document id (the doc.* tools' active doc) so the agent's tool
+        # context tracks what the user is now viewing. nil pool id (e.g. a
+        # Markdown file with no Pool backend) clears the agent's active doc.
         _ =
           WorkspaceSession.update_options(socket.assigns.workspace_session,
-            document_id: current_document_id
+            document_id: current_document_id,
+            pool_document_id: socket.assigns[:pool_document_id]
           )
 
         socket

@@ -82,6 +82,28 @@ defmodule Ecrits.Workspace.Session do
     call_if_alive(path, :foreground_agent, nil)
   end
 
+  @doc """
+  Resolve a per-agent id (from a `/mcp/doc-tools/<agent_id>` URL) to the live
+  AgentLive pid — the MCP-isolation seam (design invariant 3). A `doc.*` tool
+  call carries its calling agent's id in the URL; the MCP server resolves it
+  here, then dispatches the tool in THAT agent's context.
+
+  Returns `{:ok, pid}` when the agent is registered and alive, `:error`
+  otherwise (unknown / dead id → the tool call is rejected, never silently run
+  against a global default). The `AcpAgent` registry is the authoritative roster
+  of live agents (only started agents are registered), so registry-liveness IS
+  the in-roster check this phase.
+  """
+  @spec fetch_agent(String.t()) :: {:ok, pid()} | :error
+  def fetch_agent(agent_id) when is_binary(agent_id) and agent_id != "" do
+    case AcpAgent.whereis(agent_id) do
+      pid when is_pid(pid) -> {:ok, pid}
+      _ -> :error
+    end
+  end
+
+  def fetch_agent(_agent_id), do: :error
+
   @doc "The foreground agent's current chat title (derived from the first prompt)."
   @spec title(ws()) :: String.t() | nil
   def title(%{agent_id: agent_id}) when is_binary(agent_id) do
@@ -270,17 +292,24 @@ defmodule Ecrits.Workspace.Session do
   defp maybe_apply_settings(agent_id, settings) do
     case Keyword.get(settings, :adapter_opts) do
       opts when is_list(opts) and opts != [] ->
-        document_id = Keyword.get(settings, :document_id)
-
         live_opts =
-          if is_binary(document_id) and document_id != "",
-            do: Keyword.put(opts, :document_id, document_id),
-            else: opts
+          opts
+          |> maybe_put_setting(settings, :document_id)
+          |> maybe_put_setting(settings, :pool_document_id)
 
         AcpAgent.update_session_options(agent_id, live_opts)
 
       _ ->
         :ok
+    end
+  end
+
+  # Forward a non-empty seed setting (document_id / pool_document_id) onto the
+  # live-update opts so a re-attach follows the doc the workspace is now viewing.
+  defp maybe_put_setting(opts, settings, key) do
+    case Keyword.get(settings, key) do
+      value when is_binary(value) and value != "" -> Keyword.put(opts, key, value)
+      _ -> opts
     end
   end
 

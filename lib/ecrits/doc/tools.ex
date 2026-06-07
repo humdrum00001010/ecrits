@@ -34,10 +34,23 @@ defmodule Ecrits.Doc.Tools do
   surface; the LibreOffice backend is a separate effort. `doc.get`'s reflective
   discovery is the engine-agnostic equivalent for the HWP backend.
 
-  Tools run against a context map `%{pool: pool}` (defaults to the named
-  `Ecrits.Doc.Pool`). Results are JSON-shaped maps so the layer is testable
-  server-side without a browser or an MCP transport. Errors that the agent is
-  expected to act on (conflict, capability gaps) are returned as structured
+  Tools run against a context map. The minimal form is `%{pool: pool}` (defaults
+  to the named `Ecrits.Doc.Pool`) — the global, pre-isolation context still used
+  by the bare MCP mount and by server-side tests. The **per-agent** form
+  (design invariant 3) additionally carries `:agent_id` (the calling agent, from
+  its `/mcp/doc-tools/<agent_id>` url) and `:active_doc` (THAT agent's own active
+  document id). In an agent context:
+
+    * `doc.context` returns the agent's OWN `active_doc`, never the global
+      `Pool.active`, so two agents never see each other's doc;
+    * `doc.open` FAILS with `already_open` for an already-open doc (invariant 1)
+      and records per-agent ownership;
+    * `doc.edit` is `:forbidden` when another agent owns the doc (invariant 2),
+      while an unowned (human-opened) doc is editable and lazily claimed.
+
+  Results are JSON-shaped maps so the layer is testable server-side without a
+  browser or an MCP transport. Errors that the agent is expected to act on
+  (conflict, capability gaps, already_open/forbidden) are returned as structured
   maps mirroring the design's example payloads.
   """
 
@@ -447,13 +460,15 @@ defmodule Ecrits.Doc.Tools do
   @doc """
   Dispatch an MCP tool call.
 
-  `ctx` is `%{pool: pool}` (defaults to the named `Ecrits.Doc.Pool`).
+  `ctx` is `%{pool: pool}` (global, pre-isolation) or the per-agent form
+  `%{pool: pool, agent_id: id, active_doc: doc_id}` (design invariant 3 — see the
+  module doc for the per-agent open/ownership semantics).
   """
   @spec call(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def call(ctx \\ %{}, tool_name, args)
 
   def call(ctx, "doc.context", _args) do
-    {:ok, context_json(pool(ctx))}
+    {:ok, context_json(ctx)}
   end
 
   def call(ctx, "doc.list", _args) do
@@ -465,12 +480,18 @@ defmodule Ecrits.Doc.Tools do
       kind = args |> get(["kind"]) |> normalize_kind()
       open_opts = args |> get(["open_opts"]) |> List.wrap()
 
-      case Pool.open(pool(ctx), path, kind: kind, open_opts: open_opts) do
-        {:ok, doc_id} ->
-          {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind)}}
+      # Invariant 1 ("one doc = one live model"): in an agent context, opening a
+      # doc that is ALREADY open FAILS with `already_open` + who holds it, instead
+      # of the legacy reuse — the agent references the existing id rather than
+      # grabbing a second handle. The pre-flight check uses the Pool's stable,
+      # path/kind-derived id, so it is decided BEFORE Pool.open (which would
+      # otherwise reuse). A bare pool-only context keeps the legacy reuse.
+      case open_preflight(ctx, path, kind) do
+        :ok ->
+          do_open_tool(ctx, path, kind, open_opts)
 
-        {:error, reason} ->
-          {:error, error_json(reason)}
+        {:error, structured} ->
+          {:error, structured}
       end
     end
   end
@@ -596,6 +617,39 @@ defmodule Ecrits.Doc.Tools do
   def call(ctx, "doc.edit", args) do
     base_rev = get(args, ["base_revision"])
 
+    # Invariant 2 ("one agent per doc"): in an agent context, editing a doc owned
+    # by a DIFFERENT agent is :forbidden. An UNOWNED doc (e.g. the human-opened
+    # viewed HWP) is editable and is lazily claimed by this agent on first edit,
+    # so the common single-agent flow keeps working while a 2nd agent is fenced
+    # out. A bare pool-only context skips the check entirely.
+    with {:ok, document} <- require_string(args, "document"),
+         :ok <- enforce_ownership(ctx, document) do
+      do_edit(ctx, args, base_rev)
+    end
+  end
+
+  def call(ctx, "doc.save", args) do
+    with {:ok, document} <- require_string(args, "document"),
+         {:ok, info} <- Pool.info(pool(ctx), document) do
+      path = get(args, ["path"]) || info.path
+
+      route_doc(ctx, args,
+        # Open doc: the browser WASM model is authority — export ITS edited bytes
+        # and write them to disk (the server Editor copy is unedited).
+        browser: fn lv -> save_browser(lv, args, path) end,
+        # Headless doc: the NIF holds the edits — export via Ehwp + write.
+        server: fn editor -> save_server(editor, info, path) end
+      )
+    else
+      {:error, reason} -> {:error, error_json(reason)}
+    end
+  end
+
+  def call(_ctx, tool_name, _args), do: {:error, {:unknown_tool, tool_name}}
+
+  # --- doc.edit dispatch (after the ownership gate) ------------------------
+
+  defp do_edit(ctx, args, base_rev) do
     case get(args, ["ops"]) do
       ops when is_list(ops) ->
         # Batch form: apply many edits in one call, best-effort with a per-op
@@ -620,24 +674,101 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
-  def call(ctx, "doc.save", args) do
-    with {:ok, document} <- require_string(args, "document"),
-         {:ok, info} <- Pool.info(pool(ctx), document) do
-      path = get(args, ["path"]) || info.path
+  # --- doc.open helpers (per-agent open + ownership) -----------------------
 
-      route_doc(ctx, args,
-        # Open doc: the browser WASM model is authority — export ITS edited bytes
-        # and write them to disk (the server Editor copy is unedited).
-        browser: fn lv -> save_browser(lv, args, path) end,
-        # Headless doc: the NIF holds the edits — export via Ehwp + write.
-        server: fn editor -> save_server(editor, info, path) end
-      )
+  # Decide whether `path`/`kind` may be opened in THIS context.
+  #   * Bare pool-only context → :ok (legacy reuse path; no isolation).
+  #   * Agent context, doc NOT open → :ok (it will be opened + owned).
+  #   * Agent context, doc ALREADY open → {:error, already_open} naming who holds
+  #     it (this agent / another agent / a human viewer), so the agent references
+  #     the existing id instead of grabbing a second handle (invariant 1).
+  defp open_preflight(%{agent_id: agent_id} = ctx, path, kind) do
+    pool = pool(ctx)
+    doc_id = Pool.document_id_for(path, kind)
+
+    if document_open?(pool, doc_id) do
+      {:error, already_open_json(pool, doc_id, agent_id)}
     else
-      {:error, reason} -> {:error, error_json(reason)}
+      :ok
     end
   end
 
-  def call(_ctx, tool_name, _args), do: {:error, {:unknown_tool, tool_name}}
+  defp open_preflight(_ctx, _path, _kind), do: :ok
+
+  # Open the doc in the Pool and, in an agent context, claim ownership for the
+  # calling agent + make it the agent's active doc context. A pool-only context
+  # opens without ownership (legacy).
+  defp do_open_tool(ctx, path, kind, open_opts) do
+    case Pool.open(pool(ctx), path, kind: kind, open_opts: open_opts) do
+      {:ok, doc_id} ->
+        _ = maybe_claim_owner(ctx, doc_id)
+        {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind)}}
+
+      {:error, reason} ->
+        {:error, error_json(reason)}
+    end
+  end
+
+  # A doc is "open" iff the Pool has a live model for it (route resolves to a
+  # server editor or an alive browser viewer).
+  defp document_open?(pool, doc_id) do
+    case Pool.route(pool, doc_id) do
+      {:error, :not_found} -> false
+      _ -> true
+    end
+  end
+
+  # The `already_open` structured error: the existing document id + who holds it.
+  # held_by is `self` (this agent already owns it), `{:agent, id}` (another
+  # agent), or `:viewer` (a human-viewed/browser-backed doc with no agent owner).
+  defp already_open_json(pool, doc_id, agent_id) do
+    %{
+      "error" => "already_open",
+      "document" => doc_id,
+      "held_by" => held_by(pool, doc_id, agent_id)
+    }
+  end
+
+  defp held_by(pool, doc_id, agent_id) do
+    case Pool.owner(pool, doc_id) do
+      ^agent_id ->
+        %{"kind" => "self", "agent_id" => agent_id}
+
+      owner when is_binary(owner) ->
+        %{"kind" => "agent", "agent_id" => owner}
+
+      nil ->
+        case Pool.route(pool, doc_id) do
+          {:browser, _lv} -> %{"kind" => "viewer"}
+          _ -> %{"kind" => "unowned"}
+        end
+    end
+  end
+
+  defp maybe_claim_owner(%{agent_id: agent_id} = ctx, doc_id) when is_binary(agent_id),
+    do: Pool.claim_owner(pool(ctx), doc_id, agent_id)
+
+  defp maybe_claim_owner(_ctx, _doc_id), do: :ok
+
+  # --- doc.edit ownership enforcement (invariant 2) ------------------------
+
+  # In an agent context, gate a write on ownership. `claim_owner` is the single
+  # authoritative arbiter (it succeeds for the current owner OR an unowned doc,
+  # and fails only when ANOTHER agent owns it), so this both enforces the fence
+  # AND lazily claims an unowned doc for the editing agent. A bare pool-only
+  # context (no agent_id) skips ownership entirely.
+  defp enforce_ownership(%{agent_id: agent_id} = ctx, document) when is_binary(agent_id) do
+    case Pool.claim_owner(pool(ctx), document, agent_id) do
+      :ok ->
+        :ok
+
+      {:error, {:owned, owner}} ->
+        {:error,
+         %{"error" => "forbidden", "document" => document, "owned_by" => %{"agent_id" => owner}}}
+    end
+  end
+
+  defp enforce_ownership(_ctx, _document), do: :ok
 
   # --- doc.create helpers --------------------------------------------------
 
@@ -646,6 +777,7 @@ defmodule Ecrits.Doc.Tools do
     case Pool.create(pool(ctx), path, kind: kind) do
       {:ok, doc_id} ->
         _ = Pool.set_active(pool(ctx), doc_id)
+        _ = maybe_claim_owner(ctx, doc_id)
         {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind)}}
 
       {:error, reason} ->
@@ -667,6 +799,7 @@ defmodule Ecrits.Doc.Tools do
       case Pool.open(pool(ctx), path, kind: kind) do
         {:ok, doc_id} ->
           _ = Pool.set_active(pool(ctx), doc_id)
+          _ = maybe_claim_owner(ctx, doc_id)
           {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind), "cloned_from" => source}}
 
         {:error, reason} ->
@@ -1204,9 +1337,10 @@ defmodule Ecrits.Doc.Tools do
   #
   # The `cursor`/`selection` refs still require browser->server caret reporting
   # (editors, owned separately) and remain null for now.
-  defp context_json(pool) do
+  defp context_json(ctx) do
+    pool = pool(ctx)
     docs = Pool.list(pool)
-    active_id = Pool.active(pool)
+    active_id = active_doc_id(ctx, pool)
     active = active_id && Enum.find(docs, &(&1.id == active_id))
 
     %{
@@ -1217,6 +1351,14 @@ defmodule Ecrits.Doc.Tools do
       "documents" => Enum.map(docs, &entry_json/1)
     }
   end
+
+  # The active doc for THIS call: in an agent context (the ctx carries an
+  # `:agent_id`, design invariant 3) it is the agent's OWN active doc
+  # (`ctx.active_doc`), so two agents never see each other's. In a bare
+  # pool-only context (legacy bare MCP mount, or a direct `Tools.call(%{pool:
+  # …}, …)` from a test) it falls back to the global `Pool.active`.
+  defp active_doc_id(%{agent_id: _} = ctx, _pool), do: Map.get(ctx, :active_doc)
+  defp active_doc_id(_ctx, pool), do: Pool.active(pool)
 
   defp error_json({:not_supported, reason}),
     do: %{"not_supported" => true, "reason" => to_string(reason)}

@@ -1,7 +1,8 @@
 defmodule EcritsWeb.Plugs.DocToolsMCPPlug do
   @moduledoc """
-  Mounts the `Ecrits.Doc.MCPServer` (the `doc.*` MCP server) at `/mcp/doc-tools`,
-  exposing it over the MCP **streamable-HTTP** transport.
+  Mounts the `Ecrits.Doc.MCPServer` (the `doc.*` MCP server) at
+  `/mcp/doc-tools/<agent_id>`, exposing it over the MCP **streamable-HTTP**
+  transport.
 
   Installed in `EcritsWeb.Endpoint` *before* `Plug.Parsers` so the underlying
   `ExMCP.HttpPlug` reads the raw JSON-RPC body itself (Phoenix's parser would
@@ -9,7 +10,21 @@ defmodule EcritsWeb.Plugs.DocToolsMCPPlug do
   untouched.
 
   The provider subprocess (codex app-server / claude CLI) reaches this in-process
-  BEAM MCP server over streamable HTTP at `http://<host>:<port>/mcp/doc-tools`.
+  BEAM MCP server over streamable HTTP at
+  `http://<host>:<port>/mcp/doc-tools/<agent_id>`.
+
+  ## Per-agent MCP isolation (design invariant 3)
+
+  The url carries the calling agent's id (`<agent_id>` after the mount prefix).
+  `ExMCP.HttpPlug` / `ExMCP.MessageProcessor` runs the handler GenServer in a
+  *separate* process and only forwards the JSON-RPC `params` — neither the conn
+  nor the url path reaches `MCPServer.handle_call_tool/3`. So for a `tools/call`
+  POST we splice the url's agent id INTO the tool `arguments` (as `_agent_id`,
+  which the handler pops back off) before delegating, by rewriting the raw body
+  and stashing it in `conn.assigns[:raw_body]` (the extension point
+  `ExMCP.HttpPlug` honours instead of re-reading the consumed body). The handler
+  then resolves `Ecrits.Workspace.Session.fetch_agent(agent_id)` and dispatches
+  the tool in THAT agent's document context.
 
   ## Why we handle the SSE GET ourselves
 
@@ -68,20 +83,25 @@ defmodule EcritsWeb.Plugs.DocToolsMCPPlug do
 
   @impl true
   def call(%Plug.Conn{path_info: @prefix ++ rest} = conn, mcp_opts) do
+    # The url is `/mcp/doc-tools/<agent_id>`; `rest` is `[agent_id]` (or `[]` for
+    # the legacy bare mount — tolerated so a missing id degrades rather than 404s).
+    {agent_id, tail} = pop_agent_id(rest)
+
     conn
-    |> Map.put(:path_info, rest)
-    |> Map.put(:script_name, conn.script_name ++ @prefix)
+    |> Map.put(:path_info, tail)
+    |> Map.put(:script_name, conn.script_name ++ @prefix ++ agent_segment(agent_id))
+    |> maybe_thread_agent_id(agent_id)
     |> dispatch(mcp_opts)
     |> Plug.Conn.halt()
   end
 
   # OAuth discovery probes codex issues at the origin root for this MCP server:
-  #   GET /.well-known/oauth-authorization-server[/mcp/doc-tools]
-  #   GET /.well-known/oauth-protected-resource[/mcp/doc-tools]
+  #   GET /.well-known/oauth-authorization-server[/mcp/doc-tools[/<agent_id>]]
+  #   GET /.well-known/oauth-protected-resource[/mcp/doc-tools[/<agent_id>]]
   # Answer with 404 JSON (OAuth is not enabled) instead of leaking to the router.
   def call(%Plug.Conn{method: "GET", path_info: [".well-known", kind | rest]} = conn, _mcp_opts)
       when kind in @well_known_oauth do
-    if rest == [] or rest == @prefix do
+    if well_known_for_mount?(rest) do
       conn
       |> put_resp_header("access-control-allow-origin", "*")
       |> put_resp_content_type("application/json")
@@ -93,6 +113,65 @@ defmodule EcritsWeb.Plugs.DocToolsMCPPlug do
   end
 
   def call(conn, _mcp_opts), do: conn
+
+  # The OAuth-discovery probe targets THIS mount when its suffix is empty, the
+  # bare mount prefix, or the per-agent mount prefix + an id.
+  defp well_known_for_mount?([]), do: true
+  defp well_known_for_mount?(@prefix), do: true
+  defp well_known_for_mount?(@prefix ++ [_agent_id]), do: true
+  defp well_known_for_mount?(_rest), do: false
+
+  # Split the agent id off the mount tail. `[agent_id | tail]` for the per-agent
+  # url; `[]` (no id) for the legacy bare mount.
+  defp pop_agent_id([agent_id | tail]) when is_binary(agent_id) and agent_id != "",
+    do: {URI.decode(agent_id), tail}
+
+  defp pop_agent_id(rest), do: {nil, rest}
+
+  defp agent_segment(nil), do: []
+  defp agent_segment(agent_id), do: [agent_id]
+
+  # Splice the url's agent id into the JSON-RPC tool `arguments` for a
+  # `tools/call` POST, so it survives the process hop into
+  # `MCPServer.handle_call_tool/3` (which only sees `params`). We rewrite the raw
+  # body and stash it in `conn.assigns[:raw_body]`, the cache `ExMCP.HttpPlug`
+  # reads instead of re-reading the (here-consumed) body. Non-POST requests and
+  # non-tools/call messages pass through untouched. Best-effort: any read/parse
+  # hiccup leaves the body alone so the delegated plug handles it as before.
+  defp maybe_thread_agent_id(conn, nil), do: conn
+
+  defp maybe_thread_agent_id(%Plug.Conn{method: "POST"} = conn, agent_id) do
+    case Plug.Conn.read_body(conn) do
+      {:ok, body, conn} -> stash_agent_body(conn, body, agent_id)
+      _ -> conn
+    end
+  end
+
+  defp maybe_thread_agent_id(conn, _agent_id), do: conn
+
+  defp stash_agent_body(conn, body, agent_id) do
+    with {:ok, %{} = request} <- Jason.decode(body),
+         rewritten when is_map(rewritten) <- inject_agent_id(request, agent_id),
+         {:ok, encoded} <- Jason.encode(rewritten) do
+      Plug.Conn.assign(conn, :raw_body, encoded)
+    else
+      # Couldn't parse/rewrite — preserve the original bytes so the delegated plug
+      # still sees an intact request (it will re-surface the parse error itself).
+      _ -> Plug.Conn.assign(conn, :raw_body, body)
+    end
+  end
+
+  # Only a `tools/call` carries tool `arguments`; add `_agent_id` there. Other
+  # JSON-RPC methods (initialize, tools/list, resources/list, …) are returned
+  # unchanged.
+  defp inject_agent_id(%{"method" => "tools/call", "params" => %{} = params} = request, agent_id) do
+    arguments = Map.get(params, "arguments", %{})
+    arguments = if is_map(arguments), do: arguments, else: %{}
+    params = Map.put(params, "arguments", Map.put(arguments, "_agent_id", agent_id))
+    Map.put(request, "params", params)
+  end
+
+  defp inject_agent_id(request, _agent_id), do: request
 
   # The streamable-HTTP SSE channel: a GET that accepts `text/event-stream`. We
   # own this in the request process so `chunk/2` is legal under Bandit.

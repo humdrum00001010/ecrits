@@ -167,6 +167,35 @@ defmodule Ecrits.Doc.Pool do
   @spec active(GenServer.server()) :: document_id() | nil
   def active(pool \\ @default_name), do: GenServer.call(pool, :active)
 
+  @doc """
+  Per-agent document ownership (design invariant 2 — "one agent per doc").
+
+  Records `agent_id` as the unique owner of `document_id`. Idempotent for the
+  current owner (re-claiming a doc you already own succeeds). Returns
+  `{:error, {:owned, other_agent_id}}` when a DIFFERENT agent already owns it,
+  so `doc.edit` can refuse and `doc.open` can report `held_by`.
+
+  Phase 2 keeps the `owners` map in the (single, global) Pool — the runtime both
+  agents' MCP calls reach — so ownership is globally unique per doc id. A later
+  phase moves this to `Ecrits.Workspace.Session`.
+  """
+  @spec claim_owner(GenServer.server(), document_id(), String.t()) ::
+          :ok | {:error, {:owned, String.t()}}
+  def claim_owner(pool \\ @default_name, document_id, agent_id)
+      when is_binary(document_id) and is_binary(agent_id),
+      do: GenServer.call(pool, {:claim_owner, document_id, agent_id})
+
+  @doc "The agent id that owns `document_id`, or nil when unowned."
+  @spec owner(GenServer.server(), document_id()) :: String.t() | nil
+  def owner(pool \\ @default_name, document_id) when is_binary(document_id),
+    do: GenServer.call(pool, {:owner, document_id})
+
+  @doc "Release `agent_id`'s ownership of `document_id` (no-op if it isn't the owner)."
+  @spec release_owner(GenServer.server(), document_id(), String.t()) :: :ok
+  def release_owner(pool \\ @default_name, document_id, agent_id)
+      when is_binary(document_id) and is_binary(agent_id),
+      do: GenServer.call(pool, {:release_owner, document_id, agent_id})
+
   @spec close(GenServer.server(), document_id()) :: :ok | {:error, :not_found}
   def close(pool \\ @default_name, document_id),
     do: GenServer.call(pool, {:close, document_id})
@@ -176,7 +205,9 @@ defmodule Ecrits.Doc.Pool do
   @impl true
   def init(_opts) do
     {:ok, sup} = DynamicSupervisor.start_link(strategy: :one_for_one)
-    {:ok, %{sup: sup, docs: %{}, by_path: %{}, active: nil}}
+    # `owners`: %{document_id => agent_id} — per-agent doc ownership (design
+    # invariant 2). Populated by `claim_owner/3`, cleared on close/owner-release.
+    {:ok, %{sup: sup, docs: %{}, by_path: %{}, active: nil, owners: %{}}}
   end
 
   @impl true
@@ -330,6 +361,33 @@ defmodule Ecrits.Doc.Pool do
     {:reply, st.active, st}
   end
 
+  def handle_call({:claim_owner, document_id, agent_id}, _from, st) do
+    case Map.get(st.owners, document_id) do
+      nil ->
+        {:reply, :ok, %{st | owners: Map.put(st.owners, document_id, agent_id)}}
+
+      ^agent_id ->
+        {:reply, :ok, st}
+
+      other_agent ->
+        {:reply, {:error, {:owned, other_agent}}, st}
+    end
+  end
+
+  def handle_call({:owner, document_id}, _from, st) do
+    {:reply, Map.get(st.owners, document_id), st}
+  end
+
+  def handle_call({:release_owner, document_id, agent_id}, _from, st) do
+    owners =
+      case Map.get(st.owners, document_id) do
+        ^agent_id -> Map.delete(st.owners, document_id)
+        _ -> st.owners
+      end
+
+    {:reply, :ok, %{st | owners: owners}}
+  end
+
   def handle_call({:close, document_id}, _from, st) do
     case Map.pop(st.docs, document_id) do
       {nil, _docs} ->
@@ -342,7 +400,8 @@ defmodule Ecrits.Doc.Pool do
 
         by_path = Map.delete(st.by_path, doc.path)
         active = if st.active == document_id, do: nil, else: st.active
-        {:reply, :ok, %{st | docs: docs, by_path: by_path, active: active}}
+        owners = Map.delete(st.owners, document_id)
+        {:reply, :ok, %{st | docs: docs, by_path: by_path, active: active, owners: owners}}
     end
   end
 
@@ -363,7 +422,10 @@ defmodule Ecrits.Doc.Pool do
       |> detach_pid_everywhere(pid)
 
     active = if st.active && Map.has_key?(docs, st.active), do: st.active, else: nil
-    {:noreply, %{st | docs: docs, active: active}}
+    # A doc whose editor died is gone from `docs`; drop any ownership of it so a
+    # stale owner can never block re-opening it.
+    owners = Map.take(st.owners, Map.keys(docs))
+    {:noreply, %{st | docs: docs, active: active, owners: owners}}
   end
 
   # --- helpers -------------------------------------------------------------
@@ -444,7 +506,13 @@ defmodule Ecrits.Doc.Pool do
   defp backing(%{browser: lv}) when is_pid(lv), do: :browser
   defp backing(_doc), do: :server
 
-  defp document_id_for(path, kind) do
+  @doc """
+  The stable document id `open/3` would mint for `path` + `kind` (sha-derived,
+  path/kind-keyed). Exposed so callers can decide whether a doc is already open
+  BEFORE calling `open/3` (the `doc.open` already-open invariant).
+  """
+  @spec document_id_for(String.t(), atom()) :: document_id()
+  def document_id_for(path, kind) do
     hash =
       :crypto.hash(:sha256, "#{kind}:#{path}")
       |> Base.url_encode64(padding: false)

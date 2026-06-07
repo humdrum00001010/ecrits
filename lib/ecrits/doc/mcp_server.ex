@@ -22,6 +22,8 @@ defmodule Ecrits.Doc.MCPServer do
   use ExMCP.Server.Handler
 
   alias Ecrits.Doc.Tools
+  alias Ecrits.Local.AcpAgent.Session, as: AgentLive
+  alias Ecrits.Workspace.Session, as: WorkspaceSession
 
   @server_name "ecrits-doc-tools"
   @server_version "0.1.0"
@@ -68,10 +70,22 @@ defmodule Ecrits.Doc.MCPServer do
 
   @impl true
   def handle_call_tool(name, arguments, state) do
-    # Strip the protocol `_meta` envelope ex_mcp folds into arguments.
+    # Strip the protocol `_meta` envelope ex_mcp folds into arguments, and the
+    # `_agent_id` the per-agent MCP url's plug splices in (the isolation seam).
     {_meta, args} = Map.pop(arguments || %{}, "_meta")
+    {agent_id, args} = Map.pop(args, "_agent_id")
 
-    case Tools.call(tool_context(), name, args) do
+    case resolve_tool_context(agent_id) do
+      {:ok, ctx} ->
+        run_tool(ctx, name, args, state)
+
+      {:error, reason} ->
+        {:ok, %{content: [json_content(reason)], isError: true}, state}
+    end
+  end
+
+  defp run_tool(ctx, name, args, state) do
+    case Tools.call(ctx, name, args) do
       {:ok, result} ->
         {:ok, %{content: [json_content(result)], structuredContent: result}, state}
 
@@ -85,8 +99,36 @@ defmodule Ecrits.Doc.MCPServer do
     end
   end
 
-  # The doc tools operate against the default-named `Ecrits.Doc.Pool`.
-  defp tool_context, do: %{pool: Ecrits.Doc.Pool}
+  # Build the doc.* tool context (design invariant 3). The agent id from the
+  # per-agent MCP url resolves — via `Workspace.Session.fetch_agent/1` — to the
+  # live AgentLive; we read ITS doc context (`active_doc` = the doc this agent is
+  # bound to) and dispatch the tool there. The result is `%{pool, agent_id,
+  # active_doc}`: `doc.context` returns THIS agent's active doc, and
+  # `doc.open`/`doc.edit` honour per-agent ownership — never a global
+  # `Pool.active`.
+  #
+  # An absent agent id (legacy bare mount, or a non-agent caller in a test) keeps
+  # the prior pool-only context so direct `Tools.call(%{pool: …}, …)` behaviour is
+  # preserved. An agent id that does NOT resolve (dead/unknown) is rejected so a
+  # tool never silently runs against the wrong context.
+  defp resolve_tool_context(nil), do: {:ok, %{pool: Ecrits.Doc.Pool}}
+
+  defp resolve_tool_context(agent_id) when is_binary(agent_id) do
+    case WorkspaceSession.fetch_agent(agent_id) do
+      {:ok, pid} ->
+        %{active_doc: active_doc} = AgentLive.tool_context(pid)
+
+        {:ok,
+         %{
+           pool: Ecrits.Doc.Pool,
+           agent_id: agent_id,
+           active_doc: active_doc
+         }}
+
+      :error ->
+        {:error, %{"error" => "agent_not_found", "agent_id" => agent_id}}
+    end
+  end
 
   defp to_mcp_tool(%{"namespace" => ns, "name" => name} = tool) do
     %{
