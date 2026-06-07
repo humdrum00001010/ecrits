@@ -16,17 +16,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   alias Ecrits.Local.Workspace
   alias Ecrits.Workspace.Session, as: WorkspaceSession
   alias EcritsWeb.Components.LocalFileTree
-  alias EcritsWeb.Live.Studio.Components.ChatRail
   alias EcritsWeb.Live.Studio.Components.EditorSurface
   alias EcritsWeb.Local.WorkspaceAdapter
 
   @local_document_upload_max_size 50_000_000
-  # Debounce interval for re-rendering the streaming agent message body as
-  # formatted markdown. Raw text appends (client-side) provide instant
-  # sub-debounce feedback; on each tick we re-render the accumulated buffer
-  # through MDEx so the visible body becomes progressively-formatted markdown
-  # without thrashing on every token.
-  @local_agent_text_flush_ms 120
   # Idle window before a dirty viewed document is auto-saved. Each user/agent
   # edit (re)arms a per-document timer; when it fires and the doc is still dirty
   # we fire a canonical `doc.save` (the same path Ctrl/Cmd+S uses).
@@ -113,9 +106,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      # ("points to an old version of the code" -> BadFunctionError on the next
      # stream_insert). A remote capture `&__MODULE__.fun/1` is resolved by name at
      # call time and therefore survives recompiles.
-     |> stream_configure(:local_agent_items, dom_id: &__MODULE__.local_agent_item_dom_id/1)
      |> stream_configure(:local_hwp_pages, dom_id: &__MODULE__.local_hwp_page_dom_id/1)
-     |> stream(:local_agent_items, [])
      |> stream(:local_hwp_pages, [])
      # Markdown (.md/.markdown) editor: plain-text source + live MDEx preview.
      |> assign(:local_markdown_source, "")
@@ -165,24 +156,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:local_hwp_stream_loading?, false)
      |> assign(:last_caret, nil)
      |> assign(:workspace_error, nil)
+     # The chat thread (title/status/stream/composer) lives in the `AgentChatLive`
+     # child LiveView now. This shell keeps ONLY the provider/model/reasoning/
+     # access selection (URL-param-driven) used to SEED + live-update the durable
+     # foreground agent, plus the provider-config modal + document-import upload.
+     # `local_agent_session_id` is retained purely as the bound foreground-agent
+     # id (so a doc-switch re-attach is deduped); it drives no chat UI here.
      |> assign(:local_agent_session_id, nil)
-     |> assign(:local_agent_status, :offline)
-     |> assign(:local_agent_error, nil)
-     |> assign(:local_agent_turn_id, nil)
-     |> assign(:local_agent_text, "")
-     |> assign(:local_agent_text_segment, 0)
-     |> assign(:local_agent_text_flush_ref, nil)
-     |> assign(:local_agent_active_tools, %{})
-     |> assign(:local_agent_reasoning_text, "")
-     # Tracks whether reasoning text is being appended contiguously. codex streams
-     # reasoning as token deltas with NO separator between distinct reasoning items
-     # (each resumes after a tool call), so consecutive items glue together
-     # ("…open file.The new document…"). We insert a paragraph break when reasoning
-     # resumes after a non-reasoning event; reset to false in the event funnel.
-     |> assign(:local_agent_reasoning_open?, false)
-     |> assign(:local_agent_title, default_local_agent_title())
-     |> assign(:local_agent_title_user_edited?, false)
-     |> assign(:local_agent_title_form, local_agent_title_form())
      |> assign(:local_agent_provider, local_agent_provider_display())
      |> assign(:local_agent_provider_warning, nil)
      |> assign(:local_agent_model, default_agent_model_id(default_provider_id()))
@@ -190,7 +170,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:local_agent_reasoning_effort, default_reasoning_effort())
      |> assign_local_agent_access(default_access_control())
      |> assign(:local_agent_integrations, local_agent_integrations())
-     |> assign(:local_agent_form, local_agent_form())
      |> assign(:local_agent_options_form, local_agent_options_form())
      |> allow_upload(:local_document_import,
        accept: ~w(.hwp .hwpx .doc .docx),
@@ -261,21 +240,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   @impl true
   def handle_event("local_agent_model_modal.open", _params, socket) do
     {:noreply, assign(socket, :local_agent_model_modal_open, true)}
-  end
-
-  def handle_event(
-        "update_local_agent_title",
-        %{"local_agent_title" => %{"title" => title}},
-        socket
-      ) do
-    # Persist the rename on the durable foreground agent so it survives a refresh
-    # (and pins the auto-title). No-op before the first attach.
-    if w = ws(socket), do: WorkspaceSession.rename(w, title)
-
-    {:noreply,
-     socket
-     |> assign(:local_agent_title_user_edited?, true)
-     |> assign_local_agent_title(title)}
   end
 
   def handle_event("toggle_dir", %{"path" => path}, socket) do
@@ -447,10 +411,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     {:noreply, refresh_tree(socket, socket.assigns.expanded_paths)}
   end
 
-  def handle_event("refresh_local_agent", _params, socket) do
-    {:noreply, restart_local_agent_session(socket)}
-  end
-
   def handle_event("open_local_agent_model_modal", _params, socket) do
     {:noreply, assign(socket, :local_agent_model_modal_open, true)}
   end
@@ -521,76 +481,23 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     {:noreply, assign_local_document_upload_errors(socket)}
   end
 
-  def handle_event("send_local_agent", %{"agent" => %{"message" => message}}, socket) do
-    message = String.trim(message || "")
-
-    cond do
-      message == "" ->
-        {:noreply, assign(socket, :local_agent_form, local_agent_form())}
-
-      is_nil(socket.assigns.local_agent_session_id) ->
-        {:noreply, assign(socket, :local_agent_error, "Agent session is not ready.")}
-
-      true ->
-        with {:ok, socket} <- maybe_cancel_active_local_agent_for_new_turn(socket) do
-          send_local_agent_turn(socket, message)
-        else
-          {:error, socket} -> {:noreply, socket}
-        end
-    end
-  end
-
-  def handle_event("cancel_local_agent", _params, socket) do
-    turn_id = socket.assigns.local_agent_turn_id
-
-    if ws(socket) && turn_id do
-      case WorkspaceSession.cancel(ws(socket), turn_id) do
-        {:ok, _turn} ->
-          partial = socket.assigns.local_agent_text
-          segment = socket.assigns.local_agent_text_segment
-
-          {:noreply,
-           socket
-           |> assign(:local_agent_status, :cancelled)
-           |> assign(:local_agent_turn_id, nil)
-           |> assign(:local_agent_text, "")
-           |> finalize_cancelled_agent_text(turn_id, partial, segment)
-           |> finalize_dangling_tools("Turn cancelled.")}
-
-        {:error, reason} ->
-          {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
-      end
-    else
-      {:noreply, socket}
-    end
-  end
-
   @impl true
-  def handle_info({:local_agent_event, %{session_id: session_id} = event}, socket)
+  # The chat thread is rendered by the `AgentChatLive` child, but the shell still
+  # subscribes to the foreground agent's topic for ONE thing: the DOCUMENT-side
+  # turn-end hook. When a turn completes the agent may have left an in-memory edit
+  # unsaved (auto-save safety net) and/or created files; persist + re-list here.
+  # Every other agent event is the child's concern and ignored.
+  def handle_info({:local_agent_event, %{session_id: session_id, type: :turn_completed}}, socket)
       when session_id == socket.assigns.local_agent_session_id do
-    # Close the contiguous-reasoning run on any non-reasoning event, so the NEXT
-    # reasoning delta starts a fresh paragraph (codex glues reasoning items).
     socket =
-      case event do
-        %{type: :reasoning_delta} -> socket
-        _ -> assign(socket, :local_agent_reasoning_open?, false)
-      end
+      socket
+      |> persist_pending_agent_docs()
+      |> refresh_tree(socket.assigns.expanded_paths)
 
-    {:noreply, apply_local_agent_event(socket, event)}
+    {:noreply, socket}
   end
 
   def handle_info({:local_agent_event, _event}, socket), do: {:noreply, socket}
-
-  # Debounced re-render of the in-flight streaming agent message. Re-renders the
-  # accumulated buffer through `markdown_body`/MDEx so LiveView pushes formatted
-  # HTML that replaces the raw client-side appends.
-  def handle_info({:flush_local_agent_text, ref}, socket) do
-    if socket.assigns.local_agent_text_flush_ref == ref do
-      {:noreply, flush_local_agent_text(socket)}
-    else
-      {:noreply, socket}
-    end
-  end
 
   def handle_info({:rhwp_positional_index_request, request}, socket) do
     selected_document_id = active_document_id(socket)
@@ -882,8 +789,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           <aside
             id="local-agent-sidebar"
             data-default-visible="true"
-            data-session-id={@local_agent_session_id || ""}
-            data-agent-status={to_string(@local_agent_status)}
             data-component="chat-rail"
             data-local-chat-rail="true"
             data-provider-key={@local_agent_provider.key}
@@ -904,67 +809,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             >
             </button>
 
-            <div
-              data-role="chat-rail-controls"
-              class="flex shrink-0 items-center justify-between gap-1.5 border-b border-base-300 bg-base-200/95 px-1.5 py-0.5"
-            >
-              <div
-                id="local-agent-title"
-                data-role="chat-thread-title"
-                title={@local_agent_title}
-                class="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-semibold leading-5 text-base-content"
-              >
-                <.form
-                  for={@local_agent_title_form}
-                  id="local-agent-title-form"
-                  phx-change="update_local_agent_title"
-                  data-role="chat-thread-title-form"
-                  class="min-w-0 flex-1"
-                >
-                  <input
-                    id="local-agent-title-label"
-                    name={@local_agent_title_form[:title].name}
-                    value={@local_agent_title}
-                    type="text"
-                    autocomplete="off"
-                    maxlength="120"
-                    aria-label="Chat title"
-                    data-role="chat-thread-title-label"
-                    class="block h-6 w-full min-w-0 truncate rounded-sm border border-transparent bg-transparent px-1 py-0 text-sm font-semibold leading-6 text-base-content outline-none transition-colors placeholder:text-transparent hover:border-base-content/15 focus:border-base-content/35 focus:bg-base-100 focus:outline-none"
-                  />
-                </.form>
-              </div>
-              <span
-                id="local-agent-status"
-                data-role="local-agent-status"
-                aria-live="polite"
-                class="sr-only"
-              >
-                {agent_status_label(@local_agent_status)}
-              </span>
-              <button
-                id="local-mobile-open-document"
-                type="button"
-                data-role="mobile-open-document"
-                aria-controls="local-editor-shell local-agent-sidebar"
-                aria-pressed="false"
-                class="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content lg:hidden"
-              >
-                <.icon name="hero-document-text" class="size-3.5" />
-                <span>Document</span>
-              </button>
-              <button
-                id="local-agent-refresh"
-                type="button"
-                phx-click="refresh_local_agent"
-                class="inline-flex size-7 shrink-0 items-center justify-center rounded text-base-content/55 hover:bg-base-100 hover:text-base-content disabled:pointer-events-none disabled:opacity-45"
-                aria-label="Refresh agent chat"
-                disabled={@local_agent_status == :starting}
-              >
-                <.icon name="hero-arrow-path" class="size-4" />
-              </button>
-            </div>
-
             <p
               :if={@local_agent_provider_warning}
               id="local-agent-provider-warning"
@@ -973,220 +817,29 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               {@local_agent_provider_warning}
             </p>
 
-            <div data-role="chat-rail-body" class="flex min-h-0 flex-1 flex-col overflow-visible">
-              <div
-                id="local-agent-thread"
-                phx-update="stream"
-                data-role="chat-stream"
-                class="flex min-h-0 flex-1 flex-col items-stretch gap-3 overflow-x-hidden overflow-y-auto px-4 py-3"
-              >
-                <article
-                  :for={{dom_id, item} <- @streams.local_agent_items}
-                  id={dom_id}
-                  data-role={agent_item_data_role(item)}
-                  data-chat-role="chat-message"
-                  data-message-role={agent_item_role(item)}
-                  data-message-status={agent_item_status(item)}
-                  class={agent_item_class(item)}
-                >
-                  <%= case agent_item_role(item) do %>
-                    <% "tool" -> %>
-                      <div
-                        data-role="operation-block"
-                        class="min-w-0 px-3 py-1 text-[12px] text-base-content/60"
-                      >
-                        <button
-                          id={"#{dom_id}-toggle"}
-                          type="button"
-                          aria-expanded="false"
-                          aria-controls={"#{dom_id}-details"}
-                          phx-click={
-                            JS.toggle_attribute({"hidden", "hidden"}, to: "##{dom_id}-details")
-                            |> JS.toggle_attribute({"aria-expanded", "true", "false"})
-                          }
-                          class="flex w-full min-w-0 items-center gap-1.5 text-left hover:text-base-content"
-                        >
-                          <.icon name="hero-wrench-screwdriver" class="size-3.5 shrink-0" />
-                          <span class="shrink-0">Tool:</span>
-                          <span class="min-w-0 truncate font-mono">{agent_item_title(item)}</span>
-                          <span class="ml-auto shrink-0 text-[11px] text-base-content/45">
-                            {agent_item_status_label(item)}
-                          </span>
-                          <.icon
-                            name="hero-chevron-down"
-                            class="size-3 shrink-0 text-base-content/45"
-                          />
-                        </button>
-                        <div
-                          id={"#{dom_id}-details"}
-                          data-role="operation-details"
-                          hidden
-                          class="mt-1 border-l border-base-300 pl-3"
-                        >
-                          <pre class="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-base-content/55">{agent_item_body(item)}</pre>
-                        </div>
-                      </div>
-                    <% "thinking" -> %>
-                      <div
-                        data-role="operation-block"
-                        class="min-w-0 px-3 py-1 text-[12px] text-base-content/60"
-                      >
-                        <button
-                          id={"#{dom_id}-toggle"}
-                          type="button"
-                          aria-expanded="false"
-                          aria-controls={"#{dom_id}-details"}
-                          phx-click={
-                            JS.toggle_attribute({"hidden", "hidden"}, to: "##{dom_id}-details")
-                            |> JS.toggle_attribute({"aria-expanded", "true", "false"})
-                          }
-                          class="flex w-full min-w-0 items-center gap-1.5 text-left hover:text-base-content"
-                        >
-                          <.icon name="hero-light-bulb" class="size-3.5 shrink-0" />
-                          <span class="shrink-0">Thinking:</span>
-                          <span
-                            data-role="agent-reasoning-text"
-                            data-message-id={dom_id}
-                            class="min-w-0 truncate"
-                          >
-                            {agent_item_body(item)}
-                          </span>
-                          <.icon
-                            name="hero-chevron-down"
-                            class="ml-auto size-3 shrink-0 text-base-content/45"
-                          />
-                        </button>
-                        <div
-                          id={"#{dom_id}-details"}
-                          data-role="operation-details"
-                          hidden
-                          class="mt-1 border-l border-base-300 pl-3"
-                        >
-                          <pre class="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-base-content/55"><span
-                              data-role="agent-reasoning-details-text"
-                              data-message-id={dom_id}
-                            >{agent_item_body(item)}</span></pre>
-                        </div>
-                      </div>
-                    <% "user" -> %>
-                      <div
-                        data-role="chat-message-body"
-                        class="min-w-0 w-full border border-base-content/10 bg-base-300/50 px-3 py-1.5 text-[13px] leading-snug whitespace-normal break-words text-base-content/95 shadow-[inset_0_1px_3px_rgba(0,0,0,0.10)]"
-                      >
-                        <ChatRail.markdown_body
-                          body={agent_item_body(item)}
-                          paragraph_role="chat-md-paragraph"
-                        />
-                      </div>
-                    <% _ -> %>
-                      <div
-                        data-role="agent-text"
-                        data-message-id={dom_id}
-                        aria-busy={agent_item_status(item) == "running"}
-                        class="block min-w-0 px-3 py-1 text-[14px] leading-relaxed text-justify break-words text-base-content"
-                      >
-                        <div data-role="agent-text-body" data-message-id={dom_id}>
-                          <ChatRail.markdown_body
-                            body={agent_item_body(item)}
-                            paragraph_role="agent-paragraph"
-                          />
-                        </div>
-                        <span
-                          :if={agent_item_loading?(item)}
-                          id={"#{dom_id}-loading"}
-                          phx-update="ignore"
-                          data-role="agent-loading"
-                          role="status"
-                          aria-label="Agent responding"
-                          class="ml-1 inline-flex h-4 translate-y-[0.125rem] items-end gap-0.5 align-baseline text-base-content/45"
-                        >
-                          <span
-                            aria-hidden="true"
-                            style="animation-delay:-0.36s"
-                            class="size-1 rounded-full bg-current chat-typing-dot"
-                          >
-                          </span>
-                          <span
-                            aria-hidden="true"
-                            style="animation-delay:-0.18s"
-                            class="size-1 rounded-full bg-current chat-typing-dot"
-                          >
-                          </span>
-                          <span
-                            aria-hidden="true"
-                            class="size-1 rounded-full bg-current chat-typing-dot"
-                          >
-                          </span>
-                        </span>
-                      </div>
-                  <% end %>
-                </article>
-              </div>
+            <%!-- The chat thread + composer are an ISOLATED child LiveView
+                 (`AgentChatLive`): it owns the title/status controls, the
+                 streamed message thread and the send composer, and binds itself
+                 to the durable foreground agent (refresh re-mounts → re-binds →
+                 repaints). This shell keeps only the URL-param-driven provider
+                 options + the document-import upload (below), which a child
+                 cannot drive (no top-level `push_patch`, and the upload opens a
+                 doc in this shell's pane). `id` is stable so the child mounts
+                 once; on a doc switch the SAME workspace path re-uses it. --%>
+            <%= if @workspace_path do %>
+              {live_render(@socket, EcritsWeb.Local.AgentChatLive,
+                id: "chat-rail",
+                session: %{"workspace_path" => @workspace_path}
+              )}
+            <% end %>
 
-              <p
-                :if={@local_agent_error}
-                id="local-agent-error"
-                class="mx-3 mb-3 rounded border border-error/25 bg-error/10 px-3 py-2 text-sm text-error"
-              >
-                {@local_agent_error}
-              </p>
-
+            <%!-- Provider/model/reasoning/access options + the document-import
+                 upload stay in this shell (URL-param-driven + a doc-pane
+                 concern). The chat thread, error banner and composer moved into
+                 the `AgentChatLive` child rendered above. --%>
+            <div data-role="chat-rail-body" class="flex shrink-0 flex-col overflow-visible">
               <div class="shrink-0 border-t border-base-300 bg-base-200 px-3 py-2">
                 <div class="rounded border border-base-300 bg-base-100 transition-colors focus-within:border-base-content/40">
-                  <.form
-                    for={@local_agent_form}
-                    id="local-agent-form"
-                    phx-submit="send_local_agent"
-                    data-role="chat-form"
-                  >
-                    <.input
-                      field={@local_agent_form[:message]}
-                      id="local-agent-input"
-                      type="text"
-                      autocomplete="off"
-                      disabled={@local_agent_status in [:offline, :starting]}
-                      placeholder={agent_input_placeholder(@local_agent_status)}
-                      class="block h-8 w-full border-0 bg-transparent px-3 py-1 text-[13px] leading-snug text-base-content outline-none placeholder:text-base-content/35 focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:text-base-content/40"
-                    />
-                    <div class="flex items-center justify-end gap-1 px-2 pb-1.5 pt-0.5">
-                      <label
-                        id="local-agent-upload"
-                        data-role="chat-upload"
-                        for={@uploads.local_document_import.ref}
-                        class="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content"
-                        aria-label="Open local document"
-                      >
-                        <.icon name="hero-paper-clip" class="size-3.5" />
-                      </label>
-                      <button
-                        :if={@local_agent_status == :running}
-                        id="local-agent-submit"
-                        type="button"
-                        phx-click="cancel_local_agent"
-                        data-role="chat-stop"
-                        data-action="stop"
-                        class="inline-flex size-6 items-center justify-center rounded bg-base-content text-base-100 transition-colors hover:bg-base-content/80"
-                        aria-label="Stop agent turn"
-                      >
-                        <.icon name="hero-stop" class="size-3.5" />
-                        <span class="sr-only">Stop</span>
-                      </button>
-                      <button
-                        :if={@local_agent_status != :running}
-                        id="local-agent-submit"
-                        type="submit"
-                        data-role="chat-send"
-                        data-action="send"
-                        disabled={@local_agent_status in [:offline, :starting]}
-                        class="inline-flex size-6 items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content disabled:cursor-not-allowed disabled:opacity-35"
-                        aria-label="Send"
-                      >
-                        <.icon name="hero-paper-airplane" class="size-3.5" />
-                        <span class="sr-only">Send</span>
-                      </button>
-                    </div>
-                  </.form>
-
                   <.form
                     for={@local_agent_options_form}
                     id="local-agent-provider-options"
@@ -1283,6 +936,19 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                         </div>
                       </details>
                     </div>
+                    <%!-- Document-import affordance. The composer moved to the
+                         AgentChatLive child, but the upload (and the document it
+                         opens) is a shell concern, so the paperclip lives here
+                         with the options row + the live_file_input it triggers. --%>
+                    <label
+                      id="local-agent-upload"
+                      data-role="chat-upload"
+                      for={@uploads.local_document_import.ref}
+                      class="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content"
+                      aria-label="Open local document"
+                    >
+                      <.icon name="hero-paper-clip" class="size-3.5" />
+                    </label>
                     <.live_file_input
                       upload={@uploads.local_document_import}
                       class="sr-only"
@@ -1779,15 +1445,17 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp maybe_adopt_browser_revision(socket, _result), do: socket
 
   # Attach this LiveView to the durable per-workspace `Ecrits.Workspace.Session`
-  # (keyed by canonical path) and bind its foreground agent. This is the
-  # refresh-survival seam: `Session.attach` get-or-starts the path-keyed Session,
-  # which get-or-starts the foreground agent — so on a browser refresh the SAME
-  # agent pid / provider thread / transcript / title are re-attached, NEVER
-  # recreated. The static (disconnected) render does nothing so no agent is
-  # spawned for the throwaway mount.
+  # (keyed by canonical path) and START + SEED its foreground agent. The shell is
+  # the AUTHORITY that creates the agent (it holds the provider/model/access +
+  # open-document seed), so it must run `attach/2` even though the chat thread now
+  # lives in the `AgentChatLive` child: that child is a pure observer and never
+  # starts the agent (it would race in a default-provider one). On a browser
+  # refresh the SAME agent pid / provider thread / transcript / title are
+  # re-bound, NEVER recreated; the child re-mounts, finds the bound agent and
+  # repaints. The static (disconnected) render spawns nothing.
   defp attach_workspace_session(%{assigns: %{workspace_error: error}} = socket)
        when is_binary(error),
-       do: assign(socket, :local_agent_status, :offline)
+       do: socket
 
   defp attach_workspace_session(socket) do
     path = socket.assigns.workspace_path
@@ -1795,8 +1463,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     cond do
       not connected?(socket) ->
         socket
-        |> assign(:local_agent_status, :starting)
-        |> assign(:local_agent_error, nil)
 
       not (is_binary(path) and path != "") ->
         socket
@@ -1809,49 +1475,30 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp do_attach_workspace_session(socket, path) do
     case safe_attach_workspace_session(path, local_agent_attach_settings(socket)) do
       {:ok, %{agent_id: agent_id} = ws} when is_binary(agent_id) ->
-        # Subscribe + repaint ONCE per foreground agent. A doc switch re-runs
-        # handle_params with the SAME path/agent; re-subscribing would double the
-        # event delivery and re-streaming would re-render the whole transcript.
-        already_attached? = socket.assigns.local_agent_session_id == agent_id
-
-        socket =
-          socket
-          |> assign(:workspace_session, ws)
-          |> assign(:local_agent_session_id, agent_id)
-          |> assign(:local_agent_error, nil)
-
-        if already_attached? do
-          socket
-        else
+        # Subscribe ONCE per foreground agent so the shell observes turn-end for
+        # its DOCUMENT-side hook (auto-save the agent's dirty docs + re-list the
+        # tree). Chat rendering is the child's job; the shell ignores every other
+        # event. A doc switch re-runs handle_params with the SAME agent — don't
+        # double-subscribe.
+        if socket.assigns.local_agent_session_id != agent_id do
           :ok = WorkspaceSession.subscribe(ws)
-          snapshot = WorkspaceSession.snapshot(ws)
-
-          socket
-          |> assign(:local_agent_status, snapshot.status)
-          |> maybe_restore_agent_title(snapshot.title)
-          |> stream(:local_agent_items, [], reset: true)
-          # codex `thread/resume` restores the agent's MEMORY but does NOT
-          # re-stream past messages, so without this the re-attached pane is
-          # blank. Repaint the prior bubbles from the durable transcript.
-          |> replay_local_agent_transcript(snapshot.transcript)
         end
 
-      {:error, reason, _ws} ->
         socket
-        |> assign(:local_agent_status, :offline)
-        |> assign(:local_agent_error, local_agent_error(reason))
+        |> assign(:workspace_session, ws)
+        |> assign(:local_agent_session_id, agent_id)
 
-      {:error, reason} ->
+      {:error, _reason, _ws} ->
         socket
-        |> assign(:local_agent_status, :offline)
-        |> assign(:local_agent_error, local_agent_error(reason))
+
+      {:error, _reason} ->
+        socket
     end
   end
 
   # Tolerate the workspace-Session supervision infra not being up yet (e.g. the
   # SessionSupervisor/Registry child was added to the tree but the server hasn't
-  # been restarted to activate it). Degrade to an offline chat rail rather than
-  # crashing the whole workspace mount.
+  # been restarted to activate it). Degrade rather than crashing the mount.
   defp safe_attach_workspace_session(path, settings) do
     WorkspaceSession.attach(path, settings)
   rescue
@@ -1860,16 +1507,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     :exit, reason -> {:error, {:session_unavailable, reason}}
   end
 
-  # Restore the chat header from the durable agent's retained title (after a
-  # refresh). A brand-new agent has no title yet (keep the "New Chat" default).
-  defp maybe_restore_agent_title(socket, title) when is_binary(title) and title != "" do
-    socket
-    |> assign(:local_agent_title_user_edited?, true)
-    |> assign_local_agent_title(title)
-  end
-
-  defp maybe_restore_agent_title(socket, _title), do: socket
-
   # Settings used to SEED the foreground agent on first attach (later attaches
   # re-use the agent and these are applied live). Mirrors local_agent_session_opts
   # minus the explicit `:id` (the Session derives the stable foreground id).
@@ -1877,58 +1514,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     socket
     |> local_agent_session_opts()
     |> Keyword.delete(:id)
-  end
-
-  # Repaint the chat pane from the durable agent's display-only transcript (used
-  # after a browser refresh re-attaches the foreground agent). Each completed turn
-  # was stored as %{turn_id, user, agent}; re-stream one user bubble and one agent
-  # bubble per turn using the SAME dom-id scheme live turns use (so a later live
-  # turn with the same id reconciles rather than duplicating). The provider still
-  # owns the real conversation/memory — this only re-renders the visible history.
-  defp replay_local_agent_transcript(socket, turns) when is_list(turns) do
-    Enum.reduce(turns, socket, fn turn, acc ->
-      acc
-      |> maybe_stream_transcript_user(turn)
-      |> maybe_stream_transcript_agent(turn)
-    end)
-  end
-
-  defp replay_local_agent_transcript(socket, _turns), do: socket
-
-  defp maybe_stream_transcript_user(socket, %{turn_id: turn_id, user: user})
-       when is_binary(user) and user != "" do
-    stream_insert(socket, :local_agent_items, agent_user_item(turn_id, user))
-  end
-
-  defp maybe_stream_transcript_user(socket, _turn), do: socket
-
-  defp maybe_stream_transcript_agent(socket, %{turn_id: turn_id, agent: agent})
-       when is_binary(agent) and agent != "" do
-    stream_insert(socket, :local_agent_items, agent_assistant_item(turn_id, agent, :sent))
-  end
-
-  defp maybe_stream_transcript_agent(socket, _turn), do: socket
-
-  # Reset the chat-rail to a fresh foreground agent. The path-keyed Session owns
-  # the durable agent, so a "refresh chat" detaches THIS LiveView and re-attaches
-  # — clearing the pane locally and repainting from the (now possibly empty) live
-  # transcript. It does NOT tear down the agent (no provider-thread loss); to start
-  # a genuinely new conversation the user changes workspace (a new path → a new
-  # Session → a new foreground agent).
-  defp restart_local_agent_session(socket) do
-    maybe_cancel_active_local_agent(socket)
-
-    socket
-    |> assign(:local_agent_session_id, nil)
-    |> assign(:local_agent_turn_id, nil)
-    |> assign(:local_agent_text, "")
-    |> assign(:local_agent_text_segment, 0)
-    |> assign(:local_agent_reasoning_text, "")
-    |> assign(:local_agent_title_user_edited?, false)
-    |> assign_local_agent_title(default_local_agent_title())
-    |> assign(:local_agent_form, local_agent_form())
-    |> stream(:local_agent_items, [], reset: true)
-    |> attach_workspace_session()
   end
 
   # Apply per-turn option changes (access/reasoning/model/provider) to the LIVE
@@ -1952,288 +1537,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   defp maybe_apply_live_local_agent_options(socket, _changed?), do: socket
-
-  # The workspace Session handle (delegates send/cancel/rename to the foreground
-  # agent), or nil before the first attach.
-  defp ws(%{assigns: %{workspace_session: %{} = ws}}), do: ws
-  defp ws(_socket), do: nil
-
-  defp maybe_cancel_active_local_agent(%{
-         assigns: %{workspace_session: %{} = ws, local_agent_turn_id: turn_id}
-       })
-       when is_binary(turn_id) do
-    _ = WorkspaceSession.cancel(ws, turn_id)
-    :ok
-  end
-
-  defp maybe_cancel_active_local_agent(_socket), do: :ok
-
-  defp maybe_cancel_active_local_agent_for_new_turn(
-         %{
-           assigns: %{workspace_session: %{} = ws, local_agent_turn_id: turn_id}
-         } = socket
-       )
-       when is_binary(turn_id) do
-    case WorkspaceSession.cancel(ws, turn_id) do
-      {:ok, _turn} ->
-        partial = socket.assigns.local_agent_text
-        segment = socket.assigns.local_agent_text_segment
-
-        {:ok,
-         socket
-         |> assign(:local_agent_turn_id, nil)
-         |> assign(:local_agent_text, "")
-         |> assign(:local_agent_reasoning_text, "")
-         |> finalize_cancelled_agent_text(turn_id, partial, segment)}
-
-      {:error, :no_current_turn} ->
-        {:ok, assign(socket, :local_agent_turn_id, nil)}
-
-      {:error, reason} ->
-        {:error,
-         assign(
-           socket,
-           :local_agent_error,
-           local_agent_error(reason)
-         )}
-    end
-  end
-
-  defp maybe_cancel_active_local_agent_for_new_turn(socket), do: {:ok, socket}
-
-  defp send_local_agent_turn(socket, message) do
-    case WorkspaceSession.send_turn(ws(socket), message) do
-      {:ok, %{id: turn_id}} ->
-        {:noreply,
-         socket
-         |> stream_insert(:local_agent_items, agent_user_item(turn_id, message))
-         |> stream_insert(:local_agent_items, agent_reasoning_item(turn_id, "", :pending))
-         |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "", :running, 0))
-         |> assign(:local_agent_turn_id, turn_id)
-         |> assign(:local_agent_text, "")
-         |> assign(:local_agent_text_segment, 0)
-         |> assign(:local_agent_reasoning_text, "")
-         |> assign(:local_agent_status, :running)
-         |> assign(:local_agent_error, nil)
-         |> assign(:local_agent_form, local_agent_form())}
-
-      {:error, reason} ->
-        {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
-    end
-  end
-
-  # `send_local_agent_turn/2` already set `local_agent_turn_id` (and :running) from
-  # the synchronous send_turn reply, which carries the SAME id this event echoes.
-  # So a turn_started whose id != the current turn is stale (from an already-
-  # replaced turn) and must be ignored, otherwise it re-points turn_id/status back
-  # at a dead turn. Guard on the current turn; the catch-all clause drops the rest.
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
-         %{type: :turn_started, turn_id: turn_id}
-       ) do
-    socket
-    |> assign(:local_agent_turn_id, turn_id)
-    |> assign(:local_agent_status, :running)
-  end
-
-  # First turn_started after a fresh send may legitimately arrive while the
-  # current turn_id is still nil (no synchronous reply yet, e.g. resumed session
-  # flows). Adopt it as the active turn. A turn_started carrying a *different*
-  # non-nil turn_id is stale and falls through to the catch-all (ignored).
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: nil}} = socket,
-         %{type: :turn_started, turn_id: turn_id}
-       )
-       when is_binary(turn_id) do
-    socket
-    |> assign(:local_agent_turn_id, turn_id)
-    |> assign(:local_agent_status, :running)
-  end
-
-  defp apply_local_agent_event(socket, %{type: type, title: title})
-       when type in [:title_generated, :title_updated, :thread_title] and is_binary(title) do
-    if socket.assigns.local_agent_title_user_edited? do
-      socket
-    else
-      assign_local_agent_title(socket, title)
-    end
-  end
-
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
-         %{type: :text_delta, turn_id: turn_id, delta: delta}
-       )
-       when is_binary(delta) do
-    text = socket.assigns.local_agent_text <> delta
-    segment = socket.assigns.local_agent_text_segment
-
-    socket
-    |> assign(:local_agent_text, text)
-    |> push_event("local_agent_text_append", %{
-      message_id: agent_assistant_dom_id(turn_id, segment),
-      piece: String.replace(delta, ~r/\n{2,}/, "\n")
-    })
-    |> schedule_local_agent_text_flush()
-  end
-
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
-         %{type: :reasoning_delta, turn_id: turn_id, delta: delta}
-       )
-       when is_binary(delta) do
-    prev = socket.assigns.local_agent_reasoning_text
-
-    # New reasoning item resuming after a tool call / other event: separate it
-    # from the previous item with a paragraph break (the <pre> is whitespace-pre-
-    # wrap, so this renders as a real break). Contiguous deltas within one item
-    # append raw.
-    piece =
-      if socket.assigns[:local_agent_reasoning_open?] or prev == "",
-        do: delta,
-        else: "\n\n" <> delta
-
-    socket
-    |> assign(:local_agent_reasoning_text, prev <> piece)
-    |> assign(:local_agent_reasoning_open?, true)
-    |> push_event("local_agent_reasoning_append", %{
-      message_id: agent_reasoning_dom_id(turn_id),
-      piece: piece
-    })
-  end
-
-  defp apply_local_agent_event(socket, %{
-         type: :tool_call_started,
-         tool_call_id: tool_call_id,
-         name: name,
-         arguments: arguments
-       }) do
-    socket
-    |> close_local_agent_text_segment()
-    |> maybe_remove_empty_agent_placeholder()
-    |> update(:local_agent_active_tools, &Map.put(&1 || %{}, tool_call_id, name))
-    |> stream_insert(
-      :local_agent_items,
-      agent_tool_item(tool_call_id, name, :running, agent_tool_payload(arguments))
-    )
-  end
-
-  defp apply_local_agent_event(socket, %{
-         type: :tool_call_completed,
-         tool_call_id: tool_call_id,
-         name: name,
-         result: result
-       }) do
-    socket
-    |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
-    |> stream_insert(
-      :local_agent_items,
-      agent_tool_item(tool_call_id, name, :completed, agent_tool_payload(result))
-    )
-  end
-
-  defp apply_local_agent_event(socket, %{
-         type: :tool_call_failed,
-         tool_call_id: tool_call_id,
-         name: name,
-         reason: reason
-       }) do
-    socket
-    |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
-    |> stream_insert(
-      :local_agent_items,
-      agent_tool_item(tool_call_id, name, :failed, reason)
-    )
-  end
-
-  defp apply_local_agent_event(socket, %{
-         type: :tool_approval_required,
-         tool_call_id: tool_call_id,
-         name: name,
-         arguments: arguments
-       }) do
-    stream_insert(
-      socket |> maybe_remove_empty_agent_placeholder(),
-      :local_agent_items,
-      agent_tool_item(tool_call_id, name, :approval_required, agent_tool_payload(arguments))
-    )
-  end
-
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
-         %{type: :turn_completed, turn_id: turn_id}
-       ) do
-    # Flush ONLY the still-pending text segment: the text streamed AFTER the last
-    # tool call. Every earlier segment was already emitted at its tool boundary by
-    # close_local_agent_text_segment/1. The session's turn-completed `text` is the
-    # CUMULATIVE text of the WHOLE turn (every segment concatenated, never reset at
-    # tool boundaries — see Session.handle_turn_event/3); streaming THAT here writes
-    # it into the final segment's dom id and overwrites the real last bubble with a
-    # giant re-run of the preamble segments (preamble-A + preamble-B reappearing
-    # after the tools). Use the LiveView's per-segment buffer instead — it resets at
-    # each tool boundary, so it holds only the trailing segment. Same source the
-    # cancel path already uses for its partial flush.
-    pending = socket.assigns.local_agent_text
-
-    socket
-    |> cancel_local_agent_text_flush()
-    |> assign(:local_agent_turn_id, nil)
-    |> assign(:local_agent_text, "")
-    |> assign(:local_agent_status, :idle)
-    |> maybe_remove_empty_reasoning(turn_id)
-    |> assign(:local_agent_reasoning_text, "")
-    |> maybe_stream_final_agent_text(turn_id, pending)
-    |> finalize_dangling_tools("Turn ended before the tool finished.")
-    |> persist_pending_agent_docs()
-    # ALWAYS re-list the tree on turn end, independent of whether the auto-save
-    # net above persisted anything. The agent may have created/saved its own
-    # file (doc.create + doc.save) during the turn — that leaves NO dirty doc, so
-    # persist_pending_agent_docs is a no-op and never refreshed. Without this the
-    # new/changed file only appeared after a manual refresh. The PubSub
-    # broadcast (see handle_info {:workspace_file_written, _}) already refreshes
-    # mid-turn; this is the turn-end backstop for any write that didn't broadcast
-    # (e.g. an older code path or a missed message). refresh_tree just re-reads
-    # the dir + reassigns :tree, so it's safe to run after the auto-save refresh
-    # and does NOT touch the auto-save flash.
-    |> refresh_tree(socket.assigns.expanded_paths)
-  end
-
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
-         %{type: :turn_failed, turn_id: turn_id, reason: reason}
-       ) do
-    socket
-    |> cancel_local_agent_text_flush()
-    |> assign(:local_agent_turn_id, nil)
-    |> assign(:local_agent_text, "")
-    |> assign(:local_agent_status, :failed)
-    |> assign(:local_agent_error, local_agent_error(reason))
-    |> maybe_remove_empty_reasoning(turn_id)
-    |> assign(:local_agent_reasoning_text, "")
-    |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "Agent failed.", :failed))
-    |> finalize_dangling_tools("Turn failed.")
-  end
-
-  defp apply_local_agent_event(%{assigns: %{local_agent_turn_id: turn_id}} = socket, %{
-         type: :turn_cancelled,
-         turn_id: turn_id
-       }) do
-    partial = socket.assigns.local_agent_text
-    segment = socket.assigns.local_agent_text_segment
-
-    socket
-    |> cancel_local_agent_text_flush()
-    |> assign(:local_agent_turn_id, nil)
-    |> assign(:local_agent_text, "")
-    |> assign(:local_agent_status, :cancelled)
-    |> maybe_remove_empty_reasoning(turn_id)
-    |> assign(:local_agent_reasoning_text, "")
-    |> finalize_cancelled_agent_text(turn_id, partial, segment)
-    |> finalize_dangling_tools("Turn cancelled.")
-  end
-
-  defp apply_local_agent_event(socket, %{type: :turn_cancelled}), do: socket
-
-  defp apply_local_agent_event(socket, _event), do: socket
 
   # Turn-completion auto-save safety net. The agent may stall/stop BEFORE its
   # final `doc_save` (observed with codex/gpt-5.5 on "make a worksheet …"),
@@ -3234,35 +2537,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp format_byte_size(size) when is_integer(size), do: "#{size} B"
   defp format_byte_size(_size), do: "0 B"
 
-  defp local_agent_form(params \\ %{"message" => ""}) do
-    to_form(params, as: :agent)
-  end
-
-  defp local_agent_title_form(title \\ default_local_agent_title()) do
-    to_form(%{"title" => local_agent_title(title)}, as: :local_agent_title)
-  end
-
   defp local_agent_options_form do
     to_form(%{}, as: :agent_options)
   end
-
-  defp assign_local_agent_title(socket, title) do
-    title = local_agent_title(title)
-
-    socket
-    |> assign(:local_agent_title, title)
-    |> assign(:local_agent_title_form, local_agent_title_form(title))
-  end
-
-  defp local_agent_title(title) when is_binary(title) do
-    title
-    |> String.trim()
-    |> String.slice(0, 120)
-  end
-
-  defp local_agent_title(_title), do: ""
-
-  defp default_local_agent_title, do: "New Chat"
 
   defp local_agent_provider_param(params) do
     params["provider"] ||
@@ -3641,318 +2918,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp provider_runtime_label("claude"), do: "CLI"
   defp provider_runtime_label(_provider), do: "ACP"
 
-  defp agent_user_item(turn_id, body) do
-    %{
-      dom_id: "local-agent-user-#{turn_id}",
-      role: :user,
-      status: :sent,
-      body: body
-    }
-  end
-
-  defp agent_assistant_item(turn_id, body, status, segment \\ 0) do
-    %{
-      dom_id: agent_assistant_dom_id(turn_id, segment),
-      role: :agent,
-      status: status,
-      body: body
-    }
-  end
-
-  defp agent_reasoning_item(turn_id, body, status) do
-    %{
-      dom_id: agent_reasoning_dom_id(turn_id),
-      role: :thinking,
-      status: status,
-      title: "Thinking",
-      body: body
-    }
-  end
-
-  defp agent_assistant_dom_id(turn_id, segment), do: "local-agent-assistant-#{turn_id}-#{segment}"
-  defp agent_reasoning_dom_id(turn_id), do: "local-agent-thinking-#{turn_id}"
-
-  defp close_local_agent_text_segment(socket) do
-    socket = cancel_local_agent_text_flush(socket)
-
-    case socket.assigns.local_agent_text do
-      text when is_binary(text) and text != "" ->
-        turn_id = socket.assigns.local_agent_turn_id
-        segment = socket.assigns.local_agent_text_segment
-
-        socket
-        |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, text, :sent, segment))
-        |> assign(:local_agent_text, "")
-        |> assign(:local_agent_text_segment, segment + 1)
-
-      _empty ->
-        socket
-    end
-  end
-
-  # Coalesces streaming text deltas into a single debounced re-render. We keep a
-  # monotonic ref so a flush message that fires after the buffer was already
-  # finalized (tool boundary, turn completion) is ignored. Only one timer is
-  # ever outstanding: while one is pending, new deltas simply extend the
-  # accumulated buffer and the in-flight timer renders the latest text.
-  defp schedule_local_agent_text_flush(socket) do
-    if socket.assigns.local_agent_text_flush_ref do
-      socket
-    else
-      ref = make_ref()
-      Process.send_after(self(), {:flush_local_agent_text, ref}, @local_agent_text_flush_ms)
-      assign(socket, :local_agent_text_flush_ref, ref)
-    end
-  end
-
-  defp flush_local_agent_text(socket) do
-    socket = assign(socket, :local_agent_text_flush_ref, nil)
-
-    case socket.assigns.local_agent_text do
-      text when is_binary(text) and text != "" ->
-        turn_id = socket.assigns.local_agent_turn_id
-        segment = socket.assigns.local_agent_text_segment
-
-        stream_insert(
-          socket,
-          :local_agent_items,
-          agent_assistant_item(turn_id, text, :running, segment)
-        )
-
-      _empty ->
-        socket
-    end
-  end
-
-  defp cancel_local_agent_text_flush(socket) do
-    assign(socket, :local_agent_text_flush_ref, nil)
-  end
-
-  defp maybe_remove_empty_reasoning(socket, turn_id) do
-    case socket.assigns.local_agent_reasoning_text do
-      "" -> stream_delete(socket, :local_agent_items, agent_reasoning_item(turn_id, "", :pending))
-      _text -> socket
-    end
-  end
-
-  defp maybe_remove_empty_agent_placeholder(socket) do
-    case socket.assigns.local_agent_text do
-      "" ->
-        stream_delete(
-          socket,
-          :local_agent_items,
-          agent_assistant_item(
-            socket.assigns.local_agent_turn_id,
-            "",
-            :running,
-            socket.assigns.local_agent_text_segment
-          )
-        )
-
-      _text ->
-        socket
-    end
-  end
-
-  defp maybe_stream_final_agent_text(socket, turn_id, text) when is_binary(text) and text != "" do
-    stream_insert(
-      socket,
-      :local_agent_items,
-      agent_assistant_item(turn_id, text, :sent, socket.assigns.local_agent_text_segment)
-    )
-  end
-
-  defp maybe_stream_final_agent_text(socket, _turn_id, _text), do: socket
-
-  # On cancel, keep what the agent already streamed (finalize the in-flight bubble
-  # with the accumulated partial text, in place). Do NOT emit any "Cancelled."
-  # placeholder — if nothing was streamed yet, just drop the empty running bubble
-  # so a cancel leaves no noise.
-  defp finalize_cancelled_agent_text(socket, turn_id, partial_text, segment) do
-    if is_binary(partial_text) and partial_text != "" do
-      stream_insert(
-        socket,
-        :local_agent_items,
-        agent_assistant_item(turn_id, partial_text, :sent, segment)
-      )
-    else
-      stream_delete(
-        socket,
-        :local_agent_items,
-        agent_assistant_item(turn_id, "", :running, segment)
-      )
-    end
-  end
-
-  defp agent_display_tool_name(name), do: name
-
-  defp agent_tool_payload(payload) when is_binary(payload), do: payload
-
-  defp agent_tool_payload(payload) do
-    case Jason.encode(payload, pretty: true) do
-      {:ok, json} -> json
-      {:error, _reason} -> inspect(payload, pretty: true)
-    end
-  end
-
-  # A turn can end (complete / fail / cancel / die) while a tool_call is still
-  # mid-flight — that tool_call never gets its terminal `tool_call_completed` /
-  # `tool_call_failed` event, so its rail row would be stuck on "running" forever
-  # even though the backend turn is already gone. On every turn terminal, flip
-  # any still-tracked in-flight tool_calls to :failed so the UI never shows a
-  # phantom running tool after the turn is over.
-  defp finalize_dangling_tools(socket, reason) do
-    active = socket.assigns[:local_agent_active_tools] || %{}
-
-    socket =
-      Enum.reduce(active, socket, fn {tool_call_id, name}, acc ->
-        stream_insert(
-          acc,
-          :local_agent_items,
-          agent_tool_item(tool_call_id, name, :failed, reason)
-        )
-      end)
-
-    assign(socket, :local_agent_active_tools, %{})
-  end
-
-  defp agent_tool_item(tool_call_id, name, status, body) do
-    %{
-      dom_id: "local-agent-tool-#{tool_call_id}",
-      role: :tool,
-      title: name,
-      status: status,
-      body: body || ""
-    }
-  end
-
-  # Stream dom_id resolvers — PUBLIC so they can be captured as `&__MODULE__.../1`
-  # in stream_configure (see mount/3). Named captures survive dev hot-reloads,
-  # unlike anonymous closures compiled into this module.
-  @doc false
-  def local_agent_item_dom_id(%{dom_id: dom_id}), do: dom_id
+  # Stream dom_id resolver — PUBLIC so it can be captured as `&__MODULE__.../1` in
+  # stream_configure (see mount/3). A named capture survives dev hot-reloads,
+  # unlike an anonymous closure compiled into this module. (The chat stream's
+  # resolver moved to `EcritsWeb.Local.AgentChatLive` with the chat thread.)
   @doc false
   def local_hwp_page_dom_id(%{id: id}), do: id
-
-  defp agent_item_data_role(%{role: :tool}), do: "local-agent-tool"
-  defp agent_item_data_role(%{role: :thinking}), do: "local-agent-thinking"
-  defp agent_item_data_role(_item), do: "local-agent-message"
-
-  defp agent_item_role(%{role: role}), do: to_string(role)
-  defp agent_item_role(_item), do: "agent"
-
-  defp agent_item_status(%{status: status}), do: to_string(status)
-  defp agent_item_status(_item), do: "idle"
-
-  # The bouncing-dots waiting indicator renders ONLY while the assistant
-  # placeholder is in-flight (`running`) AND has no body yet. Without the
-  # empty-body guard, every debounced `flush_local_agent_text/1` re-render
-  # (which carries a non-empty body but keeps `status: :running`) re-emits the
-  # span; morphdom then re-creates the animated node ~every 120ms, restarting
-  # the CSS `animate-bounce` from frame 0 so the dots visibly freeze. Dropping
-  # the indicator once the first token lands (matching the JS hook's
-  # `agent-loading` removal and `ChatRail.agent_loading?/1`) lets the animation
-  # play smoothly on the empty placeholder and resolve cleanly when prose flows.
-  defp agent_item_loading?(item) do
-    agent_item_status(item) == "running" and agent_item_body(item) == ""
-  end
-
-  defp agent_item_title(%{title: title}) when is_binary(title), do: agent_display_tool_name(title)
-  defp agent_item_title(_item), do: "Tool"
-
-  defp agent_item_body(%{body: body}) when is_binary(body), do: body
-  defp agent_item_body(_item), do: ""
-
-  defp agent_item_status_label(%{status: :approval_required}), do: "Needs approval"
-
-  defp agent_item_status_label(%{status: status}),
-    do: status |> to_string() |> String.replace("_", " ")
-
-  defp agent_item_status_label(_item), do: ""
-
-  defp agent_item_class(%{role: :user}) do
-    "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5 self-end"
-  end
-
-  defp agent_item_class(%{role: :tool}) do
-    "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5"
-  end
-
-  defp agent_item_class(%{role: :thinking, status: :pending}) do
-    "hidden"
-  end
-
-  defp agent_item_class(%{role: :system}) do
-    "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5 text-base-content/65"
-  end
-
-  defp agent_item_class(_item) do
-    "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5 self-start"
-  end
-
-  defp agent_status_label(:offline), do: "Offline"
-  defp agent_status_label(:starting), do: "Starting"
-  defp agent_status_label(:running), do: "Running"
-  defp agent_status_label(:cancelled), do: "Cancelled"
-  defp agent_status_label(:failed), do: "Failed"
-  defp agent_status_label(_status), do: "Idle"
-
-  defp agent_input_placeholder(:offline), do: "Agent unavailable"
-  defp agent_input_placeholder(:starting), do: "Starting agent"
-  defp agent_input_placeholder(_status), do: "Ask about this workspace"
-
-  defp local_agent_error({:codex_executable_missing, candidates}) do
-    "Codex ACP unavailable. Install one of: #{Enum.join(candidates, ", ")}."
-  end
-
-  defp local_agent_error({:claude_executable_missing, candidates}) do
-    "Claude unavailable. Install one of: #{Enum.join(candidates, ", ")}."
-  end
-
-  defp local_agent_error("{:codex_executable_missing" <> _reason) do
-    "Codex ACP unavailable. Install codex-acp or codex, then refresh agent chat."
-  end
-
-  defp local_agent_error("{:claude_executable_missing" <> _reason) do
-    "Claude unavailable. Install and authenticate Claude CLI, then refresh agent chat."
-  end
-
-  defp local_agent_error("{:unsupported_provider, \"fake\"" <> _reason) do
-    "Selected provider is disabled. Choose Codex or Claude."
-  end
-
-  defp local_agent_error(:acp_unavailable) do
-    "Local agent runtime unavailable. Refresh the workspace."
-  end
-
-  # ExMCP.ACP adapter failures arrive as inspected strings (the adapter raises
-  # with a descriptive message that Session inspects into the event reason). Map
-  # the common provider-startup failures (missing CLI binary, bridge launch
-  # failure) onto the same friendly guidance the bespoke adapters produced.
-  defp local_agent_error(reason) when is_binary(reason) do
-    cond do
-      acp_codex_unavailable?(reason) ->
-        "Codex ACP unavailable. Install codex, then refresh agent chat."
-
-      acp_claude_unavailable?(reason) ->
-        "Claude unavailable. Install and authenticate Claude CLI, then refresh agent chat."
-
-      true ->
-        reason
-    end
-  end
-
-  defp local_agent_error(reason), do: inspect(reason)
-
-  defp acp_codex_unavailable?(reason) do
-    (String.contains?(reason, "executable_not_found") or
-       String.contains?(reason, "ex_mcp ACP session start failed")) and
-      String.contains?(reason, "codex")
-  end
-
-  defp acp_claude_unavailable?(reason) do
-    (String.contains?(reason, "executable_not_found") or
-       String.contains?(reason, "ex_mcp ACP session start failed")) and
-      String.contains?(reason, "claude")
-  end
 end

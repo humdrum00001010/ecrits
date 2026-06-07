@@ -84,6 +84,36 @@ defmodule Ecrits.Workspace.Session do
   end
 
   @doc """
+  A READ-ONLY workspace handle (`t:ws/0`) for `path`'s already-bound foreground
+  agent, or `nil` when none is bound yet. Unlike `attach/2`, this NEVER starts a
+  Session or a foreground agent — it only reads the existing roster. Used by an
+  OBSERVER LiveView (the extracted chat-rail child) that must NOT race the
+  document shell into starting a default-provider agent: it polls this until the
+  shell (which owns the provider/model/doc seed) has started + seeded the agent,
+  then `subscribe/1`s + `snapshot/1`s through the returned handle.
+  """
+  @spec foreground_ws(String.t()) :: ws() | nil
+  def foreground_ws(path) when is_binary(path) do
+    case whereis(canonical_path(path)) do
+      pid when is_pid(pid) ->
+        case GenServer.call(pid, :foreground_agent) do
+          %{id: agent_id} when is_binary(agent_id) ->
+            %{
+              path: canonical_path(path),
+              agent_id: agent_id,
+              agent_topic: AcpAgent.topic(agent_id)
+            }
+
+          _ ->
+            nil
+        end
+
+      nil ->
+        nil
+    end
+  end
+
+  @doc """
   Resolve a per-agent id (from a `/mcp/doc-tools/<agent_id>` URL) to the live
   AgentLive pid — the MCP-isolation seam (design invariant 3). A `doc.*` tool
   call carries its calling agent's id in the URL; the MCP server resolves it
