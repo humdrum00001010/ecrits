@@ -1242,6 +1242,17 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                       class="block h-8 w-full border-0 bg-transparent px-3 py-1 text-[13px] leading-snug text-base-content outline-none placeholder:text-base-content/35 focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:text-base-content/40"
                     />
                     <div class="flex items-center justify-end gap-1 px-2 pb-1.5 pt-0.5">
+                      <%!-- 📎 attach sits next to Send; its hidden file input stays
+                           in the options form below (upload phx-change binding). --%>
+                      <label
+                        id="local-agent-upload"
+                        data-role="chat-upload"
+                        for={@uploads.local_document_import.ref}
+                        class="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content"
+                        aria-label="Open local document"
+                      >
+                        <.icon name="hero-paper-clip" class="size-3.5" />
+                      </label>
                       <button
                         :if={@local_agent_status == :running}
                         id="local-agent-submit"
@@ -1367,18 +1378,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                         </div>
                       </details>
                     </div>
-                    <%!-- Document-import affordance (📎). It opens a workspace
-                         document in the editor pane, so it lives with the options
-                         row + the live_file_input it triggers. --%>
-                    <label
-                      id="local-agent-upload"
-                      data-role="chat-upload"
-                      for={@uploads.local_document_import.ref}
-                      class="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content"
-                      aria-label="Open local document"
-                    >
-                      <.icon name="hero-paper-clip" class="size-3.5" />
-                    </label>
+                    <%!-- Hidden file input for the 📎 upload. The visible label was
+                         moved up next to Send, but this input must stay inside this
+                         options form (it carries the upload's phx-change binding). --%>
                     <.live_file_input
                       upload={@uploads.local_document_import}
                       class="sr-only"
