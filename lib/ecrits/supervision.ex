@@ -104,7 +104,10 @@ defmodule Ecrits.Supervision do
   defp local_document_runtime_children do
     [
       {Registry, keys: :unique, name: Ecrits.Local.Document.Registry},
-      Ecrits.Local.Document.Supervisor
+      Ecrits.Local.Document.Supervisor,
+      # In-memory per-browser workspace shell state (open tabs + last path),
+      # keyed by the session `ws_id`. Survives a LiveView dying; lost on restart.
+      Ecrits.Local.Workspace.ShellStore
     ]
   end
 

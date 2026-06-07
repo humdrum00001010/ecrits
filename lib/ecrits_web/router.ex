@@ -4,6 +4,9 @@ defmodule EcritsWeb.Router do
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
+    # Plant a stable per-browser `ws_id` in the session so a refresh re-attaches
+    # to the same long-running agent Session + workspace shell (see the plug).
+    plug EcritsWeb.Plugs.WorkspaceSession
     plug :fetch_live_flash
     plug :put_root_layout, html: {EcritsWeb.Layouts, :root}
     plug :protect_from_forgery

@@ -150,6 +150,22 @@ defmodule Ecrits.Local.AcpAgent do
   end
 
   @doc """
+  Terminate a session GenServer (and its provider subprocess). Needed for a
+  GENUINE restart (provider/workspace switch): the Session is keyed by the stable
+  per-browser `ws_id`, so the old one must be stopped before a fresh conversation
+  starts under the same id — otherwise `start_session/2` just re-attaches to it
+  via the `{:already_started, pid}` path.
+  """
+  def close(session_id) when is_binary(session_id) do
+    case Session.whereis(session_id) do
+      nil -> :ok
+      pid -> DynamicSupervisor.terminate_child(SessionSupervisor, pid)
+    end
+  end
+
+  def close(_session_id), do: :ok
+
+  @doc """
   Live-updates a running session's turn parameters (access/approval mode,
   reasoning effort, same-provider model) in place — preserving the conversation
   — rather than recreating the session. The next turn starts from the merged

@@ -98,9 +98,16 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   ]
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(_params, session, socket) do
+    # Stable per-browser handle planted in the phx session (WorkspaceSession plug).
+    # It keys the long-running agent Session (chat re-attaches on refresh) and the
+    # in-memory ShellStore (tabs/path). Fallback id keeps tests/odd mounts working.
+    ws_id = session["ws_id"] || Ecto.UUID.generate()
+    saved = Ecrits.Local.Workspace.ShellStore.get(ws_id)
+
     {:ok,
      socket
+     |> assign(:ws_id, ws_id)
      # NAMED captures (not anon closures): a stream `dom_id` resolver is stored on
      # the long-lived LiveView at mount. An anonymous `& &1.dom_id` is compiled
      # INTO this module, so a dev hot-reload that purges the old module version
@@ -123,7 +130,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:selected_path, nil)
      |> assign(:active_document_path, nil)
      |> assign(:active_document, nil)
-     |> assign(:open_documents, [])
+     |> assign(:open_documents, Map.get(saved, :tabs, []))
      |> assign(:active_document_id, nil)
      |> assign(:pool_document_id, nil)
      # Browser-backed agent edits (design §6.2): when the open HWP is registered
@@ -252,13 +259,44 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         socket
       end
 
-    {:noreply, socket}
+    {:noreply, persist_workspace_shell(socket)}
   end
 
   def handle_params(_params, _uri, socket) do
-    # No workspace path in the URL — there's nothing to show. Send the user to
-    # the folder picker ("/") instead of rendering a dead-end error page.
-    {:noreply, push_navigate(socket, to: ~p"/")}
+    # No workspace path in the URL. If this browser had a workspace open before
+    # (ShellStore, keyed by the session ws_id), restore it; otherwise send to the
+    # folder picker ("/").
+    case Ecrits.Local.Workspace.ShellStore.get(socket.assigns[:ws_id]) do
+      %{path: path} = saved when is_binary(path) and path != "" ->
+        {:noreply, push_patch(socket, to: workspace_restore_path(path, Map.get(saved, :active_path)))}
+
+      _ ->
+        {:noreply, push_navigate(socket, to: ~p"/")}
+    end
+  end
+
+  # Record the per-browser workspace shell (mounted path + open tabs + active
+  # document) so a refresh or bare remount rehydrates it. In-memory only.
+  defp persist_workspace_shell(socket) do
+    Ecrits.Local.Workspace.ShellStore.merge(socket.assigns[:ws_id], %{
+      path: socket.assigns.workspace_path,
+      tabs: socket.assigns.open_documents,
+      active_id: socket.assigns.active_document_id,
+      active_path: socket.assigns.active_document_path
+    })
+
+    socket
+  end
+
+  defp workspace_restore_path(path, active_path) do
+    params = %{"path" => path}
+
+    params =
+      if is_binary(active_path) and active_path != "",
+        do: Map.put(params, "document", Path.basename(active_path)),
+        else: params
+
+    "/workspace?" <> URI.encode_query(params)
   end
 
   @impl true
@@ -1782,6 +1820,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp restart_local_agent_session(socket) do
     maybe_cancel_active_local_agent(socket)
+    # The Session is keyed by the stable ws_id, so a genuine restart (provider /
+    # workspace switch) must TERMINATE the old one first — otherwise the restart
+    # below would just re-attach to the prior conversation via {:already_started}.
+    if id = socket.assigns[:local_agent_session_id], do: Ecrits.Local.AcpAgent.close(id)
 
     socket
     |> assign(:local_agent_session_id, nil)
@@ -1806,7 +1848,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
          provider_changed?,
          previous_agent_context
        ) do
-    is_nil(socket.assigns.workspace_error) and
+    # Only a LIVE session can be "restarted". On a fresh mount / reconnect /
+    # browser refresh there is no session yet — it is started (and RE-ATTACHED to
+    # the ws_id-keyed Session) by start_local_agent_session. Without this guard the
+    # fresh-mount defaults look like a workspace/context "change" and we would tear
+    # down the very conversation we just re-attached to.
+    not is_nil(socket.assigns.local_agent_session_id) and
+      is_nil(socket.assigns.workspace_error) and
       (not same_workspace? or provider_changed? or
          previous_agent_context != local_agent_session_context(socket))
   end
@@ -2341,6 +2389,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> Keyword.put(:document_path, socket.assigns.active_document_path)
     |> Keyword.put(:workspace_path, workspace_path)
     |> put_current_document_id(active_document_id(socket))
+    # Key the long-running Session by the stable per-browser ws_id so a refresh
+    # re-attaches to the SAME conversation (acp_agent.ex returns the existing one
+    # on {:already_started}) instead of starting a fresh codex thread.
+    |> Keyword.put(:id, socket.assigns.ws_id)
   end
 
   defp put_current_document_id(opts, document_id)
