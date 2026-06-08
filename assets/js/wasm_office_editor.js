@@ -450,9 +450,17 @@ const WasmOfficeEditor = {
     // setTextSelection (which takes document twips) can be driven from a mouse
     // drag whose coords are page-local px.
     this.pageRects = []
+    // LOK document type (0=Writer/TEXT, 1=Calc, 2=Impress, 3=Draw), read from
+    // getPartSizesJson during load. Drives the per-type page geometry + tile
+    // origin in queryParts/renderPage (see those for why Writer differs).
+    this.docType = -1
     this.rendered = new Map() // pageIndex -> true
     this.visible = new Set()
     this.scale = window.devicePixelRatio || 1
+    // Deferred caret-settle bookkeeping (fixes the one-click-stale embind
+    // hitTest — see placeCaret/settleCaretAfterHit).
+    this._caretSettle = null
+    this._caretSettleSeq = 0
 
     // ─── Interactive-edit state (mirrors wasm_hwp_editor.js) ────────────────
     // LOK owns the real text cursor + selection internally; we only TRACK the
@@ -544,6 +552,7 @@ const WasmOfficeEditor = {
   destroyed() {
     if (this.io) this.io.disconnect()
     if (this.blink) clearInterval(this.blink)
+    if (this._caretSettle) { clearTimeout(this._caretSettle); this._caretSettle = null }
     window.removeEventListener("resize", this.onResize)
     this.el.removeEventListener("mousedown", this.onMouseDown)
     document.removeEventListener("mousemove", this.onMouseMove)
@@ -603,8 +612,11 @@ const WasmOfficeEditor = {
       await this.openWithBytes(Module, bytes)
       this.loadedUrl = url
 
-      this.parts = this.queryParts()
+      // Page rects (per-page document-twip rectangles) FIRST: queryParts needs
+      // them to build the page geometry for a Writer doc (whose getDocumentSize
+      // reports the WHOLE multi-page document, not one page — see queryParts).
       this.pageRects = this.queryPageRects()
+      this.parts = this.queryParts()
       this.caret = null
       this.hasActiveSelection = false
       this.composing = false
@@ -751,10 +763,33 @@ const WasmOfficeEditor = {
   // (in twips) on the LOK worker during load — a single cheap read with NO
   // proxy, so the browser main thread never blocks (a per-part getParts/setPart/
   // getDocumentSize storm would block it and can crash on Impress layout).
+  //
+  // CRITICAL per-doc-type distinction (the #154 "page squished / wrong hit-test
+  // geometry" root cause). LOK "parts" mean DIFFERENT things per document type:
+  //   • Impress/Draw (type 2/3): each part IS a slide/page, and getDocumentSize
+  //     per part is that slide's real size — the parts model is correct.
+  //   • Writer (type 0): the WHOLE multi-page flow is ONE logical canvas;
+  //     getParts() reports a part count but getDocumentSize returns the ENTIRE
+  //     stacked-pages height (e.g. 51650 twips ≈ 3 A4 pages), NOT one page. The
+  //     real page boxes come from getPartPageRectangles() instead. Using the
+  //     part sizes there builds N canvases each as tall as the whole document
+  //     (3× too tall, content duplicated) and throws every page-local px↔twip
+  //     mapping off — so clicks/caret land in the wrong place.
+  // So for Writer we derive the page list from the page rectangles (already
+  // queried into this.pageRects), each page = its own twip rect → px.
   queryParts() {
     if (this.api.shape === "module-functions" && typeof this.api.getPartSizesJson === "function") {
       try {
         const info = JSON.parse(this.api.getPartSizesJson())
+        this.docType = typeof info.type === "number" ? info.type : -1
+        // Writer (TEXT=0): the part sizes are the whole-document height. Use the
+        // per-page rectangles as the real page geometry instead.
+        if (this.docType === 0 && Array.isArray(this.pageRects) && this.pageRects.length) {
+          const pages = this.pageRects
+            .map((r) => this.parseSize({ width: r.w, height: r.h }))
+            .filter(Boolean)
+          if (pages.length) return pages
+        }
         const parts = (info.parts || [])
           .map((p) => this.parseSize(p))
           .filter(Boolean)
@@ -902,11 +937,20 @@ const WasmOfficeEditor = {
     const pxH = canvas.height
 
     try {
-      // Whole-page tile: origin (0,0), extent = page size in twips.
-      const tileW = Math.round((part.width || 794) * 1440 / 96) // px -> twips
-      const tileH = Math.round((part.height || 1123) * 1440 / 96)
+      // The tile rectangle is in ABSOLUTE document twips. Two cases (see
+      // queryParts): a Writer doc is ONE part whose pages are sub-rectangles of
+      // the single flow, so page `index` must paint ITS OWN page rectangle
+      // (origin pageRects[index].{x,y}, extent .{w,h}) — painting (0,0,page-size)
+      // would paint page 1 onto every canvas. An Impress slide is its own part,
+      // so we select the part and paint its whole (0,0,size) box.
+      const rect = this.docType === 0 ? this.pageRects[index] : null
+      const partArg = this.docType === 0 ? 0 : index
+      const tileX = rect ? rect.x : 0
+      const tileY = rect ? rect.y : 0
+      const tileW = rect ? rect.w : Math.round((part.width || 794) * 1440 / 96) // px -> twips
+      const tileH = rect ? rect.h : Math.round((part.height || 1123) * 1440 / 96)
 
-      const rgba = this.callPaintTile(index, 0, 0, tileW, tileH, pxW, pxH)
+      const rgba = this.callPaintTile(partArg, tileX, tileY, tileW, tileH, pxW, pxH)
       if (!rgba || !rgba.length) {
         throw new Error("paintTile returned no pixels (document not loaded?). Engine output:\n" + dumpLog())
       }
@@ -1137,11 +1181,24 @@ const WasmOfficeEditor = {
 
   // Place the LOK caret via hitTest (page is 1-based) and adopt the returned
   // page-local rect. hitTest returns {ok,page,x,y,height}.
+  //
+  // THE #154 "caret detached from the click / lands one click behind" root cause
+  // is here: the embind hitTest posts a LOK mouse down/up then reads back the
+  // caret rect SYNCHRONOUSLY — but LOK reports the new caret via an ASYNCHRONOUS
+  // LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR that has NOT fired yet, so hitTest
+  // returns the cursor rect from BEFORE this click (verified: every hitTest is
+  // exactly one click stale; the correct rect lands in getCursor ~1 frame later).
+  // We can't change the embind here, so we adopt the hitTest result immediately
+  // (responsive) AND schedule a short settle that re-reads getCursor() once the
+  // callback has landed, adopting the correct, freshly-updated caret. This makes
+  // the caret track the click precisely with a JS-only fix.
   placeCaret(pageIndex0, xPx, yPx) {
+    let immediate = null
     try {
       const res = this.callApi("hitTest", pageIndex0 + 1, xPx, yPx)
       if (res && res.ok) {
-        this.caret = { page: res.page, x: res.x, y: res.y, height: res.height }
+        immediate = { page: res.page, x: res.x, y: res.y, height: res.height }
+        this.caret = immediate
       } else {
         // hitTest didn't resolve a caret (e.g. empty area) — keep the click point
         // as a best-effort caret so the overlay still shows where the user clicked.
@@ -1154,6 +1211,45 @@ const WasmOfficeEditor = {
     this.caretBlinkOn = true
     this.drawCaret()
     window.__officeWasmCaret = this.caret
+    // Settle onto the async-updated cursor (fixes the one-click-stale hitTest).
+    this.settleCaretAfterHit(immediate)
+  },
+
+  // After a hitTest, the real caret for THIS click arrives via the async cursor
+  // callback ~1 frame later. Poll getCursor() a few times; the moment it reports
+  // a rect that DIFFERS from the stale hitTest result (or any ok rect when the
+  // hitTest didn't resolve one), adopt it as the true caret + re-anchor the IME
+  // proxy. Bounded + cancels a prior pending settle so rapid clicks don't fight.
+  settleCaretAfterHit(immediate) {
+    if (this._caretSettle) { clearTimeout(this._caretSettle); this._caretSettle = null }
+    const startedFor = ++this._caretSettleSeq
+    let tries = 0
+    const tick = () => {
+      this._caretSettle = null
+      // A newer click superseded this settle — stop.
+      if (startedFor !== this._caretSettleSeq) return
+      // A live drag owns the caret/selection; don't fight it.
+      if (this.dragSelect) return
+      let res = null
+      try { res = this.callApi("getCursor") } catch (_) {}
+      if (res && res.ok) {
+        const fresh = { page: res.page, x: res.x, y: res.y, height: res.height }
+        const changed = !immediate ||
+          Math.round(fresh.x) !== Math.round(immediate.x) ||
+          Math.round(fresh.y) !== Math.round(immediate.y) ||
+          fresh.page !== immediate.page
+        if (changed) {
+          this.caret = fresh
+          window.__officeWasmCaret = this.caret
+          this.caretBlinkOn = true
+          this.drawCaret()
+          this.anchorProxy()
+          return // settled
+        }
+      }
+      if (++tries < 6) this._caretSettle = setTimeout(tick, 40)
+    }
+    this._caretSettle = setTimeout(tick, 40)
   },
 
   // Refresh the caret rect from getCursor() (after a key/IME edit moved it).
