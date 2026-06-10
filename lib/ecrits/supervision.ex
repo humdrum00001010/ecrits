@@ -9,14 +9,13 @@ defmodule Ecrits.Supervision do
   This tree is the app's runtime map:
 
     * platform services make the BEAM/Phoenix host usable;
-    * storage opens the local ~/.ecrits SQLite store;
     * document services own cross-cutting document materialization;
     * local document runtime owns open workspace-document sessions;
     * local agent runtime owns ACP sessions and the agent-visible MCP tool loop.
 
   The important boundary is that LiveViews should not own document truth. A
   LiveView mounts a document session and renders it; supervised document
-  processes own revisions, snapshots, and agent-addressable identity. Agents
+  processes own versions, snapshots, and agent-addressable identity. Agents
   should reach documents through the local agent runtime and `doc.*` tools, not
   by bypassing the editor with raw filesystem access.
   """
@@ -37,9 +36,6 @@ defmodule Ecrits.Supervision do
       # workers publish, subscribe, or make HTTP calls.
       {:platform, platform_children()},
       {:http_clients, http_client_children()},
-      # Local durable app state — the only persistence boundary now that the
-      # legacy SaaS Postgres repo is retired.
-      {:storage, storage_children()},
       # Format/runtime services that are shared by user editing and agent edits.
       {:document_services, document_service_children()},
       # Phoenix endpoint starts after shared services so LiveViews can mount
@@ -79,13 +75,6 @@ defmodule Ecrits.Supervision do
     ]
   end
 
-  defp storage_children do
-    [
-      Ecrits.Repo,
-      Ecrits.Loader
-    ]
-  end
-
   defp document_service_children do
     [
       Ecrits.RhwpSnapshot.Materializer,
@@ -96,7 +85,7 @@ defmodule Ecrits.Supervision do
       # ehwp is cheap-per-doc and parallel, so it is NOT routed through here.
       Ecrits.Doc.Office.Instance,
       # Multi-document MCP registry: one Editor per open document, browser/server
-      # backing, revision/rebase. See `Ecrits.Doc.Pool` (doc-editing MCP design §4.3).
+      # backing. See `Ecrits.Doc.Pool` (doc-editing MCP design §4.3).
       Ecrits.Doc.Pool
     ]
   end

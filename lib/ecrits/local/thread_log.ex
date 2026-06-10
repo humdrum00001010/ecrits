@@ -1,27 +1,20 @@
 defmodule Ecrits.Local.ThreadLog do
   @moduledoc """
-  Append-only thread event log in `.ecrits/threads`.
+  Ephemeral thread log compatibility API.
   """
-
-  alias Ecrits.Local.Metadata
 
   @doc """
   Append one thread event.
   """
   @spec append(String.t(), String.t(), map()) :: :ok | {:error, term()}
-  def append(root, thread_id, event) when is_binary(thread_id) and is_map(event) do
-    Metadata.append_jsonl(root, thread_path(thread_id), Map.put(event, "thread_id", thread_id))
+  def append(_root, thread_id, event) when is_binary(thread_id) and is_map(event) do
+    _record = Map.put(event, "thread_id", thread_id)
+    :ok
   end
 
   @doc """
   Read thread events.
   """
   @spec list(String.t(), String.t()) :: {:ok, [map()]} | {:error, term()}
-  def list(root, thread_id) when is_binary(thread_id) do
-    Metadata.read_jsonl(root, thread_path(thread_id))
-  end
-
-  defp thread_path(thread_id) do
-    Path.join("threads", "#{thread_id}.jsonl")
-  end
+  def list(_root, thread_id) when is_binary(thread_id), do: {:ok, []}
 end

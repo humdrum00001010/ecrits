@@ -7,51 +7,41 @@ defmodule Ecrits.Local.MetadataStoreTest do
   alias Ecrits.Local.OperationLog
   alias Ecrits.Local.ThreadLog
 
-  test "metadata JSON and JSONL primitives add schema_version" do
+  test "metadata JSON and JSONL primitives are ephemeral compatibility shims" do
     root = tmp_root()
 
     assert :ok = Metadata.write_json(root, "custom/state.json", %{title: "Lease"})
-    assert {:ok, state} = Metadata.read_json(root, "custom/state.json")
-    assert state["schema_version"] == Metadata.schema_version()
-    assert state["title"] == "Lease"
+    assert {:error, :not_found} = Metadata.read_json(root, "custom/state.json")
 
     assert :ok = Metadata.append_jsonl(root, "logs/events.jsonl", %{event: "created"})
     assert :ok = Metadata.append_jsonl(root, "logs/events.jsonl", %{event: "updated"})
 
-    assert {:ok, events} = Metadata.read_jsonl(root, "logs/events.jsonl")
-    assert Enum.map(events, & &1["event"]) == ["created", "updated"]
-    assert Enum.all?(events, &(&1["schema_version"] == Metadata.schema_version()))
+    assert {:ok, []} = Metadata.read_jsonl(root, "logs/events.jsonl")
+    refute File.exists?(Path.join(root, ".ecrits"))
   end
 
-  test "registry, thread log, operation log, and index store use hidden metadata" do
+  test "registry, thread log, operation log, and index store do not persist metadata" do
     root = tmp_root()
+    File.mkdir_p!(root)
 
     assert :ok = DocumentRegistry.put(root, "doc-1", %{path: "docs/a.txt", title: "A"})
-    assert {:ok, doc} = DocumentRegistry.get(root, "doc-1")
-    assert doc["id"] == "doc-1"
-    assert doc["schema_version"] == Metadata.schema_version()
-
-    assert {:ok, [listed]} = DocumentRegistry.list(root)
-    assert listed["path"] == "docs/a.txt"
+    assert {:error, :not_found} = DocumentRegistry.get(root, "doc-1")
+    assert {:ok, []} = DocumentRegistry.list(root)
 
     assert :ok = ThreadLog.append(root, "thread-1", %{role: "user", text: "hello"})
     assert :ok = ThreadLog.append(root, "thread-1", %{role: "assistant", text: "hi"})
-    assert {:ok, messages} = ThreadLog.list(root, "thread-1")
-    assert Enum.map(messages, & &1["role"]) == ["user", "assistant"]
+    assert {:ok, []} = ThreadLog.list(root, "thread-1")
 
-    assert :ok = OperationLog.append(root, "doc-1", %{op: "replace", revision: 1})
-    assert {:ok, [operation]} = OperationLog.list(root, "doc-1")
-    assert operation["document_id"] == "doc-1"
-    assert operation["revision"] == 1
+    assert :ok = OperationLog.append(root, "doc-1", %{op: "replace", step: 1})
+    assert {:ok, []} = OperationLog.list(root, "doc-1")
 
     assert :ok =
              IndexStore.put(root, "documents_by_title", %{entries: [%{id: "doc-1", title: "A"}]})
 
-    assert {:ok, index} = IndexStore.get(root, "documents_by_title")
-    assert index["name"] == "documents_by_title"
-    assert [%{"id" => "doc-1"}] = index["entries"]
+    assert {:error, :not_found} = IndexStore.get(root, "documents_by_title")
 
     assert {:ok, []} = Ecrits.Local.FS.list(root)
+    refute File.exists?(Path.join(root, ".ecrits"))
   end
 
   defp tmp_root do

@@ -81,19 +81,6 @@ end
 config :ecrits, :env, config_env()
 
 # ---------------------------------------------------------------------------
-# Local ecrits SQLite store
-# ---------------------------------------------------------------------------
-if config_env() != :test do
-  ecrits_home = System.get_env("ECRITS_HOME", "~/.ecrits")
-  ecrits_database = System.get_env("ECRITS_DB_PATH", Path.join(ecrits_home, "ecrits.sqlite3"))
-
-  config :ecrits, Ecrits.Repo,
-    database: ecrits_database,
-    pool_size: 1,
-    busy_timeout: 5_000
-end
-
-# ---------------------------------------------------------------------------
 # Production-only: endpoint URL + secret_key_base
 # ---------------------------------------------------------------------------
 if config_env() == :prod do

@@ -1,13 +1,12 @@
 defmodule Ecrits.Local.Metadata do
   @moduledoc """
-  Low-level `.ecrits` JSON and JSONL primitives.
+  Retired local metadata boundary.
+
+  The app no longer persists workspace metadata into `.ecrits`. The functions
+  remain as compatibility shims for callers that still expect the old API.
   """
 
-  alias Ecrits.Local.FS
-  alias Ecrits.Local.Path, as: LocalPath
-
   @schema_version 1
-  @subdirs ~w(documents threads operations snapshots checkpoints indexes)
 
   @doc """
   Current local metadata schema version.
@@ -16,20 +15,10 @@ defmodule Ecrits.Local.Metadata do
   def schema_version, do: @schema_version
 
   @doc """
-  Ensure `.ecrits` metadata directory exists.
+  Compatibility no-op. Does not create `.ecrits`.
   """
   @spec ensure(String.t()) :: :ok | {:error, term()}
-  def ensure(root) do
-    with {:ok, metadata_root} <- LocalPath.metadata_join(root, "."),
-         :ok <- File.mkdir_p(metadata_root) do
-      Enum.reduce_while(@subdirs, :ok, fn subdir, :ok ->
-        case File.mkdir_p(Path.join(metadata_root, subdir)) do
-          :ok -> {:cont, :ok}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-      end)
-    end
-  end
+  def ensure(_root), do: :ok
 
   @doc """
   Add schema metadata to a record.
@@ -42,75 +31,28 @@ defmodule Ecrits.Local.Metadata do
   end
 
   @doc """
-  Write JSON inside `.ecrits` atomically.
+  Compatibility no-op. Does not write `.ecrits`.
   """
   @spec write_json(String.t(), String.t(), map()) :: :ok | {:error, term()}
-  def write_json(root, relative, record) when is_map(record) do
-    with :ok <- ensure(root),
-         {:ok, path} <- LocalPath.metadata_join(root, relative),
-         {:ok, json} <- Jason.encode(envelope(record), pretty: true) do
-      FS.atomic_write(path, json <> "\n")
-    end
-  end
+  def write_json(_root, _relative, record) when is_map(record), do: :ok
 
   @doc """
-  Read JSON from `.ecrits`.
+  Compatibility read. `.ecrits` is not a persistence source anymore.
   """
   @spec read_json(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
-  def read_json(root, relative) do
-    with {:ok, path} <- LocalPath.metadata_join(root, relative),
-         {:ok, body} <- File.read(path),
-         {:ok, decoded} <- Jason.decode(body) do
-      {:ok, decoded}
-    else
-      {:error, :enoent} -> {:error, :not_found}
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  def read_json(_root, _relative), do: {:error, :not_found}
 
   @doc """
-  Append a schema-versioned JSON object to a JSONL file inside `.ecrits`.
+  Compatibility no-op. Does not write `.ecrits`.
   """
   @spec append_jsonl(String.t(), String.t(), map()) :: :ok | {:error, term()}
-  def append_jsonl(root, relative, record) when is_map(record) do
-    with :ok <- ensure(root),
-         {:ok, path} <- LocalPath.metadata_join(root, relative),
-         :ok <- File.mkdir_p(Path.dirname(path)),
-         {:ok, line} <- Jason.encode(envelope(record)) do
-      File.write(path, line <> "\n", [:append, :binary])
-    end
-  end
+  def append_jsonl(_root, _relative, record) when is_map(record), do: :ok
 
   @doc """
-  Read schema-versioned JSONL records from `.ecrits`.
+  Compatibility read. `.ecrits` is not a persistence source anymore.
   """
   @spec read_jsonl(String.t(), String.t()) :: {:ok, [map()]} | {:error, term()}
-  def read_jsonl(root, relative) do
-    with {:ok, path} <- LocalPath.metadata_join(root, relative) do
-      if File.exists?(path) do
-        path
-        |> File.stream!([], :line)
-        |> Enum.reduce_while({:ok, []}, fn line, {:ok, acc} ->
-          line = String.trim(line)
-
-          if line == "" do
-            {:cont, {:ok, acc}}
-          else
-            case Jason.decode(line) do
-              {:ok, decoded} -> {:cont, {:ok, [decoded | acc]}}
-              {:error, reason} -> {:halt, {:error, reason}}
-            end
-          end
-        end)
-        |> case do
-          {:ok, records} -> {:ok, Enum.reverse(records)}
-          {:error, reason} -> {:error, reason}
-        end
-      else
-        {:ok, []}
-      end
-    end
-  end
+  def read_jsonl(_root, _relative), do: {:ok, []}
 
   defp stringify_keys(%{} = map) do
     Map.new(map, fn {key, value} ->

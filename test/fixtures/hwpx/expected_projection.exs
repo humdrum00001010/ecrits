@@ -184,7 +184,7 @@ nodes_map = Map.new(all_nodes, fn n -> {n.id, n} end)
 
 %State{
   document_id: "doc-fixture-real-contract",
-  revision: 0,
+  version: 0,
   projection: %{
     State.empty_projection()
     | title: "전력기술관리법 운영요령",

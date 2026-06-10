@@ -2,7 +2,6 @@ defmodule Ecrits.Local.DocumentSessionTest do
   use ExUnit.Case, async: false
 
   alias Ecrits.Local.Document
-  alias Ecrits.Local.SnapshotStore
 
   test "opens, reads, checkpoints, saves, and closes local document session" do
     root = tmp_root()
@@ -15,26 +14,21 @@ defmodule Ecrits.Local.DocumentSessionTest do
     File.write!(path, before)
 
     assert {:ok, doc} = Document.open(root, "docs/a.hwpx")
-    assert doc.revision == 0
     assert {:ok, ^before} = Document.read(doc)
 
     assert {:ok, checkpointed, checkpoint_meta} =
              Document.checkpoint(doc, draft, %{reason: "agent"})
 
-    assert checkpointed.revision == 1
     assert checkpoint_meta["kind"] == "checkpoint"
-    assert {:ok, ^before} = Document.read(checkpointed)
+    assert {:ok, ^draft} = Document.read(checkpointed)
     assert File.read!(path) == before
 
     assert {:ok, saved, save_meta} = Document.save(checkpointed, after_bytes, %{reason: "save"})
-    assert saved.revision == 2
     assert save_meta["kind"] == "save"
     assert {:ok, ^after_bytes} = Document.read(saved)
     assert File.read!(path) == after_bytes
 
-    assert {:ok, latest} = SnapshotStore.latest(root, saved.id)
-    assert latest["revision"] == 2
-    assert latest["projection"]["sha256"] == Document.sha256(after_bytes)
+    refute File.exists?(Path.join(root, ".ecrits"))
 
     pid = Document.whereis(saved.id)
     assert is_pid(pid)

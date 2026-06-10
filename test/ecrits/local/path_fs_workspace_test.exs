@@ -37,6 +37,7 @@ defmodule Ecrits.Local.PathFSWorkspaceTest do
 
     assert {:ok, root_entries} = Workspace.list(workspace)
     assert Enum.map(root_entries, & &1.name) == ["docs"]
+    refute File.exists?(Path.join(root, ".ecrits"))
 
     assert {:ok, doc_entries} = Workspace.list(workspace, "docs")
     assert [%{name: "a.txt", path: "docs/a.txt", type: :file}] = doc_entries
@@ -77,7 +78,7 @@ defmodule Ecrits.Local.PathFSWorkspaceTest do
     start_supervised!({Ecrits.Local.Workspace.Server, root: root, name: name})
 
     assert Ecrits.Local.Workspace.Server.root(name) == Path.expand(root)
-    assert File.dir?(Path.join(root, ".ecrits"))
+    refute File.exists?(Path.join(root, ".ecrits"))
   end
 
   defp tmp_root do

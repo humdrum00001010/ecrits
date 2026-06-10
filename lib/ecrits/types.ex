@@ -20,7 +20,6 @@ defmodule Ecrits.Types do
   @type agent_run_id :: id()
   @type chat_thread_id :: id()
 
-  @type revision :: non_neg_integer()
   @type contract_type_key :: String.t()
   @type idempotency_key :: String.t()
 

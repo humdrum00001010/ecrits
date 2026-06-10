@@ -1,27 +1,20 @@
 defmodule Ecrits.Local.IndexStore do
   @moduledoc """
-  Named local index storage in `.ecrits/indexes`.
+  Ephemeral named index compatibility API.
   """
-
-  alias Ecrits.Local.Metadata
 
   @doc """
   Store one named index.
   """
   @spec put(String.t(), String.t(), map()) :: :ok | {:error, term()}
-  def put(root, name, index) when is_binary(name) and is_map(index) do
-    Metadata.write_json(root, index_path(name), Map.put(index, "name", name))
+  def put(_root, name, index) when is_binary(name) and is_map(index) do
+    _record = Map.put(index, "name", name)
+    :ok
   end
 
   @doc """
   Fetch one named index.
   """
   @spec get(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
-  def get(root, name) when is_binary(name) do
-    Metadata.read_json(root, index_path(name))
-  end
-
-  defp index_path(name) do
-    Path.join("indexes", "#{name}.json")
-  end
+  def get(_root, name) when is_binary(name), do: {:error, :not_found}
 end

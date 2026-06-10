@@ -1,31 +1,21 @@
 defmodule Ecrits.Local.ConfigStore do
   @moduledoc """
-  File-backed local config stored in `.ecrits/config.json`.
+  Ephemeral local config compatibility API.
   """
 
   alias Ecrits.Local.Metadata
-
-  @config_file "config.json"
 
   @doc """
   Load local config, returning defaults when no config exists yet.
   """
   @spec load(String.t()) :: {:ok, map()} | {:error, term()}
-  def load(root) do
-    case Metadata.read_json(root, @config_file) do
-      {:ok, config} -> {:ok, config}
-      {:error, :not_found} -> {:ok, default_config()}
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  def load(_root), do: {:ok, default_config()}
 
   @doc """
-  Save local config atomically.
+  Compatibility no-op.
   """
   @spec save(String.t(), map()) :: :ok | {:error, term()}
-  def save(root, config) when is_map(config) do
-    Metadata.write_json(root, @config_file, config)
-  end
+  def save(_root, config) when is_map(config), do: :ok
 
   @doc """
   Get a config value.
@@ -41,10 +31,8 @@ defmodule Ecrits.Local.ConfigStore do
   Put a config value.
   """
   @spec put(String.t(), atom() | String.t(), term()) :: :ok | {:error, term()}
-  def put(root, key, value) do
-    with {:ok, config} <- load(root) do
-      save(root, Map.put(config, to_string(key), value))
-    end
+  def put(_root, key, _value) when is_atom(key) or is_binary(key) do
+    :ok
   end
 
   @doc """

@@ -5,7 +5,6 @@ defmodule Ecrits.SupervisionTest do
     assert Enum.map(Ecrits.Supervision.child_groups(), fn {group, _children} -> group end) == [
              :platform,
              :http_clients,
-             :storage,
              :document_services,
              :web,
              :local_document_runtime,
@@ -20,8 +19,6 @@ defmodule Ecrits.SupervisionTest do
              DNSCluster,
              Swoosh.Finch,
              Ecrits.Finch.OpenAI,
-             Ecrits.Repo,
-             Ecrits.Loader,
              Ecrits.RhwpSnapshot.Materializer,
              Ecrits.Doc.Office.Instance,
              Ecrits.Doc.Pool,

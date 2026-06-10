@@ -22,15 +22,6 @@ defmodule EcritsWeb.LocalWorkspaceAdapterStub do
 
   def tree do
     [
-      %{
-        type: :directory,
-        name: ".ecrits",
-        path: ".ecrits",
-        metadata?: true,
-        children: [
-          %{type: :file, name: "local.json", path: ".ecrits/local.json"}
-        ]
-      },
       %{type: :directory, name: "Assignment #2", path: "Assignment #2", children: []},
       %{type: :file, name: "template.hwp", path: "template.hwp"},
       %{type: :file, name: "Antigravity.dmg", path: "Antigravity.dmg"},

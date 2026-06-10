@@ -21,7 +21,7 @@ defmodule Ecrits.Studio.State do
     field :selected_document_id, :binary_id
     field :selected_node_id, :binary_id
 
-    field :last_seen_revision, :integer
+    field :last_seen_version, :integer
 
     field :chat_open?, :boolean, default: true
     field :document_picker_open?, :boolean, default: false
@@ -57,7 +57,7 @@ defmodule Ecrits.Studio.State do
     |> cast(attrs, [
       :selected_document_id,
       :selected_node_id,
-      :last_seen_revision,
+      :last_seen_version,
       :chat_open?,
       :document_picker_open?,
       :metadata_panel_open?,

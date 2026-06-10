@@ -1,10 +1,9 @@
 defmodule Ecrits.Local.Workspace do
   @moduledoc """
-  Local workspace facade over safe path and metadata primitives.
+  Local workspace facade over safe path primitives.
   """
 
   alias Ecrits.Local.FS
-  alias Ecrits.Local.Metadata
   alias Ecrits.Local.SnapshotStore
 
   defstruct [:root]
@@ -12,14 +11,13 @@ defmodule Ecrits.Local.Workspace do
   @type t :: %__MODULE__{root: String.t()}
 
   @doc """
-  Initialize a workspace root and its hidden metadata directory.
+  Initialize a workspace root.
   """
   @spec init(String.t()) :: {:ok, t()} | {:error, term()}
   def init(root) when is_binary(root) do
     root = Path.expand(root)
 
-    with :ok <- File.mkdir_p(root),
-         :ok <- Metadata.ensure(root) do
+    with :ok <- File.mkdir_p(root) do
       {:ok, %__MODULE__{root: root}}
     end
   end

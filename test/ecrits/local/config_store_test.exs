@@ -12,30 +12,29 @@ defmodule Ecrits.Local.ConfigStoreTest do
     assert config["workspaces"] == []
   end
 
-  test "saves config atomically with schema version metadata" do
+  test "save is an ephemeral compatibility no-op" do
     root = tmp_root()
 
     assert :ok = ConfigStore.save(root, %{"locale" => "ko", "workspace_name" => "Matter"})
-    assert {:ok, "ko"} = ConfigStore.get(root, :locale)
-    assert {:ok, "Matter"} = ConfigStore.get(root, "workspace_name")
+    assert {:ok, "fallback"} = ConfigStore.get(root, :locale, "fallback")
+    assert {:ok, nil} = ConfigStore.get(root, "workspace_name")
 
     assert {:ok, config} = ConfigStore.load(root)
     assert config["schema_version"] == Metadata.schema_version()
-    assert config["locale"] == "ko"
-
-    config_path = Path.join([root, ".ecrits", "config.json"])
-    assert File.read!(config_path) =~ ~s("schema_version": #{Metadata.schema_version()})
+    refute Map.has_key?(config, "locale")
+    refute File.exists?(Path.join(root, ".ecrits"))
   end
 
-  test "put preserves existing config values" do
+  test "put does not persist config values" do
     root = tmp_root()
 
     assert :ok = ConfigStore.put(root, :locale, "en")
     assert :ok = ConfigStore.put(root, "theme", "system")
 
     assert {:ok, config} = ConfigStore.load(root)
-    assert config["locale"] == "en"
-    assert config["theme"] == "system"
+    refute Map.has_key?(config, "locale")
+    refute Map.has_key?(config, "theme")
+    refute File.exists?(Path.join(root, ".ecrits"))
   end
 
   defp tmp_root do

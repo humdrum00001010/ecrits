@@ -2,9 +2,8 @@ defmodule Ecrits.Local.Document do
   @moduledoc """
   Local HWP/HWPX document runtime facade.
 
-  The canonical document body is the mounted workspace file. The `.ecrits`
-  tree stores only local metadata: snapshot copies, index JSON, and context
-  JSON for the editor/agent layers that consume the local runtime.
+  The canonical document body is the mounted workspace file. Local runtime
+  metadata is in-memory only.
   """
 
   alias Ecrits.Local.Document.Session
@@ -26,10 +25,9 @@ defmodule Ecrits.Local.Document do
           relative_path: String.t(),
           path: String.t(),
           format: format(),
-          revision: non_neg_integer(),
           byte_size: non_neg_integer(),
           sha256: String.t(),
-          metadata_dir: String.t()
+          metadata_dir: nil
         }
 
   defstruct [
@@ -38,7 +36,6 @@ defmodule Ecrits.Local.Document do
     :relative_path,
     :path,
     :format,
-    :revision,
     :byte_size,
     :sha256,
     :metadata_dir
@@ -67,12 +64,12 @@ defmodule Ecrits.Local.Document do
   @spec read(pid() | String.t() | t()) :: {:ok, binary()} | {:error, term()}
   def read(target), do: Session.read(target)
 
-  @doc "Write a local `.ecrits` snapshot without changing the canonical file."
+  @doc "Record an in-memory checkpoint without changing the canonical file."
   @spec checkpoint(pid() | String.t() | t(), binary(), map() | keyword()) ::
           {:ok, t(), map()} | {:error, term()}
   def checkpoint(target, bytes, attrs \\ %{}), do: Session.checkpoint(target, bytes, attrs)
 
-  @doc "Atomically replace the canonical workspace file, then record a local snapshot."
+  @doc "Atomically replace the canonical workspace file, then record an in-memory snapshot."
   @spec save(pid() | String.t() | t(), binary(), map() | keyword()) ::
           {:ok, t(), map()} | {:error, term()}
   def save(target, bytes, attrs \\ %{}), do: Session.save(target, bytes, attrs)
@@ -122,8 +119,8 @@ defmodule Ecrits.Local.Document do
   end
 
   @doc false
-  @spec build(keyword(), binary(), non_neg_integer()) :: t()
-  def build(args, bytes, revision) when is_list(args) and is_binary(bytes) do
+  @spec build(keyword(), binary()) :: t()
+  def build(args, bytes) when is_list(args) and is_binary(bytes) do
     root = Keyword.fetch!(args, :workspace_root)
     id = Keyword.fetch!(args, :id)
 
@@ -133,10 +130,9 @@ defmodule Ecrits.Local.Document do
       relative_path: Keyword.fetch!(args, :relative_path),
       path: Keyword.fetch!(args, :path),
       format: Keyword.fetch!(args, :format),
-      revision: revision,
       byte_size: byte_size(bytes),
       sha256: sha256(bytes),
-      metadata_dir: metadata_dir(root, id)
+      metadata_dir: nil
     }
   end
 
@@ -230,26 +226,11 @@ defmodule Ecrits.Local.Document do
     "local-" <> hash
   end
 
-  @spec metadata_dir(String.t(), String.t()) :: String.t()
-  def metadata_dir(workspace_root, document_id) do
-    workspace_root
-    |> Path.join(".ecrits")
-    |> Path.join("documents")
-    |> Path.join(document_id)
-  end
+  @spec metadata_dir(String.t(), String.t()) :: nil
+  def metadata_dir(_workspace_root, _document_id), do: nil
 
   @spec metadata_paths(t()) :: map()
-  def metadata_paths(%__MODULE__{} = document) do
-    metadata_root = Path.join(document.workspace_root, ".ecrits")
-
-    %{
-      document: Path.join([metadata_root, "documents", "#{document.id}.json"]),
-      index: Path.join([metadata_root, "indexes", "document-#{document.id}.json"]),
-      context: Path.join([metadata_root, "contexts", "#{document.id}.json"]),
-      mutations: Path.join([metadata_root, "operations", "document-#{document.id}.jsonl"]),
-      snapshots: Path.join([metadata_root, "snapshots", document.id])
-    }
-  end
+  def metadata_paths(%__MODULE__{}), do: %{}
 
   @spec sha256(binary()) :: String.t()
   def sha256(bytes) when is_binary(bytes) do

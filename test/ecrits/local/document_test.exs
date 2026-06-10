@@ -22,7 +22,7 @@ defmodule Ecrits.Local.DocumentTest do
     {:ok, root: root}
   end
 
-  test "opens a local hwpx fixture and creates metadata", %{root: root} do
+  test "opens a local hwpx fixture without metadata persistence", %{root: root} do
     source = File.read!("test/fixtures/hwpx/real_contract.hwpx")
     path = Path.join([root, "docs", "real_contract.hwpx"])
     File.mkdir_p!(Path.dirname(path))
@@ -30,25 +30,14 @@ defmodule Ecrits.Local.DocumentTest do
 
     assert {:ok, %Document{} = document} = Document.open(root, "docs/real_contract.hwpx")
     assert document.format == "hwpx"
-    assert document.revision == 0
     assert document.byte_size == byte_size(source)
     assert document.sha256 == Document.sha256(source)
     assert document.id == Document.id_for(root, "docs/real_contract.hwpx")
+    assert document.metadata_dir == nil
+    assert Document.metadata_paths(document) == %{}
     assert is_pid(Document.whereis(document.id))
     assert {:ok, ^source} = Document.read(document)
-
-    paths = Document.metadata_paths(document)
-    assert File.exists?(paths.document)
-    assert File.exists?(paths.index)
-    assert File.exists?(paths.context)
-
-    registry = decode_json!(paths.document)
-    index = decode_json!(paths.index)
-    assert registry["id"] == document.id
-    assert registry["path"] == "docs/real_contract.hwpx"
-    assert index["doc_id"] == document.id
-    assert index["format"] == "hwpx"
-    assert index["canonical"]["sha256"] == Document.sha256(source)
+    refute File.exists?(Path.join(root, ".ecrits"))
 
     assert :ok = Document.close(document)
   end
@@ -82,20 +71,17 @@ defmodule Ecrits.Local.DocumentTest do
     assert Document.ehwp_format?("hwpx")
   end
 
-  test "opens a local docx document and creates metadata", %{root: root} do
+  test "opens a local docx document without metadata persistence", %{root: root} do
     source = "docx fixture"
     path = Path.join(root, "contract.docx")
     File.write!(path, source)
 
     assert {:ok, %Document{} = document} = Document.open(root, "contract.docx")
     assert document.format == "docx"
-    assert document.revision == 0
     assert document.byte_size == byte_size(source)
-
-    paths = Document.metadata_paths(document)
-    index = decode_json!(paths.index)
-    assert index["format"] == "docx"
-    assert index["canonical"]["sha256"] == Document.sha256(source)
+    assert document.metadata_dir == nil
+    assert Document.metadata_paths(document) == %{}
+    refute File.exists?(Path.join(root, ".ecrits"))
 
     assert :ok = Document.close(document)
   end
@@ -114,24 +100,15 @@ defmodule Ecrits.Local.DocumentTest do
                request_id: "req-1"
              })
 
-    assert checked_document.revision == 1
     assert File.read!(path) == original
-    assert File.read!(Path.join(root, snapshot["path"])) == draft
+    assert {:ok, ^draft} = Document.read(checked_document)
+    assert snapshot["path"] == nil
     refute snapshot["saved"]
     assert snapshot["request_id"] == "req-1"
-
-    paths = Document.metadata_paths(checked_document)
-    index = decode_json!(paths.index)
-    context = decode_json!(paths.context)
-
-    assert index["latest_revision"] == 1
-    assert index["saved_revision"] == 0
-    assert [%{"revision" => 1, "saved" => false}] = index["snapshots"]
-    assert context["context"] == %{"sections" => []}
+    refute File.exists?(Path.join(root, ".ecrits"))
 
     assert :ok = Document.close(checked_document)
     assert {:ok, reopened} = Document.open(root, "contract.hwp")
-    assert reopened.revision == 0
     assert {:ok, ^original} = Document.read(reopened)
     assert :ok = Document.close(reopened)
   end
@@ -145,21 +122,13 @@ defmodule Ecrits.Local.DocumentTest do
     assert {:ok, document} = Document.open(root, "contract.hwpx")
     assert {:ok, saved_document, snapshot} = Document.save(document, saved)
 
-    assert saved_document.revision == 1
     assert snapshot["saved"]
     assert File.read!(path) == saved
     assert [] = Path.wildcard(path <> ".tmp-*")
-
-    paths = Document.metadata_paths(saved_document)
-    index = decode_json!(paths.index)
-
-    assert index["latest_revision"] == 1
-    assert index["saved_revision"] == 1
-    assert index["canonical"]["sha256"] == Document.sha256(saved)
+    refute File.exists?(Path.join(root, ".ecrits"))
 
     assert :ok = Document.close(saved_document)
     assert {:ok, reopened} = Document.open(root, "contract.hwpx")
-    assert reopened.revision == 1
     assert {:ok, ^saved} = Document.read(reopened)
     assert :ok = Document.close(reopened)
   end
@@ -185,11 +154,10 @@ defmodule Ecrits.Local.DocumentTest do
 
     assert response.ok
     assert response.local
-    assert response.revision == 1
     assert response.snapshot["saved"]
     assert File.read!(path) == saved
 
-    assert_receive {:local_document_saved, %Document{id: ^document_id}, %{"revision" => 1}}
+    assert_receive {:local_document_saved, %Document{id: ^document_id}, %{"saved" => true}}
 
     assert :ok = Document.close(document_id)
   end
@@ -221,14 +189,7 @@ defmodule Ecrits.Local.DocumentTest do
     assert mutation["lamport"] == 7
     assert mutation["body"]["type"] == "TextDeleted"
     assert {:ok, ^source} = Document.read(document)
-
-    records =
-      document
-      |> Document.metadata_paths()
-      |> Map.fetch!(:mutations)
-      |> read_jsonl!()
-
-    assert [%{"event_id" => "evt-1", "body" => %{"type" => "TextDeleted"}}] = records
+    refute File.exists?(Path.join(root, ".ecrits"))
 
     assert :ok = Document.close(document)
   end
@@ -245,19 +206,6 @@ defmodule Ecrits.Local.DocumentTest do
     if is_nil(Process.whereis(Ecrits.Local.Document.Supervisor)) do
       start_supervised!(Ecrits.Local.Document.Supervisor)
     end
-  end
-
-  defp decode_json!(path) do
-    path
-    |> File.read!()
-    |> Jason.decode!()
-  end
-
-  defp read_jsonl!(path) do
-    path
-    |> File.read!()
-    |> String.split("\n", trim: true)
-    |> Enum.map(&Jason.decode!/1)
   end
 
   defp hwp_fixture do

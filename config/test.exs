@@ -21,10 +21,6 @@ config :ecrits, EcritsWeb.Endpoint,
   secret_key_base: "fdSwy2CndhpkOt1n+miKuBzwIMBkBxzGfg7azoR3klip6hL9cvK0cL69X7pnOQLF",
   server: true
 
-config :ecrits, Ecrits.Repo,
-  database: Path.join(System.tmp_dir!(), "ecrits-test/ecrits.sqlite3"),
-  pool_size: 1
-
 # Wallaby driver + Chromium.
 #   * `:path`   — chromedriver executable. Wallaby PATH-resolves this, so
 #                 a bare "chromedriver" works as long as it's on $PATH.

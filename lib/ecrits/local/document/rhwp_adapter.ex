@@ -25,7 +25,6 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   def checkpoint(document_id, params) when is_binary(document_id) and is_map(params) do
     with {:ok, %Document{} = document} <- Document.document(document_id),
          :ok <- verify_format(document, params),
-         :ok <- verify_min_revision(document, params),
          {:ok, bytes} <- decode_bytes(params),
          {:ok, saved_document, snapshot} <- Document.checkpoint(document, bytes, attrs(params)) do
       {:ok, save_response(saved_document, snapshot)}
@@ -36,7 +35,6 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   def save(document_id, params) when is_binary(document_id) and is_map(params) do
     with {:ok, %Document{} = document} <- Document.document(document_id),
          :ok <- verify_format(document, params),
-         :ok <- verify_min_revision(document, params),
          {:ok, bytes} <- decode_bytes(params),
          {:ok, saved_document, snapshot} <- Document.save(document, bytes, attrs(params)) do
       {:ok, save_response(saved_document, snapshot)}
@@ -59,7 +57,6 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
       relative_path: document.relative_path,
       format: document.format,
       content_type: Document.content_type(document.format),
-      revision: document.revision,
       byte_size: byte_size(bytes),
       sha256: Document.sha256(bytes),
       bytes: bytes
@@ -73,7 +70,6 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
       document_id: document.id,
       relative_path: document.relative_path,
       format: document.format,
-      revision: document.revision,
       snapshot: snapshot
     }
   end
@@ -104,22 +100,6 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
     end
   end
 
-  defp verify_min_revision(document, params) do
-    case param(params, :min_revision) do
-      nil ->
-        :ok
-
-      value ->
-        min_revision = normalize_revision(value)
-
-        if document.revision + 1 >= min_revision do
-          :ok
-        else
-          {:error, :stale_revision}
-        end
-    end
-  end
-
   defp attrs(params) do
     %{
       request_id: param(params, :request_id),
@@ -133,15 +113,4 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   defp param(params, key) when is_map(params) and is_atom(key) do
     Map.get(params, key) || Map.get(params, Atom.to_string(key))
   end
-
-  defp normalize_revision(value) when is_integer(value) and value >= 0, do: value
-
-  defp normalize_revision(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {integer, ""} when integer >= 0 -> integer
-      _ -> 0
-    end
-  end
-
-  defp normalize_revision(_value), do: 0
 end

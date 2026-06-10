@@ -30,10 +30,7 @@ if File.exists?(Path.expand("../.env", __DIR__)) do
 end
 
 config :ecrits,
-  ecto_repos: [Ecrits.Repo],
   generators: [timestamp_type: :utc_datetime, binary_id: true]
-
-config :ecrits, Ecrits.Repo, priv: "priv/ecrits_repo"
 
 config :ecrits, :local_agent, provider: "codex"
 
