@@ -2,14 +2,14 @@ defmodule Ecrits.Doc.Pool do
   @moduledoc """
   Multi-document registry (design §4.3).
 
-  The Pool maps `document_id => %{kind, editor_pid, path, revision}` and starts
+  The Pool maps `document_id => %{kind, editor_pid, path}` and starts
   exactly one `Ecrits.Doc.Editor` per document. Documents run in parallel
   (separate Editors), while a single document's ops are serial (its Editor's
   mailbox).
 
     * `open/3`     — load a document into the pool (need not be the one the
       session is viewing).
-    * `list/1`     — `[%{id, kind, path, revision, backing}]`.
+    * `list/1`     — `[%{id, kind, path, backing}]`.
     * `with_doc/3` — run a function against a document's Editor (serial).
     * `route/2`    — where the authoritative SERVER model lives: `{:server,
       editor}` for an open doc, `{:error, :not_found}` otherwise.
@@ -102,13 +102,15 @@ defmodule Ecrits.Doc.Pool do
     * `:server` backing only — a **browser-backed** (currently-viewed) doc is
       NEVER auto-overwritten here; its authority is the WASM model, not the
       Editor, so persisting the (unedited) server copy would clobber it.
-    * `dirty` only — current revision ahead of the last `save` (so a doc that
+    * `dirty` only — in-memory edits since the last `save` (so a doc that
       already `doc.save`d, or one that was opened/cloned but never edited, is
       excluded → the auto-save is idempotent and a no-op).
     * `save_target` only — a doc with no on-disk path is skipped rather than
       written to a guessed location.
   """
-  @spec dirty_docs(GenServer.server()) :: [%{id: document_id(), kind: atom(), editor: pid(), path: String.t()}]
+  @spec dirty_docs(GenServer.server()) :: [
+          %{id: document_id(), kind: atom(), editor: pid(), path: String.t()}
+        ]
   def dirty_docs(pool \\ @default_name), do: GenServer.call(pool, :dirty_docs)
 
   @spec with_doc(GenServer.server(), document_id(), (Editor.t() -> term())) ::
@@ -138,6 +140,10 @@ defmodule Ecrits.Doc.Pool do
   @spec info(GenServer.server(), document_id()) :: {:ok, map()} | {:error, :not_found}
   def info(pool \\ @default_name, document_id),
     do: GenServer.call(pool, {:info, document_id})
+
+  @spec info_by_path(GenServer.server(), String.t()) :: {:ok, map()} | {:error, :not_found}
+  def info_by_path(pool \\ @default_name, path) when is_binary(path),
+    do: GenServer.call(pool, {:info_by_path, path})
 
   @spec close(GenServer.server(), document_id()) :: :ok | {:error, :not_found}
   def close(pool \\ @default_name, document_id),
@@ -196,7 +202,6 @@ defmodule Ecrits.Doc.Pool do
           id: id,
           kind: doc.kind,
           path: doc.path,
-          revision: revision(doc),
           backing: backing(doc)
         }
       end)
@@ -229,18 +234,20 @@ defmodule Ecrits.Doc.Pool do
   def handle_call({:info, document_id}, _from, st) do
     reply =
       case Map.get(st.docs, document_id) do
-        nil ->
-          {:error, :not_found}
+        nil -> {:error, :not_found}
+        doc -> {:ok, info_entry(document_id, doc)}
+      end
 
-        doc ->
-          {:ok,
-           %{
-             id: document_id,
-             kind: doc.kind,
-             path: doc.path,
-             revision: revision(doc),
-             backing: backing(doc)
-           }}
+    {:reply, reply, st}
+  end
+
+  def handle_call({:info_by_path, path}, _from, st) do
+    reply =
+      with document_id when is_binary(document_id) <- Map.get(st.by_path, path),
+           doc when is_map(doc) <- Map.get(st.docs, document_id) do
+        {:ok, info_entry(document_id, doc)}
+      else
+        _ -> {:error, :not_found}
       end
 
     {:reply, reply, st}
@@ -274,6 +281,15 @@ defmodule Ecrits.Doc.Pool do
 
   # --- helpers -------------------------------------------------------------
 
+  defp info_entry(document_id, doc) do
+    %{
+      id: document_id,
+      kind: doc.kind,
+      path: doc.path,
+      backing: backing(doc)
+    }
+  end
+
   defp do_open(st, document_id, path, kind, backend, opts) do
     editor_opts = [
       document_id: document_id,
@@ -306,7 +322,7 @@ defmodule Ecrits.Doc.Pool do
   # A pooled doc qualifies for turn-end auto-save iff its Editor is alive and
   # dirty AND it has a real save-target path. A doc the user is VIEWING (browser
   # WASM authority) has an unedited server Editor — the agent's edits went to the
-  # browser, not the NIF — so it is rev-0/clean and excluded here too, without the
+  # browser, not the NIF — so it is clean and excluded here too, without the
   # Pool needing to know about viewers (that lives in the Session now).
   defp dirty_entry(id, %{editor: editor, kind: kind}) when is_pid(editor) do
     if Process.alive?(editor) and Editor.dirty?(editor) do
@@ -327,12 +343,6 @@ defmodule Ecrits.Doc.Pool do
       _ -> {:error, :not_found}
     end
   end
-
-  defp revision(%{editor: editor}) when is_pid(editor) do
-    if Process.alive?(editor), do: Editor.revision(editor), else: 0
-  end
-
-  defp revision(_doc), do: 0
 
   # The Pool only ever holds the server NIF arm; the browser view is overlaid by
   # the Session, so a Pool entry's backing is always `:server`.

@@ -32,8 +32,8 @@ defmodule Ecrits.Doc.Office do
     * `inspect/2`  -> reflective discovery (element type + native UNO property
       names + child refs), mirroring `XServiceInfo`/`XPropertySetInfo`
     * `get/3`      -> `uno_get(ref)` (decoded JSON props)
-    * `set/4`      -> `uno_set(ref, props_json)` (UNIVERSAL property setter)
-    * `edit/3`     -> op → `uno_apply(op_json)` (insert_text/replace_text/delete/
+    * `set/3`      -> `uno_set(ref, props_json)` (UNIVERSAL property setter)
+    * `edit/2`     -> op → `uno_apply(op_json)` (insert_text/replace_text/delete/
       replace_all)
     * `save/2`     -> `uno_save(path, filter)` (docx `"MS Word 2007 XML"`, pptx
       `"Impress MS PowerPoint 2007 XML"`)
@@ -152,7 +152,7 @@ defmodule Ecrits.Doc.Office do
 
   # Native UNO property vocabulary per element kind. `inspect` reports these so
   # the agent discovers property names (CharWeight/CharColor/…) instead of
-  # hard-coding them; `set/4` passes them straight to `uno_set`. UNO-native
+  # hard-coding them; `set/3` passes them straight to `uno_set`. UNO-native
   # casing (these are real `com.sun.star.style.CharacterProperties` etc. names).
   @char_props ~w(CharWeight CharPosture CharColor CharHeight CharUnderline
                  CharStrikeout CharFontName CharBackColor)
@@ -201,7 +201,7 @@ defmodule Ecrits.Doc.Office do
   # which calls `XPropertySet::setPropertyValue` for each entry. A `kind`
   # discriminator (when the caller embeds one, e.g. {kind:"cell", BackColor})
   # is stripped — UNO routes by the ref/object, not a kind tag.
-  def set(%{doc: _} = handle, ref, props, _base_rev) when is_binary(ref) and is_map(props) do
+  def set(%{doc: _} = handle, ref, props) when is_binary(ref) and is_map(props) do
     prop_map = props |> Map.delete("kind") |> Map.delete(:kind)
 
     Instance.run(
@@ -218,7 +218,7 @@ defmodule Ecrits.Doc.Office do
     )
   end
 
-  def set(_handle, _ref, _props, _base_rev), do: {:error, :invalid_ref}
+  def set(_handle, _ref, _props), do: {:error, :invalid_ref}
 
   @impl true
   # Structural verb -> `uno_apply` JSON. The normalized `Ecrits.Doc.Op` verbs map
@@ -230,7 +230,7 @@ defmodule Ecrits.Doc.Office do
   #   delete_range  -> delete {ref}                 (clear the element's text)
   #
   # The UNO arm is text-level (no caret offsets); we operate on whole elements.
-  def edit(%{doc: _} = handle, op, _base_rev) do
+  def edit(%{doc: _} = handle, op) do
     with {:ok, op} <- Op.normalize(op),
          {:ok, uno_op} <- to_uno_op(op) do
       Instance.run(
@@ -433,6 +433,7 @@ defmodule Ecrits.Doc.Office do
   defp child_of?(_node, _parent), do: false
 
   defp preview(nil), do: nil
+
   defp preview(text, max \\ 80) when is_binary(text),
     do: if(String.length(text) > max, do: String.slice(text, 0, max) <> "…", else: text)
 
@@ -501,7 +502,15 @@ defmodule Ecrits.Doc.Office do
   defp default_install_dir do
     case System.user_home() do
       home when is_binary(home) ->
-        Path.join([home, "Desktop", "core", "instdir", "LibreOffice.app", "Contents", "Frameworks"])
+        Path.join([
+          home,
+          "Desktop",
+          "core",
+          "instdir",
+          "LibreOffice.app",
+          "Contents",
+          "Frameworks"
+        ])
 
       _ ->
         nil

@@ -24,11 +24,26 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       {:ok, pool} = start_supervised({Pool, name: nil})
 
       # Edit throwaway copies so doc.save never mutates the committed fixtures.
-      tmp = Path.join(System.tmp_dir!(), "ecrits_office_test_#{System.unique_integer([:positive])}.docx")
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "ecrits_office_test_#{System.unique_integer([:positive])}.docx"
+        )
+
       File.cp!(@fixture, tmp)
-      tmp_pptx = Path.join(System.tmp_dir!(), "ecrits_office_test_#{System.unique_integer([:positive])}.pptx")
+
+      tmp_pptx =
+        Path.join(
+          System.tmp_dir!(),
+          "ecrits_office_test_#{System.unique_integer([:positive])}.pptx"
+        )
+
       File.cp!(@pptx_fixture, tmp_pptx)
-      on_exit(fn -> File.rm(tmp); File.rm(tmp_pptx) end)
+
+      on_exit(fn ->
+        File.rm(tmp)
+        File.rm(tmp_pptx)
+      end)
 
       {:ok, ctx: %{pool: pool}, doc_path: tmp, pptx_path: tmp_pptx, native: true}
     else
@@ -64,7 +79,10 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       assert is_binary(cell["ref"])
       assert cell["ref"] =~ ~r/^tbl\[.*\]\/cell\[.*\]$/
       assert is_binary(cell["context"])
-      IO.puts("\n[office] doc.find {type:cell} -> ref=#{cell["ref"]} context=#{inspect(cell["context"])}")
+
+      IO.puts(
+        "\n[office] doc.find {type:cell} -> ref=#{cell["ref"]} context=#{inspect(cell["context"])}"
+      )
 
       # doc.get on the cell ref -> reflective type + settable property names + values
       assert {:ok, got} = Tools.call(ctx, "doc.get", %{"document" => doc, "ref" => cell["ref"]})
@@ -73,16 +91,15 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       assert "CharWeight" in got["settable"]
 
       # doc.set a cell property (universal setter -> uno_set)
-      assert {:ok, %{"ok" => true, "revision" => 1}} =
+      assert {:ok, %{"ok" => true}} =
                Tools.call(ctx, "doc.set", %{
                  "document" => doc,
                  "ref" => cell["ref"],
-                 "props" => %{"CharWeight" => 150.0},
-                 "base_revision" => 0
+                 "props" => %{"CharWeight" => 150.0}
                })
 
       # doc.edit set_text on the cell (replace_text scoped to the ref -> set_text)
-      assert {:ok, %{"ok" => true, "revision" => 2}} =
+      assert {:ok, %{"ok" => true}} =
                Tools.call(ctx, "doc.edit", %{
                  "document" => doc,
                  "op" => %{
@@ -90,14 +107,15 @@ defmodule Ecrits.Doc.OfficeNativeTest do
                    "query" => "Region",
                    "replacement" => "ECRITS_OFFICE_MCP_TOKEN",
                    "ref" => cell["ref"]
-                 },
-                 "base_revision" => 1
+                 }
                })
 
-      # doc.read sees the edited cell text, capped at 30 paragraphs
-      assert {:ok, page} = Tools.call(ctx, "doc.read", %{"document" => doc})
-      assert page["size"] <= 30
-      assert page["text"] =~ "ECRITS_OFFICE_MCP_TOKEN"
+      # doc.find sees the edited cell text.
+      assert {:ok, %{"matches" => [_ | _]}} =
+               Tools.call(ctx, "doc.find", %{
+                 "document" => doc,
+                 "pattern" => "ECRITS_OFFICE_MCP_TOKEN"
+               })
 
       # doc.save (-> uno_save with the docx export filter)
       assert {:ok, %{"ok" => true}} = Tools.call(ctx, "doc.save", %{"document" => doc})
@@ -111,7 +129,10 @@ defmodule Ecrits.Doc.OfficeNativeTest do
                Tools.call(ctx2, "doc.open", %{"path" => path, "kind" => "docx"})
 
       assert {:ok, %{"matches" => reopened}} =
-               Tools.call(ctx2, "doc.find", %{"document" => doc2, "pattern" => "ECRITS_OFFICE_MCP_TOKEN"})
+               Tools.call(ctx2, "doc.find", %{
+                 "document" => doc2,
+                 "pattern" => "ECRITS_OFFICE_MCP_TOKEN"
+               })
 
       assert reopened != [], "the saved cell edit did not persist across reopen"
     end
@@ -120,7 +141,9 @@ defmodule Ecrits.Doc.OfficeNativeTest do
   test "real UNO NIF (pptx): open -> elements -> set shape prop -> edit text -> save -> reopen persists",
        %{} = context do
     unless context[:native] do
-      IO.puts("\n[skip] LibreOffice UNO arm unavailable; skipping real Office pptx integration test")
+      IO.puts(
+        "\n[skip] LibreOffice UNO arm unavailable; skipping real Office pptx integration test"
+      )
     else
       ctx = context.ctx
       path = context.pptx_path
@@ -137,7 +160,10 @@ defmodule Ecrits.Doc.OfficeNativeTest do
 
       # doc.find -> the Impress shape via the walk_impress path; UNO-native shape ref
       assert {:ok, %{"matches" => matches}} =
-               Tools.call(ctx, "doc.find", %{"document" => doc, "pattern" => "ECRITS_PPTX_ORIGINAL"})
+               Tools.call(ctx, "doc.find", %{
+                 "document" => doc,
+                 "pattern" => "ECRITS_PPTX_ORIGINAL"
+               })
 
       assert matches != []
       shape = Enum.find(matches, &(&1["type"] in ["text_frame", "shape"]))
@@ -154,16 +180,15 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       assert "FillColor" in got["settable"]
 
       # doc.set a shape property (universal setter -> uno_set)
-      assert {:ok, %{"ok" => true, "revision" => 1}} =
+      assert {:ok, %{"ok" => true}} =
                Tools.call(ctx, "doc.set", %{
                  "document" => doc,
                  "ref" => shape["ref"],
-                 "props" => %{"FillColor" => 16_711_680},
-                 "base_revision" => 0
+                 "props" => %{"FillColor" => 16_711_680}
                })
 
       # doc.edit replace_text scoped to the shape ref -> set_text on the text frame
-      assert {:ok, %{"ok" => true, "revision" => 2}} =
+      assert {:ok, %{"ok" => true}} =
                Tools.call(ctx, "doc.edit", %{
                  "document" => doc,
                  "op" => %{
@@ -171,13 +196,15 @@ defmodule Ecrits.Doc.OfficeNativeTest do
                    "query" => "ECRITS_PPTX_ORIGINAL",
                    "replacement" => "ECRITS_PPTX_MCP_TOKEN",
                    "ref" => shape["ref"]
-                 },
-                 "base_revision" => 1
+                 }
                })
 
-      # doc.read sees the edited shape text
-      assert {:ok, page} = Tools.call(ctx, "doc.read", %{"document" => doc})
-      assert page["text"] =~ "ECRITS_PPTX_MCP_TOKEN"
+      # doc.find sees the edited shape text.
+      assert {:ok, %{"matches" => [_ | _]}} =
+               Tools.call(ctx, "doc.find", %{
+                 "document" => doc,
+                 "pattern" => "ECRITS_PPTX_MCP_TOKEN"
+               })
 
       # doc.save (-> uno_save with the pptx export filter)
       assert {:ok, %{"ok" => true}} = Tools.call(ctx, "doc.save", %{"document" => doc})
@@ -191,9 +218,199 @@ defmodule Ecrits.Doc.OfficeNativeTest do
                Tools.call(ctx2, "doc.open", %{"path" => path, "kind" => "pptx"})
 
       assert {:ok, %{"matches" => reopened}} =
-               Tools.call(ctx2, "doc.find", %{"document" => doc2, "pattern" => "ECRITS_PPTX_MCP_TOKEN"})
+               Tools.call(ctx2, "doc.find", %{
+                 "document" => doc2,
+                 "pattern" => "ECRITS_PPTX_MCP_TOKEN"
+               })
 
       assert reopened != [], "the saved slide-shape edit did not persist across reopen"
+    end
+  end
+
+  test "real backends: hwp docx pptx stay open together and read/edit independently",
+       %{} = context do
+    unless context[:native] do
+      IO.puts(
+        "\n[skip] LibreOffice UNO arm unavailable; skipping cross-format document integration test"
+      )
+    else
+      ctx = context.ctx
+
+      hwp_path =
+        Path.join(System.tmp_dir!(), "ecrits_cross_#{System.unique_integer([:positive])}.hwp")
+
+      on_exit(fn -> File.rm(hwp_path) end)
+
+      assert {:ok, %{"document" => hwp, "kind" => "hwp"}} =
+               Tools.call(ctx, "doc.create", %{"path" => hwp_path, "kind" => "hwp"})
+
+      assert {:ok, %{"document" => docx, "kind" => "docx"}} =
+               Tools.call(ctx, "doc.open", %{"path" => context.doc_path})
+
+      assert {:ok, %{"document" => pptx, "kind" => "pptx"}} =
+               Tools.call(ctx, "doc.open", %{"path" => context.pptx_path})
+
+      assert hwp != docx
+      assert docx != pptx
+      assert hwp != pptx
+
+      assert {:ok, %{"documents" => docs}} = Tools.call(ctx, "doc.list", %{})
+      open_docs = MapSet.new(Enum.map(docs, & &1["document"]))
+      assert MapSet.subset?(MapSet.new([hwp, docx, pptx]), open_docs)
+
+      assert {:ok, %{"matches" => [%{"ref" => docx_ref} | _]}} =
+               Tools.call(ctx, "doc.find", %{"document" => docx, "pattern" => "Region"})
+
+      assert {:ok, %{"text" => docx_text}} =
+               Tools.call(ctx, "doc.read", %{"document" => docx, "ref" => docx_ref})
+
+      assert docx_text =~ "Region"
+
+      assert {:ok, %{"matches" => [%{"ref" => pptx_ref} | _]}} =
+               Tools.call(ctx, "doc.find", %{
+                 "document" => pptx,
+                 "pattern" => "ECRITS_PPTX_ORIGINAL"
+               })
+
+      assert {:ok, %{"text" => pptx_text}} =
+               Tools.call(ctx, "doc.read", %{"document" => pptx, "ref" => pptx_ref})
+
+      assert pptx_text =~ "ECRITS_PPTX_ORIGINAL"
+
+      edits = [
+        Task.async(fn ->
+          Tools.call(ctx, "doc.edit", %{
+            "document" => hwp,
+            "op" => %{"op" => "insert_text", "ref" => "hwp:s0/p0", "text" => "HWP_CROSS_TOKEN"}
+          })
+        end),
+        Task.async(fn ->
+          Tools.call(ctx, "doc.edit", %{
+            "document" => docx,
+            "op" => %{
+              "op" => "replace_text",
+              "query" => "Region",
+              "replacement" => "DOCX_CROSS_TOKEN",
+              "ref" => docx_ref
+            }
+          })
+        end),
+        Task.async(fn ->
+          Tools.call(ctx, "doc.edit", %{
+            "document" => pptx,
+            "op" => %{
+              "op" => "replace_text",
+              "query" => "ECRITS_PPTX_ORIGINAL",
+              "replacement" => "PPTX_CROSS_TOKEN",
+              "ref" => pptx_ref
+            }
+          })
+        end)
+      ]
+
+      assert [{:ok, _}, {:ok, _}, {:ok, _}] = Task.await_many(edits, :infinity)
+
+      assert_find(ctx, hwp, "HWP_CROSS_TOKEN")
+      assert_find(ctx, docx, "DOCX_CROSS_TOKEN")
+      assert_find(ctx, pptx, "PPTX_CROSS_TOKEN")
+
+      for doc <- [hwp, docx, pptx] do
+        assert {:ok, %{"ok" => true}} = Tools.call(ctx, "doc.save", %{"document" => doc})
+      end
+
+      assert :ok = Pool.close(ctx.pool, docx)
+      assert :ok = Pool.close(ctx.pool, pptx)
+
+      {:ok, pool2} = start_supervised({Pool, name: nil}, id: :pool_cross_format_reopen)
+      ctx2 = %{pool: pool2}
+
+      assert {:ok, %{"document" => docx2}} =
+               Tools.call(ctx2, "doc.open", %{"path" => context.doc_path})
+
+      assert {:ok, %{"document" => pptx2}} =
+               Tools.call(ctx2, "doc.open", %{"path" => context.pptx_path})
+
+      assert_find(ctx2, docx2, "DOCX_CROSS_TOKEN")
+      assert_find(ctx2, pptx2, "PPTX_CROSS_TOKEN")
+
+      assert :ok = Pool.close(ctx.pool, hwp)
+      assert :ok = Pool.close(pool2, docx2)
+      assert :ok = Pool.close(pool2, pptx2)
+    end
+  end
+
+  test "real UNO NIF (pptx): doc.create deck creates a designed pptx from scratch",
+       %{} = context do
+    unless context[:native] do
+      IO.puts("\n[skip] LibreOffice UNO arm unavailable; skipping scratch PPTX create test")
+    else
+      ctx = context.ctx
+
+      path =
+        Path.join(System.tmp_dir!(), "ecrits_scratch_#{System.unique_integer([:positive])}.pptx")
+
+      on_exit(fn -> File.rm(path) end)
+
+      deck = %{
+        "title" => "FinMate AI",
+        "subtitle" => "AI financial copilot MVP",
+        "slides" => [
+          %{
+            "title" => "FinMate AI",
+            "subtitle" => "고객 금융 생활을 진단하고 맞춤 실행 계획을 추천하는 AI 서비스",
+            "section" => "JB Fin:AI MVP",
+            "metrics" => [
+              %{"label" => "상담 준비", "value" => "30%", "delta" => "down"},
+              %{"label" => "추천 정확도", "value" => "18%", "delta" => "up"},
+              %{"label" => "리스크 탐지", "value" => "2.4x", "delta" => "lift"}
+            ]
+          },
+          %{
+            "title" => "Problem",
+            "subtitle" => "금융 상담은 데이터가 많을수록 느려진다",
+            "cards" => [
+              %{"title" => "분산된 고객 맥락", "body" => "거래, 상품, 민원 이력이 여러 시스템에 흩어져 있음"},
+              %{"title" => "설명 가능한 추천 부족", "body" => "추천 근거를 즉시 제시하기 어려움"},
+              %{"title" => "사후 관리 누락", "body" => "상담 이후 실행 여부가 다음 액션으로 연결되지 않음"}
+            ]
+          },
+          %{
+            "title" => "Solution",
+            "subtitle" => "고객 맥락을 실행 가능한 금융 플랜으로 전환",
+            "roadmap" => ["수집", "요약", "추천", "검증", "후속관리"]
+          },
+          %{
+            "title" => "Impact",
+            "subtitle" => "6주 MVP로 생산성, 추천 품질, 리스크 탐지를 검증",
+            "metrics" => [
+              %{"label" => "MVP 기간", "value" => "6주", "delta" => "plan"},
+              %{"label" => "핵심 여정", "value" => "3개", "delta" => "scope"},
+              %{"label" => "파일럿", "value" => "50명", "delta" => "target"}
+            ],
+            "roadmap" => ["Week 1", "Week 2", "Week 4", "Week 6"]
+          }
+        ]
+      }
+
+      assert {:ok, %{"document" => doc, "kind" => "pptx", "path" => ^path}} =
+               Tools.call(ctx, "doc.create", %{"path" => path, "kind" => "pptx", "deck" => deck})
+
+      assert {:ok, "PK" <> _} = File.read(path)
+      assert_find(ctx, doc, "FinMate AI")
+      assert_find(ctx, doc, "리스크 탐지")
+
+      assert {:ok, %{"ok" => true}} = Tools.call(ctx, "doc.save", %{"document" => doc})
+      assert :ok = Pool.close(ctx.pool, doc)
+
+      {:ok, pool2} = start_supervised({Pool, name: nil}, id: :pool_scratch_pptx_reopen)
+      ctx2 = %{pool: pool2}
+
+      assert {:ok, %{"document" => reopened}} =
+               Tools.call(ctx2, "doc.open", %{"path" => path})
+
+      assert_find(ctx2, reopened, "FinMate AI")
+      assert_find(ctx2, reopened, "리스크 탐지")
+      assert :ok = Pool.close(pool2, reopened)
     end
   end
 
@@ -214,5 +431,10 @@ defmodule Ecrits.Doc.OfficeNativeTest do
     end
   rescue
     _ -> false
+  end
+
+  defp assert_find(ctx, doc, pattern) do
+    assert {:ok, %{"matches" => [_ | _]}} =
+             Tools.call(ctx, "doc.find", %{"document" => doc, "pattern" => pattern})
   end
 end

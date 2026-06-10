@@ -22,94 +22,52 @@ defmodule Ecrits.Doc.EditorTest do
     {:ok, editor: pid}
   end
 
-  test "starts at revision 0", %{editor: editor} do
-    assert Editor.revision(editor) == 0
-  end
-
-  describe "apply/3 — clean path (base_rev == current)" do
-    test "applies, bumps revision, and reports it", %{editor: editor} do
+  describe "apply/2" do
+    test "applies an edit and marks the document dirty", %{editor: editor} do
       assert {:ok, applied} =
-               Editor.apply(
-                 editor,
-                 %{op: "replace_text", query: "제2조", replacement: "X2"},
-                 0
-               )
+               Editor.apply(editor, %{op: "replace_text", query: "제2조", replacement: "X2"})
 
-      assert applied.revision == 1
-      assert Editor.revision(editor) == 1
+      assert applied.op == "replace_text"
+      assert applied.invalidated == []
+      assert applied.native == [%{"ok" => true, "replaced" => 1}]
+      assert Editor.dirty?(editor)
 
       assert {:ok, %{text: text}} = Editor.read(editor, [])
       assert text =~ "X2"
     end
 
-    test "nil base_revision is treated as clean", %{editor: editor} do
-      assert {:ok, applied} =
-               Editor.apply(editor, %{op: "replace_text", query: "제3조", replacement: "X3"}, nil)
+    test "serializes multiple writes through the editor mailbox", %{editor: editor} do
+      assert {:ok, _} =
+               Editor.apply(editor, %{op: "replace_text", query: "제2조", replacement: "AA"})
 
-      assert applied.revision == 1
-    end
-  end
-
-  describe "apply/3 — stale future base_rev" do
-    test "rejects a base_revision greater than current", %{editor: editor} do
-      assert {:error, {:stale_revision, _}} =
-               Editor.apply(editor, %{op: "replace_text", query: "제2조", replacement: "X"}, 5)
-    end
-  end
-
-  describe "apply/3 — rebase path (base_rev < current)" do
-    test "non-overlapping edits rebase cleanly and mark rebased: true", %{editor: editor} do
-      # writer A advances rev 0 -> 1 by editing 제2조
-      assert {:ok, %{revision: 1}} =
-               Editor.apply(editor, %{op: "replace_text", query: "제2조", replacement: "AA"}, 0)
-
-      # writer B arrives with stale base_rev 0, but edits a *different* span (제3조)
-      assert {:ok, applied} =
-               Editor.apply(editor, %{op: "replace_text", query: "제3조", replacement: "BB"}, 0)
-
-      assert applied.revision == 2
-      assert applied.rebased == true
+      assert {:ok, _} =
+               Editor.apply(editor, %{op: "replace_text", query: "제3조", replacement: "BB"})
 
       assert {:ok, %{text: text}} = Editor.read(editor, [])
       assert text =~ "AA"
       assert text =~ "BB"
     end
-
-    test "overlapping edits to the same span return a conflict with a snapshot", %{editor: editor} do
-      assert {:ok, %{revision: 1}} =
-               Editor.apply(editor, %{op: "replace_text", query: "제2조", replacement: "AA"}, 0)
-
-      # writer B targets the *same* span with the now-stale base_rev
-      assert {:error, {:conflict, current_revision, snapshot}} =
-               Editor.apply(editor, %{op: "replace_text", query: "제2조", replacement: "BB"}, 0)
-
-      assert current_revision == 1
-      assert is_map(snapshot)
-      assert snapshot.revision == 1
-      # state did not advance on conflict
-      assert Editor.revision(editor) == 1
-    end
   end
 
   describe "broadcast" do
-    test "subscribers receive an :applied event after a clean apply", %{editor: editor} do
+    test "subscribers receive an :applied event after apply", %{editor: editor} do
       :ok = Editor.subscribe(editor)
 
-      assert {:ok, %{revision: 1}} =
-               Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "Z1"}, 0)
+      assert {:ok, _} =
+               Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "Z1"})
 
-      assert_receive {:doc_applied, %{revision: 1, op: %{op: "replace_text"}}}
+      assert_receive {:doc_applied, %{op: %{op: "replace_text"}}}
     end
   end
 
-  describe "history / revoke" do
-    test "history records applied ops with revisions", %{editor: editor} do
-      {:ok, _} = Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "Z1"}, 0)
-      {:ok, _} = Editor.apply(editor, %{op: "replace_text", query: "제2조", replacement: "Z2"}, 1)
+  describe "history" do
+    test "records applied ops in order", %{editor: editor} do
+      {:ok, _} = Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "Z1"})
+      {:ok, _} = Editor.apply(editor, %{op: "replace_text", query: "제2조", replacement: "Z2"})
 
       history = Editor.history(editor)
       assert length(history) == 2
-      assert Enum.map(history, & &1.revision) == [1, 2]
+      assert Enum.map(history, & &1.op.replacement) == ["Z1", "Z2"]
     end
   end
 

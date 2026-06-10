@@ -130,13 +130,12 @@ defmodule Ecrits.Doc.RhwpTest do
     end
   end
 
-  describe "edit/3 — replace_text routes to the native NIF" do
+  describe "edit/2 — replace_text routes to the native NIF" do
     test "replaces text and is observable on the next read", %{handle: handle} do
       assert {:ok, applied} =
                Rhwp.edit(
                  handle,
-                 %{op: "replace_text", query: "제2조", replacement: "ARTICLE_TWO"},
-                 nil
+                 %{op: "replace_text", query: "제2조", replacement: "ARTICLE_TWO"}
                )
 
       assert is_map(applied)
@@ -145,35 +144,41 @@ defmodule Ecrits.Doc.RhwpTest do
       refute text =~ "제2조"
     end
 
-    test "insert_text is not supported by the headless NIF yet", %{handle: handle} do
-      assert {:error, {:not_supported, _}} =
-               Rhwp.edit(handle, %{op: "insert_text", ref: "hwp:s0/p1", text: "x"}, nil)
+    test "insert_text applies through the headless runtime", %{handle: handle} do
+      assert {:ok, %{op: "insert_text"}} =
+               Rhwp.edit(handle, %{op: "insert_text", ref: "hwp:s0/p1", text: "x"})
+
+      assert {:ok, %{text: text}} = Rhwp.read(handle, [])
+      assert text =~ "x"
     end
 
-    test "split is not supported by the headless NIF yet", %{handle: handle} do
-      assert {:error, {:not_supported, _}} =
-               Rhwp.edit(handle, %{op: "split", ref: "hwp:s0/p1"}, nil)
+    test "split applies through the headless runtime", %{handle: handle} do
+      assert {:ok, %{op: "split"}} = Rhwp.edit(handle, %{op: "split", ref: "hwp:s0/p1"})
     end
   end
 
-  describe "set/4 — property edit" do
-    test "char/paragraph property edits are not supported by the headless NIF yet", %{
+  describe "set/3 — property edit" do
+    test "char/paragraph property edits return the runtime capability error", %{
       handle: handle
     } do
-      assert {:error, {:not_supported, _}} =
-               Rhwp.set(handle, "hwp:s0/p1", %{"Bold" => false}, nil)
+      assert {:error, %{kind: "unsupported", message: msg}} =
+               Rhwp.set(handle, "hwp:s0/p1", %{"Bold" => false})
+
+      assert msg =~ "set_properties"
     end
   end
 
   describe "get/3 — property read" do
-    test "property read is not supported by the headless NIF yet", %{handle: handle} do
-      assert {:error, {:not_supported, _}} = Rhwp.get(handle, "hwp:s0/p1", ["Bold"])
+    test "property read returns the runtime capability error", %{handle: handle} do
+      assert {:error, {:unsupported_query, "get_properties"}} =
+               Rhwp.get(handle, "hwp:s0/p1", ["Bold"])
     end
   end
 
   describe "save/2" do
-    test "export to bytes is not supported by the headless NIF yet", %{handle: handle} do
-      assert {:error, {:not_supported, _}} = Rhwp.save(handle, [])
+    test "export to bytes succeeds", %{handle: handle} do
+      assert {:ok, %{"bytes" => bytes}} = Rhwp.save(handle, [])
+      assert bytes > 0
     end
   end
 

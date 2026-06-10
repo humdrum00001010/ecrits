@@ -25,7 +25,6 @@ defmodule Ecrits.Doc.PoolTest do
       assert entry.id == doc_id
       assert entry.kind == :hwp
       assert entry.path == "contract.hwp"
-      assert entry.revision == 0
       assert entry.backing == :server
     end
 

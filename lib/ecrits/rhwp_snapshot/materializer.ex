@@ -27,7 +27,7 @@ defmodule Ecrits.RhwpSnapshot.Materializer do
     end
   end
 
-  def ensure_committed(document_id, min_revision, opts \\ []) do
+  def ensure_committed(document_id, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, @timeout)
     text_events = Keyword.get(opts, :text_events, [])
     base_snapshot = Keyword.get(opts, :base_snapshot)
@@ -36,7 +36,7 @@ defmodule Ecrits.RhwpSnapshot.Materializer do
       pid when is_pid(pid) ->
         GenServer.call(
           pid,
-          {:ensure_committed, document_id, min_revision, timeout, text_events, base_snapshot},
+          {:ensure_committed, document_id, timeout, text_events, base_snapshot},
           timeout + 1_000
         )
 
@@ -99,7 +99,7 @@ defmodule Ecrits.RhwpSnapshot.Materializer do
   end
 
   def handle_call(
-        {:ensure_committed, document_id, min_revision, timeout, text_events, base_snapshot},
+        {:ensure_committed, document_id, timeout, text_events, base_snapshot},
         from,
         state
       ) do
@@ -114,7 +114,6 @@ defmodule Ecrits.RhwpSnapshot.Materializer do
         %{
           request_id: request_id,
           document_id: document_id,
-          min_revision: min_revision,
           text_events: List.wrap(text_events)
         }
         |> maybe_put_base_snapshot(base_snapshot)
@@ -124,7 +123,6 @@ defmodule Ecrits.RhwpSnapshot.Materializer do
       request = %{
         from: from,
         document_id: document_id,
-        min_revision: min_revision,
         pending: editors,
         failed: MapSet.new(),
         timer_ref: Process.send_after(self(), {:request_timeout, request_id}, timeout)
@@ -197,13 +195,11 @@ defmodule Ecrits.RhwpSnapshot.Materializer do
        when status in [:committed, "committed"] do
     result_request_id = value(result, [:request_id, "request_id"])
     document_id = value(result, [:document_id, "document_id"])
-    revision = value(result, [:revision, "revision"])
     snapshot = value(result, [:snapshot, "snapshot"])
 
     if request_id_matches?(request_id, result_request_id) and document_id == request.document_id and
-         is_integer(revision) and revision >= request.min_revision do
-      {:ok,
-       %{request_id: request_id, document_id: document_id, revision: revision, snapshot: snapshot}}
+         is_map(snapshot) do
+      {:ok, %{request_id: request_id, document_id: document_id, snapshot: snapshot}}
     else
       :error
     end
@@ -211,12 +207,9 @@ defmodule Ecrits.RhwpSnapshot.Materializer do
 
   defp committed_result(request_id, request, {:ok, snapshot}) do
     document_id = value(snapshot, [:document_id, "document_id"])
-    revision = value(snapshot, [:revision, "revision"])
 
-    if document_id == request.document_id and is_integer(revision) and
-         revision >= request.min_revision do
-      {:ok,
-       %{request_id: request_id, document_id: document_id, revision: revision, snapshot: snapshot}}
+    if document_id == request.document_id do
+      {:ok, %{request_id: request_id, document_id: document_id, snapshot: snapshot}}
     else
       :error
     end

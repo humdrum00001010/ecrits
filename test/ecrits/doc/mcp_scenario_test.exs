@@ -38,33 +38,36 @@ defmodule Ecrits.Doc.McpScenarioTest do
     assert match["text"] =~ "제2조"
     ref = match["ref"]
 
-    # 2) get its properties — honestly not supported by the headless NIF yet
-    assert {:error, %{"not_supported" => true}} =
+    # 2) get its reflective properties.
+    assert {:ok, info} =
              Tools.call(ctx, "doc.get", %{"document" => doc, "ref" => ref, "props" => ["Bold"]})
 
-    # 3) the supported edit: replace the article text, base_revision 0
-    assert {:ok, %{"ok" => true, "revision" => 1}} =
+    assert info["type"] == "char_run"
+    assert "Bold" in info["settable"]
+    assert Map.has_key?(info, "values")
+
+    # 3) the supported edit: replace the article text.
+    assert {:ok, %{"ok" => true}} =
              Tools.call(ctx, "doc.edit", %{
                "document" => doc,
                "op" => %{
                  "op" => "replace_text",
                  "query" => "제2조 (계약기간)",
                  "replacement" => "제2조 (기간)"
-               },
-               "base_revision" => 0
+               }
              })
 
-    {:ok, %{"text" => text}} = Tools.call(ctx, "doc.read", %{"document" => doc})
-    assert text =~ "제2조 (기간)"
+    assert_doc_has(ctx, doc, "제2조 (기간)")
 
-    # property-style edit path is wired but honestly reports the NIF gap
-    assert {:error, %{"not_supported" => true}} =
+    # property-style edit path reaches the runtime and reports its precise gap.
+    assert {:error, %{kind: "unsupported", message: msg}} =
              Tools.call(ctx, "doc.set", %{
                "document" => doc,
                "ref" => ref,
-               "props" => %{"Bold" => false},
-               "base_revision" => 1
+               "props" => %{"Bold" => false}
              })
+
+    assert msg =~ "fake apply_op"
   end
 
   test "two HWP documents edit in parallel through independent editors", %{ctx: ctx} do
@@ -81,83 +84,62 @@ defmodule Ecrits.Doc.McpScenarioTest do
         Task.async(fn ->
           Tools.call(ctx, "doc.edit", %{
             "document" => doc,
-            "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => repl},
-            "base_revision" => 0
+            "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => repl}
           })
         end)
       end
 
     assert [{:ok, %{"ok" => true}}, {:ok, %{"ok" => true}}] = Task.await_many(tasks)
 
-    {:ok, %{"text" => ta}} = Tools.call(ctx, "doc.read", %{"document" => a})
-    {:ok, %{"text" => tb}} = Tools.call(ctx, "doc.read", %{"document" => b})
-    assert ta =~ "DOC_A"
-    assert tb =~ "DOC_B"
+    assert_doc_has(ctx, a, "DOC_A")
+    assert_doc_has(ctx, b, "DOC_B")
   end
 
-  test "conflict scenario from §7: stale base_revision on the same span yields a snapshot", %{
-    ctx: ctx
-  } do
+  test "serial edits target the current document state", %{ctx: ctx} do
     {:ok, %{"document" => doc}} =
       Tools.call(ctx, "doc.open", %{"path" => "c.hwp", "open_opts" => [__text__: "제2조 본문 내용"]})
 
-    # user/other writer advances rev 0 -> 1 on the same span
-    {:ok, %{"revision" => 1}} =
-      Tools.call(ctx, "doc.edit", %{
-        "document" => doc,
-        "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "USER"},
-        "base_revision" => 0
-      })
-
-    # agent arrives with stale base_revision 0 targeting the same span -> conflict
-    assert {:error, %{"conflict" => true, "current_revision" => 1, "snapshot" => snap}} =
+    assert {:ok, %{"ok" => true}} =
              Tools.call(ctx, "doc.edit", %{
                "document" => doc,
-               "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "AGENT"},
-               "base_revision" => 0
+               "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "USER"}
              })
 
-    # agent retries against the current revision shown in the snapshot
-    retry_rev = snap["revision"]
-    assert retry_rev == 1
-
-    assert {:ok, %{"ok" => true, "revision" => 2}} =
+    assert {:ok, %{"ok" => true}} =
              Tools.call(ctx, "doc.edit", %{
                "document" => doc,
-               "op" => %{"op" => "replace_text", "query" => "USER", "replacement" => "AGENT"},
-               "base_revision" => retry_rev
+               "op" => %{"op" => "replace_text", "query" => "USER", "replacement" => "AGENT"}
              })
 
-    {:ok, %{"text" => text}} = Tools.call(ctx, "doc.read", %{"document" => doc})
-    assert text =~ "AGENT"
+    assert_doc_has(ctx, doc, "AGENT")
   end
 
-  test "non-overlapping concurrent edits rebase cleanly (§6.5 common case)", %{ctx: ctx} do
+  test "non-overlapping serial edits both apply", %{ctx: ctx} do
     {:ok, %{"document" => doc}} =
       Tools.call(ctx, "doc.open", %{
         "path" => "d.hwp",
         "open_opts" => [__text__: "제2조 둘째\n제7조 일곱째"]
       })
 
-    # writer at para 2
-    {:ok, %{"revision" => 1}} =
-      Tools.call(ctx, "doc.edit", %{
-        "document" => doc,
-        "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "SECOND"},
-        "base_revision" => 0
-      })
-
-    # agent edits a *different* span with a now-stale base_revision -> rebased
-    assert {:ok, %{"ok" => true, "revision" => 2, "rebased" => true}} =
+    assert {:ok, %{"ok" => true}} =
              Tools.call(ctx, "doc.edit", %{
                "document" => doc,
-               "op" => %{"op" => "replace_text", "query" => "제7조", "replacement" => "SEVENTH"},
-               "base_revision" => 0
+               "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "SECOND"}
              })
 
-    {:ok, %{"text" => text}} = Tools.call(ctx, "doc.read", %{"document" => doc})
-    assert text =~ "SECOND"
-    assert text =~ "SEVENTH"
+    assert {:ok, %{"ok" => true}} =
+             Tools.call(ctx, "doc.edit", %{
+               "document" => doc,
+               "op" => %{"op" => "replace_text", "query" => "제7조", "replacement" => "SEVENTH"}
+             })
+
+    assert_doc_has(ctx, doc, "SECOND")
+    assert_doc_has(ctx, doc, "SEVENTH")
+  end
+
+  defp assert_doc_has(ctx, doc, pattern) do
+    assert {:ok, %{"matches" => [_ | _]}} =
+             Tools.call(ctx, "doc.find", %{"document" => doc, "pattern" => pattern})
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)

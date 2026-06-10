@@ -33,7 +33,7 @@ defmodule Ecrits.Doc.Rhwp do
       through `doc.get` (the standalone `doc.inspect` tool was folded in).
     * `edit replace_text` -> `Ehwp.write(handle, {:replace_one, q, r})`
 
-  `set/4` is the UNIVERSAL property setter: char-run formatting
+  `set/3` is the UNIVERSAL property setter: char-run formatting
   (Bold/Italic/FontSize/TextColor/…) routes to the `apply_char_format` op
   (the NIF rejects `set_properties kind:char`), while picture/shape/table/cell
   (incl. cell `BackgroundColor`) and paragraph properties route to
@@ -527,7 +527,7 @@ defmodule Ecrits.Doc.Rhwp do
   #
   # `kind` comes from the props map if the caller embedded it (e.g. {kind:"cell",
   # BackgroundColor}), else it is inferred from the ref.
-  def set(%{ehwp: ehwp_handle}, ref, props, _base_rev) when is_map(props) do
+  def set(%{ehwp: ehwp_handle}, ref, props) when is_map(props) do
     {kind, prop_map} = pop_kind(props)
     resolved = kind || ref_kind(ref)
 
@@ -581,7 +581,7 @@ defmodule Ecrits.Doc.Rhwp do
   # `apply_op` shape (section/paragraph/offset/control?/cell?/cell_para? at the
   # top level, the rest of the verb fields verbatim) and hand the batch straight
   # to the NIF. No per-verb translation/wrapper.
-  def edit(%{ehwp: ehwp_handle}, op, _base_rev) do
+  def edit(%{ehwp: ehwp_handle}, op) do
     with {:ok, op} <- Op.normalize(op),
          {:ok, op} <- resolve_picture_src(op) do
       {bins, op} = pop_bins(op)
@@ -710,33 +710,39 @@ defmodule Ecrits.Doc.Rhwp do
     # docs; decode it to section/paragraph/offset so a ref'd edit hits the RIGHT
     # paragraph (not the section-0/para-0 default). The browser backend uses a
     # JSON `{section,paragraph,offset,...}` ref — accept that too.
-    case Ref.decode(ref) do
-      {:ok, %{kind: :cell_char, sec: s, para: p, control: ct, cell: ce, cell_para: cp, off: o}} ->
-        %{section: s, paragraph: p, control: ct, cell: ce, cell_para: cp, offset: o}
+    ref = String.trim(ref)
 
-      {:ok, %{kind: :char, sec: s, para: p, off: o}} ->
-        %{section: s, paragraph: p, offset: o}
+    if String.starts_with?(ref, "{") do
+      case Jason.decode(ref) do
+        {:ok, %{} = m} -> flatten_ref(m)
+        _ -> %{}
+      end
+    else
+      case Ref.decode(ref) do
+        {:ok, %{kind: :cell_char, sec: s, para: p, control: ct, cell: ce, cell_para: cp, off: o}} ->
+          %{section: s, paragraph: p, control: ct, cell: ce, cell_para: cp, offset: o}
 
-      # A non-cell IR control ref from the element enumerator: flatten its
-      # verbatim parsed object (section/paragraph/control + any subParagraph/
-      # cellPath) so a follow-up edit/get hits exactly that control.
-      {:ok, %{kind: :control, fields: fields}} when is_map(fields) ->
-        flatten_ref(fields)
+        {:ok, %{kind: :char, sec: s, para: p, off: o}} ->
+          %{section: s, paragraph: p, offset: o}
 
-      {:ok, %{kind: :paragraph, sec: s, para: p}} ->
-        %{section: s, paragraph: p}
+        # A non-cell IR control ref from the element enumerator: flatten its
+        # verbatim parsed object (section/paragraph/control + any subParagraph/
+        # cellPath) so a follow-up edit/get hits exactly that control.
+        {:ok, %{kind: :control, fields: fields}} when is_map(fields) ->
+          flatten_ref(fields)
 
-      {:ok, %{kind: :section, sec: s}} ->
-        %{section: s}
+        {:ok, %{kind: :paragraph, sec: s, para: p}} ->
+          %{section: s, paragraph: p}
 
-      {:ok, %{kind: :document}} ->
-        %{}
+        {:ok, %{kind: :section, sec: s}} ->
+          %{section: s}
 
-      _ ->
-        case Jason.decode(ref) do
-          {:ok, %{} = m} -> flatten_ref(m)
-          _ -> %{}
-        end
+        {:ok, %{kind: :document}} ->
+          %{}
+
+        _ ->
+          %{}
+      end
     end
   end
 
@@ -850,7 +856,10 @@ defmodule Ecrits.Doc.Rhwp do
 
       {:error, reason} ->
         {:error,
-         %{kind: "insert_picture", message: "cannot read image #{src}: #{:file.format_error(reason)}"}}
+         %{
+           kind: "insert_picture",
+           message: "cannot read image #{src}: #{:file.format_error(reason)}"
+         }}
     end
   end
 

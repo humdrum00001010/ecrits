@@ -22,13 +22,9 @@ defmodule Ecrits.Doc do
   it. For HWP a ref encodes `(sec, para, off)` / cell paths; for Office it is a
   UNO path. Callers MUST NOT construct refs by hand.
 
-  ## Revisions & conflicts
-
-  Every mutating callback (`set/4`, `edit/3`) takes a
-  `base_revision` so the owning `Ecrits.Doc.Editor` can detect interleaved
-  writers and rebase. The authoritative revision counter lives in the Editor,
-  not the engine. Mutating callbacks return `{:ok, applied}` where `applied`
-  carries the *engine-level* effect; the Editor stamps the final revision.
+  Mutating callbacks return `{:ok, applied}` where `applied` carries only the
+  engine-level effect. Ordering is owned by `Ecrits.Doc.Editor`'s mailbox, not by
+  a document ordering token.
   """
 
   @typedoc "Opaque element reference issued by a backend."
@@ -43,13 +39,10 @@ defmodule Ecrits.Doc do
   @typedoc """
   Engine-level result of a mutation.
 
-  `revision` is advisory (the Editor owns the authoritative counter);
   `invalidated` is the list of pages a renderer must redraw.
   """
   @type applied :: %{
-          optional(:revision) => integer(),
           optional(:invalidated) => [integer()],
-          optional(:rebased) => boolean(),
           optional(atom()) => term()
         }
 
@@ -86,7 +79,7 @@ defmodule Ecrits.Doc do
   Mirrors the engine's own self-description so the agent never hard-codes a
   property name: for Office this is `XServiceInfo` + `XPropertySetInfo` +
   children; for rhwp it is the element's type plus the *native* property names
-  (`Bold`/`Italic`/`Width`/…) that `get/3`/`set/4` understand for that element
+  (`Bold`/`Italic`/`Width`/…) that `get/3`/`set/3` understand for that element
   kind, plus its child refs. The returned map carries at least `:ref`,
   `:type`, and `:properties` (a list of native property names).
   """
@@ -97,12 +90,10 @@ defmodule Ecrits.Doc do
               {:ok, map()} | {:error, term()}
 
   @doc "Universal property edit. Routes native setters per element kind."
-  @callback set(handle(), ref(), props :: map(), base_revision :: integer() | nil) ::
-              {:ok, applied()} | {:error, term()}
+  @callback set(handle(), ref(), props :: map()) :: {:ok, applied()} | {:error, term()}
 
   @doc "Structural verb (see `Ecrits.Doc.Op`)."
-  @callback edit(handle(), op :: map(), base_revision :: integer() | nil) ::
-              {:ok, applied()} | {:error, term()}
+  @callback edit(handle(), op :: map()) :: {:ok, applied()} | {:error, term()}
 
   @doc "Persist to disk (or export bytes). May be unsupported on some engines."
   @callback save(handle(), opts :: keyword()) :: :ok | {:error, term()}

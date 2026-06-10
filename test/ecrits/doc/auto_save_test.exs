@@ -56,33 +56,36 @@ defmodule Ecrits.Doc.AutoSaveTest do
 
       assert {:server, editor} = Pool.route(pool, id)
       assert Editor.dirty?(editor) == false
-      assert %{dirty: false, saved_revision: 0, revision: 0} = Editor.info(editor)
+      assert %{dirty: false} = Editor.info(editor)
     end
 
-    test "applying an edit bumps the revision and marks the doc dirty", %{pool: pool, dir: dir} do
+    test "applying an edit marks the doc dirty", %{pool: pool, dir: dir} do
       path = Path.join(dir, "edited.hwp")
       {:ok, id} = Pool.open(pool, path, kind: :hwp, open_opts: [__text__: "제1조 (목적)"])
       {:server, editor} = Pool.route(pool, id)
 
-      assert {:ok, %{revision: 1}} =
-               Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "ARTICLE-1"}, 0)
+      assert {:ok, _} =
+               Editor.apply(
+                 editor,
+                 %{op: "replace_text", query: "제1조", replacement: "ARTICLE-1"}
+               )
 
       assert Editor.dirty?(editor) == true
-      assert %{dirty: true, saved_revision: 0, revision: 1} = Editor.info(editor)
+      assert %{dirty: true} = Editor.info(editor)
     end
 
-    test "a successful save advances saved_revision so the doc is clean again",
+    test "a successful save marks the doc clean again",
          %{pool: pool, dir: dir} do
       path = Path.join(dir, "saved.hwp")
       {:ok, id} = Pool.open(pool, path, kind: :hwp, open_opts: [__text__: "제1조"])
       {:server, editor} = Pool.route(pool, id)
 
-      {:ok, _} = Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "X"}, 0)
+      {:ok, _} = Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "X"})
       assert Editor.dirty?(editor)
 
       assert {:ok, _} = Editor.save(editor, format: :hwp, path: path)
       refute Editor.dirty?(editor)
-      assert %{dirty: false, saved_revision: 1, revision: 1} = Editor.info(editor)
+      assert %{dirty: false} = Editor.info(editor)
     end
   end
 
@@ -96,7 +99,9 @@ defmodule Ecrits.Doc.AutoSaveTest do
       {:ok, _clean_id} = Pool.open(pool, clean_path, kind: :hwp, open_opts: [__text__: "제9조"])
 
       {:server, dirty_editor} = Pool.route(pool, dirty_id)
-      {:ok, _} = Editor.apply(dirty_editor, %{op: "replace_text", query: "제1조", replacement: "Y"}, 0)
+
+      {:ok, _} =
+        Editor.apply(dirty_editor, %{op: "replace_text", query: "제1조", replacement: "Y"})
 
       entries = Pool.dirty_docs(pool)
       assert [%{id: ^dirty_id, path: ^dirty_path, kind: :hwp, editor: ^dirty_editor}] = entries
@@ -120,8 +125,8 @@ defmodule Ecrits.Doc.AutoSaveTest do
 
       {:server, editor} = Pool.route(pool, id)
 
-      {:ok, %{revision: 1}} =
-        Editor.apply(editor, %{op: "replace_text", query: "TEMPLATE", replacement: "FILLED"}, 0)
+      {:ok, _} =
+        Editor.apply(editor, %{op: "replace_text", query: "TEMPLATE", replacement: "FILLED"})
 
       # ...but the turn STALLS before doc.save: nothing on disk yet.
       refute File.exists?(path)
@@ -152,7 +157,9 @@ defmodule Ecrits.Doc.AutoSaveTest do
       {:ok, id} = Pool.open(pool, path, kind: :hwp, open_opts: [__text__: "제1조"])
       {:server, editor} = Pool.route(pool, id)
 
-      {:ok, _} = Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "SAVED"}, 0)
+      {:ok, _} =
+        Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "SAVED"})
+
       assert {:ok, _} = Editor.save(editor, format: :hwp, path: path)
       mtime_before = File.stat!(path).mtime
 
@@ -180,7 +187,7 @@ defmodule Ecrits.Doc.AutoSaveTest do
       path = Path.join(dir, "idempotent.hwp")
       {:ok, id} = Pool.open(pool, path, kind: :hwp, open_opts: [__text__: "제1조"])
       {:server, editor} = Pool.route(pool, id)
-      {:ok, _} = Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "Z"}, 0)
+      {:ok, _} = Editor.apply(editor, %{op: "replace_text", query: "제1조", replacement: "Z"})
 
       {_docs, saved1} = run_turn_end_auto_save(pool)
       assert saved1 == [path]

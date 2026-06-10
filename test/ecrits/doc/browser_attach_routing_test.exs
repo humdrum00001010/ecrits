@@ -55,6 +55,32 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
     end)
   end
 
+  defp browser_reply_lv(parent, result) do
+    spawn(fn ->
+      receive do
+        {:doc_browser_request, from, ref, verb, payload} ->
+          send(parent, {:browser_request, verb, payload})
+          send(from, {:doc_browser_reply, ref, {:ok, result}})
+
+          receive do
+            :stop -> :ok
+          after
+            1_000 -> :ok
+          end
+      end
+    end)
+  end
+
+  defp put_pool_doc(pool, id, path, kind, editor) do
+    :sys.replace_state(pool, fn state ->
+      doc = %{kind: kind, backend: Ecrits.Doc.backend_for(kind), path: path, editor: editor}
+
+      state
+      |> Map.update!(:docs, &Map.put(&1, id, doc))
+      |> Map.update!(:by_path, &Map.put(&1, path, id))
+    end)
+  end
+
   describe "attach_viewer is exclusive per viewer (the navigation invariant)" do
     test "viewing a second doc detaches the viewer from the first", %{pool: pool, path: path} do
       {:ok, doc1} = Pool.open(pool, "/abs/doc1.hwp", kind: :hwp, open_opts: [__text__: "ONE"])
@@ -104,6 +130,115 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
   end
 
   describe "doc.* operate on the NAMED doc while a viewer is attached (server arm)" do
+    test "browser-routed batch edit keeps revision metadata out of per-op payloads", %{
+      pool: pool,
+      path: path
+    } do
+      {:ok, %{"document" => doc}} =
+        Tools.call(ctx(pool, path), "doc.open", %{
+          "path" => Path.join(path, "viewed-batch.hwp"),
+          "open_opts" => [__text__: "A B"]
+        })
+
+      live_result = %{
+        "ok" => true,
+        "applied" => 2,
+        "failed" => 0,
+        "results" => [%{"ok" => true}, %{"ok" => true}]
+      }
+
+      lv = browser_reply_lv(self(), live_result)
+      :ok = Session.attach_viewer(path, doc, lv)
+
+      assert {:ok, %{"applied" => 2, "failed" => 0}} =
+               Tools.call(ctx(pool, path), "doc.edit", %{
+                 "document" => doc,
+                 "base_revision" => 7,
+                 "ops" => [
+                   %{
+                     "op" => "replace_text",
+                     "query" => "A",
+                     "replacement" => "AA",
+                     "base_revision" => 7
+                   },
+                   %{
+                     "op" => "replace_text",
+                     "query" => "B",
+                     "replacement" => "BB",
+                     "current_version" => 8
+                   }
+                 ]
+               })
+
+      assert_receive {:browser_request, :edit, %{ops: [op_a, op_b]} = payload}
+      refute Map.has_key?(payload, :base_revision)
+      refute Map.has_key?(op_a, "base_revision")
+      refute Map.has_key?(op_b, "current_version")
+
+      send(lv, :stop)
+    end
+
+    test "doc.get on a viewed office document resolves through the browser IR", %{
+      pool: pool,
+      path: path
+    } do
+      doc = "d_docx_browser_get"
+      doc_path = Path.join(path, "browser.docx")
+      editor = idle_lv()
+      put_pool_doc(pool, doc, doc_path, :docx, editor)
+
+      live_result = %{
+        "ref" => "tbl[Table1]/cell[A1]",
+        "type" => "cell",
+        "kind" => "cell",
+        "values" => %{"text" => "LIVE_BROWSER_TEXT"},
+        "properties" => %{"text" => "LIVE_BROWSER_TEXT"},
+        "settable" => ["CharWeight"],
+        "children" => [],
+        "ir" => %{"ref" => "tbl[Table1]/cell[A1]", "text" => "LIVE_BROWSER_TEXT"}
+      }
+
+      lv = browser_reply_lv(self(), live_result)
+      :ok = Session.attach_viewer(path, doc, lv)
+
+      assert {:ok, ^live_result} =
+               Tools.call(ctx(pool, path), "doc.get", %{
+                 "document" => doc,
+                 "ref" => "tbl[Table1]/cell[A1]"
+               })
+
+      assert_receive {:browser_request, :get, %{ref: "tbl[Table1]/cell[A1]", props: nil}}
+
+      send(lv, :stop)
+      send(editor, :stop)
+    end
+
+    test "doc.save accepts the viewed document path and routes to the browser model", %{
+      pool: pool,
+      path: path
+    } do
+      relative_path = "viewed-save.hwp"
+      absolute_path = Path.join(path, relative_path)
+      File.mkdir_p!(path)
+
+      {:ok, %{"document" => doc}} =
+        Tools.call(ctx(pool, path), "doc.open", %{
+          "path" => absolute_path,
+          "open_opts" => [__text__: "SERVER COPY"]
+        })
+
+      lv = browser_reply_lv(self(), %{"bytes_base64" => Base.encode64("VIEWER BYTES")})
+      :ok = Session.attach_viewer(path, doc, lv)
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx(pool, path), "doc.save", %{"document" => relative_path})
+
+      assert_receive {:browser_request, :save, %{}}
+      assert File.read!(absolute_path) == "VIEWER BYTES"
+
+      send(lv, :stop)
+    end
+
     test "open + read + find + edit target the second doc, not the viewed one", %{
       pool: pool,
       path: path
@@ -111,7 +246,7 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       # Viewed doc (HWP-B) — browser-backed by a viewer.
       {:ok, %{"document" => viewed}} =
         Tools.call(ctx(pool, path), "doc.open", %{
-          "path" => "/abs/HWP-B.hwp",
+          "path" => Path.join(path, "HWP-B.hwp"),
           "open_opts" => [__text__: "VIEWED-B 제1조 (viewed only)"]
         })
 
@@ -121,7 +256,7 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       # Agent opens a SECOND, distinct headless doc (HWP-A) it must read.
       {:ok, %{"document" => second}} =
         Tools.call(ctx(pool, path), "doc.open", %{
-          "path" => "/abs/HWP-A.hwp",
+          "path" => Path.join(path, "HWP-A.hwp"),
           "open_opts" => [__text__: "SECOND-A 제9조 (source text)"]
         })
 
@@ -132,12 +267,15 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       assert {:browser, ^lv} = Session.route(path, viewed)
       assert {:server, _editor} = Pool.route(pool, second)
 
-      # (b) doc.read / doc.find on the second return ITS content (not the viewed one).
-      assert {:ok, %{"text" => text}} =
-               Tools.call(ctx(pool, path), "doc.read", %{"document" => second})
+      # (b) doc.find on the second returns ITS content (not the viewed one).
+      assert {:ok, %{"matches" => [second_text | _]}} =
+               Tools.call(ctx(pool, path), "doc.find", %{
+                 "document" => second,
+                 "pattern" => "SECOND-A"
+               })
 
-      assert text =~ "SECOND-A"
-      refute text =~ "VIEWED-B"
+      assert second_text["text"] =~ "SECOND-A"
+      refute second_text["text"] =~ "VIEWED-B"
 
       assert {:ok, %{"matches" => [m | _]}} =
                Tools.call(ctx(pool, path), "doc.find", %{"document" => second, "pattern" => "제9조"})
@@ -145,17 +283,17 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       assert m["text"] =~ "제9조"
 
       # (c) an edit lands on the second doc ONLY.
-      assert {:ok, %{"ok" => true, "revision" => 1}} =
+      assert {:ok, %{"ok" => true}} =
                Tools.call(ctx(pool, path), "doc.edit", %{
                  "document" => second,
-                 "op" => %{"op" => "replace_text", "query" => "제9조", "replacement" => "ARTICLE9"},
-                 "base_revision" => 0
+                 "op" => %{"op" => "replace_text", "query" => "제9조", "replacement" => "ARTICLE9"}
                })
 
-      assert {:ok, %{"text" => after_text}} =
-               Tools.call(ctx(pool, path), "doc.read", %{"document" => second})
-
-      assert after_text =~ "ARTICLE9"
+      assert {:ok, %{"matches" => [_ | _]}} =
+               Tools.call(ctx(pool, path), "doc.find", %{
+                 "document" => second,
+                 "pattern" => "ARTICLE9"
+               })
 
       # The viewed doc still routes to the browser (its own model is the authority).
       assert {:browser, ^lv} = Session.route(path, viewed)
@@ -168,13 +306,13 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       # User views doc1, then navigates to doc2 in the same viewer.
       {:ok, %{"document" => doc1}} =
         Tools.call(ctx(pool, path), "doc.open", %{
-          "path" => "/abs/L3-8.hwp",
+          "path" => Path.join(path, "L3-8.hwp"),
           "open_opts" => [__text__: "L3-8 SOURCE 제3조"]
         })
 
       {:ok, %{"document" => doc2}} =
         Tools.call(ctx(pool, path), "doc.open", %{
-          "path" => "/abs/plan.hwp",
+          "path" => Path.join(path, "plan.hwp"),
           "open_opts" => [__text__: "PLAN VIEWED 제1조"]
         })
 
@@ -184,16 +322,19 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
 
       # Agent is asked to use the text of the *previously-viewed* L3-8 file. doc1
       # has no viewer (the viewer moved to doc2), so it routes to its server NIF
-      # and the read returns L3-8's own text, not the currently-viewed doc2.
+      # and the search returns L3-8's own text, not the currently-viewed doc2.
       assert reopened = doc1
       assert Session.viewer(path, doc1) == nil
       assert {:server, _} = Pool.route(pool, doc1)
 
-      assert {:ok, %{"text" => text}} =
-               Tools.call(ctx(pool, path), "doc.read", %{"document" => reopened})
+      assert {:ok, %{"matches" => [text | _]}} =
+               Tools.call(ctx(pool, path), "doc.find", %{
+                 "document" => reopened,
+                 "pattern" => "L3-8 SOURCE"
+               })
 
-      assert text =~ "L3-8 SOURCE"
-      refute text =~ "PLAN VIEWED"
+      assert text["text"] =~ "L3-8 SOURCE"
+      refute text["text"] =~ "PLAN VIEWED"
     end
   end
 

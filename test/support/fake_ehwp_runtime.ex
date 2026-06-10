@@ -86,11 +86,31 @@ defmodule Ecrits.Test.FakeEhwpRuntime do
   # Property read/query surface (`get_properties`, etc.). The fake holds only
   # plain text — it has no property model — so report an honest unsupported
   # error, mirroring the headless NIF's current capability gap.
-  def query(%{agent: _agent}, query) when is_map(query) do
-    {:error, {:unsupported_query, to_string(Map.get(query, :q) || Map.get(query, "q") || "query")}}
+  def query(%{agent: agent}, query) when is_map(query) do
+    case Map.get(query, :q) || Map.get(query, "q") do
+      "elements" ->
+        {:ok, Jason.encode!(fake_elements(text(agent)))}
+
+      _ ->
+        {:error,
+         {:unsupported_query, to_string(Map.get(query, :q) || Map.get(query, "q") || "query")}}
+    end
   end
 
   def query(_handle, _query), do: {:error, :invalid_handle}
+
+  defp fake_elements(body) do
+    body
+    |> paragraphs()
+    |> Enum.with_index()
+    |> Enum.map(fn {text, index} ->
+      %{
+        "type" => "paragraph",
+        "text" => text,
+        "ref" => %{"section" => 0, "paragraph" => index, "offset" => 0}
+      }
+    end)
+  end
 
   # Serialize the current document back to bytes (the real NIF's `export`). The
   # fake's "canonical bytes" are simply the current text, which is enough to
@@ -114,7 +134,7 @@ defmodule Ecrits.Test.FakeEhwpRuntime do
 
   # Apply each op in order against the agent's text buffer. The first op the
   # fake cannot model yields `{:error, {index, kind, message}}` (the native
-  # error tuple shape `Ecrits.Doc.Rhwp.edit/3` decodes). All-applied -> the
+  # error tuple shape `Ecrits.Doc.Rhwp.edit/2` decodes). All-applied -> the
   # JSON results array.
   defp apply_ops(_agent, [], _index, acc),
     do: {:ok, Jason.encode!(Enum.reverse(acc))}

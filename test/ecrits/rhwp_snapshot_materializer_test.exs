@@ -6,14 +6,14 @@ defmodule Ecrits.RhwpSnapshotMaterializerTest do
   test "ensure_committed returns no_live_editor without a registered editor" do
     document_id = Ecto.UUID.generate()
 
-    assert {:error, :no_live_editor} = Materializer.ensure_committed(document_id, 1, timeout: 25)
+    assert {:error, :no_live_editor} = Materializer.ensure_committed(document_id, timeout: 25)
   end
 
   test "failure ack returns the editor reason" do
     document_id = Ecto.UUID.generate()
     editor = start_editor!(document_id)
 
-    ensure = start_ensure!(document_id, 5, timeout: 500)
+    ensure = start_ensure!(document_id, timeout: 500)
 
     assert_receive {:editor_request, ^editor, request}
 
@@ -22,22 +22,26 @@ defmodule Ecrits.RhwpSnapshotMaterializerTest do
     assert {:error, :render_failed} = receive_ensure_result(ensure)
   end
 
-  test "stale ack is ignored until a good ack arrives" do
+  test "ack for another document is ignored until a matching ack arrives" do
     document_id = Ecto.UUID.generate()
+    other_document_id = Ecto.UUID.generate()
     editor = start_editor!(document_id)
 
-    ensure = start_ensure!(document_id, 5, timeout: 500)
+    ensure = start_ensure!(document_id, timeout: 500)
 
     assert_receive {:editor_request, ^editor, request}
 
-    send(editor, {:ack, request.request_id, committed(document_id, 4, %{stale: true})})
-    send(editor, {:ack, request.request_id, committed(document_id, 5, %{fresh: true})})
+    send(
+      editor,
+      {:ack, request.request_id, committed(other_document_id, %{wrong_document: true})}
+    )
+
+    send(editor, {:ack, request.request_id, committed(document_id, %{fresh: true})})
 
     assert {:ok,
             %{
               request_id: request_id,
               document_id: ^document_id,
-              revision: 5,
               snapshot: %{fresh: true}
             }} = receive_ensure_result(ensure)
 
@@ -48,10 +52,10 @@ defmodule Ecrits.RhwpSnapshotMaterializerTest do
     document_id = Ecto.UUID.generate()
     editor = start_editor!(document_id)
     text_events = [%{"kind" => "insert_text", "text" => "materialize-me"}]
-    base_snapshot = %{url: "/documents/#{document_id}/rhwp-snapshots/6.hwp", revision: 6}
+    base_snapshot = %{url: "/documents/#{document_id}/rhwp-snapshots/current.hwp"}
 
     ensure =
-      start_ensure!(document_id, 7,
+      start_ensure!(document_id,
         timeout: 500,
         text_events: text_events,
         base_snapshot: base_snapshot
@@ -61,9 +65,9 @@ defmodule Ecrits.RhwpSnapshotMaterializerTest do
     assert request.text_events == text_events
     assert request.base_snapshot == base_snapshot
 
-    send(editor, {:ack, request.request_id, committed(document_id, 7, %{fresh: true})})
+    send(editor, {:ack, request.request_id, committed(document_id, %{fresh: true})})
 
-    assert {:ok, %{revision: 7}} = receive_ensure_result(ensure)
+    assert {:ok, %{snapshot: %{fresh: true}}} = receive_ensure_result(ensure)
   end
 
   test "first good ack wins" do
@@ -71,22 +75,21 @@ defmodule Ecrits.RhwpSnapshotMaterializerTest do
     first = start_editor!(document_id)
     second = start_editor!(document_id)
 
-    ensure = start_ensure!(document_id, 3, timeout: 500)
+    ensure = start_ensure!(document_id, timeout: 500)
 
     request_id =
       receive_request_id(first, second)
 
-    send(first, {:ack, request_id, committed(document_id, 3, %{winner: :first})})
+    send(first, {:ack, request_id, committed(document_id, %{winner: :first})})
 
     assert {:ok,
             %{
               request_id: ^request_id,
               document_id: ^document_id,
-              revision: 3,
               snapshot: %{winner: :first}
             }} = receive_ensure_result(ensure)
 
-    send(second, {:ack, request_id, committed(document_id, 4, %{winner: :second})})
+    send(second, {:ack, request_id, committed(document_id, %{winner: :second})})
   end
 
   defp start_editor!(document_id) do
@@ -112,7 +115,7 @@ defmodule Ecrits.RhwpSnapshotMaterializerTest do
     pid
   end
 
-  defp start_ensure!(document_id, min_revision, opts) do
+  defp start_ensure!(document_id, opts) do
     parent = self()
 
     start_supervised!(%{
@@ -121,7 +124,7 @@ defmodule Ecrits.RhwpSnapshotMaterializerTest do
         {Task, :start_link,
          [
            fn ->
-             result = Materializer.ensure_committed(document_id, min_revision, opts)
+             result = Materializer.ensure_committed(document_id, opts)
              send(parent, {:ensure_result, self(), result})
            end
          ]},
@@ -146,11 +149,10 @@ defmodule Ecrits.RhwpSnapshotMaterializerTest do
     end
   end
 
-  defp committed(document_id, revision, snapshot) do
+  defp committed(document_id, snapshot) do
     %{
       status: :committed,
       document_id: document_id,
-      revision: revision,
       snapshot: snapshot
     }
   end

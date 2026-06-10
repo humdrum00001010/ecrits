@@ -27,6 +27,9 @@ defmodule Ecrits.Doc.Op do
             insert_table_column delete_table_column merge_cells split_cell
             delete_node insert_picture set_cell
             insert_equation insert_footnote insert_endnote insert_shape set_columns)
+  @protocol_metadata_keys ~w(base_revision base_version revision version current_revision
+                             current_version stale_revision stale_version saved_revision
+                             saved_version rebased)a
 
   @doc "The full set of recognised op verbs."
   @spec verbs() :: [String.t()]
@@ -41,7 +44,7 @@ defmodule Ecrits.Doc.Op do
     case fetch(op, :op) do
       {:ok, verb} when is_binary(verb) ->
         if verb in @verbs do
-          validate(verb, atomize(op) |> Map.put(:op, verb))
+          validate(verb, op |> atomize() |> strip_protocol_metadata() |> Map.put(:op, verb))
         else
           {:error, {:unknown_op, verb}}
         end
@@ -61,8 +64,9 @@ defmodule Ecrits.Doc.Op do
   # the browser would then substitute the empty string and silently DELETE the
   # match. Reject that here with an actionable message so the agent corrects the
   # field instead of corrupting the document. To delete text the agent must use
-  # `delete_range`. A multi-paragraph (newline-bearing) replacement is also
-  # rejected — one paragraph per op (the renderer keeps a paragraph on one line).
+  # `delete_range`. Newlines in `replacement` are folded to spaces because
+  # `replace_text` replaces one paragraph/run; multi-paragraph authoring belongs
+  # to `insert_text`/`set_cell`.
   defp validate("replace_text", %{} = op) do
     cond do
       not is_binary(op[:query]) or op[:query] == "" ->
@@ -73,20 +77,16 @@ defmodule Ecrits.Doc.Op do
          {:invalid_op,
           "replace_text requires a string \"replacement\" (the field is \"replacement\", not \"text\"/\"new\"; to delete text use delete_range)"}}
 
-      String.contains?(op[:replacement], "\n") ->
-        {:error,
-         {:invalid_op,
-          "replace_text \"replacement\" must be a single paragraph (no newlines); use one op per paragraph or \"split\""}}
-
       true ->
-        {:ok, op}
+        {:ok, Map.update!(op, :replacement, &single_paragraph_text/1)}
     end
   end
 
   defp validate("insert_text", %{} = op) do
     cond do
       is_nil(op[:ref]) ->
-        {:error, {:invalid_op, "insert_text requires a \"ref\" (from doc.find) saying where to insert"}}
+        {:error,
+         {:invalid_op, "insert_text requires a \"ref\" (from doc.find) saying where to insert"}}
 
       not is_binary(op[:text]) or op[:text] == "" ->
         {:error, {:invalid_op, "insert_text requires a non-empty string \"text\""}}
@@ -119,7 +119,8 @@ defmodule Ecrits.Doc.Op do
 
   defp validate("delete_range", %{} = op) do
     if is_nil(op[:ref]) do
-      {:error, {:invalid_op, "delete_range requires a \"ref\" (from doc.find) saying what to delete"}}
+      {:error,
+       {:invalid_op, "delete_range requires a \"ref\" (from doc.find) saying what to delete"}}
     else
       {:ok, op}
     end
@@ -128,7 +129,9 @@ defmodule Ecrits.Doc.Op do
   defp validate("insert_equation", %{} = op) do
     cond do
       is_nil(op[:ref]) ->
-        {:error, {:invalid_op, "insert_equation requires a \"ref\" (from doc.find) saying where to insert"}}
+        {:error,
+         {:invalid_op,
+          "insert_equation requires a \"ref\" (from doc.find) saying where to insert"}}
 
       not is_binary(op[:script]) or op[:script] == "" ->
         {:error,
@@ -143,7 +146,8 @@ defmodule Ecrits.Doc.Op do
   defp validate("insert_shape", %{} = op) do
     cond do
       is_nil(op[:ref]) ->
-        {:error, {:invalid_op, "insert_shape requires a \"ref\" (from doc.find) saying where to insert"}}
+        {:error,
+         {:invalid_op, "insert_shape requires a \"ref\" (from doc.find) saying where to insert"}}
 
       not is_integer(op[:width]) or not is_integer(op[:height]) ->
         {:error,
@@ -159,11 +163,23 @@ defmodule Ecrits.Doc.Op do
     if is_integer(op[:count]) and op[:count] > 0 do
       {:ok, op}
     else
-      {:error, {:invalid_op, "set_columns requires an integer \"count\" > 0 (the number of columns)"}}
+      {:error,
+       {:invalid_op, "set_columns requires an integer \"count\" > 0 (the number of columns)"}}
     end
   end
 
   defp validate(_verb, op), do: {:ok, op}
+
+  defp strip_protocol_metadata(op) do
+    Map.drop(op, @protocol_metadata_keys)
+  end
+
+  defp single_paragraph_text(text) do
+    text
+    |> String.replace(~r/\R+/u, " ")
+    |> String.replace(~r/[ \t]{2,}/u, " ")
+    |> String.trim()
+  end
 
   defp fetch(map, key) when is_atom(key) do
     cond do

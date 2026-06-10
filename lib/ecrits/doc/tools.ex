@@ -11,11 +11,11 @@ defmodule Ecrits.Doc.Tools do
   | `doc.list`       | read  | `Pool.list/1` |
   | `doc.open`       | read  | `Pool.open/3` |
   | `doc.create`     | write | `Pool.create/3` (blank template) |
-  | `doc.read`       | read  | `Editor.read/2` (**≤30 paragraphs/call** + cursor) |
+  | `doc.read`       | read  | one `doc.find` ref -> nearby structural context |
   | `doc.find`       | read  | `Editor.find/3` |
   | `doc.get`        | read  | `Editor.get/3` + `Editor.inspect_element/2` (type/values/settable/children) |
-  | `doc.set`        | write | `Editor.set/4` (base_revision) — UNIVERSAL property setter |
-  | `doc.edit`       | write | `Editor.apply/3` (base_revision) |
+  | `doc.set`        | write | `Editor.set/3` — UNIVERSAL property setter |
+  | `doc.edit`       | write | `Editor.apply/2` |
   | `doc.save`       | write | `Editor.save/2` |
 
   Ten tools (the former `doc.inspect` and `doc.apply_style` are folded away):
@@ -25,9 +25,10 @@ defmodule Ecrits.Doc.Tools do
   `doc.set` (it routes char refs to the engine's `apply_char_format`), so there
   is a single read-properties tool and a single write-properties tool.
 
-  `doc.read` is **incremental**: a single call returns at most 30 paragraphs (a
-  hard cap, design §4.4) plus a `next_at` cursor, so the agent pages through a
-  document and never pulls the whole thing.
+  `doc.read` is an anchor clarifier: `doc.find` discovers refs, then
+  `doc.read {ref, nearby: ...}` returns a tiny structural neighborhood (siblings,
+  row/column/header context). Table context is compacted by common
+  section/paragraph/control anchor and never dumps the whole grid by default.
 
   The deep Office tools (`office.inspect`/`office.call`/`office.dispatch`,
   design §4.4 "Office 전용 심화") are intentionally **not** part of this HWP
@@ -50,8 +51,8 @@ defmodule Ecrits.Doc.Tools do
 
   Results are JSON-shaped maps so the layer is testable server-side without a
   browser or an MCP transport. Errors that the agent is expected to act on
-  (conflict, capability gaps, already_open/forbidden) are returned as structured
-  maps mirroring the design's example payloads.
+  (capability gaps, already_open/forbidden) are returned as structured maps
+  mirroring the design's example payloads.
   """
 
   alias Ecrits.Doc.Editor
@@ -78,10 +79,6 @@ defmodule Ecrits.Doc.Tools do
   # plus a WASM `replaceAll`/`insertText`, so this is generous.
   @browser_timeout_ms 15_000
 
-  # Hard cap on `doc.read` (design §4.4, the user's explicit limit). Sourced
-  # from the backend so the tool schema and the enforcement can never drift.
-  @read_cap Ecrits.Doc.Rhwp.read_paragraph_cap()
-
   @tools [
     %{
       "namespace" => @namespace,
@@ -97,7 +94,7 @@ defmodule Ecrits.Doc.Tools do
     %{
       "namespace" => @namespace,
       "name" => "list",
-      "description" => "List open/available documents (id, kind, path, revision, backing).",
+      "description" => "List open/available documents (id, kind, path, backing).",
       "risk" => "read",
       "inputSchema" => %{"type" => "object", "additionalProperties" => false, "properties" => %{}},
       "annotations" => %{"readOnlyHint" => true}
@@ -121,32 +118,65 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "create",
       "description" =>
-        "Create a NEW document whose save target is `path` (the file need not exist " <>
-          "yet). Returns {document, kind}.\n" <>
-          "• WITHOUT `from`: a blank document. Author content with doc.edit " <>
-          "(insert_text/insert_paragraph/split/insert_table_*/…) and persist with doc.save.\n" <>
-          "• WITH `from` (CLONE A TEMPLATE — use this when asked to make a document " <>
-          "\"in the format of\" / \"같은 양식으로\" / \"…형식대로\" an existing doc): `from` is " <>
-          "an existing HWP document's file PATH or an open document id. The template " <>
-          "file is byte-copied to `path`, so the clone INHERITS ALL of the template's " <>
-          "formatting (column widths, cell/paragraph patterns, fonts, headers, tables). " <>
-          "Then REPLACE the template's content cell-by-cell (doc.find + doc.edit " <>
-          "replace_text / insert_text) preserving each cell's structure, and use " <>
-          "doc.edit insert_table_row to add rows that inherit the template's cell format " <>
-          "— do NOT rebuild a table from scratch.",
+        "Create doc at `path`. Optional `from` clones an existing/open document and preserves format. " <>
+          "For a new PowerPoint, use kind:\"pptx\" with `deck`: %{title, subtitle, slides:[%{title, subtitle, cards, metrics, roadmap}]}; " <>
+          "this writes a real designed PPTX, opens it, and returns the document id. Save with doc.save.",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
           "path" => %{"type" => "string", "minLength" => 1},
-          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx"]},
+          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx", "pptx"]},
           "from" => %{
             "type" => "string",
             "minLength" => 1,
             "description" =>
-              "Optional template to clone: an existing HWP document's file path OR an " <>
+              "Optional template to clone: an existing document file path OR an " <>
                 "open document id. The file is byte-copied to `path` so the new document " <>
                 "inherits all of the template's formatting."
+          },
+          "deck" => %{
+            "type" => "object",
+            "description" =>
+              "PPTX-only scratch deck spec. Include slides with title/subtitle plus cards, metrics, and roadmap/steps for a designed deck.",
+            "properties" => %{
+              "title" => %{"type" => "string"},
+              "subtitle" => %{"type" => "string"},
+              "slides" => %{
+                "type" => "array",
+                "items" => %{
+                  "type" => "object",
+                  "properties" => %{
+                    "title" => %{"type" => "string"},
+                    "subtitle" => %{"type" => "string"},
+                    "section" => %{"type" => "string"},
+                    "bullets" => %{"type" => "array", "items" => %{"type" => "string"}},
+                    "roadmap" => %{"type" => "array", "items" => %{"type" => "string"}},
+                    "cards" => %{
+                      "type" => "array",
+                      "items" => %{
+                        "type" => "object",
+                        "properties" => %{
+                          "title" => %{"type" => "string"},
+                          "body" => %{"type" => "string"}
+                        }
+                      }
+                    },
+                    "metrics" => %{
+                      "type" => "array",
+                      "items" => %{
+                        "type" => "object",
+                        "properties" => %{
+                          "label" => %{"type" => "string"},
+                          "value" => %{"type" => "string"},
+                          "delta" => %{"type" => "string"}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         },
         "required" => ["path"]
@@ -156,35 +186,35 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "read",
       "description" =>
-        "Read a chunk of a document's elements. INCREMENTAL: a single call returns " <>
-          "AT MOST #{@read_cap} elements (a hard cap) and never the whole document. " <>
-          "Start at index `at` (default 0); `size` is the requested count, clamped to " <>
-          "#{@read_cap}. Each entry in `paragraphs` is `{text, ref, table_cell}` — body " <>
-          "paragraphs AND every TABLE CELL (including EMPTY cells, prefixed `[cell]` in " <>
-          "`text`). Use the per-element `ref` to edit it directly (e.g. insert_text into " <>
-          "an empty cell, or replace_text in a filled one) — this is how you find and fill " <>
-          "blank table fields a text search can't see. The result includes `next_at` " <>
-          "(cursor for the next page, or null at end) and `total` — page through with it.",
+        "Clarify one ref from doc.find. Returns nearby structural elements/table row/column context.",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
           "document" => %{"type" => "string"},
-          "ref" => %{"type" => "string"},
-          "at" => %{
-            "type" => "integer",
-            "minimum" => 0,
-            "description" => "0-based paragraph index to start the page at."
-          },
-          "size" => %{
-            "type" => "integer",
-            "minimum" => 1,
-            "maximum" => @read_cap,
+          "ref" => %{"type" => "string", "description" => "Anchor ref from doc.find."},
+          "nearby" => %{
+            "type" => "object",
             "description" =>
-              "Requested paragraph count; hard-capped at #{@read_cap} per call."
+              "For text: before/after sibling count. For cell: row/column/headers booleans.",
+            "properties" => %{
+              "before" => %{"type" => "integer", "minimum" => 0, "maximum" => 10},
+              "after" => %{"type" => "integer", "minimum" => 0, "maximum" => 10},
+              "unit" => %{"type" => "string", "enum" => ["element"], "default" => "element"},
+              "row" => %{"type" => "boolean"},
+              "column" => %{"type" => "boolean"},
+              "headers" => %{"type" => "boolean"}
+            }
+          },
+          "include" => %{
+            "type" => "array",
+            "items" => %{
+              "type" => "string",
+              "enum" => ["text", "refs", "table_headers", "row_labels"]
+            }
           }
         },
-        "required" => ["document"]
+        "required" => ["document", "ref"]
       },
       "annotations" => %{"readOnlyHint" => true}
     },
@@ -192,26 +222,19 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "find",
       "description" =>
-        "Literal search -> [{ref, text}]. With `all:true`, returns EVERY element " <>
-          "including empty table cells (each with its own ref) and treats `pattern` " <>
-          "as a REGULAR EXPRESSION — use it to discover blanks to fill: " <>
-          "`{all:true}` lists the whole document structure; " <>
-          "`{all:true, pattern:\"^\\\\s*$\"}` lists only the empty elements. " <>
-          "In `all` mode `pattern` is optional (omit it to match everything). " <>
-          "Pass `type` to fetch just one slice by element type — `\"empty_cell\"` " <>
-          "(blank table cells to fill), `\"cell\"` (all table cells), " <>
-          "`\"filled_cell\"`, `\"paragraph\"` (body), or `\"empty\"` — combinable " <>
-          "with `pattern`. To FILL a form, call `{type:\"empty_cell\"}` once to get " <>
-          "exactly the blanks, then insert_text into each. Every CELL match also " <>
-          "carries `context` = \"<column header> / <row label>\" (e.g. " <>
-          "\"지급금액 / 선급금\") plus `row`/`col`, so a blank self-describes what it is " <>
-          "for — you usually do NOT need to read the table to know what to fill.",
+        "Find text or elements. Use type:\"fillable\" for writable blanks/cells/inline gaps. Batch with patterns:[].",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
           "document" => %{"type" => "string"},
           "pattern" => %{"type" => "string"},
+          "patterns" => %{
+            "type" => "array",
+            "description" =>
+              "Batch form: several literal/regex patterns in one call; top-level all/regex/type/case_sensitive apply to each.",
+            "items" => %{"type" => "string"}
+          },
           "case_sensitive" => %{"type" => "boolean", "default" => false},
           "all" => %{
             "type" => "boolean",
@@ -228,18 +251,19 @@ defmodule Ecrits.Doc.Tools do
           },
           "type" => %{
             "type" => "string",
-            "enum" =>
-              ~w(empty_cell cell filled_cell paragraph empty
+            "enum" => ~w(fillable empty_cell cell filled_cell paragraph empty
                  table picture shape equation field form
                  header footer footnote endnote bookmark hyperlink
                  ruby auto_number new_number section_def column_def
                  page_number_pos page_hide hidden_comment char_overlap unknown),
             "description" =>
-              "Return only elements of this IR type (with refs). Cell-state filters: " <>
-                "`empty_cell` = blank table cells to fill; `cell`/`filled_cell` = table " <>
-                "cells; `paragraph` = body paragraphs; `empty` = any blank element. Also " <>
-                "spans the FULL document taxonomy — table/picture/shape/equation/field/" <>
-                "form/header/footer/footnote/endnote/… Combine with `pattern`."
+              "Element filter. `fillable` = writable blank/form/placeholder targets only."
+          },
+          "limit" => %{
+            "type" => "integer",
+            "minimum" => 1,
+            "maximum" => 2000,
+            "description" => "Max matches returned."
           }
         },
         "required" => ["document"]
@@ -249,14 +273,7 @@ defmodule Ecrits.Doc.Tools do
     %{
       "namespace" => @namespace,
       "name" => "get",
-      "description" =>
-        "Inspect an element (ref). Returns its `type`, current property `values`, the " <>
-          "`settable` property NAMES doc.set understands for that element (e.g. " <>
-          "Bold/Italic/FontSize for a char run, BackgroundColor for a cell, " <>
-          "Alignment/LineSpacing for a paragraph), and child `refs`. Use this to discover " <>
-          "what you can set and read current values in one call. `props?` narrows the " <>
-          "returned values to those names. Pass `refs:[...]` to inspect many elements in " <>
-          "ONE call (best-effort, per-ref result). Supply EITHER `ref` (single) OR `refs`.",
+      "description" => "Inspect ref(s): type, values, settable props, child refs.",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
@@ -278,15 +295,7 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "set",
       "description" =>
-        "Universal property edit — sets ANY element's properties (use doc.get to discover " <>
-          "the settable names). Examples: a CHAR run -> {Bold:true, TextColor:\"#FF0000\", " <>
-          "FontSize:12}; a TABLE CELL -> {kind:\"cell\", BackgroundColor:\"#FFFF00\"} (to fill " <>
-          "a cell/column, doc.find the cells then doc.set kind:cell BackgroundColor); a " <>
-          "PARAGRAPH -> {Alignment:\"center\", LineSpacing:160}; table/picture/shape props " <>
-          "likewise. Routes to the right native setter automatically. Honours base_revision. " <>
-          "Pass `sets:[{ref,props}, ...]` to set many elements in ONE call (best-effort, " <>
-          "per-set result, one bad ref does not abort the others). Supply EITHER " <>
-          "`ref`+`props` (single) OR `sets`.",
+        "Set element props. Use doc.get for prop names. Batch with sets:[{ref,props}].",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
@@ -306,8 +315,7 @@ defmodule Ecrits.Doc.Tools do
               },
               "required" => ["ref", "props"]
             }
-          },
-          "base_revision" => %{"type" => "integer", "minimum" => 0}
+          }
         },
         "required" => ["document"]
       },
@@ -317,7 +325,7 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "edit",
       "description" =>
-        "Apply ONE structural edit (`op`), discriminated by op.op. Honours base_revision. " <>
+        "Apply ONE structural edit (`op`), discriminated by op.op. " <>
           "Pass `ops:[...]` to apply many edits in ONE call (e.g. fill every blank cell) — " <>
           "far fewer round-trips. Best-effort: each op is applied independently and you get " <>
           "a per-op result; one bad ref does not abort the others.",
@@ -336,35 +344,7 @@ defmodule Ecrits.Doc.Tools do
           "op" => %{
             "type" => "object",
             "description" =>
-              "The edit. Field `op` is the verb. Per verb:\n" <>
-                "• replace_text {op, query, replacement, ref?, all?}: replace the literal `query` text with `replacement`. " <>
-                "BOTH `query` and `replacement` are REQUIRED (the field is `replacement`, NOT `text`/`new`/`value`). " <>
-                "To DELETE text use delete_range — never an empty/omitted `replacement`. " <>
-                "`replacement` is SINGLE-paragraph text: do NOT put newlines in it (one paragraph per op; use `split` to add paragraphs). " <>
-                "By default only the FIRST match is replaced; scope to one paragraph with `ref` (from doc.find), or pass `all:true` to replace every match. " <>
-                "If `query` occurs in more than one place and neither `ref` nor `all` is given, the edit is REJECTED (so you never edit unrelated sample blocks by accident).\n" <>
-                "• insert_text {op, ref, text}: `text` MAY contain `\\n` — each newline starts a NEW paragraph " <>
-                  "(the body is expanded into real paragraphs). Use this to author multi-paragraph content " <>
-                  "(e.g. each contract clause / 조 on its own line) in ONE call instead of one giant run-on paragraph.\n" <>
-                "• set_cell {op, ref, text}: REPLACE a table CELL's entire content with `text` in ONE op. `ref` must be a " <>
-                  "CELL ref (from doc.find on text inside that cell) — including a NESTED cell (a table inside a cell, whose " <>
-                  "ref carries `cellPath`): set_cell replaces nested header/title cells too. `text` is split on `\\n` into one " <>
-                  "cell paragraph per line, and EACH line inherits the cell's existing paragraph + character formatting " <>
-                  "(font, alignment, color). Use this to fill a multi-paragraph cell (e.g. an `① English sentence\\n해석(Korean)` " <>
-                  "two-line cell) without per-line replace_text/split surgery. " <>
-                  "To CHANGE a cell that ALREADY has text (e.g. a header reading 'Lesson 3' → 'Lesson 4'), ALWAYS use set_cell — " <>
-                  "it clears then rewrites the cell. NEVER insert_text into a non-empty cell: insert APPENDS, leaving the old text " <>
-                  "behind so the two overlap/render garbled. Preferred over replace_text when you want to swap a whole cell's body.\n" <>
-                "• delete_range {op, ref, count?}\n" <>
-                "• insert_paragraph {op, ref} • delete_paragraph {op, ref} • split {op, ref} • merge {op, ref}\n" <>
-                "• insert_table {op, ref, rows, cols}: create a NEW rows×cols table at `ref`. Returns native {paraIdx, controlIdx} — " <>
-                "use it to fill cells: insert_text with a ref carrying {section, paragraph: paraIdx, control: controlIdx, cell: <0-based cell index, row-major>, cell_para: 0, offset: 0}.\n" <>
-                "• insert_table_row / delete_table_row / insert_table_column / delete_table_column / merge_cells / split_cell {op, ref}: modify an EXISTING table.\n" <>
-                "• delete_node {op, ref} • insert_picture {op, ref, bins}\n" <>
-                "• insert_equation {op, ref, script, font_size?, color?}: insert an inline equation at `ref`; `script` is HWP equation markup (e.g. \"x^2 + y^2 = z^2\").\n" <>
-                "• insert_footnote {op, ref, text?} • insert_endnote {op, ref, text?}: insert a footnote/endnote anchor at `ref` (number auto-assigned); pass `text` to fill the note's body (otherwise the note is empty — do NOT fake notes as body paragraphs).\n" <>
-                "• insert_shape {op, ref, width, height, shape_type?, x?, y?}: insert a drawing shape (rectangle/ellipse/line/textbox) at `ref`; width/height in HWPUNIT.\n" <>
-                "• set_columns {op, ref, count, column_type?, same_width?, spacing?}: set the section's multi-column layout — `count` is the NUMBER of columns (2 = two columns / 2단). It applies from `ref`'s paragraph ONWARD, so to make the WHOLE body multi-column, call set_columns at the FIRST body paragraph (section 0, paragraph 0) BEFORE inserting the body text. `same_width?` defaults true; `spacing?` is the inter-column gap in HWPUNIT.",
+              "Edit object. Common: replace_text {query,replacement,ref?,all?}; insert_text {ref,text}; set_cell {ref,text}; delete_range {ref,count}; insert_table {ref,rows,cols}; set_columns {ref,count}.",
             "properties" => %{
               "op" => %{
                 "type" => "string",
@@ -372,16 +352,38 @@ defmodule Ecrits.Doc.Tools do
                   ~w(insert_text delete_range replace_text insert_paragraph delete_paragraph split merge insert_table insert_table_row delete_table_row insert_table_column delete_table_column merge_cells split_cell delete_node insert_picture set_cell insert_equation insert_footnote insert_endnote insert_shape set_columns)
               },
               "rows" => %{"type" => "integer", "description" => "insert_table: number of rows."},
-              "cols" => %{"type" => "integer", "description" => "insert_table: number of columns."},
-              "query" => %{"type" => "string", "description" => "replace_text: literal text to find."},
+              "cols" => %{
+                "type" => "integer",
+                "description" => "insert_table: number of columns."
+              },
+              "query" => %{
+                "type" => "string",
+                "description" => "replace_text: literal text to find."
+              },
               "replacement" => %{
                 "type" => "string",
-                "description" => "replace_text: text to substitute in (single paragraph, no newlines). REQUIRED for replace_text."
+                "description" =>
+                  "replace_text: text to substitute in. Newlines are folded to spaces. REQUIRED for replace_text."
               },
-              "ref" => %{"type" => "string", "description" => "Target element ref (from doc.find). Scopes the edit to that element/paragraph."},
-              "all" => %{"type" => "boolean", "description" => "replace_text: replace EVERY match (default false = first match only)."},
-              "text" => %{"type" => "string", "description" => "insert_text: text to insert. set_cell: the cell's new content (\\n splits into cell paragraphs)."},
-              "at" => %{"type" => "integer", "description" => "char offset within the target paragraph."},
+              "ref" => %{
+                "type" => "string",
+                "description" =>
+                  "Target element ref (from doc.find). Scopes the edit to that element/paragraph."
+              },
+              "all" => %{
+                "type" => "boolean",
+                "description" =>
+                  "replace_text: replace EVERY match (default false = first match only)."
+              },
+              "text" => %{
+                "type" => "string",
+                "description" =>
+                  "insert_text: text to insert. set_cell: the cell's new content (\\n splits into cell paragraphs)."
+              },
+              "at" => %{
+                "type" => "integer",
+                "description" => "char offset within the target paragraph."
+              },
               "count" => %{
                 "type" => "integer",
                 "description" =>
@@ -394,11 +396,13 @@ defmodule Ecrits.Doc.Tools do
               },
               "font_size" => %{
                 "type" => "integer",
-                "description" => "insert_equation: equation font size in HWPUNIT (point×100; 1000 = 10pt). Defaults to 1000."
+                "description" =>
+                  "insert_equation: equation font size in HWPUNIT (point×100; 1000 = 10pt). Defaults to 1000."
               },
               "color" => %{
                 "type" => "integer",
-                "description" => "insert_equation: packed 0xBBGGRR color of the equation (default 0 = black)."
+                "description" =>
+                  "insert_equation: packed 0xBBGGRR color of the equation (default 0 = black)."
               },
               "shape_type" => %{
                 "type" => "string",
@@ -407,14 +411,41 @@ defmodule Ecrits.Doc.Tools do
               },
               "width" => %{
                 "type" => "integer",
-                "description" => "insert_shape: shape width in HWPUNIT (e.g. 8504 ≈ 3cm). REQUIRED for insert_shape."
+                "description" =>
+                  "insert_shape: shape width in HWPUNIT (e.g. 8504 ≈ 3cm). REQUIRED for insert_shape."
               },
               "height" => %{
                 "type" => "integer",
-                "description" => "insert_shape: shape height in HWPUNIT. REQUIRED for insert_shape."
+                "description" =>
+                  "insert_shape: shape height in HWPUNIT. REQUIRED for insert_shape."
               },
-              "x" => %{"type" => "integer", "description" => "insert_shape: horizontal offset (HWPUNIT, default 0)."},
-              "y" => %{"type" => "integer", "description" => "insert_shape: vertical offset (HWPUNIT, default 0)."},
+              "x" => %{
+                "type" => "integer",
+                "description" => "insert_shape: horizontal offset (HWPUNIT, default 0)."
+              },
+              "y" => %{
+                "type" => "integer",
+                "description" => "insert_shape: vertical offset (HWPUNIT, default 0)."
+              },
+              "fillColor" => %{
+                "type" => "string",
+                "description" =>
+                  "insert_shape: solid fill color as CSS #RRGGBB, e.g. #FFA500 for orange."
+              },
+              "BackgroundColor" => %{
+                "type" => "string",
+                "description" => "insert_shape: alias for fillColor as CSS #RRGGBB."
+              },
+              "fillBgColor" => %{
+                "type" => "integer",
+                "description" => "insert_shape: solid fill color as packed HWP BGR 0x00BBGGRR."
+              },
+              "fillType" => %{
+                "type" => "string",
+                "enum" => ~w(solid none),
+                "description" =>
+                  "insert_shape: fill type; defaults to solid when a fill color is given."
+              },
               "column_type" => %{
                 "type" => "integer",
                 "description" => "set_columns: 0=normal (default), 1=distribute, 2=parallel."
@@ -430,7 +461,12 @@ defmodule Ecrits.Doc.Tools do
             },
             "required" => ["op"]
           },
-          "base_revision" => %{"type" => "integer", "minimum" => 0}
+          "verbose" => %{
+            "type" => "boolean",
+            "default" => false,
+            "description" =>
+              "For batch ops, include every per-op result. Default false returns counts plus failures only."
+          }
         },
         "required" => ["document"]
       },
@@ -439,11 +475,17 @@ defmodule Ecrits.Doc.Tools do
     %{
       "namespace" => @namespace,
       "name" => "save",
-      "description" => "Persist the document to disk (export).",
+      "description" => "Persist the document to disk (export). Returns only ok/error.",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
-        "properties" => %{"document" => %{"type" => "string"}},
+        "properties" => %{
+          "document" => %{"type" => "string"},
+          "path" => %{
+            "type" => "string",
+            "description" => "Optional save target; defaults to the document's current path."
+          }
+        },
         "required" => ["document"]
       },
       "annotations" => %{"readOnlyHint" => false}
@@ -480,7 +522,7 @@ defmodule Ecrits.Doc.Tools do
     with {:ok, path} <- require_string(args, "path"),
          # Don't open files outside the workspace (prompt-injection guard).
          {:ok, path} <- confine_path(ctx, path) do
-      kind = args |> get(["kind"]) |> normalize_kind()
+      kind = args |> get(["kind"]) |> normalize_kind(path)
       open_opts = args |> get(["open_opts"]) |> List.wrap()
 
       # Invariant 1 ("one doc = one live model"): in an agent context, opening a
@@ -505,10 +547,10 @@ defmodule Ecrits.Doc.Tools do
     with :ok <- enforce_writable(ctx),
          {:ok, path} <- require_string(args, "path"),
          {:ok, path} <- confine_path(ctx, path) do
-      kind = args |> get(["kind"]) |> normalize_kind()
+      kind = args |> get(["kind"]) |> normalize_kind(path)
 
       case get(args, ["from"]) do
-        nil -> create_blank(ctx, path, kind)
+        nil -> create_blank(ctx, path, kind, args)
         from when is_binary(from) and from != "" -> create_from(ctx, path, kind, from)
         _ -> {:error, error_json({:invalid_params, "from must be a non-empty string"})}
       end
@@ -518,20 +560,18 @@ defmodule Ecrits.Doc.Tools do
   end
 
   def call(ctx, "doc.read", args) do
-    route_doc(ctx, args,
-      browser: fn lv -> browser_call(lv, args, :read, %{opts: take_opts(args, ["at", "size", "ref"])}) end,
-      server: fn editor ->
-        opts = take_opts(args, ["at", "size", "ref"])
-        # Keep the windowed-text contract (≤#{@read_cap} paragraphs + cursor) and
-        # ADDITIVELY enrich it with the full-IR element list (incl. per-cell
-        # `context`) when the NIF `elements` verb is available — so a read surfaces
-        # tables/cells/pictures/fields in the window, not just flat text. An older
-        # NIF (no elements verb) simply omits `elements`.
-        wrap(Editor.read(editor, opts), fn result ->
-          result |> stringify() |> attach_read_elements(editor)
-        end)
-      end
-    )
+    with {:ok, _ref} <- require_string(args, "ref") do
+      route_doc(ctx, args,
+        browser: fn lv ->
+          browser_call(lv, args, :read, %{
+            opts: take_opts(args, ["ref", "nearby", "include"])
+          })
+        end,
+        server: fn editor -> server_read_nearby(editor, args) end
+      )
+    else
+      {:error, reason} -> {:error, error_json(reason)}
+    end
   end
 
   def call(ctx, "doc.find", args) do
@@ -542,19 +582,41 @@ defmodule Ecrits.Doc.Tools do
     # `pattern` is required for a literal search, but optional in discovery mode
     # (`all`/`regex`/`type`): {all:true} or {type:"empty_cell"} with no pattern
     # enumerates by structure, so default to "" rather than hard-failing.
-    with {:ok, pattern} <- find_pattern(args, all || regex || (is_binary(type) and type != "")) do
-      route_doc(ctx, args,
-        browser: fn lv ->
-          browser_call(lv, args, :find, %{
-            pattern: pattern,
-            case_sensitive: get(args, ["case_sensitive"]) || false,
-            all: all,
-            regex: regex,
-            type: type
-          })
-        end,
-        server: fn editor -> server_find(editor, pattern, type, args) end
-      )
+    case get(args, ["patterns"]) do
+      patterns when is_list(patterns) ->
+        with {:ok, patterns} <- normalize_find_patterns(patterns) do
+          route_doc(ctx, args,
+            browser: fn lv ->
+              browser_call(lv, args, :find, %{
+                patterns: patterns,
+                case_sensitive: get(args, ["case_sensitive"]) || false,
+                all: all,
+                regex: regex,
+                type: type,
+                limit: find_limit(args)
+              })
+            end,
+            server: fn editor -> server_find_many(editor, patterns, type, args) end
+          )
+        end
+
+      _ ->
+        with {:ok, pattern} <-
+               find_pattern(args, all || regex || (is_binary(type) and type != "")) do
+          route_doc(ctx, args,
+            browser: fn lv ->
+              browser_call(lv, args, :find, %{
+                pattern: pattern,
+                case_sensitive: get(args, ["case_sensitive"]) || false,
+                all: all,
+                regex: regex,
+                type: type,
+                limit: find_limit(args)
+              })
+            end,
+            server: fn editor -> server_find(editor, pattern, type, args) end
+          )
+        end
     end
   end
 
@@ -563,14 +625,15 @@ defmodule Ecrits.Doc.Tools do
   # This folds the former standalone `doc.inspect` into the one read-properties
   # tool, so the agent has a single place to discover what it can set and what
   # the current values are.
-  # `refs:[...]` (batch) takes precedence over `ref` (single). Server-only
-  # (with_editor): inspect each ref best-effort and return a per-ref `results`.
+  # `refs:[...]` (batch) takes precedence over `ref` (single). Open Office docs
+  # inspect the browser IR; other docs inspect each ref best-effort on the server
+  # editor and return a per-ref `results`.
   def call(ctx, "doc.get", args) do
     props = get(args, ["props"])
 
     case get(args, ["refs"]) do
       refs when is_list(refs) ->
-        with_editor(ctx, args, fn editor ->
+        get_with_editor_or_office_browser(ctx, args, %{refs: refs, props: props}, fn editor ->
           results =
             Enum.map(refs, fn ref ->
               case inspect_one(editor, ref, props) do
@@ -584,7 +647,7 @@ defmodule Ecrits.Doc.Tools do
 
       _ ->
         with {:ok, ref} <- require_string(args, "ref") do
-          with_editor(ctx, args, fn editor ->
+          get_with_editor_or_office_browser(ctx, args, %{ref: ref, props: props}, fn editor ->
             case inspect_one(editor, ref, props) do
               {:ok, info} -> {:ok, info}
               {:error, err} -> {:error, err}
@@ -596,15 +659,13 @@ defmodule Ecrits.Doc.Tools do
 
   # `sets:[{ref,props}, ...]` (batch) takes precedence over `ref`+`props` (single).
   def call(ctx, "doc.set", args) do
-    base_rev = get(args, ["base_revision"])
-
     with :ok <- enforce_writable(ctx) do
       case get(args, ["sets"]) do
         sets when is_list(sets) ->
           # Batch form: set many elements in one call, best-effort per-set result.
           route_doc(ctx, args,
             browser: fn lv -> browser_set_batch(lv, args, sets) end,
-            server: fn editor -> set_batch_server(editor, sets, base_rev) end
+            server: fn editor -> set_batch_server(editor, sets) end
           )
 
         _ ->
@@ -617,7 +678,7 @@ defmodule Ecrits.Doc.Tools do
               # A server-NIF set would mutate the unedited server copy the user never
               # sees — invisible — so set MUST route to the browser for an open doc.
               browser: fn lv -> browser_set(lv, args, ref, props) end,
-              server: fn editor -> write_result(Editor.set(editor, ref, props, base_rev)) end
+              server: fn editor -> write_result(Editor.set(editor, ref, props)) end
             )
           end
       end
@@ -628,8 +689,6 @@ defmodule Ecrits.Doc.Tools do
 
   # `ops:[...]` (batch) takes precedence over `op` (single) when present.
   def call(ctx, "doc.edit", args) do
-    base_rev = get(args, ["base_revision"])
-
     # Invariant 2 ("one agent per doc"): in an agent context, editing a doc owned
     # by a DIFFERENT agent is :forbidden. An UNOWNED doc (e.g. the human-opened
     # viewed HWP) is editable and is lazily claimed by this agent on first edit,
@@ -638,7 +697,7 @@ defmodule Ecrits.Doc.Tools do
     with :ok <- enforce_writable(ctx),
          {:ok, document} <- require_string(args, "document"),
          :ok <- enforce_ownership(ctx, document) do
-      do_edit(ctx, args, base_rev)
+      do_edit(ctx, args)
     else
       {:error, reason} -> {:error, error_json(reason)}
     end
@@ -647,8 +706,10 @@ defmodule Ecrits.Doc.Tools do
   def call(ctx, "doc.save", args) do
     with :ok <- enforce_writable(ctx),
          {:ok, document} <- require_string(args, "document"),
-         {:ok, info} <- Pool.info(pool(ctx), document),
+         {:ok, document, info} <- resolve_save_document(ctx, document),
          {:ok, path} <- confine_path(ctx, get(args, ["path"]) || info.path) do
+      args = Map.put(args, "document", document)
+
       route_doc(ctx, args,
         # Open doc: the browser WASM model is authority — export ITS edited bytes
         # and write them to disk (the server Editor copy is unedited).
@@ -663,9 +724,22 @@ defmodule Ecrits.Doc.Tools do
 
   def call(_ctx, tool_name, _args), do: {:error, {:unknown_tool, tool_name}}
 
+  defp resolve_save_document(ctx, document) do
+    case Pool.info(pool(ctx), document) do
+      {:ok, info} ->
+        {:ok, document, info}
+
+      {:error, :not_found} ->
+        with {:ok, path} <- confine_path(ctx, document),
+             {:ok, %{id: document_id} = info} <- Pool.info_by_path(pool(ctx), path) do
+          {:ok, document_id, info}
+        end
+    end
+  end
+
   # --- doc.edit dispatch (after the ownership gate) ------------------------
 
-  defp do_edit(ctx, args, base_rev) do
+  defp do_edit(ctx, args) do
     case get(args, ["ops"]) do
       ops when is_list(ops) ->
         # Batch form: apply many edits in one call, best-effort with a per-op
@@ -673,7 +747,7 @@ defmodule Ecrits.Doc.Tools do
         # the single path), so a malformed op is rejected individually.
         route_doc(ctx, args,
           browser: fn lv -> browser_write_batch(lv, args, ops) end,
-          server: fn editor -> edit_batch_server(editor, ops, base_rev) end
+          server: fn editor -> edit_batch_server(editor, ops, get(args, ["verbose"]) == true) end
         )
 
       _ ->
@@ -681,10 +755,10 @@ defmodule Ecrits.Doc.Tools do
           route_doc(ctx, args,
             # Viewed-HWP authority is the browser WASM model: deliver the structural
             # edit to the owning LiveView -> WasmHwpEditor hook applies it to the rhwp
-            # WASM doc and reports the new revision. We do NOT touch the server NIF
+            # WASM doc. We do NOT touch the server NIF
             # for a browser-backed doc (design §6.2) so the two models can't diverge.
             browser: fn lv -> browser_write(lv, args, op) end,
-            server: fn editor -> write_result(Editor.apply(editor, op, base_rev)) end
+            server: fn editor -> write_result(Editor.apply(editor, op)) end
           )
         end
     end
@@ -809,14 +883,62 @@ defmodule Ecrits.Doc.Tools do
   # --- doc.create helpers --------------------------------------------------
 
   # doc.create without `from`: a blank engine template whose save target is `path`.
-  defp create_blank(ctx, path, kind) do
-    case Pool.create(pool(ctx), path, kind: kind) do
-      {:ok, doc_id} ->
-        _ = maybe_claim_owner(ctx, doc_id)
-        {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind)}}
+  defp create_blank(ctx, path, :pptx, args) do
+    deck = get(args, ["deck"])
 
-      {:error, reason} ->
-        {:error, error_json(reason)}
+    if is_map(deck) do
+      create_pptx(ctx, path, deck)
+    else
+      {:error, error_json({:create_unsupported, Ecrits.Doc.Office})}
+    end
+  end
+
+  defp create_blank(ctx, path, kind, _args) do
+    with {:ok, backend} <- create_backend(kind),
+         :ok <- supports_blank_create(backend) do
+      case Pool.create(pool(ctx), path, kind: kind) do
+        {:ok, doc_id} ->
+          _ = maybe_claim_owner(ctx, doc_id)
+          {:ok, %{"document" => doc_id, "kind" => Atom.to_string(kind)}}
+
+        {:error, reason} ->
+          {:error, error_json(reason)}
+      end
+    else
+      {:error, reason} -> {:error, error_json(reason)}
+    end
+  end
+
+  defp create_pptx(ctx, path, deck) do
+    with :ok <- Ecrits.Doc.PptxBuilder.write(path, deck) do
+      broadcast_file_written(path)
+
+      case Pool.open(pool(ctx), path, kind: :pptx) do
+        {:ok, doc_id} ->
+          _ = maybe_claim_owner(ctx, doc_id)
+          {:ok, %{"document" => doc_id, "kind" => "pptx", "path" => path}}
+
+        {:error, reason} ->
+          {:error, error_json(reason)}
+      end
+    else
+      {:error, reason} -> {:error, error_json({:create_failed, reason})}
+    end
+  end
+
+  defp create_backend(kind) do
+    case Ecrits.Doc.backend_for(kind) do
+      nil -> {:error, {:unsupported_kind, kind}}
+      backend -> {:ok, backend}
+    end
+  end
+
+  defp supports_blank_create(backend) do
+    with {:module, ^backend} <- Code.ensure_loaded(backend),
+         true <- function_exported?(backend, :new, 1) do
+      :ok
+    else
+      _ -> {:error, {:create_unsupported, backend}}
     end
   end
 
@@ -875,20 +997,6 @@ defmodule Ecrits.Doc.Tools do
 
   # --- doc.read / doc.find server arms -------------------------------------
 
-  # Layer the enumerated elements onto a read result when available. The text
-  # window/cap is unchanged; we just add an `elements` array so the agent sees
-  # structured content (tables/cells/pictures/fields, with per-cell `context`)
-  # alongside text. Best-effort: an older NIF (no elements verb) omits it.
-  defp attach_read_elements(read, editor) do
-    case Editor.elements(editor) do
-      {:ok, nodes} when is_list(nodes) ->
-        Map.put(read, "elements", Enum.map(nodes, &element_to_match/1))
-
-      _ ->
-        read
-    end
-  end
-
   # Server-arm `doc.find`. Enumerate the full IR via the NIF `elements` verb and
   # filter by `type` and/or `pattern` (so each match carries its IR type, row/col
   # and per-cell `context`). If the verb is unavailable (older NIF) FALL BACK to
@@ -899,14 +1007,446 @@ defmodule Ecrits.Doc.Tools do
         matches =
           nodes
           |> filter_by_type(type)
-          |> filter_by_pattern(pattern, find_case_sensitive?(args))
+          |> filter_by_pattern(pattern, find_case_sensitive?(args), find_regex?(args))
           |> Enum.map(&element_to_match/1)
+          |> limit_matches(find_limit(args))
 
         {:ok, %{"pattern" => pattern, "type" => type, "matches" => matches}}
 
       :fallback ->
         literal_find(editor, pattern, args)
     end
+  end
+
+  defp server_find_many(editor, patterns, type, args) do
+    results =
+      Enum.map(patterns, fn pattern ->
+        case server_find(editor, pattern, type, args) do
+          {:ok, result} -> result
+          {:error, error} -> %{"pattern" => pattern, "error" => error}
+        end
+      end)
+
+    {:ok, %{"results" => results}}
+  end
+
+  defp server_read_nearby(editor, args) do
+    ref = get(args, ["ref"])
+    nearby = normalize_nearby(get(args, ["nearby"]))
+
+    case Editor.elements(editor) do
+      {:ok, nodes} when is_list(nodes) ->
+        matches = Enum.map(nodes, &element_to_match/1)
+        read_nearby_from_matches(nodes, matches, ref, nearby)
+
+      {:error, reason} ->
+        {:error, error_json(reason)}
+    end
+  end
+
+  defp read_nearby_from_matches(nodes, matches, ref, nearby) do
+    ref_string = ref_to_string(ref)
+    candidates = read_ref_candidates(ref)
+
+    resolved =
+      Enum.find_value(candidates, fn candidate ->
+        case Enum.find_index(matches, &(Map.get(&1, "ref") == candidate)) do
+          nil -> nil
+          idx -> {candidate, idx}
+        end
+      end)
+
+    case resolved do
+      nil ->
+        case Enum.find(candidates, &table_key_from_ref/1) do
+          nil ->
+            {:error, error_json({:not_found, "ref not found"})}
+
+          table_ref ->
+            case compact_table_from_nodes(nodes, table_ref, nearby) do
+              {:ok, result} ->
+                {:ok,
+                 result
+                 |> Map.put("ref", ref_string)
+                 |> maybe_put("resolved_ref", if(table_ref != ref_string, do: table_ref))}
+
+              error ->
+                error
+            end
+        end
+
+      {resolved_ref, idx} ->
+        target = Enum.at(matches, idx)
+        before_n = Map.get(nearby, "before", 2)
+        after_n = Map.get(nearby, "after", 2)
+        start = max(0, idx - before_n)
+        count = before_n + 1 + after_n
+        elements = matches |> Enum.slice(start, count) |> Enum.map(&nearby_element/1)
+
+        base =
+          %{
+            "ref" => ref_string,
+            "target" => nearby_element(target),
+            "elements" => elements,
+            "text" => Enum.map_join(elements, "\n", &(Map.get(&1, "text") || ""))
+          }
+          |> maybe_put("resolved_ref", if(resolved_ref != ref_string, do: resolved_ref))
+
+        if Map.get(target, "type") == "cell" or table_key_from_ref(resolved_ref) do
+          {:ok, Map.merge(base, table_nearby(nodes, target, nearby))}
+        else
+          {:ok, base}
+        end
+    end
+  end
+
+  defp nearby_element(match) do
+    match
+    |> Map.take(["ref", "text", "type", "row", "col", "context"])
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Map.new()
+  end
+
+  defp normalize_nearby(%{} = nearby) do
+    %{
+      "before" => bounded_int(get(nearby, ["before"]), 2, 0, 10),
+      "after" => bounded_int(get(nearby, ["after"]), 2, 0, 10),
+      "row" => get(nearby, ["row"]) != false,
+      "column" => get(nearby, ["column"]) == true,
+      "headers" => get(nearby, ["headers"]) != false
+    }
+  end
+
+  defp normalize_nearby(_nearby),
+    do: %{"before" => 2, "after" => 2, "row" => true, "column" => false, "headers" => true}
+
+  defp bounded_int(value, _default, min_value, max_value)
+       when is_integer(value) and value >= min_value,
+       do: min(value, max_value)
+
+  defp bounded_int(_value, default, _min_value, _max_value), do: default
+
+  defp read_ref_candidates(ref) do
+    ([ref_to_string(ref)] ++ parent_read_refs(ref))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp parent_read_refs(%{} = ref) do
+    ref
+    |> parent_read_ref_maps()
+    |> Enum.map(&ref_to_string/1)
+  end
+
+  defp parent_read_refs(ref) when is_binary(ref) do
+    trimmed = String.trim(ref)
+
+    json_refs =
+      if String.starts_with?(trimmed, "{") do
+        case Jason.decode(trimmed) do
+          {:ok, %{} = decoded} -> parent_read_refs(decoded)
+          _ -> []
+        end
+      else
+        []
+      end
+
+    json_refs ++ hwp_parent_read_refs(trimmed) ++ office_parent_read_refs(trimmed)
+  end
+
+  defp parent_read_refs(_ref), do: []
+
+  defp parent_read_ref_maps(%{} = ref) do
+    cell = map_field(ref, ["cell", :cell])
+
+    cond do
+      is_map(cell) ->
+        sec = int_field(ref, ["section", :section, "sectionIndex", :sectionIndex], 0)
+
+        para =
+          int_field(
+            cell,
+            ["parentParaIndex", :parentParaIndex, "parentPara", :parentPara],
+            int_field(ref, ["paragraph", :paragraph, "paragraphIndex", :paragraphIndex], nil)
+          )
+
+        control = int_field(cell, ["controlIndex", :controlIndex, "ctrlIdx", :ctrlIdx], nil)
+        cell_index = int_field(cell, ["cellIndex", :cellIndex, "cellIdx", :cellIdx], nil)
+        cell_para = int_field(cell, ["cellParaIndex", :cellParaIndex, "cellPara", :cellPara], 0)
+
+        if is_integer(para) and is_integer(control) and is_integer(cell_index) do
+          [
+            %{
+              "section" => sec,
+              "paragraph" => para,
+              "offset" => 0,
+              "cell" => %{
+                "parentParaIndex" => para,
+                "controlIndex" => control,
+                "cellIndex" => cell_index,
+                "cellParaIndex" => cell_para
+              }
+            },
+            %{"section" => sec, "paragraph" => para, "control" => control}
+          ]
+        else
+          []
+        end
+
+      not is_nil(map_field(ref, ["paragraph", :paragraph, "paragraphIndex", :paragraphIndex])) ->
+        sec = int_field(ref, ["section", :section, "sectionIndex", :sectionIndex], 0)
+        para = int_field(ref, ["paragraph", :paragraph, "paragraphIndex", :paragraphIndex], nil)
+
+        if is_integer(para) do
+          [%{"section" => sec, "paragraph" => para, "offset" => 0}, "hwp:s#{sec}/p#{para}"]
+        else
+          []
+        end
+
+      true ->
+        []
+    end
+  end
+
+  defp hwp_parent_read_refs(ref) do
+    cond do
+      match =
+          Regex.run(
+            ~r/^hwp:s(\d+)\/p(\d+)\/tbl(\d+)\/cell(\d+)\/cp(\d+)\/c\d+\+\d+$/,
+            ref
+          ) ->
+        [_all, sec, para, control, cell, cell_para] = match
+        sec = String.to_integer(sec)
+        para = String.to_integer(para)
+        control = String.to_integer(control)
+        cell = String.to_integer(cell)
+        cell_para = String.to_integer(cell_para)
+
+        [
+          ref_to_string(%{
+            "section" => sec,
+            "paragraph" => para,
+            "offset" => 0,
+            "cell" => %{
+              "parentParaIndex" => para,
+              "controlIndex" => control,
+              "cellIndex" => cell,
+              "cellParaIndex" => cell_para
+            }
+          })
+        ]
+
+      match = Regex.run(~r/^hwp:s(\d+)\/p(\d+)\/c\d+\+\d+$/, ref) ->
+        [_all, sec, para] = match
+        sec = String.to_integer(sec)
+        para = String.to_integer(para)
+
+        [
+          ref_to_string(%{"section" => sec, "paragraph" => para, "offset" => 0}),
+          "hwp:s#{sec}/p#{para}"
+        ]
+
+      true ->
+        []
+    end
+  end
+
+  defp office_parent_read_refs(ref) do
+    case Regex.run(~r/^(.*\/p\d+)\/r\d+$/, ref) do
+      [_, paragraph_ref] -> [paragraph_ref]
+      _ -> []
+    end
+  end
+
+  defp compact_table_from_nodes(nodes, ref, nearby) do
+    entries = table_entries(nodes)
+    target_key = table_key_from_ref(ref) || target_key_from_entries(entries, ref)
+
+    cond do
+      is_nil(target_key) ->
+        {:error, error_json({:invalid_ref, "ref is not a table/cell ref"})}
+
+      true ->
+        cells =
+          entries
+          |> Enum.filter(&(&1.type == "cell" and &1.table_key == target_key))
+          |> Enum.map(&table_cell_json/1)
+
+        if cells == [] do
+          {:error, error_json({:not_found, "no cells for table ref"})}
+        else
+          {:ok,
+           %{"ref" => ref_to_string(ref)}
+           |> Map.merge(compact_table_payload(ref, target_key, cells, nil, nearby))}
+        end
+    end
+  end
+
+  defp table_nearby(nodes, target, nearby) do
+    entries = table_entries(nodes)
+    ref = Map.get(target, "ref")
+    key = table_key_from_ref(ref) || target_key_from_entries(entries, ref)
+
+    cells =
+      entries
+      |> Enum.filter(&(&1.type == "cell" and &1.table_key == key))
+      |> Enum.map(&table_cell_json/1)
+
+    if is_nil(key) or cells == [] do
+      %{}
+    else
+      compact_table_payload(ref, key, cells, target, nearby)
+    end
+  end
+
+  defp table_entries(nodes) do
+    nodes
+    |> Enum.map_reduce(nil, fn node, current_key ->
+      type = node_type(node)
+      ref = node_field(node, "ref")
+      own_key = table_key_from_ref(ref)
+
+      table_key =
+        cond do
+          type == "table" -> own_key || ref_to_string(ref)
+          type == "cell" -> own_key || current_key
+          type == "paragraph" -> nil
+          true -> current_key
+        end
+
+      next_key =
+        cond do
+          type == "table" -> table_key
+          type == "paragraph" -> nil
+          true -> current_key
+        end
+
+      {%{
+         node: node,
+         type: type,
+         ref: ref,
+         ref_string: ref_to_string(ref),
+         table_key: table_key
+       }, next_key}
+    end)
+    |> elem(0)
+  end
+
+  defp target_key_from_entries(entries, ref) do
+    ref_string = ref_to_string(ref)
+
+    case Enum.find(entries, &(&1.ref_string == ref_string)) do
+      nil -> nil
+      entry -> entry.table_key
+    end
+  end
+
+  defp table_cell_json(%{node: node, ref: ref} = entry) do
+    row = node_field(node, "row")
+    col = node_field(node, "col")
+    match = element_to_match(node)
+    writable = writable_table_cell?(match, row, col)
+
+    %{
+      "ref" => ref_to_string(ref),
+      "row" => row,
+      "col" => col,
+      "text" => node_text(node),
+      "writable" => writable
+    }
+    |> maybe_put("context", node_field(node, "context"))
+    |> maybe_put("_table_key", entry.table_key)
+  end
+
+  defp compact_table_payload(ref, table_key, cells, target, nearby) do
+    cells = cells |> Enum.map(&Map.delete(&1, "_table_key")) |> Enum.sort_by(&cell_sort_key/1)
+    target_row = if target, do: Map.get(target, "row")
+    target_col = if target, do: Map.get(target, "col")
+    target_ref = ref_to_string(ref)
+
+    table =
+      %{
+        "key" => table_key,
+        "anchor" => table_anchor(table_key),
+        "row_count" =>
+          cells |> Enum.map(& &1["row"]) |> Enum.reject(&is_nil/1) |> Enum.uniq() |> length(),
+        "col_count" =>
+          cells |> Enum.map(& &1["col"]) |> Enum.reject(&is_nil/1) |> Enum.uniq() |> length()
+      }
+
+    %{"table" => table}
+    |> maybe_put(
+      "table_headers",
+      if(Map.get(nearby, "headers"), do: compact_headers(cells), else: nil)
+    )
+    |> maybe_put(
+      "row_labels",
+      if(Map.get(nearby, "headers"), do: compact_row_labels(cells, target_row), else: nil)
+    )
+    |> maybe_put(
+      "row",
+      if(Map.get(nearby, "row") and is_integer(target_row),
+        do: cells |> Enum.filter(&(&1["row"] == target_row)) |> compact_cells(target_ref),
+        else: nil
+      )
+    )
+    |> maybe_put(
+      "column",
+      if(Map.get(nearby, "column") and is_integer(target_col),
+        do: cells |> Enum.filter(&(&1["col"] == target_col)) |> compact_cells(target_ref),
+        else: nil
+      )
+    )
+  end
+
+  defp cell_sort_key(cell), do: {cell["row"] || 0, cell["col"] || 0}
+
+  defp compact_headers(cells) do
+    cells
+    |> Enum.filter(&(&1["row"] == 0))
+    |> Enum.sort_by(&(&1["col"] || 0))
+    |> Enum.map(&Map.take(&1, ["col", "text"]))
+  end
+
+  defp compact_row_labels(cells, target_row) do
+    cells
+    |> Enum.filter(&((&1["col"] || 0) == 0 and (&1["row"] || 0) > 0))
+    |> Enum.filter(fn cell ->
+      text = cell["text"] |> to_string() |> String.trim()
+      text != "" or cell["row"] == target_row
+    end)
+    |> Enum.sort_by(&(&1["row"] || 0))
+    |> Enum.map(&Map.take(&1, ["row", "text"]))
+  end
+
+  defp compact_cells(cells, target_ref) do
+    cells
+    |> Enum.sort_by(&cell_sort_key/1)
+    |> Enum.map(fn cell ->
+      cell
+      |> Map.take(["row", "col", "text", "type", "context", "writable"])
+      |> maybe_put("ref", if(cell["writable"] or cell["ref"] == target_ref, do: cell["ref"]))
+    end)
+  end
+
+  defp table_anchor(table_key) do
+    case Regex.run(~r/^hwp:s(\d+):p(\d+):c(\d+)$/, to_string(table_key)) do
+      [_, section, paragraph, control] ->
+        %{
+          "section" => String.to_integer(section),
+          "paragraph" => String.to_integer(paragraph),
+          "control" => String.to_integer(control)
+        }
+
+      _ ->
+        %{"key" => table_key}
+    end
+  end
+
+  defp writable_table_cell?(match, row, col) do
+    text = match |> Map.get("text", "") |> to_string() |> String.trim()
+    body_cell? = is_integer(row) and is_integer(col) and row > 0 and col > 0
+    Map.get(match, "type") == "cell" and text == "" and (real_context?(match) or body_cell?)
   end
 
   # Try the full-IR enumerator. `:fallback` signals the verb is unavailable so the
@@ -921,8 +1461,16 @@ defmodule Ecrits.Doc.Tools do
 
   defp literal_find(editor, pattern, args) when is_binary(pattern) and pattern != "" do
     case Editor.find(editor, pattern, take_opts(args, ["case_sensitive"])) do
-      {:ok, matches} -> {:ok, %{"pattern" => pattern, "matches" => Enum.map(matches, &stringify/1)}}
-      {:error, reason} -> {:error, error_json(reason)}
+      {:ok, matches} ->
+        matches =
+          matches
+          |> Enum.map(&stringify/1)
+          |> limit_matches(find_limit(args))
+
+        {:ok, %{"pattern" => pattern, "matches" => matches}}
+
+      {:error, reason} ->
+        {:error, error_json(reason)}
     end
   end
 
@@ -936,6 +1484,7 @@ defmodule Ecrits.Doc.Tools do
   # type matches the node's own IR kind; nil/"" keeps everything.
   defp filter_by_type(nodes, nil), do: nodes
   defp filter_by_type(nodes, ""), do: nodes
+  defp filter_by_type(nodes, "fillable"), do: Enum.filter(nodes, &fillable_node?/1)
   defp filter_by_type(nodes, "empty"), do: Enum.filter(nodes, &blank_node_text?/1)
 
   defp filter_by_type(nodes, "empty_cell"),
@@ -947,10 +1496,17 @@ defmodule Ecrits.Doc.Tools do
   defp filter_by_type(nodes, type) when is_binary(type),
     do: Enum.filter(nodes, &(node_type(&1) == type))
 
-  defp filter_by_pattern(nodes, nil, _cs), do: nodes
-  defp filter_by_pattern(nodes, "", _cs), do: nodes
+  defp filter_by_pattern(nodes, nil, _cs, _regex), do: nodes
+  defp filter_by_pattern(nodes, "", _cs, _regex), do: nodes
 
-  defp filter_by_pattern(nodes, pattern, case_sensitive?) do
+  defp filter_by_pattern(nodes, pattern, case_sensitive?, true) do
+    case Regex.compile(pattern, if(case_sensitive?, do: "", else: "i")) do
+      {:ok, regex} -> Enum.filter(nodes, &Regex.match?(regex, node_text(&1)))
+      {:error, _reason} -> []
+    end
+  end
+
+  defp filter_by_pattern(nodes, pattern, case_sensitive?, _regex) do
     needle = if case_sensitive?, do: pattern, else: String.downcase(pattern)
 
     Enum.filter(nodes, fn node ->
@@ -963,19 +1519,66 @@ defmodule Ecrits.Doc.Tools do
   # Project an enumerator node into the doc.find match shape: ref/text/type plus
   # row/col and the per-cell `context` breadcrumb when present.
   defp element_to_match(node) do
-    %{
-      "ref" => node_field(node, "ref"),
-      "text" => node_text(node),
-      "type" => node_type(node)
-    }
-    |> maybe_put("row", node_field(node, "row"))
-    |> maybe_put("col", node_field(node, "col"))
-    |> maybe_put("context", node_field(node, "context"))
+    match =
+      %{
+        "ref" => ref_to_string(node_field(node, "ref")),
+        "text" => node_text(node),
+        "type" => node_type(node)
+      }
+      |> maybe_put("row", node_field(node, "row"))
+      |> maybe_put("col", node_field(node, "col"))
+      |> maybe_put("context", node_field(node, "context"))
+
+    maybe_put(match, "fillable_kind", fillable_kind(match))
   end
 
   defp node_type(node), do: node_field(node, "type")
   defp node_text(node), do: node_field(node, "text") || ""
   defp blank_node_text?(node), do: String.trim(node_text(node)) == ""
+  defp fillable_node?(node), do: fillable_match?(element_to_match(node))
+
+  defp fillable_match?(match) do
+    not is_nil(fillable_kind(match))
+  end
+
+  defp fillable_kind(match) do
+    text = match |> Map.get("text", "") |> String.trim()
+    type = Map.get(match, "type")
+
+    cond do
+      type == "cell" and text == "" and real_context?(match) -> "empty_cell"
+      type in ["field", "form"] -> type
+      placeholder_host?(type) -> placeholder_kind(text)
+      true -> nil
+    end
+  end
+
+  defp placeholder_host?(type), do: type in [nil, "", "paragraph", "cell"]
+
+  defp placeholder_kind(text) when is_binary(text) do
+    text = String.trim(text)
+
+    cond do
+      text == "" or String.starts_with?(text, "※") -> nil
+      String.contains?(text, "____") -> "underscore"
+      String.contains?(text, "[]") -> "checkbox"
+      Regex.match?(~r/^\s*[□☐]\s*/u, text) -> "checkbox"
+      Regex.match?(~r/[-‐‑‒–—―－─]{4,}.*\(이하/u, text) -> "signature_line"
+      Regex.match?(~r/\(\s{2,}\)/u, text) -> "paren_blank"
+      Regex.match?(~r/[:：]\s{2,}[회년월일원%]/u, text) -> "inline_gap"
+      Regex.match?(~r/[년월일]\s{2,}/u, text) -> "date_gap"
+      String.ends_with?(text, ":") and String.length(text) <= 80 -> "trailing_label"
+      true -> nil
+    end
+  end
+
+  defp real_context?(match) do
+    match
+    |> Map.get("context", "")
+    |> to_string()
+    |> String.trim()
+    |> Kernel.!=("")
+  end
 
   # Enumerator nodes are JSON-decoded (string keys); tolerate atom keys too.
   defp node_field(node, key) when is_map(node) do
@@ -994,6 +1597,113 @@ defmodule Ecrits.Doc.Tools do
   end
 
   defp find_case_sensitive?(args), do: get(args, ["case_sensitive"]) == true
+  defp find_regex?(args), do: get(args, ["regex"]) == true or get(args, ["all"]) == true
+
+  defp find_limit(args) do
+    case get(args, ["limit"]) do
+      value when is_integer(value) and value > 0 -> min(value, 2000)
+      _ -> nil
+    end
+  end
+
+  defp limit_matches(matches, nil), do: matches
+  defp limit_matches(matches, limit), do: Enum.take(matches, limit)
+
+  defp table_key_from_ref(ref) when is_map(ref) do
+    cond do
+      is_map(map_field(ref, ["cell", :cell])) ->
+        cell = map_field(ref, ["cell", :cell])
+        sec = int_field(ref, ["section", :section, "sectionIndex", :sectionIndex], 0)
+
+        para =
+          int_field(cell, ["parentParaIndex", :parentParaIndex, "parentPara", :parentPara], nil)
+
+        control = int_field(cell, ["controlIndex", :controlIndex, "ctrlIdx", :ctrlIdx], nil)
+        table_key("hwp", sec, para, control)
+
+      is_integer(map_field(ref, ["control", :control, "controlIndex", :controlIndex])) ->
+        sec = int_field(ref, ["section", :section, "sectionIndex", :sectionIndex], 0)
+        para = int_field(ref, ["paragraph", :paragraph, "paragraphIndex", :paragraphIndex], nil)
+        control = int_field(ref, ["control", :control, "controlIndex", :controlIndex], nil)
+        table_key("hwp", sec, para, control)
+
+      true ->
+        nil
+    end
+  end
+
+  defp table_key_from_ref(ref) when is_binary(ref) do
+    trimmed = String.trim(ref)
+
+    cond do
+      String.starts_with?(trimmed, "{") ->
+        case Jason.decode(trimmed) do
+          {:ok, decoded} -> table_key_from_ref(decoded)
+          _ -> nil
+        end
+
+      match = Regex.run(~r/^(tbl\[[^\]]+\])(?:\/cell\[.*\])?$/, trimmed) ->
+        Enum.at(match, 1)
+
+      match = Regex.run(~r/^hwp:s(\d+)\/p(\d+)\/tbl(\d+)/, trimmed) ->
+        [_all, sec, para, control] = match
+
+        table_key(
+          "hwp",
+          String.to_integer(sec),
+          String.to_integer(para),
+          String.to_integer(control)
+        )
+
+      true ->
+        nil
+    end
+  end
+
+  defp table_key_from_ref(_ref), do: nil
+
+  defp table_key(_prefix, _sec, nil, _control), do: nil
+  defp table_key(_prefix, _sec, _para, nil), do: nil
+  defp table_key(prefix, sec, para, control), do: "#{prefix}:s#{sec}:p#{para}:c#{control}"
+
+  defp map_field(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, fn key -> Map.get(map, key) end)
+  end
+
+  defp int_field(map, keys, default) do
+    case map_field(map, keys) do
+      value when is_integer(value) ->
+        value
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {int, ""} -> int
+          _ -> default
+        end
+
+      _ ->
+        default
+    end
+  end
+
+  defp ref_to_string(nil), do: nil
+  defp ref_to_string(ref) when is_binary(ref), do: ref
+  defp ref_to_string(%{} = ref), do: Jason.encode!(ref)
+  defp ref_to_string(ref), do: to_string(ref)
+
+  defp normalize_find_patterns(patterns) do
+    patterns =
+      Enum.map(patterns, fn
+        pattern when is_binary(pattern) -> {:ok, pattern}
+        %{} = entry -> find_pattern(entry, false)
+        _other -> {:error, {:invalid_params, "patterns must be strings or pattern objects"}}
+      end)
+
+    case Enum.find(patterns, &match?({:error, _}, &1)) do
+      {:error, reason} -> {:error, reason}
+      nil -> {:ok, Enum.map(patterns, fn {:ok, pattern} -> pattern end)}
+    end
+  end
 
   # --- dispatch helpers ----------------------------------------------------
 
@@ -1035,7 +1745,7 @@ defmodule Ecrits.Doc.Tools do
   end
 
   # For a browser-backed doc, deliver a structural edit op to the owning LiveView
-  # and wait for the WASM apply to report the resulting revision (design §6.2).
+  # and wait for the WASM apply result (design §6.2).
   # The op is normalised first (validated verb, string keys) so the browser hook
   # always receives a well-formed `{"op": "<verb>", ...}` regardless of how the
   # agent keyed the map.
@@ -1056,10 +1766,10 @@ defmodule Ecrits.Doc.Tools do
   end
 
   defp do_browser_write(lv, args, op) do
-    case browser_call(lv, args, :edit, %{op: op, base_revision: get(args, ["base_revision"])}) do
+    case browser_call(lv, args, :edit, %{op: op}) do
       {:ok, %{} = applied} ->
         {:ok,
-         %{"ok" => true, "revision" => Map.get(applied, "revision") || Map.get(applied, :revision)}
+         %{"ok" => true}
          |> maybe_put("replaced", Map.get(applied, "replaced") || Map.get(applied, :replaced))}
 
       {:error, _reason} = error ->
@@ -1090,35 +1800,44 @@ defmodule Ecrits.Doc.Tools do
     normalized_ops = Enum.map(ok_ops, fn {:ok, op} -> op end)
     local_failures = Enum.map(bad_results, fn {:error, res} -> res end)
 
-    case browser_call(lv, args, :edit, %{ops: normalized_ops, base_revision: get(args, ["base_revision"])}) do
-      {:ok, %{} = applied} ->
-        {:ok, merge_browser_batch(applied, local_failures)}
+    if normalized_ops == [] do
+      batch_reply(
+        batch_result(local_failures, 0, length(local_failures), get(args, ["verbose"]) == true)
+      )
+    else
+      case browser_call(lv, args, :edit, %{ops: normalized_ops}) do
+        {:ok, %{} = applied} ->
+          batch_reply(
+            merge_browser_batch(applied, local_failures, get(args, ["verbose"]) == true)
+          )
 
-      {:error, _reason} = error ->
-        error
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
 
   # Merge the browser's batch result with any locally-rejected (un-normalisable)
   # ops so `failed`/`results` account for EVERY op the agent submitted.
-  defp merge_browser_batch(applied, local_failures) do
+  defp merge_browser_batch(applied, local_failures, verbose) do
     results = (Map.get(applied, "results") || Map.get(applied, :results) || []) ++ local_failures
     applied_n = Map.get(applied, "applied") || Map.get(applied, :applied) || 0
-    failed_n = (Map.get(applied, "failed") || Map.get(applied, :failed) || 0) + length(local_failures)
-    revision = Map.get(applied, "revision") || Map.get(applied, :revision)
 
-    batch_result(results, applied_n, failed_n, revision)
+    failed_n =
+      (Map.get(applied, "failed") || Map.get(applied, :failed) || 0) + length(local_failures)
+
+    batch_result(results, applied_n, failed_n, verbose)
   end
 
   # doc.set for a browser-backed doc: deliver the property set to the viewer's
-  # authoritative WASM model and adopt the revision it reports. The ref (doc.find's
+  # authoritative WASM model. The ref (doc.find's
   # positional ref, incl. cell address) is parsed browser-side by the SAME parseRef
   # the edit verbs use, so there is no ref-format round-trip mismatch with the
   # server `hwp:` grammar — the reason a server-routed set rejected find's ref.
   defp browser_set(lv, args, ref, props) do
     case browser_call(lv, args, :set, %{ref: ref, props: props}) do
       {:ok, %{} = applied} ->
-        {:ok, %{"ok" => true, "revision" => Map.get(applied, "revision") || Map.get(applied, :revision)}}
+        {:ok, %{"ok" => true} |> maybe_put("invalidated", Map.get(applied, "invalidated"))}
 
       {:error, _reason} = error ->
         error
@@ -1128,14 +1847,50 @@ defmodule Ecrits.Doc.Tools do
   # Batch doc.set for a browser-backed doc: hand the `sets` array to the hook's
   # applyAgentSetBatch in ONE round-trip (each set addresses a fixed cell/run, so
   # order is irrelevant). The hook applies all of them best-effort and finishes
-  # (re-renders) once, returning {applied, failed, results, revision}.
+  # (re-renders) once, returning {applied, failed, results}.
   defp browser_set_batch(lv, args, sets) do
-    case browser_call(lv, args, :set, %{sets: sets, base_revision: get(args, ["base_revision"])}) do
+    case browser_call(lv, args, :set, %{sets: sets}) do
       {:ok, %{} = applied} ->
-        {:ok, merge_browser_batch(applied, [])}
+        batch_reply(merge_browser_batch(applied, [], get(args, ["verbose"]) == true))
 
       {:error, _reason} = error ->
         error
+    end
+  end
+
+  # doc.get for an open Office document must inspect the browser WASM model, not
+  # the headless server copy. HWP keeps the existing server metadata path because
+  # the HWP browser hook does not expose `get`.
+  defp get_with_editor_or_office_browser(ctx, args, browser_payload, server_fun) do
+    with {:ok, document} <- require_string(args, "document") do
+      case route(ctx, document) do
+        {:browser, lv} ->
+          if office_document?(ctx, document) do
+            browser_get(lv, args, browser_payload)
+          else
+            with_server_editor(ctx, document, server_fun)
+          end
+
+        {:server, editor} ->
+          server_fun.(editor)
+
+        {:error, :not_found} ->
+          {:error, error_json(:not_found)}
+      end
+    end
+  end
+
+  defp office_document?(ctx, document) do
+    case Pool.info(pool(ctx), document) do
+      {:ok, %{kind: kind}} -> kind in [:docx, :pptx]
+      _ -> false
+    end
+  end
+
+  defp browser_get(lv, args, payload) do
+    case browser_call(lv, args, :get, payload) do
+      {:ok, %{} = result} -> {:ok, result}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -1150,7 +1905,7 @@ defmodule Ecrits.Doc.Tools do
              {:ok, bytes} <- Base.decode64(b64),
              :ok <- File.write(path, bytes) do
           broadcast_file_written(path)
-          {:ok, %{"ok" => true, "path" => path, "bytes" => byte_size(bytes)}}
+          {:ok, %{"ok" => true}}
         else
           :error -> {:error, error_json({:save_failed, "viewer returned invalid base64"})}
           {:error, reason} -> {:error, error_json(reason)}
@@ -1166,11 +1921,11 @@ defmodule Ecrits.Doc.Tools do
     case Editor.save(editor, format: save_format(info.kind), path: path) do
       :ok ->
         broadcast_file_written(path)
-        {:ok, %{"ok" => true, "path" => path}}
+        {:ok, %{"ok" => true}}
 
-      {:ok, %{} = saved} ->
+      {:ok, %{} = _saved} ->
         broadcast_file_written(path)
-        {:ok, Map.merge(%{"ok" => true, "path" => path}, stringify(saved))}
+        {:ok, %{"ok" => true}}
 
       {:error, reason} ->
         {:error, error_json(reason)}
@@ -1223,50 +1978,23 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
-  defp with_editor(ctx, args, fun) do
-    with {:ok, document} <- require_string(args, "document") do
-      case route(ctx, document) do
-        {:server, editor} ->
-          fun.(editor)
-
-        {:browser, _lv} ->
-          # Browser-backed doc, but this tool (inspect/get/set/style/save)
-          # has no browser apply yet. The server Editor still holds the document
-          # (identical structure on open), so serve these read/meta verbs from it.
-          case Pool.with_doc(pool(ctx), document, fun) do
-            {:error, :not_found} -> {:error, error_json(:not_found)}
-            other -> other
-          end
-
-        {:error, :not_found} ->
-          {:error, error_json(:not_found)}
-      end
+  defp with_server_editor(ctx, document, fun) do
+    case Pool.with_doc(pool(ctx), document, fun) do
+      {:error, :not_found} -> {:error, error_json(:not_found)}
+      other -> other
     end
   end
 
   defp write_result({:ok, applied}) do
     {:ok,
-     %{"ok" => true, "revision" => Map.get(applied, :revision)}
+     %{"ok" => true}
      |> maybe_put("invalidated", Map.get(applied, :invalidated))
-     |> maybe_put("rebased", Map.get(applied, :rebased))
      # Native engine result (e.g. insert_table returns {paraIdx, controlIdx} —
      # the agent needs it to address the new table's cells with a follow-up edit).
      |> maybe_put("native", Map.get(applied, :native))}
   end
 
-  defp write_result({:error, {:conflict, current_revision, snapshot}}) do
-    {:error,
-     %{
-       "conflict" => true,
-       "current_revision" => current_revision,
-       "snapshot" => stringify(snapshot)
-     }}
-  end
-
   defp write_result({:error, reason}), do: {:error, error_json(reason)}
-
-  defp wrap({:ok, value}, mapper) when is_function(mapper, 1), do: {:ok, mapper.(value)}
-  defp wrap({:error, reason}, _mapper), do: {:error, error_json(reason)}
 
   # Inspect ONE ref for doc.get (single + batch share this). Reflective metadata
   # (type + settable property NAMES + child refs) anchors the result; live
@@ -1284,70 +2012,71 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
-  # Server-arm batch doc.edit: apply each op via Editor.apply best-effort, collect
-  # per-op results, return the same shape the browser batch does. base_revision is
-  # passed unchanged to every op (the engine rebases internally); a per-op failure
-  # is recorded but does NOT abort the rest. `revision` is the LAST applied op's
-  # revision (or the conflict's current revision), so the agent learns where it
-  # landed.
-  defp edit_batch_server(editor, ops, base_rev) do
-    {results, applied, failed, last_rev} =
-      Enum.reduce(ops, {[], 0, 0, nil}, fn op, {acc, ok_n, bad_n, rev} ->
+  # Server-arm batch doc.edit: apply each op via Editor.apply best-effort,
+  # collect per-op results, and return the same shape the browser batch does.
+  # A per-op failure is recorded but does NOT abort the rest.
+  defp edit_batch_server(editor, ops, verbose) do
+    {results, applied, failed} =
+      Enum.reduce(ops, {[], 0, 0}, fn op, {acc, ok_n, bad_n} ->
         op_ref = op_ref(op)
 
-        case Editor.apply(editor, op, base_rev) do
-          {:ok, applied_map} ->
-            new_rev = Map.get(applied_map, :revision) || rev
-            {[%{"ref" => op_ref, "ok" => true} | acc], ok_n + 1, bad_n, new_rev}
+        case Editor.apply(editor, op) do
+          {:ok, _applied_map} ->
+            {[%{"ref" => op_ref, "ok" => true} | acc], ok_n + 1, bad_n}
 
           {:error, reason} ->
-            {[%{"ref" => op_ref, "error" => error_json(reason)} | acc], ok_n, bad_n + 1, rev}
+            {[%{"ref" => op_ref, "error" => error_json(reason)} | acc], ok_n, bad_n + 1}
         end
       end)
 
-    {:ok, batch_result(Enum.reverse(results), applied, failed, last_rev)}
+    batch_reply(batch_result(Enum.reverse(results), applied, failed, verbose))
   end
 
   # Server-arm batch doc.set: apply each {ref, props} via Editor.set best-effort.
-  defp set_batch_server(editor, sets, base_rev) do
-    {results, applied, failed, last_rev} =
-      Enum.reduce(sets, {[], 0, 0, nil}, fn entry, {acc, ok_n, bad_n, rev} ->
+  defp set_batch_server(editor, sets) do
+    {results, applied, failed} =
+      Enum.reduce(sets, {[], 0, 0}, fn entry, {acc, ok_n, bad_n} ->
         ref = get(entry, ["ref"])
         props = get(entry, ["props"])
 
-        case set_one_server(editor, ref, props, base_rev) do
-          {:ok, applied_map} ->
-            new_rev = Map.get(applied_map, :revision) || rev
-            {[%{"ref" => ref, "ok" => true} | acc], ok_n + 1, bad_n, new_rev}
+        case set_one_server(editor, ref, props) do
+          {:ok, _applied_map} ->
+            {[%{"ref" => ref, "ok" => true} | acc], ok_n + 1, bad_n}
 
           {:error, reason} ->
-            {[%{"ref" => ref, "error" => error_json(reason)} | acc], ok_n, bad_n + 1, rev}
+            {[%{"ref" => ref, "error" => error_json(reason)} | acc], ok_n, bad_n + 1}
         end
       end)
 
-    {:ok, batch_result(Enum.reverse(results), applied, failed, last_rev)}
+    batch_reply(batch_result(Enum.reverse(results), applied, failed, false))
   end
 
   # One server set with the same ref/props validation the single path uses, so a
   # malformed entry in the batch is an :invalid_params error for THAT entry only.
-  defp set_one_server(_editor, ref, _props, _base_rev) when not is_binary(ref) or ref == "",
+  defp set_one_server(_editor, ref, _props) when not is_binary(ref) or ref == "",
     do: {:error, {:invalid_params, "ref (non-empty string) is required"}}
 
-  defp set_one_server(_editor, _ref, props, _base_rev) when not is_map(props),
+  defp set_one_server(_editor, _ref, props) when not is_map(props),
     do: {:error, {:invalid_params, "props (object) is required"}}
 
-  defp set_one_server(editor, ref, props, base_rev), do: Editor.set(editor, ref, props, base_rev)
+  defp set_one_server(editor, ref, props), do: Editor.set(editor, ref, props)
 
   # The ref carried on an op (for the per-op result label); nil when absent.
   defp op_ref(op) when is_map(op), do: get(op, ["ref"])
   defp op_ref(_op), do: nil
 
   # The shared best-effort batch result shape (browser + server use it):
-  # `applied`/`failed` counts, the per-op `results`, and the landing `revision`.
-  defp batch_result(results, applied, failed, revision) do
-    %{"ok" => true, "applied" => applied, "failed" => failed, "results" => results}
-    |> maybe_put("revision", revision)
+  # `applied`/`failed` counts plus per-op results.
+  defp batch_result(results, applied, failed, verbose) do
+    failed_results = Enum.filter(results, &Map.has_key?(&1, "error"))
+
+    %{"ok" => failed == 0, "applied" => applied, "failed" => failed}
+    |> maybe_put("results", if(verbose, do: results))
+    |> maybe_put("failed_results", if(failed_results == [], do: nil, else: failed_results))
   end
+
+  defp batch_reply(%{"failed" => failed} = result) when failed > 0, do: {:error, result}
+  defp batch_reply(result), do: {:ok, result}
 
   # Live property values for doc.get, best-effort: nil when the engine can't read
   # them yet, so the reflective discovery still stands.
@@ -1418,9 +2147,6 @@ defmodule Ecrits.Doc.Tools do
   defp error_json({:not_supported, reason}),
     do: %{"not_supported" => true, "reason" => to_string(reason)}
 
-  defp error_json({:stale_revision, details}),
-    do: %{"error" => "stale_revision", "details" => stringify_kw(details)}
-
   defp error_json(:not_found), do: %{"error" => "not_found"}
 
   defp error_json({:unsupported_kind, kind}),
@@ -1432,14 +2158,19 @@ defmodule Ecrits.Doc.Tools do
   defp error_json({:clone_failed, reason}),
     do: %{"error" => "clone_failed", "reason" => inspect(reason)}
 
+  defp error_json({:create_failed, reason}),
+    do: %{"error" => "create_failed", "reason" => inspect(reason)}
+
+  defp error_json({:create_unsupported, backend}),
+    do: %{"error" => "create_unsupported", "backend" => inspect(backend)}
+
   defp error_json({:invalid_params, message}),
     do: %{"error" => "invalid_params", "message" => to_string(message)}
 
   defp error_json(:read_only),
     do: %{
       "error" => "read_only",
-      "message" =>
-        "read-only session — switch access to Ask/Full workspace to edit/save"
+      "message" => "read-only session — switch access to Ask/Full workspace to edit/save"
     }
 
   defp error_json({:outside_workspace, root}),
@@ -1457,7 +2188,6 @@ defmodule Ecrits.Doc.Tools do
       "document" => entry.id,
       "kind" => to_string(entry.kind),
       "path" => entry.path,
-      "revision" => entry.revision,
       "backing" => to_string(entry.backing)
     }
   end
@@ -1545,6 +2275,10 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
+  defp normalize_kind(nil, path), do: kind_from_path(path) || :hwp
+  defp normalize_kind("", path), do: kind_from_path(path) || :hwp
+  defp normalize_kind(kind, _path), do: normalize_kind(kind)
+
   defp normalize_kind("hwpx"), do: :hwpx
   defp normalize_kind("hwp"), do: :hwp
   defp normalize_kind("docx"), do: :docx
@@ -1553,6 +2287,18 @@ defmodule Ecrits.Doc.Tools do
   defp normalize_kind(:docx), do: :docx
   defp normalize_kind(:pptx), do: :pptx
   defp normalize_kind(_other), do: :hwp
+
+  defp kind_from_path(path) when is_binary(path) do
+    case path |> Path.extname() |> String.downcase() do
+      ".hwp" -> :hwp
+      ".hwpx" -> :hwpx
+      ".docx" -> :docx
+      ".pptx" -> :pptx
+      _ -> nil
+    end
+  end
+
+  defp kind_from_path(_path), do: nil
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
@@ -1563,9 +2309,4 @@ defmodule Ecrits.Doc.Tools do
 
   defp stringify(list) when is_list(list), do: Enum.map(list, &stringify/1)
   defp stringify(value), do: value
-
-  defp stringify_kw(kw) when is_list(kw),
-    do: Map.new(kw, fn {k, v} -> {to_string(k), v} end)
-
-  defp stringify_kw(other), do: other
 end

@@ -53,8 +53,7 @@ defmodule Ecrits.Doc.Office.InstanceLruTest do
           {:ok, _} =
             Office.edit(
               handle,
-              %{"op" => "replace_text", "query" => "Region", "replacement" => token},
-              0
+              %{"op" => "replace_text", "query" => "Region", "replacement" => token}
             )
 
           %{handle: handle, path: tmp, token: token}
@@ -73,8 +72,11 @@ defmodule Ecrits.Doc.Office.InstanceLruTest do
       assert {:ok, _} =
                Office.edit(
                  first.handle,
-                 %{"op" => "replace_text", "query" => first.token, "replacement" => first.token <> "_v2"},
-                 0
+                 %{
+                   "op" => "replace_text",
+                   "query" => first.token,
+                   "replacement" => first.token <> "_v2"
+                 }
                )
 
       assert {:ok, %{text: text2}} = Office.read(first.handle, [])

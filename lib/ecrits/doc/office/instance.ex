@@ -136,7 +136,8 @@ defmodule Ecrits.Doc.Office.Instance do
   @impl true
   def handle_call({:open, path, opts}, _from, st) do
     case OfficeNative.open_session(path, opts) do
-      {:ok, %{session: session, kind: kind, path: abs, install_dir: install_dir, profile: profile}} ->
+      {:ok,
+       %{session: session, kind: kind, path: abs, install_dir: install_dir, profile: profile}} ->
         doc = make_ref()
 
         entry = %{

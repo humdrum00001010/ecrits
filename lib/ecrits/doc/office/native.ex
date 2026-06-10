@@ -51,7 +51,8 @@ defmodule Ecrits.Doc.Office.Native do
            }}
 
         {:error, :uno_unavailable} ->
-          {:error, {:office_unavailable, "libreofficex UNO arm not built (no LO SDK at build time)"}}
+          {:error,
+           {:office_unavailable, "libreofficex UNO arm not built (no LO SDK at build time)"}}
 
         {:error, {:open_failed, msg}} ->
           {:error, {:open_failed, to_string(msg)}}
@@ -123,7 +124,15 @@ defmodule Ecrits.Doc.Office.Native do
   defp default_install_dir do
     case System.user_home() do
       home when is_binary(home) ->
-        Path.join([home, "Desktop", "core", "instdir", "LibreOffice.app", "Contents", "Frameworks"])
+        Path.join([
+          home,
+          "Desktop",
+          "core",
+          "instdir",
+          "LibreOffice.app",
+          "Contents",
+          "Frameworks"
+        ])
 
       _ ->
         nil
@@ -136,7 +145,9 @@ defmodule Ecrits.Doc.Office.Native do
   defp lok_present?(_dir), do: false
 
   defp profile_url(abs_path) do
-    hash = :crypto.hash(:sha256, abs_path) |> Base.url_encode64(padding: false) |> String.slice(0, 16)
+    hash =
+      :crypto.hash(:sha256, abs_path) |> Base.url_encode64(padding: false) |> String.slice(0, 16)
+
     dir = Path.join([System.tmp_dir!(), "ecrits_office_profile", hash])
     File.mkdir_p(dir)
     "file://" <> dir

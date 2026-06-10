@@ -37,6 +37,7 @@ defmodule Ecrits.Doc.ToolsTest do
 
       # The consolidated surface is exactly ten tools; the former doc.inspect and
       # doc.apply_style are folded into doc.get / doc.set.
+      assert "doc.read_table" not in names
       assert "doc.inspect" not in names
       assert "doc.apply_style" not in names
       assert length(names) == 10
@@ -70,7 +71,6 @@ defmodule Ecrits.Doc.ToolsTest do
       assert Enum.any?(docs, &(&1["document"] == doc_id))
       entry = Enum.find(docs, &(&1["document"] == doc_id))
       assert entry["kind"] == "hwp"
-      assert entry["revision"] == 0
       assert entry["backing"] == "server"
     end
   end
@@ -150,14 +150,27 @@ defmodule Ecrits.Doc.ToolsTest do
       end
     end
 
+    test "blank create infers Office kind from .pptx path instead of writing HWP bytes",
+         %{pool: pool} do
+      path = Path.join(System.tmp_dir!(), "scratch_#{System.unique_integer()}.pptx")
+      File.rm(path)
+      on_exit(fn -> File.rm(path) end)
+
+      assert {:error, %{"error" => "create_unsupported", "backend" => backend}} =
+               Tools.call(ctx(pool), "doc.create", %{"path" => path})
+
+      assert backend =~ "Ecrits.Doc.Office"
+      refute File.exists?(path)
+    end
+
     test "the create tool schema advertises the `from` clone param" do
       create = Enum.find(Tools.tools(), &(&1["name"] == "create"))
       assert Map.has_key?(create["inputSchema"]["properties"], "from")
-      assert create["description"] =~ "format of" or create["description"] =~ "CLONE"
+      assert create["description"] =~ "clones"
     end
   end
 
-  describe "doc.read / doc.find / doc.outline" do
+  describe "doc.read / doc.find" do
     setup %{pool: pool} do
       {:ok, %{"document" => doc_id}} =
         Tools.call(ctx(pool), "doc.open", %{
@@ -168,31 +181,113 @@ defmodule Ecrits.Doc.ToolsTest do
       {:ok, doc_id: doc_id}
     end
 
-    test "doc.read returns text", %{pool: pool, doc_id: doc_id} do
-      assert {:ok, %{"text" => text}} =
-               Tools.call(ctx(pool), "doc.read", %{"document" => doc_id})
+    test "doc.read clarifies a doc.find anchor", %{pool: pool, doc_id: doc_id} do
+      {:ok, %{"matches" => [match | _]}} =
+        Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "제2조"})
+
+      assert {:ok, %{"target" => target, "elements" => elements, "text" => text}} =
+               Tools.call(ctx(pool), "doc.read", %{
+                 "document" => doc_id,
+                 "ref" => match["ref"],
+                 "nearby" => %{"before" => 1, "after" => 1}
+               })
 
       assert text =~ "제2조"
+      assert target["text"] =~ "제2조"
+      assert length(elements) == 3
+    end
+
+    test "doc.read accepts a text-match span ref and resolves to its paragraph", %{
+      pool: pool,
+      doc_id: doc_id
+    } do
+      assert {:ok, %{"ref" => ref, "resolved_ref" => resolved_ref, "target" => target}} =
+               Tools.call(ctx(pool), "doc.read", %{
+                 "document" => doc_id,
+                 "ref" => "hwp:s0/p1/c0+3",
+                 "nearby" => %{"before" => 0, "after" => 0}
+               })
+
+      assert ref == "hwp:s0/p1/c0+3"
+      assert resolved_ref != ref
+      assert target["text"] =~ "제2조"
+    end
+
+    test "doc.read rejects missing ref", %{pool: pool, doc_id: doc_id} do
+      assert {:error, %{"error" => "invalid_params"}} =
+               Tools.call(ctx(pool), "doc.read", %{"document" => doc_id})
     end
 
     test "doc.find returns matches with opaque refs", %{pool: pool, doc_id: doc_id} do
       assert {:ok, %{"matches" => [m | _]}} =
                Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "제2조"})
 
-      assert String.starts_with?(m["ref"], "hwp:")
+      assert is_binary(m["ref"])
     end
 
-    test "doc.outline returns a paragraph tree", %{pool: pool, doc_id: doc_id} do
-      assert {:ok, %{"outline" => outline}} =
-               Tools.call(ctx(pool), "doc.outline", %{"document" => doc_id})
+    test "doc.find supports batched patterns", %{pool: pool, doc_id: doc_id} do
+      assert {:ok, %{"results" => [first, second]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "patterns" => ["제1조", "제3조"]
+               })
 
-      assert outline["type"] == "document"
-      assert is_list(outline["children"])
+      assert [%{} | _] = first["matches"]
+      assert [%{} | _] = second["matches"]
+    end
+
+    test "doc.find type fillable includes party underline paragraphs", %{pool: pool} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "signature.hwp",
+          "open_opts" => [
+            __text__: "---------------(이하 ‘원사업자’)와 ------------(이하 ‘수급사업자’)는 계약한다."
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "type" => "fillable"})
+
+      assert match["text"] =~ "원사업자"
+    end
+
+    test "doc.find type fillable includes colon inline unit blanks", %{pool: pool} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "inline_blank.hwp",
+          "open_opts" => [
+            __text__: "거. 이행거절을 위한 기성금 등의 미지급 횟수 :    회 미지급"
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "type" => "fillable"})
+
+      assert match["text"] =~ "미지급 횟수"
+      assert match["fillable_kind"] == "inline_gap"
+    end
+
+    test "doc.find type fillable does not reflag padded filled values", %{pool: pool} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "filled_inline_blank.hwp",
+          "open_opts" => [
+            __text__:
+              "◇ 계약기간  :     2025년 2월 12일부터 2026년 3월 12일까지\n" <>
+                "거. 이행거절을 위한 기성금 등의 미지급 횟수 :    회 미지급"
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "type" => "fillable"})
+
+      assert match["text"] =~ "미지급 횟수"
+      assert match["fillable_kind"] == "inline_gap"
     end
   end
 
   describe "doc.edit replace_text (the supported write path)" do
-    test "applies and bumps revision through the editor", %{pool: pool} do
+    test "applies through the editor", %{pool: pool} do
       {:ok, %{"document" => doc_id}} =
         Tools.call(ctx(pool), "doc.open", %{
           "path" => "c.hwp",
@@ -202,43 +297,121 @@ defmodule Ecrits.Doc.ToolsTest do
       assert {:ok, result} =
                Tools.call(ctx(pool), "doc.edit", %{
                  "document" => doc_id,
-                 "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "ARTICLE2"},
-                 "base_revision" => 0
+                 "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "ARTICLE2"}
                })
 
       assert result["ok"] == true
-      assert result["revision"] == 1
 
-      assert {:ok, %{"text" => text}} = Tools.call(ctx(pool), "doc.read", %{"document" => doc_id})
-      assert text =~ "ARTICLE2"
+      assert {:ok, %{"matches" => [_ | _]}} =
+               Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "ARTICLE2"})
     end
 
-    test "surfaces a conflict from the editor as a structured error", %{pool: pool} do
+    test "returns native write details for no-op replacements", %{pool: pool} do
       {:ok, %{"document" => doc_id}} =
         Tools.call(ctx(pool), "doc.open", %{
           "path" => "c.hwp",
           "open_opts" => [__text__: "제2조 본문"]
         })
 
-      {:ok, _} =
-        Tools.call(ctx(pool), "doc.edit", %{
-          "document" => doc_id,
-          "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "AA"},
-          "base_revision" => 0
-        })
-
-      assert {:error, %{"conflict" => true, "current_revision" => 1, "snapshot" => snap}} =
+      assert {:ok, _} =
                Tools.call(ctx(pool), "doc.edit", %{
                  "document" => doc_id,
-                 "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "BB"},
-                 "base_revision" => 0
+                 "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "AA"}
                })
 
-      assert is_map(snap)
+      assert {:ok, %{"ok" => true, "native" => [%{"ok" => false, "replaced" => 0}]}} =
+               Tools.call(ctx(pool), "doc.edit", %{
+                 "document" => doc_id,
+                 "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "BB"}
+               })
+    end
+
+    test "batch replace_text folds multiline replacement instead of failing", %{pool: pool} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "multiline-replace.hwp",
+          "open_opts" => [__text__: "PLACEHOLDER"]
+        })
+
+      assert {:ok, %{"applied" => 1, "failed" => 0} = result} =
+               Tools.call(ctx(pool), "doc.edit", %{
+                 "document" => doc_id,
+                 "ops" => [
+                   %{
+                     "op" => "replace_text",
+                     "query" => "PLACEHOLDER",
+                     "replacement" => "첫째 줄\n둘째 줄"
+                   }
+                 ],
+                 "verbose" => true
+               })
+
+      refute Map.has_key?(result, "failed_results")
+
+      assert {:ok, %{"matches" => [_]}} =
+               Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "첫째 줄 둘째 줄"})
+    end
+
+    test "batch edit applies all ops when revision metadata is present", %{pool: pool} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "batch-revision-metadata.hwp",
+          "open_opts" => [__text__: "A B"]
+        })
+
+      assert {:ok, %{"applied" => 2, "failed" => 0} = result} =
+               Tools.call(ctx(pool), "doc.edit", %{
+                 "document" => doc_id,
+                 "base_revision" => 7,
+                 "ops" => [
+                   %{
+                     "op" => "replace_text",
+                     "query" => "A",
+                     "replacement" => "AA",
+                     "base_revision" => 7
+                   },
+                   %{
+                     "op" => "replace_text",
+                     "query" => "B",
+                     "replacement" => "BB",
+                     "current_version" => 8
+                   }
+                 ],
+                 "verbose" => true
+               })
+
+      refute Map.has_key?(result, "failed_results")
+
+      assert {:ok, %{"matches" => [_]}} =
+               Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "AA BB"})
+    end
+
+    test "batch edit with any failed op returns a tool error", %{pool: pool} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "partial-batch.hwp",
+          "open_opts" => [__text__: "A B"]
+        })
+
+      assert {:error, %{"ok" => false, "applied" => 1, "failed" => 1} = result} =
+               Tools.call(ctx(pool), "doc.edit", %{
+                 "document" => doc_id,
+                 "ops" => [
+                   %{"op" => "replace_text", "query" => "A", "replacement" => "AA"},
+                   %{"op" => "replace_text", "query" => "B"}
+                 ],
+                 "verbose" => true
+               })
+
+      assert [%{"error" => %{"error" => error}}] = result["failed_results"]
+      assert error =~ "invalid_op"
+
+      assert {:ok, %{"matches" => [_]}} =
+               Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "AA"})
     end
   end
 
-  describe "honest capability errors (headless NIF gaps)" do
+  describe "write capabilities" do
     setup %{pool: pool} do
       {:ok, %{"document" => doc_id}} =
         Tools.call(ctx(pool), "doc.open", %{
@@ -249,22 +422,79 @@ defmodule Ecrits.Doc.ToolsTest do
       {:ok, doc_id: doc_id}
     end
 
-    test "doc.set is not supported yet", %{pool: pool, doc_id: doc_id} do
-      assert {:error, %{"not_supported" => true}} =
+    test "doc.set returns runtime capability error", %{pool: pool, doc_id: doc_id} do
+      assert {:error, %{kind: "unsupported", message: msg}} =
                Tools.call(ctx(pool), "doc.set", %{
                  "document" => doc_id,
                  "ref" => "hwp:s0/p0",
                  "props" => %{"Bold" => false}
                })
+
+      assert msg =~ "set_properties"
     end
 
-    test "doc.save is not supported yet", %{pool: pool, doc_id: doc_id} do
-      assert {:error, %{"not_supported" => true}} =
+    test "doc.save writes bytes", %{pool: pool, doc_id: doc_id} do
+      assert {:ok, %{"ok" => true}} =
                Tools.call(ctx(pool), "doc.save", %{"document" => doc_id})
     end
 
-    test "doc.edit insert_text is not supported yet", %{pool: pool, doc_id: doc_id} do
-      assert {:error, %{"not_supported" => true}} =
+    test "doc.save accepts an open document path", %{pool: pool} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "save-by-path.hwp",
+          "open_opts" => [__text__: "저장 경로"]
+        })
+
+      assert {:ok, %{id: ^doc_id}} = Pool.info_by_path(pool, "save-by-path.hwp")
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx(pool), "doc.save", %{"document" => "save-by-path.hwp"})
+    end
+
+    test "doc.save resolves workspace-relative document paths", %{pool: pool} do
+      root = Path.join(System.tmp_dir!(), "ws_save_path_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(root)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      ctx = %{pool: pool, session_path: root, agent_id: "agent", read_only: false}
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx, "doc.open", %{
+          "path" => "viewed.hwp",
+          "open_opts" => [__text__: "상대 경로 저장"]
+        })
+
+      absolute_path = Path.join(root, "viewed.hwp")
+      assert {:ok, %{id: ^doc_id}} = Pool.info_by_path(pool, absolute_path)
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.save", %{"document" => "viewed.hwp"})
+
+      assert File.exists?(absolute_path)
+    end
+
+    test "doc.save ignores legacy validate and returns ok only", %{pool: pool} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "validate_inline_blank.hwp",
+          "open_opts" => [
+            __text__: "거. 이행거절을 위한 기성금 등의 미지급 횟수 :    회 미지급"
+          ]
+        })
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx(pool), "doc.save", %{"document" => doc_id, "validate" => true})
+    end
+
+    test "doc.save schema has no validation output mode" do
+      save = Enum.find(Tools.tools(), &(&1["name"] == "save"))
+      props = save["inputSchema"]["properties"]
+
+      assert Map.keys(props) |> Enum.sort() == ["document", "path"]
+    end
+
+    test "doc.edit insert_text succeeds", %{pool: pool, doc_id: doc_id} do
+      assert {:ok, %{"ok" => true}} =
                Tools.call(ctx(pool), "doc.edit", %{
                  "document" => doc_id,
                  "op" => %{"op" => "insert_text", "ref" => "hwp:s0/p0", "text" => "x"}
@@ -272,48 +502,13 @@ defmodule Ecrits.Doc.ToolsTest do
     end
   end
 
-  describe "doc.read 30-paragraph hard cap (the user's explicit limit)" do
-    test "a single doc.read returns at most 30 paragraphs + a continuation cursor", %{pool: pool} do
-      text = 1..100 |> Enum.map_join("\n", &"para #{&1}")
-
-      {:ok, %{"document" => doc_id}} =
-        Tools.call(ctx(pool), "doc.open", %{"path" => "big.hwp", "open_opts" => [__text__: text]})
-
-      assert {:ok, page0} = Tools.call(ctx(pool), "doc.read", %{"document" => doc_id})
-      assert page0["size"] == 30
-      assert page0["total"] == 100
-      assert page0["next_at"] == 30
-      assert page0["capped"] == 30
-      assert length(page0["paragraphs"]) == 30
-
-      # Paging with the cursor advances and stays within the cap.
-      assert {:ok, page1} =
-               Tools.call(ctx(pool), "doc.read", %{"document" => doc_id, "at" => page0["next_at"]})
-
-      assert page1["size"] == 30
-      assert page1["at"] == 30
-    end
-
-    test "an oversized explicit size is clamped to 30", %{pool: pool} do
-      text = 1..80 |> Enum.map_join("\n", &"para #{&1}")
-
-      {:ok, %{"document" => doc_id}} =
-        Tools.call(ctx(pool), "doc.open", %{"path" => "big.hwp", "open_opts" => [__text__: text]})
-
-      assert {:ok, page} =
-               Tools.call(ctx(pool), "doc.read", %{
-                 "document" => doc_id,
-                 "at" => 0,
-                 "size" => 999
-               })
-
-      assert page["size"] == 30
-    end
-
-    test "the read tool schema advertises the cap" do
+  describe "doc.read anchor-neighborhood surface" do
+    test "the read tool schema has no paging knobs" do
       read = Enum.find(Tools.tools(), &(&1["name"] == "read"))
-      assert read["inputSchema"]["properties"]["size"]["maximum"] == 30
-      assert read["description"] =~ "30"
+      props = read["inputSchema"]["properties"]
+
+      assert read["inputSchema"]["required"] == ["document", "ref"]
+      assert props |> Map.keys() |> Enum.sort() == ["document", "include", "nearby", "ref"]
     end
   end
 
@@ -475,16 +670,14 @@ defmodule Ecrits.Doc.ToolsTest do
       assert {:ok, %{"ok" => true}} =
                Tools.call(agent_ctx(pool, path, "owner", doc_id), "doc.edit", %{
                  "document" => doc_id,
-                 "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "제3조"},
-                 "base_revision" => 0
+                 "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "제3조"}
                })
 
       # A different agent is fenced out.
       assert {:error, %{"error" => "forbidden", "document" => ^doc_id, "owned_by" => owned}} =
                Tools.call(agent_ctx(pool, path, "intruder", doc_id), "doc.edit", %{
                  "document" => doc_id,
-                 "op" => %{"op" => "replace_text", "query" => "제3조", "replacement" => "X"},
-                 "base_revision" => 1
+                 "op" => %{"op" => "replace_text", "query" => "제3조", "replacement" => "X"}
                })
 
       assert owned == %{"agent_id" => "owner"}
@@ -503,8 +696,7 @@ defmodule Ecrits.Doc.ToolsTest do
       assert {:ok, %{"ok" => true}} =
                Tools.call(agent_ctx(pool, path, "fg", doc_id), "doc.edit", %{
                  "document" => doc_id,
-                 "op" => %{"op" => "replace_text", "query" => "제1조", "replacement" => "제1조 (목적)"},
-                 "base_revision" => 0
+                 "op" => %{"op" => "replace_text", "query" => "제1조", "replacement" => "제1조 (목적)"}
                })
 
       assert Session.owner(path, doc_id) == "fg"
@@ -512,7 +704,10 @@ defmodule Ecrits.Doc.ToolsTest do
 
     test "a bare pool-only context has no ownership fence + legacy open reuse", %{pool: pool} do
       {:ok, %{"document" => doc_id}} =
-        Tools.call(ctx(pool), "doc.open", %{"path" => "legacy.hwp", "open_opts" => [__text__: "x"]})
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "legacy.hwp",
+          "open_opts" => [__text__: "x"]
+        })
 
       # Legacy reuse: re-open returns the SAME id, no already_open error.
       assert {:ok, %{"document" => ^doc_id}} =
@@ -530,7 +725,7 @@ defmodule Ecrits.Doc.ToolsTest do
 
     test "unknown document", %{pool: pool} do
       assert {:error, %{"error" => "not_found"}} =
-               Tools.call(ctx(pool), "doc.read", %{"document" => "ghost"})
+               Tools.call(ctx(pool), "doc.read", %{"document" => "ghost", "ref" => "ghost-ref"})
     end
 
     test "missing required document arg", %{pool: pool} do
@@ -588,8 +783,7 @@ defmodule Ecrits.Doc.ToolsTest do
       assert {:error, %{"error" => "read_only"}} =
                Tools.call(ro_ctx(pool, root), "doc.edit", %{
                  "document" => doc_id,
-                 "op" => %{"op" => "replace_text", "query" => "제1조", "replacement" => "X"},
-                 "base_revision" => 0
+                 "op" => %{"op" => "replace_text", "query" => "제1조", "replacement" => "X"}
                })
     end
 
@@ -608,8 +802,14 @@ defmodule Ecrits.Doc.ToolsTest do
           "open_opts" => [__text__: "제1조 (목적)\n제2조 (기간)"]
         })
 
+      {:ok, %{"matches" => [match | _]}} =
+        Tools.call(ro_ctx(pool, root), "doc.find", %{"document" => doc_id, "pattern" => "제2조"})
+
       assert {:ok, %{"text" => text}} =
-               Tools.call(ro_ctx(pool, root), "doc.read", %{"document" => doc_id})
+               Tools.call(ro_ctx(pool, root), "doc.read", %{
+                 "document" => doc_id,
+                 "ref" => match["ref"]
+               })
 
       assert text =~ "제2조"
 
@@ -657,7 +857,9 @@ defmodule Ecrits.Doc.ToolsTest do
     end
 
     test "doc.open OUTSIDE the workspace root is refused", %{pool: pool, root: root} do
-      outside = Path.join(System.tmp_dir!(), "outside_open_#{System.unique_integer([:positive])}.hwp")
+      outside =
+        Path.join(System.tmp_dir!(), "outside_open_#{System.unique_integer([:positive])}.hwp")
+
       File.write!(outside, "x")
       on_exit(fn -> File.rm_rf(outside) end)
 
