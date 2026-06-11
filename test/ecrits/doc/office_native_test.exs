@@ -506,17 +506,16 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       # The inserted text is discoverable and props read back IR-direct.
       assert_find(ctx, doc, "Aria IR direct")
 
-      # The feedback loop: render the slide to a real PNG (doc.render returns it
-      # as base64 under __images__ for the MCP image content blocks).
-      assert {:ok, %{"ok" => true, "rendered" => ["hero"], "__images__" => [img]}} =
+      # The feedback loop: render the slide to a real PNG FILE (doc.render
+      # returns paths — CLI agents view images from disk, never inline base64).
+      assert {:ok, %{"ok" => true, "rendered" => ["hero"], "files" => [img]}} =
                Tools.call(ctx, "doc.render", %{
                  "document" => doc,
                  "page" => "hero",
                  "width" => 480
                })
 
-      assert {:ok, png} = Base.decode64(img["data"])
-      assert <<137, ?P, ?N, ?G, _::binary>> = png
+      assert <<137, ?P, ?N, ?G, _::binary>> = File.read!(img["file"])
 
       # set_geometry moves an existing shape (the fix-up verb).
       assert {:ok, %{"ok" => true}} =

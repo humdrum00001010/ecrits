@@ -89,5 +89,9 @@ defmodule EcritsWeb.Router do
     # workspace path. The browser rhwp_core WASM engine fetches these to render
     # + hit-test locally (the server keeps the bytes as source of truth).
     get "/local/document-bytes", LocalDocumentBytesController, :show
+
+    # Inline previews for doc.render outputs (PNG files in the render scratch
+    # dir) — the chat rail swaps the render tool-call chip body for the image.
+    get "/local/render-preview", LocalRenderPreviewController, :show
   end
 end

@@ -556,7 +556,10 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     """
     [System] Open doc#{doc}. Use doc MCP tools only. Tool names may appear as
     `doc_x` or `doc.x`; same tool. If missing, load/search doc tools first. Never
-    shell/file-read docs.
+    shell/file-read docs. ONE exception: `doc_render` returns PNG file paths —
+    VIEW those with your native image tool (view_image / image read) to check
+    your work; viewing renders is expected. Editing files outside doc tools
+    stays forbidden.
 
     Default voice: caveman mode. Short answer. No filler. No long plan unless user
     asks. Report only result, blockers, saved path/hash when useful.
@@ -579,7 +582,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
 
     Rules: read-only refusal = stop/report. No fabrication; use reasonable values
     only when document/context supports them. Any edit/create/set MUST end with
-    `doc_save {validate:true}` before saying done.
+    `doc_save` before saying done.
     """ <> "\n" <> ultracode_keyword(opts)
   end
 

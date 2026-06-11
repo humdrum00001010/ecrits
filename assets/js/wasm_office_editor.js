@@ -697,6 +697,11 @@ const WasmOfficeEditor = {
       console.log("[office-wasm] parts/geometry:", this.parts, "pageRects:", this.pageRects)
       this.setStatus("")
       this.loaded = true
+      // The browser becomes the doc's authority ONLY now that the model is
+      // actually loaded — the LiveView attaches the Session viewer on this
+      // event. Registering at tab-open routed doc.* calls to an editor that
+      // (e.g. in a non-isolated context) never loaded anything.
+      this.notifyViewerState(true)
       this.rememberActiveDocument(url)
       // A clean load clears any prior one-shot reload guard for this document.
       try { sessionStorage.removeItem("office-wasm-retry:" + url) } catch (_) {}
@@ -718,6 +723,7 @@ const WasmOfficeEditor = {
       // isn't stuck in a reload cycle.
       const msg = (error && error.message) || String(error)
       this.loaded = false
+      this.notifyViewerState(false)
       if (/cross-origin isolated/.test(msg)) {
         const retryKey = "office-wasm-coi-retry:" + location.pathname + location.search
         let alreadyRetried = false
@@ -775,10 +781,25 @@ const WasmOfficeEditor = {
     this.nativeInteractionState = null
     this.composing = false
     this.loaded = true
+    this.notifyViewerState(true)
     this.setStatus("")
     this.buildPageStack()
     this.renderVisiblePages()
     return true
+  },
+
+  // Tell the LiveView whether this editor actually holds the document model.
+  // ready=true -> it attaches the Session viewer (browser becomes the doc.*
+  // authority); ready=false -> it detaches, so the agent's tools fall back to
+  // the server arm instead of a viewer that has nothing loaded.
+  notifyViewerState(ready) {
+    if (!this.documentId) return
+    try {
+      this.pushEvent(
+        ready ? "local_document.viewer_ready" : "local_document.viewer_failed",
+        { document_id: this.documentId }
+      )
+    } catch (_) { /* disconnected socket — nothing to claim */ }
   },
 
   rememberActiveDocument(url) {

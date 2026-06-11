@@ -570,8 +570,9 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "render",
       "description" =>
-        "Render slide(s) of a pptx as PNG images returned INLINE — you can SEE the actual " <>
-          "result. ALWAYS render after designing each slide and CHECK STRICTLY, in order: " <>
+        "Render page(s)/slide(s) to PNG FILES and return their paths — VIEW the returned " <>
+          "file with your image tool (codex: view_image; claude: Read the path) to SEE the " <>
+          "actual result. ALWAYS render after designing each slide and CHECK STRICTLY, in order: " <>
           "(1) does ANY text touch or overlap other text or cross a box edge? " <>
           "(2) is any element cut off by the slide edge? (3) is contrast readable? " <>
           "(4) are columns/cards aligned on a consistent grid? " <>
@@ -854,9 +855,12 @@ defmodule Ecrits.Doc.Tools do
 
   def call(_ctx, tool_name, _args), do: {:error, {:unknown_tool, tool_name}}
 
-  # Render the requested slide (or all, capped) to PNGs and return them as
-  # base64 under "__images__" — the MCP layer turns that into image content
-  # blocks so a vision-capable agent literally sees its slides.
+  # Render the requested slide (or all, capped) to PNG FILES and return their
+  # paths. NO inline base64: the receivers are CLI agents whose vision path is
+  # file-based (codex view_image / claude Read) — an inline image block just
+  # round-trips ~100-200KB of base64 through the ACP text channel per render
+  # (observed live), bloating the model context instead of showing pixels.
+  # Stable per-doc/page/width names under tmp keep re-renders overwrite-only.
   defp render_pages(editor, args) do
     width =
       case get(args, ["width"]) do
@@ -881,37 +885,42 @@ defmodule Ecrits.Doc.Tools do
     if pages == [] do
       {:error, error_json({:invalid_params, "document has no slides to render"})}
     else
-      {images, failures} =
-        Enum.reduce(pages, {[], []}, fn page, {ok_acc, err_acc} ->
-          tmp =
-            Path.join(
-              System.tmp_dir!(),
-              "ecrits_render_#{System.unique_integer([:positive])}.png"
-            )
+      doc_token =
+        args
+        |> get(["document"])
+        |> to_string()
+        |> String.replace(~r/[^A-Za-z0-9_-]/, "_")
 
-          case Editor.render(editor, page, tmp, width: width) do
+      dir = Path.join(System.tmp_dir!(), "ecrits_render")
+      File.mkdir_p!(dir)
+
+      {files, failures} =
+        Enum.reduce(pages, {[], []}, fn page, {ok_acc, err_acc} ->
+          page_token = page |> to_string() |> String.replace(~r/[^A-Za-z0-9_-]/, "_")
+          out = Path.join(dir, "#{doc_token}_#{page_token}_w#{width}.png")
+
+          case Editor.render(editor, page, out, width: width) do
             :ok ->
-              data = File.read!(tmp)
-              File.rm(tmp)
-              {[%{"page" => page, "data" => Base.encode64(data)} | ok_acc], err_acc}
+              {[%{"page" => page, "file" => out} | ok_acc], err_acc}
 
             {:error, reason} ->
-              File.rm(tmp)
+              File.rm(out)
               {ok_acc, [%{"page" => page, "error" => format_render_error(reason)} | err_acc]}
           end
         end)
 
-      images = Enum.reverse(images)
+      files = Enum.reverse(files)
       failures = Enum.reverse(failures)
 
-      if images == [] do
+      if files == [] do
         {:error, error_json({:render_failed, failures})}
       else
         result = %{
           "ok" => true,
-          "rendered" => Enum.map(images, & &1["page"]),
+          "rendered" => Enum.map(files, & &1["page"]),
           "width" => width,
-          "__images__" => images
+          "files" => files,
+          "note" => "PNG files on local disk — VIEW them with your image tool to check the result"
         }
 
         result = if failures == [], do: result, else: Map.put(result, "failed", failures)

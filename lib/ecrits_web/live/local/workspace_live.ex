@@ -451,6 +451,35 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   def handle_event("local_document.viewer_mutated", _params, socket), do: {:noreply, socket}
 
+  # The editor hook reports whether it ACTUALLY holds the document model. Only
+  # then does this LiveView claim browser authority for doc.* routing —
+  # attaching at tab-open routed agent calls to editors that never loaded
+  # (e.g. office WASM in a non-isolated context), producing document_not_loaded
+  # finds and refused renders while the server arm sat idle and capable.
+  def handle_event("local_document.viewer_ready", %{"document_id" => document_id}, socket) do
+    with :ok <- verify_active_document(socket, document_id),
+         doc_id when is_binary(doc_id) <- socket.assigns[:pool_document_id] do
+      attach_session_viewer(socket, doc_id)
+      {:noreply, socket}
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("local_document.viewer_ready", _params, socket), do: {:noreply, socket}
+
+  def handle_event("local_document.viewer_failed", %{"document_id" => document_id}, socket) do
+    with :ok <- verify_active_document(socket, document_id),
+         doc_id when is_binary(doc_id) <- socket.assigns[:pool_document_id] do
+      detach_session_viewer(socket, doc_id)
+      {:noreply, socket}
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("local_document.viewer_failed", _params, socket), do: {:noreply, socket}
+
   # --- Markdown (.md/.markdown) editor events (from the MarkdownEditor hook) ----
   # Debounced source changes re-render the live preview; Ctrl/Cmd+S persists the
   # current source to the canonical workspace file via the file-based Document
@@ -1114,6 +1143,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                 >
                   <%= case agent_item_role(item) do %>
                     <% "tool" -> %>
+                      <% render_files = agent_item_render_files(item) %>
                       <div
                         data-role="operation-block"
                         class="min-w-0 px-3 py-1 text-[12px] text-base-content/60"
@@ -1140,6 +1170,29 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                             class="size-3 shrink-0 text-base-content/45"
                           />
                         </button>
+                        <%!-- doc.render chips show the rendered page itself —
+                             the raw tool payload stays behind the toggle. --%>
+                        <div
+                          :if={render_files != []}
+                          data-role="render-preview"
+                          class="mt-1.5 flex flex-wrap gap-2"
+                        >
+                          <a
+                            :for={file <- render_files}
+                            href={"/local/render-preview?file=#{URI.encode_www_form(file)}"}
+                            target="_blank"
+                            rel="noopener"
+                            title={Path.basename(file)}
+                            class="block max-w-full overflow-hidden rounded border border-base-300 bg-white shadow-sm transition-shadow hover:shadow"
+                          >
+                            <img
+                              src={"/local/render-preview?file=#{URI.encode_www_form(file)}"}
+                              alt={"Rendered page " <> Path.basename(file)}
+                              loading="lazy"
+                              class="block max-h-48 w-auto"
+                            />
+                          </a>
+                        </div>
                         <div
                           id={"#{dom_id}-details"}
                           data-role="operation-details"
@@ -1936,16 +1989,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     case DocPool.open(path, kind: kind) do
       {:ok, doc_id} ->
-        # Register THIS LiveView as the human viewer of the doc in the workspace
-        # Session (the real home of `viewers` since Phase 3) so the agent's doc.*
-        # edits route to the WASM model the user is viewing (design §6.2) instead
-        # of a divergent server NIF copy. attach_viewer is only meaningful for a
-        # connected viewer (the hook lives in the browser); on the dead static
-        # render we leave the doc `:server`-backed. There is NO global active doc
-        # anymore — the agent's active doc is its own `pool_document_id`, applied
-        # live via `maybe_restart_local_agent_for_document`.
-        if connected?(socket), do: attach_session_viewer(socket, doc_id)
-
+        # NOTE: the Session viewer (browser authority for doc.* routing) is NOT
+        # attached here. The editor hook pushes `local_document.viewer_ready`
+        # once the WASM model has ACTUALLY loaded, and the handler attaches
+        # then — a tab whose editor failed to load (e.g. office WASM in a
+        # non-isolated context) must never capture routing; the doc stays
+        # `:server`-backed so reads/renders keep working.
         socket
         |> assign(:pool_document_id, doc_id)
         |> assign(:doc_browser_pending, %{})
@@ -1971,8 +2020,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     case DocPool.open(path, kind: kind) do
       {:ok, doc_id} ->
-        if connected?(socket), do: attach_session_viewer(socket, doc_id)
-
+        # Viewer attach happens on `local_document.viewer_ready` (see the hwp
+        # clause above) — never at tab-open.
         socket
         |> assign(:pool_document_id, doc_id)
         |> assign(:doc_browser_pending, %{})
@@ -4397,6 +4446,24 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp agent_item_body(%{body: body}) when is_binary(body), do: body
   defp agent_item_body(_item), do: ""
+
+  # PNG paths a doc.render tool call produced, scraped from the chip body (the
+  # tool output JSON arrives escape-wrapped inside the ACP rawOutput, so a
+  # direct path scan beats parsing nested JSON). Only files in the canonical
+  # render scratch dir count — the preview route serves nothing else anyway.
+  defp agent_item_render_files(%{title: title, body: body})
+       when is_binary(title) and is_binary(body) do
+    if String.contains?(title, "render") do
+      ~r{(/[^"'\\\s]*?/ecrits_render/[^"'\\\s]*?\.png)}
+      |> Regex.scan(body)
+      |> Enum.map(fn [_, file] -> file end)
+      |> Enum.uniq()
+    else
+      []
+    end
+  end
+
+  defp agent_item_render_files(_item), do: []
 
   defp agent_item_status_label(%{status: :approval_required}), do: "Needs approval"
 

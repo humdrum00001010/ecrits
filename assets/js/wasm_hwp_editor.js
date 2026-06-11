@@ -216,9 +216,25 @@ const WasmHwpEditor = {
 
       this.buildPageStack()
       this.renderVisiblePages()
+      // The browser becomes this doc's authority only now that the model is
+      // actually loaded — the LiveView attaches the Session viewer on this
+      // event (a tab whose editor failed to load must NOT capture doc.* routing).
+      this.notifyViewerState(true)
     } catch (error) {
       console.error("[wasm-hwp] load failed", error)
+      this.notifyViewerState(false)
     }
+  },
+
+  notifyViewerState(ready) {
+    const id = this.documentId
+    if (!id) return
+    try {
+      this.pushEvent(
+        ready ? "local_document.viewer_ready" : "local_document.viewer_failed",
+        { document_id: id }
+      )
+    } catch (_) { /* disconnected socket — nothing to claim */ }
   },
 
   // Build one box-reserving <section> per page with a render <canvas> and a
