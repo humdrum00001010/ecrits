@@ -88,6 +88,16 @@ defmodule Ecrits.Doc.Office.Instance do
     GenServer.call(server, {:open, path, opts}, :infinity)
   end
 
+  @doc """
+  Write a LibreOffice factory-blank document to `path` (one-shot open factory ->
+  export -> close), serialised through this governor like every other NIF touch.
+  """
+  @spec create_blank_file(GenServer.server(), String.t(), :docx | :pptx) ::
+          :ok | {:error, term()}
+  def create_blank_file(server \\ @name, path, kind) when is_binary(path) do
+    GenServer.call(server, {:create_blank_file, path, kind}, :infinity)
+  end
+
   @doc "Close + forget a document (dispose its UNO session, drop the LRU slot)."
   @spec close(GenServer.server(), handle()) :: :ok
   def close(server \\ @name, handle)
@@ -162,6 +172,10 @@ defmodule Ecrits.Doc.Office.Instance do
       {:error, _reason} = error ->
         {:reply, error, st}
     end
+  end
+
+  def handle_call({:create_blank_file, path, kind}, _from, st) do
+    {:reply, OfficeNative.create_blank_file(path, kind), st}
   end
 
   def handle_call({:close, doc}, _from, st) do

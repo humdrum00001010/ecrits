@@ -124,7 +124,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                   data-role="mobile-open-chat"
                   aria-controls="local-editor-shell local-agent-sidebar"
                   aria-pressed="false"
-                  class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content lg:hidden"
+                  class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content md:hidden"
                   title="Show chat"
                 >
                   <.icon name="hero-chat-bubble-left-right" class="size-4" />

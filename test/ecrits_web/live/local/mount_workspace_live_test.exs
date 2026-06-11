@@ -1342,11 +1342,17 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
 
-    assert Enum.any?(
-             items,
-             &(Map.get(&1, :role) == :tool and Map.get(&1, :name) == "doc.context" and
-                 Map.get(&1, :status) == :completed)
-           )
+    assert tool_item =
+             Enum.find(
+               items,
+               &(Map.get(&1, :role) == :tool and Map.get(&1, :name) == "doc.context" and
+                   Map.get(&1, :status) == :completed)
+             )
+
+    assert tool_item.input =~ ~s("document": "active")
+    assert tool_item.output =~ ~s("ok": true)
+    assert tool_item.body =~ "Input:"
+    assert tool_item.body =~ "Output:"
 
     legacy_body =
       Jason.encode!(
@@ -1884,6 +1890,8 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
       assert has_element?(lv, "#{row}[data-role='local-agent-tool']", tool_name)
       assert has_element?(lv, details, ~s("ok": true))
+      assert has_element?(lv, details, "Input:")
+      assert has_element?(lv, details, "Output:")
 
       refute has_element?(lv, details, "base_version")
       refute has_element?(lv, details, "base_revision")

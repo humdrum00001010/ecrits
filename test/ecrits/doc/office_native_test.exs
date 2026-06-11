@@ -414,6 +414,202 @@ defmodule Ecrits.Doc.OfficeNativeTest do
     end
   end
 
+  test "real UNO NIF (pptx): IR-direct from-scratch authoring — blank create, insert_slide, insert_shape",
+       %{} = context do
+    unless context[:native] do
+      IO.puts("\n[skip] LibreOffice UNO arm unavailable; skipping IR-direct authoring test")
+    else
+      ctx = context.ctx
+
+      path =
+        Path.join(System.tmp_dir!(), "ecrits_irdirect_#{System.unique_integer([:positive])}.pptx")
+
+      on_exit(fn -> File.rm(path) end)
+
+      # No deck: a LibreOffice factory-blank presentation, not a template.
+      assert {:ok, %{"document" => doc, "kind" => "pptx"}} =
+               Tools.call(ctx, "doc.create", %{"path" => path, "kind" => "pptx"})
+
+      assert {:ok, "PK" <> _} = File.read(path)
+
+      # New named slide -> deterministic ref page[hero].
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc,
+                 "op" => %{"op" => "insert_slide", "name" => "hero"}
+               })
+
+      # IR-direct shapes: raw UNO service + 1/100 mm geometry + raw UNO props.
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc,
+                 "op" => %{
+                   "op" => "insert_shape",
+                   "page" => "hero",
+                   "service" => "com.sun.star.drawing.RectangleShape",
+                   "name" => "accent",
+                   "x" => 1000,
+                   "y" => 1000,
+                   "w" => 20_000,
+                   "h" => 3000,
+                   "FillColor" => 0x2563EB
+                 }
+               })
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc,
+                 "op" => %{
+                   "op" => "insert_shape",
+                   "page" => "hero",
+                   "service" => "com.sun.star.drawing.TextShape",
+                   "name" => "title",
+                   "x" => 1500,
+                   "y" => 1400,
+                   "w" => 18_000,
+                   "h" => 2000,
+                   "text" => "Aria IR direct",
+                   "CharHeight" => 32,
+                   "CharWeight" => 150,
+                   "CharColor" => 0x111827
+                 }
+               })
+
+      # HWP-arm alias + CSS hex (what agents actually send, schema documents both
+      # arms): fillColor "#RRGGBB" must normalize to UNO FillColor int, never
+      # silently drop (the silent drop rendered live decks in default green).
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc,
+                 "op" => %{
+                   "op" => "insert_shape",
+                   "page" => "hero",
+                   "service" => "com.sun.star.drawing.RectangleShape",
+                   "name" => "css_hex",
+                   "x" => 1000,
+                   "y" => 5000,
+                   "w" => 8000,
+                   "h" => 2000,
+                   "fillColor" => "#10B981",
+                   "fillType" => "solid"
+                 }
+               })
+
+      assert {:ok, %{"values" => hex_values}} =
+               Tools.call(ctx, "doc.get", %{
+                 "document" => doc,
+                 "ref" => "page[hero]/shape[css_hex]"
+               })
+
+      assert round(hex_values["FillColor"]) == 0x10B981
+
+      # The inserted text is discoverable and props read back IR-direct.
+      assert_find(ctx, doc, "Aria IR direct")
+
+      # The feedback loop: render the slide to a real PNG (doc.render returns it
+      # as base64 under __images__ for the MCP image content blocks).
+      assert {:ok, %{"ok" => true, "rendered" => ["hero"], "__images__" => [img]}} =
+               Tools.call(ctx, "doc.render", %{
+                 "document" => doc,
+                 "page" => "hero",
+                 "width" => 480
+               })
+
+      assert {:ok, png} = Base.decode64(img["data"])
+      assert <<137, ?P, ?N, ?G, _::binary>> = png
+
+      # set_geometry moves an existing shape (the fix-up verb).
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc,
+                 "op" => %{
+                   "op" => "set_geometry",
+                   "ref" => "page[hero]/shape[accent]",
+                   "x" => 2500,
+                   "w" => 10_000
+                 }
+               })
+
+      # delete_node removes a shape entirely.
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc,
+                 "op" => %{"op" => "delete_node", "ref" => "page[hero]/shape[css_hex]"}
+               })
+
+      # insert_picture (office form) EMBEDS an image: the saved pptx must carry
+      # it under ppt/media with a blipFill reference.
+      img_src =
+        Path.join(System.tmp_dir!(), "ecrits_pic_#{System.unique_integer([:positive])}.png")
+
+      # A tiny valid PNG (1x1, red) — enough for the engine to embed.
+      File.write!(
+        img_src,
+        Base.decode64!(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+        )
+      )
+
+      on_exit(fn -> File.rm(img_src) end)
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc,
+                 "op" => %{
+                   "op" => "insert_picture",
+                   "page" => "hero",
+                   "name" => "logo",
+                   "src" => img_src,
+                   "x" => 20_000,
+                   "y" => 1000,
+                   "w" => 4000,
+                   "h" => 4000
+                 }
+               })
+
+      assert {:ok, %{"values" => rect_values}} =
+               Tools.call(ctx, "doc.get", %{"document" => doc, "ref" => "page[hero]/shape[accent]"})
+
+      assert round(rect_values["FillColor"]) == 0x2563EB
+
+      assert {:ok, %{"values" => title_values}} =
+               Tools.call(ctx, "doc.get", %{"document" => doc, "ref" => "page[hero]/shape[title]"})
+
+      assert round(title_values["CharHeight"]) == 32
+
+      # Persists through a real pptx save -> reopen.
+      assert {:ok, %{"ok" => true}} = Tools.call(ctx, "doc.save", %{"document" => doc})
+      assert :ok = Pool.close(ctx.pool, doc)
+
+      # The EXPORTED XML must carry the solid fill explicitly. Reading FillColor
+      # back from the live model is not enough: without FillStyle=SOLID the
+      # OOXML exporter writes NO fill element and the theme default (green)
+      # paints the shape — the live-deck regression this test pins down.
+      {:ok, zip} = :zip.unzip(String.to_charlist(path), [:memory])
+
+      slide_xmls =
+        zip
+        |> Enum.filter(fn {n, _} -> to_string(n) =~ ~r{^ppt/slides/slide\d+\.xml$} end)
+        |> Enum.map_join("\n", fn {_n, body} -> body end)
+
+      assert slide_xmls =~ ~r/<a:solidFill><a:srgbClr val="2563EB"/i
+      # The css_hex shape was delete_node'd: its color must NOT survive the save.
+      refute slide_xmls =~ ~r/<a:srgbClr val="10B981"/i
+      # set_geometry moved accent to x=2500 (1/100 mm) = 900000 EMU.
+      assert slide_xmls =~ ~s(<a:off x="900000")
+      # insert_picture embedded the image: media part + blip reference present.
+      assert Enum.any?(zip, fn {n, _} -> to_string(n) =~ ~r{^ppt/media/image\d+\.} end)
+      assert slide_xmls =~ "blip"
+
+      {:ok, pool2} = start_supervised({Pool, name: nil}, id: :pool_irdirect_reopen)
+      ctx2 = %{pool: pool2}
+
+      assert {:ok, %{"document" => reopened}} = Tools.call(ctx2, "doc.open", %{"path" => path})
+      assert_find(ctx2, reopened, "Aria IR direct")
+      assert :ok = Pool.close(pool2, reopened)
+    end
+  end
+
   # Probe the UNO arm by attempting a real open of the fixture through the
   # Office backend. `{:office_unavailable, _}` (no SDK build / no install dir) or
   # an :nif_not_loaded ErlangError => the arm is absent and the test skips green.

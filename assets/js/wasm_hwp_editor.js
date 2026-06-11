@@ -86,6 +86,9 @@ const WasmHwpEditor = {
     this.snapshotSeq = 0
     this.caretBlinkOn = true
     this.elementPickerEnabled = false
+    this.pickerHover = null
+    this.pickerHoverEvent = null
+    this.pickerHoverRaf = null
     this.agentOpQueue = []
     this.agentOpProcessing = false
 
@@ -167,6 +170,7 @@ const WasmHwpEditor = {
     if (this.io) this.io.disconnect()
     if (this.blink) clearInterval(this.blink)
     if (this.snapshotTimer) clearTimeout(this.snapshotTimer)
+    if (this.pickerHoverRaf) cancelAnimationFrame(this.pickerHoverRaf)
     window.removeEventListener("resize", this.onResize)
     this.el.removeEventListener("mousedown", this.onMouseDown)
     this.el.removeEventListener("dblclick", this.onDoubleClick)
@@ -333,8 +337,9 @@ const WasmHwpEditor = {
       event.preventDefault()
       event.stopPropagation()
       const pick = this.hwpPickFromHit(hit, pageIndex)
+      // Toggle into the multi-select set; bindElementPickerTarget's picks
+      // listener repaints every highlight (incl. removal).
       appendPickedElementToComposer(pick)
-      this.paintPickedPoint(hit, pageIndex)
       return
     }
 
@@ -365,9 +370,15 @@ const WasmHwpEditor = {
   },
 
   // mousemove while the button is held: hit-test the current point and extend
-  // the selection from the drag anchor to the current (focus) offset.
+  // the selection from the drag anchor to the current (focus) offset. In picker
+  // mode (no drag) it instead tracks a DOM-inspector-style hover preview of the
+  // element under the cursor.
   onCanvasMouseMove(event) {
-    if (!this.dragSelect || !this.doc) return
+    if (!this.doc) return
+    if (!this.dragSelect) {
+      if (this.elementPickerEnabled) this.queuePickerHover(event)
+      return
+    }
     // Only react while the primary button is still pressed (defensive: a mouseup
     // outside the window can be missed).
     if ((event.buttons & 1) === 0) {
@@ -419,8 +430,11 @@ const WasmHwpEditor = {
       this.renderSelection()
       if (this.caret) this.drawCaret(this.caret)
     }
-    // A moved drag already established `this.selection` during mousemove; nothing
-    // more to do — the highlight stays until the next press.
+    // A moved drag already established `this.selection` during mousemove; the
+    // text highlight stays until the next press. Picks persist after picker
+    // mode ends, and the drag's overlay clears wiped them on OTHER pages
+    // (drawCaret only restores the caret's page) — repaint the full set.
+    if (this.currentDocumentPicks().length > 0) this.paintPickedHighlights()
   },
 
   onCanvasDoubleClick(event) {
@@ -663,8 +677,32 @@ const WasmHwpEditor = {
 
   hwpPickFromHit(hit, pageIndex) {
     const ref = this.hwpRefFromHit(hit)
-    const element = this.findHwpElement(ref)
 
+    // A click that lands ON a control (shape/picture/table — the engine treats
+    // inline controls as a char, so the plain hit only gives a char offset)
+    // must pick the CONTROL itself, with the control ref grammar the doc.*
+    // tools accept, and its page bbox for the highlight.
+    const control = ref.cell ? null : this.hwpControlAtHit(hit)
+    if (control) {
+      const controlRef = {
+        section: ref.section,
+        paragraph: ref.paragraph,
+        control: control.controlIndex,
+        type: control.type
+      }
+      return {
+        document: this.el.dataset.documentPath || "",
+        backend: "hwp",
+        format: this.format || "hwp",
+        type: control.type,
+        ref: JSON.stringify(controlRef),
+        text: control.text || "",
+        rects: control.bbox ? [control.bbox] : this.hwpHighlightRects(ref, hit, pageIndex),
+        ir: { page: pageIndex + 1, ref: controlRef, hit }
+      }
+    }
+
+    const element = this.findHwpElement(ref)
     return {
       document: this.el.dataset.documentPath || "",
       backend: "hwp",
@@ -672,12 +710,160 @@ const WasmHwpEditor = {
       type: ref.cell ? "cell" : "paragraph",
       ref: JSON.stringify(ref),
       text: element ? element.text || "" : this.hwpTextForRef(ref),
+      rects: this.hwpHighlightRects(ref, hit, pageIndex),
       ir: {
         page: pageIndex + 1,
         ref,
         hit,
         element
       }
+    }
+  },
+
+  // Highlight rects for a pick/hover, DOM-inspector style: the ELEMENT's box,
+  // never empty for a resolvable hit. Cells use the engine's exact cell bbox;
+  // paragraphs use the per-page union of their line rects. Two reasons not to
+  // paint raw per-line text rects: empty elements have none (the original
+  // "selection isn't shown" bug), and the engine can SKIP wrapped lines
+  // (observed: a cell paragraph with an embedded line break lost the line
+  // after the wrap — "memory." — from getSelectionRectsInCell).
+  hwpHighlightRects(ref, hit, pageIndex) {
+    // Exact cell box (top-level tables only; for nested cellPaths the bbox
+    // lookup doesn't address the inner table, so fall through to line rects).
+    if (ref.cell && (!ref.cell.cellPath || ref.cell.cellPath.length <= 1)) {
+      try {
+        const raw = this.doc.getTableCellBboxes(
+          ref.section, ref.cell.parentParaIndex, ref.cell.controlIndex)
+        const boxes = JSON.parse(raw)
+        const box = Array.isArray(boxes)
+          ? boxes.find(b => b.cellIdx === ref.cell.cellIndex)
+          : null
+        if (box) {
+          return [{ pageIndex: box.pageIndex, x: box.x, y: box.y, width: box.w, height: box.h }]
+        }
+      } catch (_) { /* fall through to line rects */ }
+    }
+
+    const rects = this.hwpRectsForRef(ref)
+    if (rects.length > 0) return this.unionRectsByPage(rects)
+
+    const cr = hit && hit.cursorRect
+    if (cr) {
+      return [{
+        pageIndex: cr.pageIndex ?? pageIndex ?? 0,
+        x: cr.x,
+        y: cr.y,
+        width: Math.max(cr.width || 0, 90),
+        height: cr.height || 14
+      }]
+    }
+    return []
+  },
+
+  // Collapse line rects into ONE bounding box per page (an element that wraps
+  // pages keeps one box on each page).
+  unionRectsByPage(rects) {
+    const byPage = new Map()
+    for (const r of rects) {
+      const page = r.pageIndex ?? 0
+      const x2 = r.x + (r.width || 0)
+      const y2 = r.y + (r.height || 0)
+      const cur = byPage.get(page)
+      if (!cur) {
+        byPage.set(page, { x1: r.x, y1: r.y, x2, y2 })
+      } else {
+        cur.x1 = Math.min(cur.x1, r.x)
+        cur.y1 = Math.min(cur.y1, r.y)
+        cur.x2 = Math.max(cur.x2, x2)
+        cur.y2 = Math.max(cur.y2, y2)
+      }
+    }
+    return [...byPage.entries()].map(([page, b]) => ({
+      pageIndex: page, x: b.x1, y: b.y1, width: b.x2 - b.x1, height: b.y2 - b.y1
+    }))
+  },
+
+  // Resolve the control (shape/picture/table/…) whose page bbox contains the
+  // hit point. getControlTextPositions lists the paragraph's controls; each
+  // bbox comes from getShapeBBox. Char-offset equality alone is unreliable
+  // (clicking past the inline char still means "that shape" visually), so the
+  // bbox containment test is authoritative.
+  hwpControlAtHit(hit) {
+    if (!this.doc || hit.paragraphIndex === undefined) return null
+    const section = hit.sectionIndex ?? 0
+    const paragraph = hit.paragraphIndex
+    let controls
+    try {
+      controls = JSON.parse(this.doc.getControlTextPositions(section, paragraph)) || []
+    } catch (_) {
+      return null
+    }
+    if (!Array.isArray(controls)) controls = controls.controls || []
+
+    for (const c of controls) {
+      const idx = c.controlIndex ?? c.control ?? c.index
+      if (idx === undefined) continue
+      let bbox = null
+      try {
+        bbox = JSON.parse(this.doc.getShapeBBox(section, paragraph, idx))
+      } catch (_) {
+        bbox = null
+      }
+      const inBBox =
+        bbox && hit.x !== undefined
+          ? hit.x >= bbox.x && hit.x <= bbox.x + bbox.width &&
+            hit.y >= bbox.y && hit.y <= bbox.y + bbox.height
+          : false
+      const atOffset =
+        c.charOffset !== undefined && hit.charOffset !== undefined &&
+        Math.abs(hit.charOffset - c.charOffset) <= 1
+      if (inBBox || (bbox == null && atOffset)) {
+        const el = this.findHwpControlElement(section, paragraph, idx)
+        return {
+          controlIndex: idx,
+          type: (el && el.type) || c.type || "shape",
+          text: (el && el.text) || "",
+          bbox
+        }
+      }
+    }
+    return null
+  },
+
+  findHwpControlElement(section, paragraph, controlIndex) {
+    try {
+      return this.collectElements().find(el => {
+        const r = el.ref || {}
+        return Number(r.section ?? 0) === Number(section) &&
+          Number(r.paragraph ?? 0) === Number(paragraph) &&
+          Number(r.control ?? -1) === Number(controlIndex)
+      }) || null
+    } catch (_) {
+      return null
+    }
+  },
+
+  // Highlight rects (page coords) for a text ref: the whole paragraph's (or
+  // cell paragraph's) line rects via the engine's selection-rect query.
+  hwpRectsForRef(ref) {
+    try {
+      let raw
+      if (ref.cell) {
+        const c = ref.cell
+        const para = c.cellParaIndex ?? 0
+        const len = this.doc.getCellParagraphLength(
+          ref.section, c.parentParaIndex, c.controlIndex, c.cellIndex, para)
+        raw = this.doc.getSelectionRectsInCell(
+          ref.section, c.parentParaIndex, c.controlIndex, c.cellIndex,
+          para, 0, para, len)
+      } else {
+        const len = this.paragraphLength(ref.section, ref.paragraph)
+        raw = this.doc.getSelectionRects(ref.section, ref.paragraph, 0, ref.paragraph, len)
+      }
+      const rects = JSON.parse(raw)
+      return Array.isArray(rects) ? rects : []
+    } catch (_) {
+      return []
     }
   },
 
@@ -743,24 +929,128 @@ const WasmHwpEditor = {
     }
   },
 
-  paintPickedPoint(hit, pageIndex) {
-    const rect = hit.cursorRect ||
-      (hit.x !== undefined ? { pageIndex, x: hit.x, y: hit.y, height: hit.height || 16 } : null)
-    if (!rect) return
-    const rectPageIndex = rect.pageIndex !== undefined ? rect.pageIndex : pageIndex
-    const overlay = this.pageOverlay(rectPageIndex)
+  // Repaint EVERY current pick's highlight (multi-select) plus the live hover
+  // preview. Clears + repaints the overlays through the normal selection pass
+  // so picks, hover, text selection and caret coexist.
+  paintPickedHighlights() {
+    this.renderSelection()
+    // drawCaret also repaints the adornments on the caret's page (it owns that
+    // overlay's clear/blink cycle) — don't paint that page twice below.
+    const caretPage =
+      this.caret && this.caret.cursorRect ? this.caret.cursorRect.pageIndex : null
+    if (this.caret) this.drawCaret(this.caret)
+
+    const pages = new Set()
+    for (const pick of this.currentDocumentPicks()) {
+      for (const rect of pick.rects || []) pages.add(rect.pageIndex ?? 0)
+    }
+    if (this.elementPickerEnabled && this.pickerHover) {
+      for (const rect of this.pickerHover.rects || []) pages.add(rect.pageIndex ?? 0)
+    }
+    if (caretPage != null) pages.delete(caretPage)
+    for (const page of pages) this.paintAdornmentsOnPage(page)
+  },
+
+  currentDocumentPicks() {
+    const picker = window.EcritsDocumentElementPicker
+    const picks = (picker && picker.picks) || []
+    const docPath = this.el.dataset.documentPath || ""
+    return picks.filter(p => p.document === docPath)
+  },
+
+  // Paint the pick highlights + hover preview that fall on ONE page's overlay,
+  // without clearing it (the caller owns the clear). Solid indigo for picks,
+  // dashed for the hover preview.
+  paintAdornmentsOnPage(pageIndex) {
+    const overlay = this.pageOverlay(pageIndex)
     if (!overlay) return
     const ctx = overlay.getContext("2d")
     if (!ctx) return
     const s = this.scale
-    const x = Math.max(0, rect.x * s - 3)
-    const y = Math.max(0, rect.y * s - 3)
-    const h = Math.max(14, rect.height || 16) * s
-    ctx.save()
-    ctx.strokeStyle = "rgba(29, 78, 216, 0.9)"
-    ctx.lineWidth = Math.max(2, 1.5 * s)
-    ctx.strokeRect(x, y, Math.max(8, 8 * s), h + 6)
-    ctx.restore()
+
+    for (const pick of this.currentDocumentPicks()) {
+      for (const rect of pick.rects || []) {
+        if ((rect.pageIndex ?? 0) !== pageIndex) continue
+        ctx.save()
+        ctx.fillStyle = "rgba(99, 102, 241, 0.16)"
+        ctx.strokeStyle = "rgba(79, 70, 229, 0.95)"
+        ctx.lineWidth = Math.max(2, 1.5 * s)
+        ctx.fillRect(rect.x * s, rect.y * s, rect.width * s, rect.height * s)
+        ctx.strokeRect(rect.x * s, rect.y * s, rect.width * s, rect.height * s)
+        ctx.restore()
+      }
+    }
+
+    const hover = this.elementPickerEnabled ? this.pickerHover : null
+    if (hover) {
+      for (const rect of hover.rects || []) {
+        if ((rect.pageIndex ?? 0) !== pageIndex) continue
+        ctx.save()
+        ctx.fillStyle = "rgba(99, 102, 241, 0.08)"
+        ctx.strokeStyle = "rgba(79, 70, 229, 0.9)"
+        ctx.lineWidth = Math.max(1.5, s)
+        ctx.setLineDash([6 * s, 4 * s])
+        ctx.fillRect(rect.x * s, rect.y * s, rect.width * s, rect.height * s)
+        ctx.strokeRect(rect.x * s, rect.y * s, rect.width * s, rect.height * s)
+        ctx.restore()
+      }
+    }
+  },
+
+  // ─── Picker hover preview (DOM-inspector style) ─────────────────────────
+
+  // rAF-throttle the document-level mousemove: hit-testing every move would
+  // hammer the WASM engine while the pointer sweeps across a page.
+  queuePickerHover(event) {
+    this.pickerHoverEvent = event
+    if (this.pickerHoverRaf) return
+    this.pickerHoverRaf = requestAnimationFrame(() => {
+      this.pickerHoverRaf = null
+      this.updatePickerHover(this.pickerHoverEvent)
+    })
+  },
+
+  updatePickerHover(event) {
+    if (!this.elementPickerEnabled || !this.doc || !event) {
+      this.setPickerHover(null)
+      return
+    }
+    const overPage = event.target && event.target.closest
+      ? event.target.closest("[data-role='local-hwp-page']")
+      : null
+    if (!overPage) {
+      this.setPickerHover(null)
+      return
+    }
+    const hitInfo = this.hitTestEvent(event)
+    if (!hitInfo) {
+      this.setPickerHover(null)
+      return
+    }
+    const { hit, pageIndex } = hitInfo
+    const ref = this.hwpRefFromHit(hit)
+    const control = ref.cell ? null : this.hwpControlAtHit(hit)
+    const rects = control && control.bbox
+      ? [control.bbox]
+      : this.hwpHighlightRects(ref, hit, pageIndex)
+    const key = JSON.stringify({ ref, control: control && control.controlIndex })
+    if (this.pickerHover && this.pickerHover.key === key) return
+    this.setPickerHover({
+      key,
+      rects: rects.map(r => ({ ...r, pageIndex: r.pageIndex ?? pageIndex }))
+    })
+  },
+
+  setPickerHover(hover) {
+    if (!hover && !this.pickerHover) return
+    this.pickerHover = hover
+    this.paintPickedHighlights()
+  },
+
+  // bindElementPickerTarget calls this on picker mode changes: leaving picker
+  // mode must erase the hover preview (picks are cleared by the picker module).
+  onElementPickerState(enabled) {
+    if (!enabled) this.setPickerHover(null)
   },
 
   // Refresh `cursorRect` from the engine for the current caret position. Used
@@ -797,9 +1087,11 @@ const WasmHwpEditor = {
     if (!ctx) return
 
     ctx.clearRect(0, 0, overlay.width, overlay.height)
-    // The caret and the selection highlight share this overlay; clearing it for
-    // the caret blink would wipe the highlight, so repaint the selection first.
+    // The caret, the selection highlight AND the picker adornments share this
+    // overlay; clearing it for the caret blink would wipe them, so repaint
+    // both before the caret.
     if (this.selection) this.paintSelectionOnPage(rect.pageIndex)
+    this.paintAdornmentsOnPage(rect.pageIndex)
     if (!this.caretBlinkOn) return
     const s = this.scale
     ctx.fillStyle = "#1d4ed8"

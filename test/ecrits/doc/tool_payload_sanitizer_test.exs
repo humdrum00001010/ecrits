@@ -48,4 +48,35 @@ defmodule Ecrits.Doc.ToolPayloadSanitizerTest do
 
     assert ToolPayloadSanitizer.sanitize_tool_payload("doc.context", payload) == payload
   end
+
+  test "doc.create deck arguments are compacted for transcript proof" do
+    payload = %{
+      "path" => "/tmp/deck.pptx",
+      "kind" => "pptx",
+      "deck" => %{
+        "title" => "Board update",
+        "subtitle" => "Q2",
+        "slides" => [
+          %{
+            "title" => "Problem",
+            "cards" => [
+              %{"title" => "Long", "body" => String.duplicate("full body ", 50)}
+            ]
+          },
+          %{"title" => "Solution", "roadmap" => ["A", "B", "C"]}
+        ]
+      }
+    }
+
+    assert ToolPayloadSanitizer.sanitize_tool_payload("doc.create", payload) == %{
+             "path" => "/tmp/deck.pptx",
+             "kind" => "pptx",
+             "deck" => %{
+               "title" => "Board update",
+               "subtitle" => "Q2",
+               "slides" => 2,
+               "slide_titles" => ["Problem", "Solution"]
+             }
+           }
+  end
 end

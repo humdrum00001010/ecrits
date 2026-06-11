@@ -451,6 +451,10 @@ defmodule Ecrits.Workspace.Session do
        # agents roster: %{agent_id => %{role: :foreground, pid: pid}}
        agents: %{},
        foreground_id: nil,
+       # Provider id the foreground agent was started under. The ACP adapter is
+       # bound at start and cannot be swapped live, so a re-attach requesting a
+       # DIFFERENT provider must restart the agent rather than reuse it.
+       foreground_provider: nil,
        # Per-doc ownership (invariant 2): %{document_id => agent_id}. The real home
        # of what Phase 2 temporarily parked in `Ecrits.Doc.Pool`.
        owners: %{},
@@ -635,30 +639,53 @@ defmodule Ecrits.Workspace.Session do
   defp ensure_foreground_agent(state, settings) do
     case current_foreground(state) do
       %{id: agent_id} = fg ->
-        _ = maybe_apply_settings(agent_id, settings)
-        {:ok, state, fg}
+        if provider_switch?(state.foreground_provider, Keyword.get(settings, :provider)) do
+          # The bound ACP adapter cannot be swapped live, so a re-attach (e.g. a
+          # page reload whose URL provider differs from the durable agent's) that
+          # requests a DIFFERENT provider must do a genuine restart — otherwise the
+          # stale adapter keeps serving turns under the new provider's model and the
+          # provider rejects them (observed: "'sonnet' not supported with Codex").
+          restart_foreground_agent(state, settings)
+        else
+          _ = maybe_apply_settings(agent_id, settings)
+          {:ok, state, fg}
+        end
 
       nil ->
-        agent_id = foreground_agent_id(state.path)
-        opts = Keyword.put(settings, :id, agent_id)
-
-        case AcpAgent.start_session(nil, opts) do
-          {:ok, %{id: ^agent_id}} ->
-            pid = AcpAgent.whereis(agent_id)
-
-            state = %{
-              state
-              | foreground_id: agent_id,
-                agents: Map.put(state.agents, agent_id, %{role: :foreground, pid: pid})
-            }
-
-            {:ok, state, %{id: agent_id, pid: pid}}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+        start_foreground_agent(state, settings)
     end
   end
+
+  defp start_foreground_agent(state, settings) do
+    agent_id = foreground_agent_id(state.path)
+    opts = Keyword.put(settings, :id, agent_id)
+
+    case AcpAgent.start_session(nil, opts) do
+      {:ok, %{id: ^agent_id}} ->
+        pid = AcpAgent.whereis(agent_id)
+
+        state = %{
+          state
+          | foreground_id: agent_id,
+            foreground_provider: Keyword.get(settings, :provider),
+            agents: Map.put(state.agents, agent_id, %{role: :foreground, pid: pid})
+        }
+
+        {:ok, state, %{id: agent_id, pid: pid}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # A provider SWITCH only when both the bound and requested providers are known
+  # and differ. A re-attach that doesn't pin a provider (nil) — or pins the same
+  # one — reuses the durable agent, preserving refresh-survival.
+  defp provider_switch?(bound, requested)
+       when is_binary(bound) and is_binary(requested),
+       do: bound != requested
+
+  defp provider_switch?(_bound, _requested), do: false
 
   # GENUINE restart for a provider change: terminate the current foreground agent
   # (its ACP adapter is bound at start and cannot be swapped), wait for the
@@ -678,6 +705,7 @@ defmodule Ecrits.Workspace.Session do
     state = %{
       state
       | foreground_id: nil,
+        foreground_provider: nil,
         agents: Map.delete(state.agents, agent_id)
     }
 
@@ -690,6 +718,7 @@ defmodule Ecrits.Workspace.Session do
         state = %{
           state
           | foreground_id: agent_id,
+            foreground_provider: Keyword.get(settings, :provider),
             agents: Map.put(state.agents, agent_id, %{role: :foreground, pid: pid})
         }
 

@@ -1066,3 +1066,9 @@ body[data-chat-rail-dragging="true"] {
 .mount-foot__sep {
   color: color-mix(in oklab, var(--cs-ink) 24%, transparent);
 }
+
+/* Document element picker: make picker mode visible while the pointer is over
+   the document (the editors set data-element-picker on their root). */
+[data-element-picker="true"] canvas {
+  cursor: crosshair;
+}

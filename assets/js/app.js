@@ -113,6 +113,10 @@ const LocalChatRailResizer = {
     this.fileTreeCollapsedWidth = 40
     this.editorMinWidth = 360
     this.desktopMinWidth = 1024
+    // Below this width the layout is single-pane (chat OR document, toggled).
+    // Between this and `desktopMinWidth` the editor + chat share a two-pane
+    // layout; the file tree only returns at `desktopMinWidth` (Tailwind `lg`).
+    this.singlePaneMaxWidth = 768
     this.mobilePane = "chat"
     this.dragging = false
     this.dragKind = null
@@ -220,7 +224,9 @@ const LocalChatRailResizer = {
     this.fileTreeShow = this.el.querySelector('[data-role="file-tree-show"]')
     this.editorShell = this.el.querySelector('[data-local-editor-shell="true"]')
     this.mobileOpenDocument = this.el.querySelector('[data-role="mobile-open-document"]')
-    this.mobileOpenChat = this.el.querySelector('[data-role="mobile-open-chat"]')
+    // Several "back to chat" buttons can exist at once (editor toolbar + the
+    // file-tree header shown on the single-pane document view).
+    this.mobileOpenChatButtons = [...this.el.querySelectorAll('[data-role="mobile-open-chat"]')]
   },
 
   handleLayoutClick(event) {
@@ -432,23 +438,30 @@ const LocalChatRailResizer = {
     this.el.setAttribute("data-mobile-pane", this.mobilePane)
 
     const showingDocument = this.mobilePane === "document"
-    const mobile = window.innerWidth < this.desktopMinWidth
+    // Single-pane (true mobile) only below `md`. Between `md` and `lg` the editor
+    // and chat share a two-pane layout (the file tree stays hidden via its static
+    // `max-lg:hidden`), so the document is always visible on those wider screens.
+    const singlePane = window.innerWidth < this.singlePaneMaxWidth
 
-    if (mobile) {
-      this.fileTreePanel?.classList.add("max-lg:hidden")
-      this.editorShell?.classList.toggle("max-lg:hidden", !showingDocument)
-      this.chatRail?.classList.toggle("max-lg:hidden", showingDocument)
+    if (singlePane) {
+      // The document view stacks the file tree (the file picker) above the
+      // editor so a phone user can both open documents and get back to chat.
+      this.fileTreePanel?.classList.toggle("max-md:hidden", !showingDocument)
+      this.editorShell?.classList.toggle("max-md:hidden", !showingDocument)
+      this.chatRail?.classList.toggle("max-md:hidden", showingDocument)
     } else {
-      this.fileTreePanel?.classList.remove("max-lg:hidden")
-      this.editorShell?.classList.remove("max-lg:hidden")
-      this.chatRail?.classList.remove("max-lg:hidden")
+      this.fileTreePanel?.classList.remove("max-md:hidden")
+      this.editorShell?.classList.remove("max-md:hidden")
+      this.chatRail?.classList.remove("max-md:hidden")
     }
 
     this.mobileOpenDocument?.setAttribute("aria-pressed", String(showingDocument))
-    this.mobileOpenChat?.setAttribute("aria-pressed", String(!showingDocument))
+    this.mobileOpenChatButtons?.forEach(btn =>
+      btn.setAttribute("aria-pressed", String(!showingDocument))
+    )
 
-    if (focus && mobile) {
-      const target = showingDocument ? this.mobileOpenChat : this.mobileOpenDocument
+    if (focus && singlePane) {
+      const target = showingDocument ? this.mobileOpenChatButtons?.[0] : this.mobileOpenDocument
       target?.focus({preventScroll: true})
     }
   },

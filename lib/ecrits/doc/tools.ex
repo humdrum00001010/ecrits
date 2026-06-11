@@ -119,14 +119,20 @@ defmodule Ecrits.Doc.Tools do
       "name" => "create",
       "description" =>
         "Create doc at `path`. Optional `from` clones an existing/open document and preserves format. " <>
-          "For a new PowerPoint, use kind:\"pptx\" with `deck`: %{title, subtitle, slides:[%{title, subtitle, cards, metrics, roadmap}]}; " <>
-          "this writes a real designed PPTX, opens it, and returns the document id. Save with doc.save.",
+          "For a NEW PowerPoint, kind:\"pptx\" with NO deck creates a blank presentation you then DESIGN " <>
+          "yourself, slide by slide and shape by shape, with doc.edit insert_slide / insert_shape " <>
+          "(full control of layout, geometry, color, fonts — preferred for a polished custom deck). " <>
+          "Alternatively pass `deck` %{title, subtitle, slides:[...]} for a quick fixed-template deck. " <>
+          "For a NEW Word document, kind:\"docx\" creates a blank text document you author with " <>
+          "doc.edit insert_paragraph (style: e.g. \"Heading 1\") / insert_table (cells then editable " <>
+          "as tbl[<name>]/cell[A1]) / insert_picture {ref, src} / insert_footnote / set_columns " <>
+          "{count, from, to}. Save with doc.save.",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
           "path" => %{"type" => "string", "minLength" => 1},
-          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx", "pptx"]},
+          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx", "docx", "pptx"]},
           "from" => %{
             "type" => "string",
             "minLength" => 1,
@@ -328,7 +334,43 @@ defmodule Ecrits.Doc.Tools do
         "Apply ONE structural edit (`op`), discriminated by op.op. " <>
           "Pass `ops:[...]` to apply many edits in ONE call (e.g. fill every blank cell) — " <>
           "far fewer round-trips. Best-effort: each op is applied independently and you get " <>
-          "a per-op result; one bad ref does not abort the others.",
+          "a per-op result; one bad ref does not abort the others. " <>
+          "SLIDE AUTHORING (pptx): insert_slide {name} adds slide page[<name>]; " <>
+          "insert_shape {page, service, name, x, y, w, h, text?, ...} places a shape at " <>
+          "x/y sized w/h in 1/100 mm. The 16:9 slide canvas is 28000 wide x 15750 tall — " <>
+          "keep x+w <= 28000 and y+h <= 15750 or content is CLIPPED off the slide. " <>
+          "A blank doc.create starts " <>
+          "with one empty slide page[page1]: design it as your FIRST slide, then insert_slide " <>
+          "for the rest. `service` is any LibreOffice UNO shape service — " <>
+          "com.sun.star.drawing.RectangleShape, .EllipseShape, .TextShape (textbox), .LineShape. " <>
+          "ALL other keys are raw UNO properties applied verbatim: FillColor/LineColor/CharColor " <>
+          "accept int 0xRRGGBB or a CSS \"#RRGGBB\" string. ALWAYS set FillColor explicitly on " <>
+          "Rectangle/Ellipse shapes (the engine default fill is an ugly green); shapes get NO " <>
+          "outline unless you set LineColor/LineStyle. CharHeight (pt), " <>
+          "CharWeight (150=bold), CharPosture (2=italic), CharFontName, TextHorizontalAdjust... " <>
+          "TEXT WRAPS at the box width and auto-grows DOWNWARD over whatever is below — " <>
+          "plan box height ~= lines x CharHeight x 45 (1/100 mm) and leave vertical gaps; " <>
+          "roughly 4.5 x CharHeight of width fits ONE character, so a 28000-wide box at " <>
+          "CharHeight 20 holds ~46 chars per line. " <>
+          "insert_picture {page, name, src, x, y, w, h} EMBEDS an image file (png/jpg " <>
+          "from the workspace) on the slide — use real images for hero visuals/logos. " <>
+          "The new shape's ref is page[<page>]/shape[<name>]: " <>
+          "set_geometry {ref, x?, y?, w?, h?} moves/resizes it, doc.set restyles it, " <>
+          "delete_node {ref} removes a shape (or a whole slide with ref page[<name>]). " <>
+          "Design like a real deck: background rects, accent bars, big titles, aligned grids, " <>
+          "a consistent palette. IMPORTANT: batch ONE SLIDE per doc.edit call (its insert_slide " <>
+          "+ that slide's shapes, 8-12 ops) — never the whole deck in one giant call. " <>
+          "After EACH slide, call doc.render {page} to SEE it and fix overlaps/overflow " <>
+          "before moving on. " <>
+          "WORD AUTHORING (docx): ops anchor on a body paragraph ref (\"p3\" from doc.find) or " <>
+          "\"end\". insert_paragraph {ref, text, style?} appends a new paragraph (style: a Writer " <>
+          "paragraph style, e.g. \"Heading 1\", \"Text Body\"); insert_table {ref, rows, cols, name} " <>
+          "adds a real table whose cells you then fill with replace_text/set_cell on " <>
+          "tbl[<name>]/cell[A1] refs; insert_picture {ref, src, w?, h?} embeds an inline image " <>
+          "(w/h in 1/100 mm, defaults to natural size); insert_footnote {ref, text} adds a numbered " <>
+          "footnote; set_columns {count, from, to} lays the from..to paragraph range out in N " <>
+          "columns — footnoted paragraphs must stay OUTSIDE that range (the engine refuses " <>
+          "otherwise). doc.render {page:\"1\"} works on docx too (PDF-backed) — render and CHECK your work.",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
@@ -349,7 +391,7 @@ defmodule Ecrits.Doc.Tools do
               "op" => %{
                 "type" => "string",
                 "enum" =>
-                  ~w(insert_text delete_range replace_text insert_paragraph delete_paragraph split merge insert_table insert_table_row delete_table_row insert_table_column delete_table_column merge_cells split_cell delete_node insert_picture set_cell insert_equation insert_footnote insert_endnote insert_shape set_columns)
+                  ~w(insert_text delete_range replace_text insert_paragraph delete_paragraph split merge insert_table insert_table_row delete_table_row insert_table_column delete_table_column merge_cells split_cell delete_node insert_picture set_cell insert_equation insert_footnote insert_endnote insert_shape set_columns insert_slide set_geometry)
               },
               "rows" => %{"type" => "integer", "description" => "insert_table: number of rows."},
               "cols" => %{
@@ -421,11 +463,42 @@ defmodule Ecrits.Doc.Tools do
               },
               "x" => %{
                 "type" => "integer",
-                "description" => "insert_shape: horizontal offset (HWPUNIT, default 0)."
+                "description" =>
+                  "insert_shape: horizontal position. Slide form (with `page`): 1/100 mm. HWP form (with `ref`): HWPUNIT offset (default 0)."
               },
               "y" => %{
                 "type" => "integer",
-                "description" => "insert_shape: vertical offset (HWPUNIT, default 0)."
+                "description" =>
+                  "insert_shape: vertical position. Slide form (with `page`): 1/100 mm. HWP form (with `ref`): HWPUNIT offset (default 0)."
+              },
+              "w" => %{
+                "type" => "integer",
+                "description" =>
+                  "insert_shape (slide form): shape width in 1/100 mm (the 16:9 slide canvas is 28000 wide). REQUIRED with `page`."
+              },
+              "h" => %{
+                "type" => "integer",
+                "description" =>
+                  "insert_shape (slide form): shape height in 1/100 mm (16:9 slide is 19050 tall). REQUIRED with `page`."
+              },
+              "page" => %{
+                "type" => "string",
+                "description" =>
+                  "insert_shape (slide form): target slide name (from insert_slide or doc.find refs page[<name>]). Selecting the slide form: raw UNO properties (FillColor, CharHeight, CharColor, CharWeight, CharFontName, ...) may be passed as additional keys and apply verbatim."
+              },
+              "service" => %{
+                "type" => "string",
+                "description" =>
+                  "insert_shape (slide form): UNO shape service, e.g. com.sun.star.drawing.RectangleShape / .EllipseShape / .TextShape / .LineShape. Default TextShape."
+              },
+              "name" => %{
+                "type" => "string",
+                "description" =>
+                  "insert_slide / insert_shape (slide form): REQUIRED name; the new ref becomes page[<name>] / page[<page>]/shape[<name>]."
+              },
+              "index" => %{
+                "type" => "integer",
+                "description" => "insert_slide: 0-based position (default: append at end)."
               },
               "fillColor" => %{
                 "type" => "string",
@@ -489,6 +562,38 @@ defmodule Ecrits.Doc.Tools do
         "required" => ["document"]
       },
       "annotations" => %{"readOnlyHint" => false}
+    },
+    %{
+      "namespace" => @namespace,
+      "name" => "render",
+      "description" =>
+        "Render slide(s) of a pptx as PNG images returned INLINE — you can SEE the actual " <>
+          "result. ALWAYS render after designing each slide and CHECK STRICTLY, in order: " <>
+          "(1) does ANY text touch or overlap other text or cross a box edge? " <>
+          "(2) is any element cut off by the slide edge? (3) is contrast readable? " <>
+          "(4) are columns/cards aligned on a consistent grid? " <>
+          "If ANYTHING fails — even slightly — fix it (doc.edit set_geometry to move/resize, " <>
+          "doc.set to restyle, delete_node to remove) and RE-RENDER to confirm before the " <>
+          "next slide; overlapping text is never acceptable. " <>
+          "Pass `page` (slide name) for one slide; omit to render every slide (max 8). " <>
+          "Works for HWP too: pass the 1-based page NUMBER as `page` (\"1\", \"2\", ...).",
+      "risk" => "read",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "document" => %{"type" => "string"},
+          "page" => %{
+            "type" => "string",
+            "description" => "Slide name (refs look like page[<name>]). Omit for all slides."
+          },
+          "width" => %{
+            "type" => "integer",
+            "description" => "Pixel width per image (default 880, max 1920)."
+          }
+        },
+        "required" => ["document"]
+      },
+      "annotations" => %{"readOnlyHint" => true}
     }
   ]
 
@@ -722,7 +827,120 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
+  def call(ctx, "doc.render", args) do
+    with {:ok, document} <- require_string(args, "document") do
+      case route(ctx, document) do
+        {:server, editor} ->
+          render_pages(editor, args)
+
+        {:browser, _lv} ->
+          # The browser WASM model is the authority for a viewed doc; the server
+          # copy would render stale content. The authoring flow is headless.
+          {:error,
+           error_json(
+             {:not_supported, "doc.render works on headless (server-backed) documents"}
+           )}
+
+        {:error, :not_found} ->
+          {:error, error_json(:not_found)}
+      end
+    else
+      {:error, reason} -> {:error, error_json(reason)}
+    end
+  end
+
   def call(_ctx, tool_name, _args), do: {:error, {:unknown_tool, tool_name}}
+
+  # Render the requested slide (or all, capped) to PNGs and return them as
+  # base64 under "__images__" — the MCP layer turns that into image content
+  # blocks so a vision-capable agent literally sees its slides.
+  defp render_pages(editor, args) do
+    width =
+      case get(args, ["width"]) do
+        w when is_integer(w) -> w |> max(320) |> min(1920)
+        _other -> 880
+      end
+
+    pages =
+      case get(args, ["page"]) do
+        page when is_binary(page) and page != "" ->
+          [page]
+
+        _other ->
+          # pptx: every slide by name. HWP has no named pages — default to
+          # page "1" (the agent passes "2", "3", … explicitly for more).
+          case editor |> slide_names() |> Enum.take(8) do
+            [] -> ["1"]
+            slides -> slides
+          end
+      end
+
+    if pages == [] do
+      {:error, error_json({:invalid_params, "document has no slides to render"})}
+    else
+      {images, failures} =
+        Enum.reduce(pages, {[], []}, fn page, {ok_acc, err_acc} ->
+          tmp =
+            Path.join(
+              System.tmp_dir!(),
+              "ecrits_render_#{System.unique_integer([:positive])}.png"
+            )
+
+          case Editor.render(editor, page, tmp, width: width) do
+            :ok ->
+              data = File.read!(tmp)
+              File.rm(tmp)
+              {[%{"page" => page, "data" => Base.encode64(data)} | ok_acc], err_acc}
+
+            {:error, reason} ->
+              File.rm(tmp)
+              {ok_acc, [%{"page" => page, "error" => format_render_error(reason)} | err_acc]}
+          end
+        end)
+
+      images = Enum.reverse(images)
+      failures = Enum.reverse(failures)
+
+      if images == [] do
+        {:error, error_json({:render_failed, failures})}
+      else
+        result = %{
+          "ok" => true,
+          "rendered" => Enum.map(images, & &1["page"]),
+          "width" => width,
+          "__images__" => images
+        }
+
+        result = if failures == [], do: result, else: Map.put(result, "failed", failures)
+        {:ok, result}
+      end
+    end
+  end
+
+  defp slide_names(editor) do
+    case Editor.elements(editor) do
+      {:ok, nodes} ->
+        nodes
+        |> Enum.filter(&(node_field(&1, "type") == "slide"))
+        |> Enum.map(&page_name_from_ref(node_field(&1, "ref")))
+        |> Enum.reject(&is_nil/1)
+
+      _other ->
+        []
+    end
+  end
+
+  defp page_name_from_ref("page[" <> rest) do
+    case String.split(rest, "]", parts: 2) do
+      [name, _] -> name
+      _other -> nil
+    end
+  end
+
+  defp page_name_from_ref(_ref), do: nil
+
+  defp format_render_error(%{} = reason), do: reason
+  defp format_render_error(reason), do: inspect(reason)
 
   defp resolve_save_document(ctx, document) do
     case Pool.info(pool(ctx), document) do
@@ -883,13 +1101,51 @@ defmodule Ecrits.Doc.Tools do
   # --- doc.create helpers --------------------------------------------------
 
   # doc.create without `from`: a blank engine template whose save target is `path`.
+  # PPTX with `deck` -> the designed PptxBuilder template; without `deck` -> a
+  # LibreOffice factory-blank presentation, the seed for IR-direct from-scratch
+  # authoring (insert_slide / insert_shape edit ops).
   defp create_blank(ctx, path, :pptx, args) do
     deck = get(args, ["deck"])
 
     if is_map(deck) do
       create_pptx(ctx, path, deck)
     else
-      {:error, error_json({:create_unsupported, Ecrits.Doc.Office})}
+      with :ok <- Ecrits.Doc.Office.create_blank_file(path, :pptx) do
+        broadcast_file_written(path)
+
+        case Pool.open(pool(ctx), path, kind: :pptx) do
+          {:ok, doc_id} ->
+            _ = maybe_claim_owner(ctx, doc_id)
+            {:ok, %{"document" => doc_id, "kind" => "pptx", "path" => path}}
+
+          {:error, reason} ->
+            {:error, error_json(reason)}
+        end
+      else
+        {:error, reason} -> {:error, error_json({:create_failed, reason})}
+      end
+    end
+  end
+
+  # docx mirrors the pptx factory-blank path: the engine's own "new text
+  # document" exported as docx, then opened for IR-direct Writer authoring
+  # (insert_paragraph / insert_table / insert_picture / insert_footnote /
+  # set_columns edit ops). The generic clause below requires backend.new/1,
+  # which Office (create_blank_file/2) does not expose.
+  defp create_blank(ctx, path, :docx, _args) do
+    with :ok <- Ecrits.Doc.Office.create_blank_file(path, :docx) do
+      broadcast_file_written(path)
+
+      case Pool.open(pool(ctx), path, kind: :docx) do
+        {:ok, doc_id} ->
+          _ = maybe_claim_owner(ctx, doc_id)
+          {:ok, %{"document" => doc_id, "kind" => "docx", "path" => path}}
+
+        {:error, reason} ->
+          {:error, error_json(reason)}
+      end
+    else
+      {:error, reason} -> {:error, error_json({:create_failed, reason})}
     end
   end
 

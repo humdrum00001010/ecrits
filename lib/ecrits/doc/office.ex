@@ -110,6 +110,17 @@ defmodule Ecrits.Doc.Office do
 
   def close(_handle), do: :ok
 
+  @doc """
+  Write a LibreOffice factory-blank document to `path` — the engine's own "new
+  presentation" (`private:factory/simpress`), exported as pptx/docx. This is the
+  from-scratch authoring seed: the caller opens it and builds slides/shapes via
+  IR-direct `insert_slide`/`insert_shape` edit ops.
+  """
+  @spec create_blank_file(String.t(), :docx | :pptx) :: :ok | {:error, term()}
+  def create_blank_file(path, kind) when is_binary(path) and kind in [:docx, :pptx] do
+    Instance.create_blank_file(path, kind)
+  end
+
   @impl true
   # Read a paragraph window from the document. The UNO walker returns the whole
   # element list (paragraphs + cells + shapes) in one JSON; we keep only the
@@ -202,7 +213,13 @@ defmodule Ecrits.Doc.Office do
   # discriminator (when the caller embeds one, e.g. {kind:"cell", BackColor})
   # is stripped — UNO routes by the ref/object, not a kind tag.
   def set(%{doc: _} = handle, ref, props) when is_binary(ref) and is_map(props) do
-    prop_map = props |> Map.delete("kind") |> Map.delete(:kind)
+    prop_map =
+      props
+      |> Map.delete("kind")
+      |> Map.delete(:kind)
+      |> Enum.flat_map(fn {k, v} -> normalize_office_prop(to_string(k), v) end)
+      |> Map.new()
+      |> pair_fill_styles()
 
     Instance.run(
       Instance,
@@ -271,6 +288,121 @@ defmodule Ecrits.Doc.Office do
   end
 
   @doc """
+  Rasterize one slide to a PNG at `path` via the engine's own
+  GraphicExportFilter (`render_page` uno_apply op). Pure read — the document is
+  not marked dirty. `width` is the pixel width; height follows the slide's
+  aspect ratio. This is the agent's visual feedback loop: render, look, fix.
+  """
+  @spec render_page(handle(), String.t(), String.t(), pos_integer()) :: :ok | {:error, term()}
+  # Writer (docx) arm: text documents have no Impress draw pages, so the
+  # GraphicExportFilter op below can't see them. Render via the engine's PDF
+  # export (writer_pdf_Export) + poppler's pdftoppm, page numbers are 1-based
+  # strings ("1", "2", …) like the HWP arm.
+  def render_page(%{doc: _, kind: :docx} = handle, page, path, width)
+      when is_binary(page) and is_binary(path) and is_integer(width) do
+    with {:ok, pageno} <- writer_page_number(page),
+         {:ok, pdftoppm} <- require_pdftoppm() do
+      tmp_pdf =
+        Path.join(
+          System.tmp_dir!(),
+          "ecrits_writer_render_#{System.unique_integer([:positive])}.pdf"
+        )
+
+      try do
+        Instance.run(
+          Instance,
+          handle,
+          fn session ->
+            case Native.uno_save(session, tmp_pdf, "writer_pdf_Export") do
+              :ok -> rasterize_pdf_page(pdftoppm, tmp_pdf, pageno, path, width)
+              {:error, reason} -> {:error, %{kind: "save_failed", message: inspect(reason)}}
+            end
+          end,
+          write?: false
+        )
+      after
+        File.rm(tmp_pdf)
+      end
+    end
+  end
+
+  def render_page(%{doc: _} = handle, page, path, width)
+      when is_binary(page) and is_binary(path) and is_integer(width) do
+    op = %{"op" => "render_page", "page" => page, "path" => path, "width" => width}
+
+    Instance.run(
+      Instance,
+      handle,
+      fn session ->
+        case Native.uno_apply(session, Jason.encode!(op)) do
+          :ok -> :ok
+          {:error, {kind, msg}} -> {:error, %{kind: to_string(kind), message: to_string(msg)}}
+          {:error, reason} -> {:error, reason}
+        end
+      end,
+      write?: false
+    )
+  end
+
+  def render_page(_handle, _page, _path, _width), do: {:error, :invalid_handle}
+
+  defp writer_page_number(page) do
+    case Integer.parse(to_string(page)) do
+      {n, ""} when n >= 1 ->
+        {:ok, n}
+
+      _other ->
+        {:error,
+         %{
+           kind: "invalid_params",
+           message: "docx page must be a 1-based page NUMBER string (\"1\", \"2\", …), got: #{inspect(page)}"
+         }}
+    end
+  end
+
+  defp require_pdftoppm do
+    case System.find_executable("pdftoppm") do
+      nil -> {:error, %{kind: "render_failed", message: "pdftoppm (poppler) not installed"}}
+      exe -> {:ok, exe}
+    end
+  end
+
+  # `-singlefile` writes exactly `<prefix>.png` for the one selected page; a
+  # page past the end produces no file, which we surface as no such page.
+  defp rasterize_pdf_page(pdftoppm, pdf, pageno, out_path, width) do
+    prefix = String.replace_suffix(out_path, ".png", "")
+
+    args = [
+      "-png",
+      "-singlefile",
+      "-f",
+      to_string(pageno),
+      "-l",
+      to_string(pageno),
+      "-scale-to-x",
+      to_string(width),
+      "-scale-to-y",
+      "-1",
+      pdf,
+      prefix
+    ]
+
+    case System.cmd(pdftoppm, args, stderr_to_stdout: true) do
+      {_out, 0} ->
+        png = prefix <> ".png"
+
+        cond do
+          png == out_path and File.exists?(png) -> :ok
+          File.exists?(png) -> File.rename(png, out_path)
+          true -> {:error, %{kind: "render_failed", message: "no such page: #{pageno}"}}
+        end
+
+      {out, code} ->
+        {:error, %{kind: "render_failed", message: "pdftoppm exit #{code}: #{out}"}}
+    end
+  end
+
+  @doc """
   The decoded element list (the UNO object-model walk). Each node is a map with
   at least `"ref"` and `"type"`, plus `"text"`/`"row"`/`"col"`/`"context"` where
   the walker provides them. Public so tests/callers can read the raw IR.
@@ -331,12 +463,209 @@ defmodule Ecrits.Doc.Office do
     {:ok, %{"op" => "insert_text", "ref" => ref, "text" => text}}
   end
 
+  # HWP-arm verb agents reuse on office tables: set the whole cell's text
+  # (tbl[<name>]/cell[A1] / shape-table cell refs both resolve server-side).
+  defp to_uno_op(%{op: "set_cell", ref: ref} = op) when is_binary(ref) do
+    {:ok, %{"op" => "set_text", "ref" => ref, "text" => op[:text] || ""}}
+  end
+
   defp to_uno_op(%{op: "delete_range", ref: ref}) when is_binary(ref) do
     {:ok, %{"op" => "delete", "ref" => ref}}
   end
 
+  defp to_uno_op(%{op: "insert_slide"} = op) do
+    {:ok, op |> Map.take([:op, :name, :index]) |> scalar_op_fields()}
+  end
+
+  defp to_uno_op(%{op: "insert_shape", page: page} = op) when is_binary(page) do
+    # IR-direct: every scalar field passes through verbatim — service (any UNO
+    # shape service), name, x/y/w/h (1/100 mm), text, and raw UNO props
+    # (FillColor, CharHeight, …). The NIF applies props with the same
+    # char-cursor/object routing as uno_set.
+    {:ok, op |> scalar_op_fields() |> pair_fill_styles() |> default_no_outline()}
+  end
+
+  defp to_uno_op(%{op: "insert_picture", page: page} = op) when is_binary(page) do
+    # Office form of the existing HWP verb: an embedded image is just a
+    # GraphicObjectShape whose GraphicURL points at the source file (the engine
+    # embeds the bytes into ppt/media on save). `src` is a plain path or
+    # file:// URL.
+    src = op[:src] || op[:path]
+
+    if is_binary(src) and src != "" do
+      op
+      |> Map.drop([:src, :path])
+      |> Map.merge(%{
+        op: "insert_shape",
+        service: "com.sun.star.drawing.GraphicObjectShape",
+        GraphicURL: to_file_url(src)
+      })
+      |> to_uno_op()
+    else
+      {:error,
+       {:invalid_op,
+        "office insert_picture requires \"src\" (image file path), plus page/name/x/y/w/h like insert_shape"}}
+    end
+  end
+
+  defp to_uno_op(%{op: "set_geometry", ref: ref} = op) when is_binary(ref) do
+    {:ok, op |> Map.take([:op, :ref, :x, :y, :w, :h]) |> scalar_op_fields()}
+  end
+
+  defp to_uno_op(%{op: "delete_node", ref: ref}) when is_binary(ref) do
+    {:ok, %{"op" => "delete_node", "ref" => ref}}
+  end
+
+  defp to_uno_op(%{op: "insert_shape"}) do
+    {:error,
+     {:invalid_op,
+      "office insert_shape requires \"page\" (slide name from doc.find / insert_slide), " <>
+        "\"service\" (a UNO shape service, e.g. com.sun.star.drawing.RectangleShape or " <>
+        ".TextShape), \"name\" (your ref becomes page[<page>]/shape[<name>]), and " <>
+        "x/y/w/h in 1/100 mm; other keys are raw UNO properties applied verbatim"}}
+  end
+
+  # ── Writer (docx) structural verbs ─────────────────────────────────────
+  # The UNO arm's text-document ops: same verb names as the HWP arm, anchored
+  # on body paragraph refs ("p3") or "end".
+
+  defp to_uno_op(%{op: "insert_paragraph"} = op) do
+    {:ok, op |> Map.take([:op, :ref, :text, :style]) |> Map.put_new(:ref, "end") |> scalar_op_fields()}
+  end
+
+  defp to_uno_op(%{op: "insert_table"} = op) do
+    {:ok,
+     op |> Map.take([:op, :ref, :rows, :cols, :name]) |> Map.put_new(:ref, "end") |> scalar_op_fields()}
+  end
+
+  defp to_uno_op(%{op: "insert_footnote"} = op) do
+    {:ok, op |> Map.take([:op, :ref, :text]) |> scalar_op_fields()}
+  end
+
+  # Writer inline image (no slide `page:` — that form maps to insert_shape
+  # above). `src` is a plain path or file:// URL; w/h in 1/100 mm (defaults to
+  # the image's natural size).
+  defp to_uno_op(%{op: "insert_picture"} = op) do
+    src = op[:src] || op[:path]
+
+    if is_binary(src) and src != "" do
+      {:ok,
+       %{op: "insert_picture", ref: op[:ref] || "end", src: to_file_url(src)}
+       |> Map.merge(Map.take(op, [:w, :h]))
+       |> Map.put_new(:w, op[:width])
+       |> Map.put_new(:h, op[:height])
+       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+       |> Map.new()
+       |> scalar_op_fields()}
+    else
+      {:error,
+       {:invalid_op,
+        "office insert_picture requires \"src\" (image file path); Writer form takes " <>
+          "ref(\"p<idx>\"|\"end\") + optional w/h in 1/100 mm, slide form takes page/name/x/y/w/h"}}
+    end
+  end
+
+  defp to_uno_op(%{op: "set_columns"} = op) do
+    {:ok, op |> Map.take([:op, :count, :from, :to, :name]) |> scalar_op_fields()}
+  end
+
   defp to_uno_op(%{op: verb}),
     do: {:error, {:not_supported, "office edit verb \"#{verb}\" is not supported by the UNO arm"}}
+
+  # The NIF's flat-JSON channel carries scalars only: stringify keys, drop nils
+  # and non-scalar values (structs/lists cannot cross; geometry is already
+  # flattened to x/y/w/h).
+  defp scalar_op_fields(op) do
+    op
+    |> Enum.flat_map(fn {k, v} ->
+      if is_binary(v) or is_number(v) or is_boolean(v),
+        do: normalize_office_prop(to_string(k), v),
+        else: []
+    end)
+    |> Map.new()
+  end
+
+  # The doc.edit op schema documents BOTH arms, so agents mix the HWP shape
+  # vocabulary into slide ops (observed live: `fillColor: "#0F1B2D"` — UNO has
+  # no such property, so the prop was SILENTLY dropped and every backdrop
+  # rendered in LibreOffice's default fill). Normalize the known aliases and
+  # accept CSS hex for any *Color property; drop keys that only mean something
+  # to the HWP arm rather than letting them no-op invisibly.
+  @hwp_only_shape_keys ~w(fillBgColor BackgroundColor shape_type width height)
+
+  defp normalize_office_prop(key, _value) when key in @hwp_only_shape_keys, do: []
+  defp normalize_office_prop("fillColor", value), do: normalize_office_prop("FillColor", value)
+  defp normalize_office_prop("lineColor", value), do: normalize_office_prop("LineColor", value)
+  defp normalize_office_prop("charColor", value), do: normalize_office_prop("CharColor", value)
+
+  # HWP-arm fillType maps onto UNO FillStyle (enum: 0=NONE, 1=SOLID).
+  defp normalize_office_prop("fillType", "none"), do: [{"FillStyle", 0}]
+  defp normalize_office_prop("fillType", "solid"), do: [{"FillStyle", 1}]
+  defp normalize_office_prop("fillType", _other), do: []
+
+  defp normalize_office_prop(key, value) when is_binary(value) do
+    if String.ends_with?(key, "Color") do
+      case css_hex_to_int(value) do
+        {:ok, int} -> [{key, int}]
+        :error -> [{key, value}]
+      end
+    else
+      [{key, value}]
+    end
+  end
+
+  defp normalize_office_prop(key, value), do: [{key, value}]
+
+  # Setting UNO FillColor/LineColor alone does NOT make the fill/line visible —
+  # the style enums stay in their default state and the OOXML exporter then
+  # writes NO fill element, so the theme default (green) paints the shape.
+  # Pair the color with its style=SOLID unless the caller set the style.
+  defp pair_fill_styles(fields) do
+    fields
+    |> maybe_pair("FillColor", "FillStyle", 1)
+    |> maybe_pair("LineColor", "LineStyle", 1)
+    # The default graphic style binds the fill to the THEME color (accent1 —
+    # LibreOffice green). A numeric FillColor does not clear that binding and
+    # the OOXML exporter prefers the theme ref (writes schemeClr accent1), so
+    # the concrete color never reaches the file. -1 = no theme color. The LINE
+    # channel has the same binding (exported a schemeClr outline that Keynote's
+    # importer stumbles over even when LineColor was set explicitly).
+    |> maybe_pair("FillColor", "FillColorTheme", -1)
+    |> maybe_pair("LineColor", "LineColorTheme", -1)
+  end
+
+  defp maybe_pair(fields, color_key, style_key, solid) do
+    if Map.has_key?(fields, color_key) and not Map.has_key?(fields, style_key) do
+      Map.put(fields, style_key, solid)
+    else
+      fields
+    end
+  end
+
+  # A new shape with no Line* keys gets NO outline rather than LibreOffice's
+  # default (a solid green border on every card/circle). Callers wanting a
+  # border say so (LineColor / LineStyle / LineWidth).
+  defp default_no_outline(fields) do
+    if Enum.any?(Map.keys(fields), &String.starts_with?(&1, "Line")) do
+      fields
+    else
+      Map.put(fields, "LineStyle", 0)
+    end
+  end
+
+  defp to_file_url("file://" <> _ = url), do: url
+  defp to_file_url(path), do: "file://" <> Path.expand(path)
+
+  defp css_hex_to_int("#" <> hex), do: css_hex_to_int(hex)
+
+  defp css_hex_to_int(hex) when byte_size(hex) == 6 do
+    case Integer.parse(hex, 16) do
+      {int, ""} -> {:ok, int}
+      _other -> :error
+    end
+  end
+
+  defp css_hex_to_int(_other), do: :error
 
   # --- find / read / outline helpers ---------------------------------------
 

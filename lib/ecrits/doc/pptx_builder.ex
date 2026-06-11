@@ -73,50 +73,15 @@ defmodule Ecrits.Doc.PptxBuilder do
     end
   end
 
+  # A deck with no slides builds a SINGLE cover from the caller's own title/
+  # subtitle. It must never fabricate a multi-slide demo deck (the old "FinMate
+  # AI" template with invented metrics/cards/roadmap) — content the caller never
+  # authored. Real decks come from the caller supplying `slides`.
   defp default_slides(deck) do
-    title = text_value(map_get(deck, "title", "FinMate AI"))
-    subtitle = text_value(map_get(deck, "subtitle", "AI financial copilot MVP"))
-
     [
       %{
-        "title" => title,
-        "subtitle" => subtitle,
-        "section" => "Overview",
-        "metrics" => [
-          %{"label" => "Prep time", "value" => "30%", "delta" => "down"},
-          %{"label" => "Recommendation lift", "value" => "18%", "delta" => "up"},
-          %{"label" => "Risk detection", "value" => "2.4x", "delta" => "lift"}
-        ]
-      },
-      %{
-        "title" => "Problem",
-        "subtitle" => "Finance workflows need faster context, explainability, and follow-up.",
-        "cards" => [
-          %{"title" => "Scattered context", "body" => "Customer data lives across systems."},
-          %{
-            "title" => "Weak explanations",
-            "body" => "Advisors need visible recommendation reasons."
-          },
-          %{
-            "title" => "Missed follow-up",
-            "body" => "Risk changes are not connected to next actions."
-          }
-        ]
-      },
-      %{
-        "title" => "Solution",
-        "subtitle" => "One flow turns raw financial context into an actionable plan.",
-        "roadmap" => ["Collect", "Summarize", "Recommend", "Explain", "Follow up"]
-      },
-      %{
-        "title" => "Impact",
-        "subtitle" => "A six-week MVP can prove measurable advisor productivity.",
-        "metrics" => [
-          %{"label" => "MVP", "value" => "6 weeks", "delta" => "plan"},
-          %{"label" => "Coverage", "value" => "3 journeys", "delta" => "scope"},
-          %{"label" => "Pilot", "value" => "50 users", "delta" => "target"}
-        ],
-        "roadmap" => ["Week 1", "Week 2", "Week 4", "Week 6"]
+        "title" => text_value(map_get(deck, "title", "")),
+        "subtitle" => text_value(map_get(deck, "subtitle", ""))
       }
     ]
   end
@@ -467,8 +432,10 @@ defmodule Ecrits.Doc.PptxBuilder do
       end)
 
     if cards == [] do
+      # No `cards` supplied: fall back to `bullets` if the caller gave them, but
+      # NEVER fabricate placeholder cards — a slide that omits both renders empty.
       slide
-      |> map_get("bullets", ["Clear goal", "Focused execution", "Measurable result"])
+      |> map_get("bullets", [])
       |> List.wrap()
       |> Enum.take(3)
       |> Enum.map(fn bullet -> %{title: text_value(bullet), body: ""} end)
@@ -492,20 +459,14 @@ defmodule Ecrits.Doc.PptxBuilder do
         }
       end)
 
-    if metrics == [] do
-      [
-        %{label: "Speed", value: "30%", delta: "down"},
-        %{label: "Accuracy", value: "18%", delta: "up"},
-        %{label: "Coverage", value: "2.4x", delta: "lift"}
-      ]
-    else
-      metrics
-    end
+    # Never fabricate placeholder metrics: a slide that omits `metrics` renders no
+    # metric cards rather than seeding plausible-but-false numbers.
+    metrics
   end
 
   defp roadmap(slide) do
     slide
-    |> map_get("roadmap", map_get(slide, "steps", ["Discover", "Design", "Build", "Verify"]))
+    |> map_get("roadmap", map_get(slide, "steps", []))
     |> List.wrap()
     |> Enum.map(&text_value/1)
     |> Enum.reject(&(&1 == ""))

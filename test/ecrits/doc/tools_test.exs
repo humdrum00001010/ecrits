@@ -31,16 +31,17 @@ defmodule Ecrits.Doc.ToolsTest do
       names = Tools.tools() |> Enum.map(&(&1["namespace"] <> "." <> &1["name"]))
 
       for n <- ~w(doc.context doc.list doc.open doc.create doc.read doc.find
-                  doc.get doc.set doc.edit doc.save) do
+                  doc.get doc.set doc.edit doc.save doc.render) do
         assert n in names, "expected #{n} in tool catalog"
       end
 
-      # The consolidated surface is exactly ten tools; the former doc.inspect and
-      # doc.apply_style are folded into doc.get / doc.set.
+      # The consolidated surface is eleven tools (ten + doc.render, the visual
+      # feedback loop); the former doc.inspect and doc.apply_style are folded
+      # into doc.get / doc.set.
       assert "doc.read_table" not in names
       assert "doc.inspect" not in names
       assert "doc.apply_style" not in names
-      assert length(names) == 10
+      assert length(names) == 11
 
       for tool <- Tools.tools() do
         assert is_map(tool["inputSchema"])
@@ -156,11 +157,18 @@ defmodule Ecrits.Doc.ToolsTest do
       File.rm(path)
       on_exit(fn -> File.rm(path) end)
 
-      assert {:error, %{"error" => "create_unsupported", "backend" => backend}} =
-               Tools.call(ctx(pool), "doc.create", %{"path" => path})
+      # A no-deck .pptx create routes to the Office factory-blank path (the
+      # IR-direct from-scratch authoring seed), never the HWP engine. With the
+      # UNO arm built it yields a real blank pptx on disk; without it, a
+      # structured office create error — in neither case HWP bytes.
+      case Tools.call(ctx(pool), "doc.create", %{"path" => path}) do
+        {:ok, %{"kind" => "pptx", "path" => ^path}} ->
+          assert {:ok, "PK" <> _} = File.read(path)
 
-      assert backend =~ "Ecrits.Doc.Office"
-      refute File.exists?(path)
+        {:error, %{"error" => err}} ->
+          assert err =~ "create_failed" or err =~ "create_unsupported"
+          refute File.exists?(path)
+      end
     end
 
     test "the create tool schema advertises the `from` clone param" do

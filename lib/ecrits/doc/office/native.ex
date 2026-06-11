@@ -102,6 +102,48 @@ defmodule Ecrits.Doc.Office.Native do
     _ -> :ok
   end
 
+  @doc """
+  One-shot: write a LibreOffice factory-blank document to `path` (the engine's
+  own "new presentation/document", NOT a hand-rolled template). Opens
+  `private:factory/simpress|swriter`, exports with the kind's filter, and closes
+  the session; callers reopen the file via `open_session/2`.
+  """
+  @spec create_blank_file(String.t(), :docx | :pptx) :: :ok | {:error, term()}
+  def create_blank_file(path, kind) when is_binary(path) do
+    factory =
+      case kind do
+        :pptx -> "private:factory/simpress"
+        _other -> "private:factory/swriter"
+      end
+
+    with {:ok, install_dir} <- install_dir(),
+         {:ok, abs} <- absolute_path(path),
+         :ok <- File.mkdir_p(Path.dirname(abs)) do
+      case Native.uno_open(install_dir, factory, profile_url(abs)) do
+        {:ok, session} ->
+          try do
+            case Native.uno_save(session, abs, filter_for(kind)) do
+              :ok -> :ok
+              {:error, reason} -> {:error, reason}
+            end
+          after
+            _ = close_session(session)
+          end
+
+        {:error, :uno_unavailable} ->
+          {:error, {:office_unavailable, "libreofficex UNO arm not built"}}
+
+        {:error, {:open_failed, msg}} ->
+          {:error, {:open_failed, to_string(msg)}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  rescue
+    e in ErlangError -> {:error, {:office_unavailable, inspect(e.original)}}
+  end
+
   # ── resolution helpers (mirrors Ecrits.Doc.Office) ─────────────────
 
   @doc "Resolve the LOK install dir (app config -> LOK_INSTALL_DIR -> ~/Desktop/core)."

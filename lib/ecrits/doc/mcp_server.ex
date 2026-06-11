@@ -87,6 +87,15 @@ defmodule Ecrits.Doc.MCPServer do
 
   defp run_tool(ctx, name, args, state) do
     case Tools.call(ctx, name, args) do
+      {:ok, %{"__images__" => images} = result} when is_list(images) ->
+        # Render results: strip the base64 payloads from the JSON/structured
+        # body (they would blow the text channel) and attach each as a real MCP
+        # image content block, so a vision-capable agent SEES its slides.
+        public = Map.delete(result, "__images__")
+
+        content = [json_content(public) | Enum.map(images, &image_content/1)]
+        {:ok, %{content: content, structuredContent: public}, state}
+
       {:ok, result} ->
         {:ok, %{content: [json_content(result)], structuredContent: result}, state}
 
@@ -153,6 +162,10 @@ defmodule Ecrits.Doc.MCPServer do
 
   defp json_content(value) do
     %{type: "text", text: Jason.encode!(value)}
+  end
+
+  defp image_content(%{"data" => data} = image) do
+    %{type: "image", data: data, mimeType: Map.get(image, "mimeType", "image/png")}
   end
 
   defp text_content(text) do

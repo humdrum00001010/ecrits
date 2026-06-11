@@ -31,7 +31,10 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # updates (tool calls, text deltas) is making progress and must NOT be killed
   # just for being long — only a genuinely STALLED turn (no activity for this
   # long) fails. Reset on every session update. Bounded by the total ceiling.
-  @idle_timeout 300_000
+  # 10 min: ACP surfaces only COMPLETED events, so a provider generating one
+  # long tool call (e.g. a whole-slide ops batch when designing a pptx) is
+  # silent-but-active the entire generation; 5 min killed real turns.
+  @idle_timeout 600_000
 
   @doc """
   Returns a `Stream` of normalized chat-rail events for one turn.

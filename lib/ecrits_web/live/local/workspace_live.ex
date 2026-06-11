@@ -834,14 +834,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           phx-hook="LocalChatRailResizer"
           data-mobile-pane="chat"
           style="--local-editor-z: 0; --local-agent-rail-z: 30"
-          class="isolate grid h-full min-h-0 grid-cols-1 overflow-hidden lg:grid-cols-[var(--local-file-tree-width,260px)_minmax(0,1fr)_var(--local-chat-rail-width,340px)] lg:overflow-hidden"
+          class="isolate grid h-full min-h-0 grid-cols-1 overflow-hidden max-lg:grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[minmax(0,1fr)_var(--local-chat-rail-width,340px)] lg:grid-cols-[var(--local-file-tree-width,260px)_minmax(0,1fr)_var(--local-chat-rail-width,340px)] lg:overflow-hidden"
         >
           <aside
             id="local-file-tree-panel"
             data-component="repo-browser"
             data-local-file-tree-panel="true"
             data-collapsed="false"
-            class="relative flex min-h-0 flex-col overflow-hidden border-b border-base-300 bg-base-100 max-lg:hidden lg:border-b-0 lg:border-r"
+            class="relative flex min-h-0 flex-col overflow-hidden border-b border-base-300 bg-base-100 max-md:hidden max-lg:col-start-1 max-lg:row-start-1 lg:border-b-0 lg:border-r"
           >
             <div
               id="local-file-tree-content"
@@ -859,6 +859,17 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                       {workspace_title(@workspace)}
                     </h1>
                   </div>
+                  <button
+                    id="local-file-tree-open-chat"
+                    type="button"
+                    data-role="mobile-open-chat"
+                    aria-controls="local-editor-shell local-agent-sidebar"
+                    aria-pressed="false"
+                    class="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content md:hidden"
+                  >
+                    <.icon name="hero-chat-bubble-left-right" class="size-3.5" />
+                    <span>Chat</span>
+                  </button>
                   <button
                     id="local-file-tree-hide"
                     type="button"
@@ -920,7 +931,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           <section
             id="local-editor-shell"
             data-local-editor-shell="true"
-            class="relative z-[var(--local-editor-z)] h-full min-h-0 min-w-0 overflow-hidden bg-[var(--cs-bg)] max-lg:hidden"
+            class="relative z-[var(--local-editor-z)] h-full min-h-0 min-w-0 overflow-hidden bg-[var(--cs-bg)] max-md:hidden max-lg:col-start-1 max-lg:row-start-2"
           >
             <EditorSurface.local_document
               :if={@active_document || @open_documents != []}
@@ -979,7 +990,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             data-component="chat-rail"
             data-local-chat-rail="true"
             data-provider-key={@local_agent_provider.key}
-            class="relative z-[var(--local-agent-rail-z)] flex h-full min-h-0 flex-col overflow-visible border-t border-base-300 bg-base-200 text-base-content lg:border-l lg:border-t-0"
+            class="relative z-[var(--local-agent-rail-z)] flex h-full min-h-0 flex-col overflow-visible border-t border-base-300 bg-base-200 text-base-content max-lg:row-start-1 max-lg:row-span-2 md:col-start-2 md:border-l md:border-t-0 lg:col-start-3"
           >
             <button
               id="local-agent-rail-resizer"
@@ -1068,7 +1079,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                 data-role="mobile-open-document"
                 aria-controls="local-editor-shell local-agent-sidebar"
                 aria-pressed="false"
-                class="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content lg:hidden"
+                class="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content md:hidden"
               >
                 <.icon name="hero-document-text" class="size-3.5" />
                 <span>Document</span>
@@ -3881,13 +3892,18 @@ defmodule EcritsWeb.Local.WorkspaceLive do
          name: name,
          arguments: arguments
        }) do
+    input = agent_tool_payload(name, arguments)
+
     socket
     |> close_local_agent_text_segment()
     |> maybe_remove_empty_agent_placeholder()
-    |> update(:local_agent_active_tools, &Map.put(&1 || %{}, tool_call_id, name))
+    |> update(
+      :local_agent_active_tools,
+      &Map.put(&1 || %{}, tool_call_id, %{name: name, input: input})
+    )
     |> stream_insert(
       :local_agent_items,
-      agent_tool_item(tool_call_id, name, :running, agent_tool_payload(name, arguments))
+      agent_tool_item(tool_call_id, name, :running, tool_io_body(input, nil))
     )
   end
 
@@ -3897,11 +3913,15 @@ defmodule EcritsWeb.Local.WorkspaceLive do
          name: name,
          result: result
        }) do
+    active = Map.get(socket.assigns.local_agent_active_tools || %{}, tool_call_id, %{})
+    input = active[:input]
+    output = agent_tool_payload(name, result)
+
     socket
     |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
     |> stream_insert(
       :local_agent_items,
-      agent_tool_item(tool_call_id, name, :completed, agent_tool_payload(name, result))
+      agent_tool_item(tool_call_id, name, :completed, tool_io_body(input, output))
     )
   end
 
@@ -3911,9 +3931,15 @@ defmodule EcritsWeb.Local.WorkspaceLive do
          name: name,
          reason: reason
        }) do
+    active = Map.get(socket.assigns.local_agent_active_tools || %{}, tool_call_id, %{})
+    input = active[:input]
+
     socket
     |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
-    |> stream_insert(:local_agent_items, agent_tool_item(tool_call_id, name, :failed, reason))
+    |> stream_insert(
+      :local_agent_items,
+      agent_tool_item(tool_call_id, name, :failed, tool_io_body(input, reason))
+    )
   end
 
   defp apply_local_agent_event(socket, %{
@@ -3922,10 +3948,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
          name: name,
          arguments: arguments
        }) do
+    input = agent_tool_payload(name, arguments)
+
     stream_insert(
       socket |> maybe_remove_empty_agent_placeholder(),
       :local_agent_items,
-      agent_tool_item(tool_call_id, name, :approval_required, agent_tool_payload(name, arguments))
+      agent_tool_item(tool_call_id, name, :approval_required, tool_io_body(input, nil))
     )
   end
 
@@ -4061,7 +4089,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             "#{turn_id}-#{index}"
 
         name = item_field(item, :name) || item_field(item, :title) || "tool"
-        body = agent_tool_body(name, item_field(item, :body))
+        input = agent_tool_body(name, item_field(item, :input))
+        output = agent_tool_body(name, item_field(item, :output))
+        body = tool_io_body(input, output) || agent_tool_body(name, item_field(item, :body))
 
         stream_insert(
           socket,
@@ -4257,11 +4287,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     active = socket.assigns[:local_agent_active_tools] || %{}
 
     socket =
-      Enum.reduce(active, socket, fn {tool_call_id, name}, acc ->
+      Enum.reduce(active, socket, fn {tool_call_id, tool}, acc ->
+        name = active_tool_name(tool)
+        input = active_tool_input(tool)
+
         stream_insert(
           acc,
           :local_agent_items,
-          agent_tool_item(tool_call_id, name, :failed, reason)
+          agent_tool_item(tool_call_id, name, :failed, tool_io_body(input, reason))
         )
       end)
 
@@ -4297,6 +4330,29 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       body: body || ""
     }
   end
+
+  defp active_tool_name(%{name: name}), do: name
+  defp active_tool_name(name) when is_binary(name), do: name
+  defp active_tool_name(_tool), do: "tool"
+
+  defp active_tool_input(%{input: input}), do: input
+  defp active_tool_input(_tool), do: nil
+
+  defp tool_io_body(input, output) do
+    parts =
+      []
+      |> maybe_tool_io_part("Input", input)
+      |> maybe_tool_io_part("Output", output)
+
+    case parts do
+      [] -> nil
+      _ -> Enum.join(parts, "\n\n")
+    end
+  end
+
+  defp maybe_tool_io_part(parts, _label, nil), do: parts
+  defp maybe_tool_io_part(parts, _label, ""), do: parts
+  defp maybe_tool_io_part(parts, label, body), do: parts ++ ["#{label}:\n#{body}"]
 
   defp agent_assistant_dom_id(turn_id, segment), do: "local-agent-assistant-#{turn_id}-#{segment}"
   defp agent_reasoning_dom_id(turn_id), do: "local-agent-thinking-#{turn_id}"

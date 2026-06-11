@@ -26,7 +26,8 @@ defmodule Ecrits.Doc.Op do
             split merge insert_table insert_table_row delete_table_row
             insert_table_column delete_table_column merge_cells split_cell
             delete_node insert_picture set_cell
-            insert_equation insert_footnote insert_endnote insert_shape set_columns)
+            insert_equation insert_footnote insert_endnote insert_shape set_columns
+            insert_slide set_geometry)
   @protocol_metadata_keys ~w(base_revision base_version revision version current_revision
                              current_version stale_revision stale_version saved_revision
                              saved_version rebased)a
@@ -143,6 +144,28 @@ defmodule Ecrits.Doc.Op do
     end
   end
 
+  # Two arms share the verb: the HWP form places a shape at a text ref
+  # (ref + width/height in HWPUNIT); the Office/Impress form is IR-direct —
+  # page + UNO service + name + x/y/w/h in 1/100 mm, all other keys raw UNO
+  # properties passed through verbatim.
+  defp validate("insert_shape", %{page: page} = op) when is_binary(page) do
+    cond do
+      not is_binary(op[:name]) or op[:name] == "" ->
+        {:error,
+         {:invalid_op,
+          "insert_shape (slide) requires a \"name\" — the new shape's ref becomes page[<page>]/shape[<name>]"}}
+
+      not (is_integer(op[:x]) and is_integer(op[:y]) and is_integer(op[:w]) and
+               is_integer(op[:h])) ->
+        {:error,
+         {:invalid_op,
+          "insert_shape (slide) requires integer \"x\", \"y\", \"w\", \"h\" in 1/100 mm (the 16:9 slide canvas is 28000 x 15750)"}}
+
+      true ->
+        {:ok, op}
+    end
+  end
+
   defp validate("insert_shape", %{} = op) do
     cond do
       is_nil(op[:ref]) ->
@@ -156,6 +179,57 @@ defmodule Ecrits.Doc.Op do
 
       true ->
         {:ok, op}
+    end
+  end
+
+  # Office/Impress form (page present): an embedded image placed like a shape.
+  # The HWP form (ref + src) keeps its existing engine-side validation.
+  defp validate("insert_picture", %{page: page} = op) when is_binary(page) do
+    cond do
+      not is_binary(op[:src] || op[:path]) ->
+        {:error,
+         {:invalid_op, "insert_picture (slide) requires \"src\" — the image file path to embed"}}
+
+      not is_binary(op[:name]) or op[:name] == "" ->
+        {:error,
+         {:invalid_op,
+          "insert_picture (slide) requires a \"name\" — the ref becomes page[<page>]/shape[<name>]"}}
+
+      not (is_integer(op[:x]) and is_integer(op[:y]) and is_integer(op[:w]) and
+               is_integer(op[:h])) ->
+        {:error,
+         {:invalid_op,
+          "insert_picture (slide) requires integer \"x\", \"y\", \"w\", \"h\" in 1/100 mm"}}
+
+      true ->
+        {:ok, op}
+    end
+  end
+
+  defp validate("set_geometry", %{} = op) do
+    cond do
+      not is_binary(op[:ref]) or op[:ref] == "" ->
+        {:error,
+         {:invalid_op,
+          "set_geometry requires a shape \"ref\" (page[<page>]/shape[<name>]) to move/resize"}}
+
+      not Enum.any?([:x, :y, :w, :h], &is_integer(op[&1])) ->
+        {:error,
+         {:invalid_op,
+          "set_geometry requires at least one integer of \"x\", \"y\", \"w\", \"h\" (1/100 mm)"}}
+
+      true ->
+        {:ok, op}
+    end
+  end
+
+  defp validate("insert_slide", %{} = op) do
+    if is_binary(op[:name]) and op[:name] != "" do
+      {:ok, op}
+    else
+      {:error,
+       {:invalid_op,
+        "insert_slide requires a \"name\" — the new slide's ref becomes page[<name>]"}}
     end
   end
 

@@ -76,4 +76,69 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^t2}}, 2_000
     assert length(AcpAgent.agent_snapshot(agent_id).transcript) == 1
   end
+
+  test "re-attach with a DIFFERENT provider restarts the agent (adapter is bound at start)",
+       %{path: path, ws: ws} do
+    agent_id = ws.agent_id
+    old_pid = AcpAgent.whereis(agent_id)
+    assert is_pid(old_pid)
+
+    # Give the codex agent a non-empty transcript.
+    {:ok, %{id: turn_id}} = AcpAgent.send_turn(nil, agent_id, "hello from codex")
+    Session.subscribe_agent(agent_id)
+    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+    assert AcpAgent.agent_snapshot(agent_id).transcript != []
+
+    # A plain ATTACH (not restart) whose provider differs from the bound agent's —
+    # this is the page-reload seam: the durable path-keyed agent was started under
+    # codex, but the new mount requests claude. The ACP adapter cannot be swapped
+    # live, so attach MUST restart rather than silently reuse the codex adapter.
+    {:ok, ws2} =
+      Session.attach(path,
+        provider: "claude",
+        adapter_opts: [
+          exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+          script: [{:text_delta, "claude reply"}]
+        ],
+        workspace_root: path
+      )
+
+    assert ws2.agent_id == agent_id
+    new_pid = AcpAgent.whereis(agent_id)
+    assert is_pid(new_pid)
+    refute new_pid == old_pid, "attach with a new provider must restart the bound agent"
+    refute Process.alive?(old_pid)
+
+    # Fresh session under the same stable id: empty transcript, idle.
+    snapshot = AcpAgent.agent_snapshot(agent_id)
+    assert snapshot.transcript == []
+    assert snapshot.status == :idle
+  end
+
+  test "re-attach with the SAME provider reuses the agent (refresh-survival is preserved)",
+       %{path: path, ws: ws} do
+    agent_id = ws.agent_id
+    old_pid = AcpAgent.whereis(agent_id)
+
+    {:ok, %{id: turn_id}} = AcpAgent.send_turn(nil, agent_id, "hello from codex")
+    Session.subscribe_agent(agent_id)
+    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+
+    # A browser refresh re-attaches with the SAME provider. The durable agent —
+    # its pid, provider thread and transcript — must be preserved, NOT restarted.
+    {:ok, ws2} =
+      Session.attach(path,
+        provider: "codex",
+        adapter_opts: [
+          exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+          script: [{:text_delta, "codex reply"}]
+        ],
+        workspace_root: path
+      )
+
+    assert ws2.agent_id == agent_id
+    assert AcpAgent.whereis(agent_id) == old_pid
+    assert Process.alive?(old_pid)
+    assert AcpAgent.agent_snapshot(agent_id).transcript != []
+  end
 end

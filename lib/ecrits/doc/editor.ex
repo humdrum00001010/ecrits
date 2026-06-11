@@ -72,6 +72,14 @@ defmodule Ecrits.Doc.Editor do
   def save(editor, opts \\ []), do: GenServer.call(editor, {:save, opts})
 
   @doc """
+  Rasterize one slide/page to a PNG at `path` (read-only; Office/Impress docs).
+  Backends without `render_page/4` return `{:error, {:not_supported, _}}`.
+  """
+  @spec render(t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def render(editor, page, path, opts \\ []),
+    do: GenServer.call(editor, {:render, page, path, opts}, 60_000)
+
+  @doc """
   Whether the document has unsaved edits.
   """
   @spec dirty?(t()) :: boolean()
@@ -193,6 +201,17 @@ defmodule Ecrits.Doc.Editor do
 
   def handle_call({:get, ref, props}, _from, st),
     do: {:reply, st.backend.get(st.handle, ref, props), st}
+
+  def handle_call({:render, page, path, opts}, _from, st) do
+    result =
+      if function_exported?(st.backend, :render_page, 4) do
+        st.backend.render_page(st.handle, page, path, Keyword.get(opts, :width, 1280))
+      else
+        {:error, {:not_supported, "render is not supported by this document backend"}}
+      end
+
+    {:reply, result, st}
+  end
 
   def handle_call({:save, opts}, _from, st) do
     case save_via(st, opts) do

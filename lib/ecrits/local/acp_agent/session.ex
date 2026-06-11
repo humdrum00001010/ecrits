@@ -733,12 +733,21 @@ defmodule Ecrits.Local.AcpAgent.Session do
     tool_call_id =
       tool_call_id || "tool-" <> Integer.to_string(System.unique_integer([:positive]))
 
+    previous =
+      current
+      |> Map.get(:items, [])
+      |> Enum.find(&(Map.get(&1, :tool_call_id) == tool_call_id))
+
+    {input, output, details} = tool_item_payloads(status, body, previous)
+
     item = %{
       role: :tool,
       tool_call_id: tool_call_id,
       name: name || "tool",
       status: status,
-      body: body || ""
+      input: input,
+      output: output,
+      body: details
     }
 
     items = Map.get(current, :items, [])
@@ -759,6 +768,45 @@ defmodule Ecrits.Local.AcpAgent.Session do
   defp tool_payload(name, payload) do
     Ecrits.Doc.ToolPayloadSanitizer.encode_tool_payload(name, payload)
   end
+
+  defp tool_item_payloads(status, body, previous) do
+    body = body || ""
+
+    case status do
+      :running ->
+        {body, nil, tool_io_body(body, nil)}
+
+      :approval_required ->
+        {body, nil, tool_io_body(body, nil)}
+
+      :completed ->
+        input = previous && Map.get(previous, :input)
+        {input, body, tool_io_body(input, body)}
+
+      :failed ->
+        input = previous && Map.get(previous, :input)
+        {input, body, tool_io_body(input, body)}
+
+      _other ->
+        {nil, body, body}
+    end
+  end
+
+  defp tool_io_body(input, output) do
+    parts =
+      []
+      |> maybe_tool_io_part("Input", input)
+      |> maybe_tool_io_part("Output", output)
+
+    case parts do
+      [] -> ""
+      _ -> Enum.join(parts, "\n\n")
+    end
+  end
+
+  defp maybe_tool_io_part(parts, _label, nil), do: parts
+  defp maybe_tool_io_part(parts, _label, ""), do: parts
+  defp maybe_tool_io_part(parts, label, body), do: parts ++ ["#{label}:\n#{body}"]
 
   defp blank?(nil), do: true
   defp blank?(text) when is_binary(text), do: String.trim(text) == ""

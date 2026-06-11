@@ -22,6 +22,7 @@ defmodule Ecrits.Doc.ToolPayloadSanitizer do
 
   def sanitize_tool_payload(name, payload) do
     cond do
+      create_tool?(name) -> payload |> scrub() |> compact_create_payload()
       save_tool?(name) -> payload |> scrub() |> compact_save_payload()
       doc_tool?(name) -> scrub(payload)
       true -> payload
@@ -53,6 +54,16 @@ defmodule Ecrits.Doc.ToolPayloadSanitizer do
   end
 
   defp save_tool?(_name), do: false
+
+  defp create_tool?("doc.create"), do: true
+
+  defp create_tool?(name) when is_atom(name) do
+    name
+    |> Atom.to_string()
+    |> create_tool?()
+  end
+
+  defp create_tool?(_name), do: false
 
   defp scrub(%{} = map) do
     map
@@ -126,6 +137,38 @@ defmodule Ecrits.Doc.ToolPayloadSanitizer do
 
   defp compact_save_payload(payload), do: payload
 
+  defp compact_create_payload(%{} = payload) do
+    case static_get(payload, "deck") do
+      %{} = deck -> Map.put(payload, "deck", compact_deck(deck))
+      _other -> payload
+    end
+  end
+
+  defp compact_create_payload(payload), do: payload
+
+  defp compact_deck(deck) do
+    slides =
+      deck
+      |> static_get("slides")
+      |> case do
+        list when is_list(list) -> list
+        _other -> []
+      end
+
+    %{
+      "title" => static_get(deck, "title"),
+      "subtitle" => static_get(deck, "subtitle"),
+      "slides" => length(slides),
+      "slide_titles" =>
+        slides
+        |> Enum.map(&static_get(&1, "title"))
+        |> Enum.reject(&is_nil/1)
+        |> Enum.take(8)
+    }
+    |> Enum.reject(fn {_key, value} -> value in [nil, "", []] end)
+    |> Map.new()
+  end
+
   defp ok_payload?(%{} = payload), do: static_get(payload, "ok") == true
   defp ok_payload?(_payload), do: false
 
@@ -155,4 +198,8 @@ defmodule Ecrits.Doc.ToolPayloadSanitizer do
 
   defp static_get(map, "content"), do: Map.get(map, "content") || Map.get(map, :content)
   defp static_get(map, "text"), do: Map.get(map, "text") || Map.get(map, :text)
+  defp static_get(map, "deck"), do: Map.get(map, "deck") || Map.get(map, :deck)
+  defp static_get(map, "slides"), do: Map.get(map, "slides") || Map.get(map, :slides)
+  defp static_get(map, "title"), do: Map.get(map, "title") || Map.get(map, :title)
+  defp static_get(map, "subtitle"), do: Map.get(map, "subtitle") || Map.get(map, :subtitle)
 end

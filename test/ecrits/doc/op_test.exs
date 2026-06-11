@@ -59,7 +59,7 @@ defmodule Ecrits.Doc.OpTest do
         ~w(insert_text delete_range replace_text insert_paragraph delete_paragraph split merge
            insert_table insert_table_row delete_table_row insert_table_column delete_table_column
            merge_cells split_cell delete_node insert_picture set_cell insert_equation
-           insert_footnote insert_endnote insert_shape set_columns)
+           insert_footnote insert_endnote insert_shape set_columns insert_slide set_geometry)
 
       for verb <- verbs do
         assert verb in Op.verbs()
