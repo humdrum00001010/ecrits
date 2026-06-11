@@ -78,3 +78,8 @@ npm-debug.log
 # Phoenix / app runtime logs — local-only, never commit.
 /log/
 *.log
+
+# test artifacts some doc tests still write to CWD
+/c.hwp
+/save-by-path.hwp
+/validate_inline_blank.hwp
