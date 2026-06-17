@@ -25,6 +25,7 @@ defmodule Ecrits.Doc.MCPServer do
   alias Ecrits.Doc.Tools
   alias Ecrits.Local.AcpAgent.Session, as: AgentLive
   alias Ecrits.Workspace.Session, as: WorkspaceSession
+  require Logger
 
   @server_name "ecrits-doc-tools"
   @server_version "0.1.0"
@@ -90,7 +91,11 @@ defmodule Ecrits.Doc.MCPServer do
   end
 
   defp run_tool(ctx, name, args, state) do
-    case Tools.call(ctx, name, args) do
+    started_at = System.monotonic_time(:millisecond)
+    result = Tools.call(ctx, name, args)
+    log_tool_timing(ctx, name, result, started_at)
+
+    case result do
       # NOTE: doc.render used to attach MCP image content blocks here
       # ("__images__"). That was removed: CLI agents round-trip the whole
       # content array (base64 included) through the ACP text channel, feeding
@@ -114,6 +119,22 @@ defmodule Ecrits.Doc.MCPServer do
     end
   end
 
+  defp log_tool_timing(ctx, name, result, started_at) do
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+    status = tool_status(result)
+    agent_id = Map.get(ctx, :agent_id)
+
+    Logger.debug(fn ->
+      "[doc_mcp] tool=#{name} status=#{status} duration_ms=#{duration_ms} agent_id=#{inspect(agent_id)}"
+    end)
+  end
+
+  defp tool_status({:ok, _result}), do: "ok"
+  defp tool_status({:error, %{} = error}), do: "error:#{Map.get(error, "error", "structured")}"
+  defp tool_status({:error, reason}) when is_atom(reason), do: "error:#{reason}"
+  defp tool_status({:error, {reason, _}}) when is_atom(reason), do: "error:#{reason}"
+  defp tool_status({:error, _reason}), do: "error"
+
   # Build the doc.* tool context (design invariant 3). The agent id from the
   # per-agent MCP url resolves — via `Workspace.Session.fetch_agent/1` — to the
   # live AgentLive; we read ITS doc context (`active_doc` = the doc this agent is
@@ -125,7 +146,9 @@ defmodule Ecrits.Doc.MCPServer do
   # An absent agent id (legacy bare mount, or a non-agent caller in a test) keeps
   # the prior pool-only context so direct `Tools.call(%{pool: …}, …)` behaviour is
   # preserved. An agent id that does NOT resolve (dead/unknown) is rejected so a
-  # tool never silently runs against the wrong context.
+  # tool never silently runs against the wrong context. `document_path` is the
+  # UI-selected workspace path and is surfaced by `doc.context.current_document`
+  # so agents do not need prompt-embedded document names.
   defp resolve_tool_context(nil), do: {:ok, %{pool: Ecrits.Doc.Pool}}
 
   defp resolve_tool_context(agent_id) when is_binary(agent_id) do
@@ -144,6 +167,7 @@ defmodule Ecrits.Doc.MCPServer do
            # the human-viewer registry, and the wasm/NIF routing decision — the
            # real home of what Phase 2 parked in the global Pool.
            session_path: workspace_root,
+           document_path: Map.get(tc, :document_path),
            # Honour the workspace access-control setting server-side: the doc.*
            # tools run in-process and bypass the agent CLI sandbox, so without
            # this a read-only agent could still write. Defaults false when the

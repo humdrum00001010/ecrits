@@ -129,7 +129,7 @@ defmodule Ecrits.Local.AcpAgent do
         exmcp_adapter: exmcp_adapter,
         adapter_opts: adapter_opts,
         workspace_root: Keyword.get(opts, :workspace_root),
-        document_id: Keyword.get(opts, :document_id),
+        document_path: Keyword.get(opts, :document_path),
         pool_document_id: Keyword.get(opts, :pool_document_id),
         # Per-agent MCP url (design invariant 3): the agent's own id keys its
         # `/mcp/doc-tools/<id>` endpoint, so a tool call resolves back to THIS

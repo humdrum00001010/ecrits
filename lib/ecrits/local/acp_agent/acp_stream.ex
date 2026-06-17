@@ -6,21 +6,22 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   This is the single, robust ex_mcp-based producer — it replaces the bespoke
   Codex app-server / Claude CLI drivers entirely. It:
 
-    * starts an `ExMCP.ACP.Client` over `ExMCP.ACP.AdapterTransport`, selecting
-      the concrete ACP agent adapter (`Codex` / `Claude`);
-    * creates a session, forwarding the `doc.*` MCP server(s) so the agent can
-      discover and call them (`new_session(..., mcp_servers: ...)`);
+    * can either start an `ExMCP.ACP.Client` for a one-off turn or drive an
+      already-open durable client owned by `Ecrits.Local.AcpAgent.Session`;
+    * creates or reuses a session, forwarding the `doc.*` MCP server(s) so the
+      agent can discover and call them (`new_session(..., mcp_servers: ...)`);
     * issues the prompt and streams `session/update` notifications, mapping them
       to `%{type: :text_delta | :reasoning_delta | :tool_call_started |
       :tool_call_completed | :tool_call_failed, ...}`;
-    * on cleanup, cancels the in-flight turn and disconnects (terminating the
-      provider subprocess).
+    * on cleanup, cancels the in-flight turn; one-off clients are disconnected,
+      while durable clients stay alive for the next turn.
   """
 
   alias ExMCP.ACP.AdapterTransport
   alias ExMCP.ACP.Adapters.Claude
   alias ExMCP.ACP.Adapters.Codex
   alias ExMCP.ACP.Client
+  require Logger
 
   # Total ceiling for one turn (the ExMCP `prompt` RPC stays open for the whole
   # turn — every tool call resolves through the session and the prompt completes
@@ -39,7 +40,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   @doc """
   Returns a `Stream` of normalized chat-rail events for one turn.
 
-  `turn` is `%{input, workspace_root, document_id}` and may carry
+  `turn` is `%{input, workspace_root, document_path}` and may carry
   `:provider_session_id` — the provider session/thread id from a PRIOR turn of
   this conversation. When present, the turn RESUMES that provider session
   (`session/load`) so the agent keeps cross-turn memory, instead of minting a
@@ -61,9 +62,18 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     )
   end
 
-  # ── start ──────────────────────────────────────────────────────────
+  @doc false
+  def update_state, do: %{saw_text?: false, tool_titles: %{}}
 
-  defp start_session(exmcp_adapter, turn, opts, timeout) do
+  @doc false
+  def map_session_update(update, state) when is_map(state) do
+    update
+    |> map_update(ensure_update_state(state))
+  end
+
+  @doc false
+  def open_client_session(exmcp_adapter, turn, opts, event_listener \\ self()) do
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
     cwd = working_dir(turn, opts)
     adapter_opts = exmcp_adapter_opts(exmcp_adapter, cwd, opts)
 
@@ -71,50 +81,149 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       transport_mod: AdapterTransport,
       adapter: exmcp_adapter,
       adapter_opts: adapter_opts,
-      event_listener: self()
+      event_listener: event_listener
     ]
 
+    started_at = System.monotonic_time(:millisecond)
+
     case Client.start_link(client_opts) do
-      {:ok, client} -> start_session_with_client(client, cwd, turn, opts, timeout)
-      {:error, reason} -> raise "ex_mcp ACP client start failed: #{inspect(reason)}"
+      {:ok, client} ->
+        case open_provider_session_for_client(client, cwd, turn, opts, timeout) do
+          {:ok, session_id} ->
+            log_acp_timing("session_open", started_at,
+              status: "ok",
+              resumed: is_binary(prior_provider_session_id(turn)),
+              mcp_servers: length(mcp_servers_param(Keyword.get(opts, :mcp_servers)))
+            )
+
+            {:ok, %{client: client, session_id: session_id, cwd: cwd}}
+
+          {:error, _reason} = error ->
+            log_acp_timing("session_open", started_at, status: "error")
+            _ = safe_disconnect(client)
+            error
+
+          other ->
+            log_acp_timing("session_open", started_at, status: "unexpected")
+            _ = safe_disconnect(client)
+            {:error, {:unexpected_session_open, other}}
+        end
+
+      {:error, _reason} = error ->
+        log_acp_timing("session_open", started_at, status: "error")
+        error
     end
   end
 
-  defp start_session_with_client(client, cwd, turn, opts, timeout) do
+  # ── start ──────────────────────────────────────────────────────────
+
+  defp start_session(exmcp_adapter, turn, opts, timeout) do
+    case reusable_client(opts) do
+      {:ok, client, session_id} ->
+        log_acp_timing("session_reuse", System.monotonic_time(:millisecond),
+          status: "ok",
+          mcp_servers: length(mcp_servers_param(Keyword.get(opts, :mcp_servers)))
+        )
+
+        start_prompt_with_session(client, session_id, turn, opts, timeout, true)
+
+      :none ->
+        start_new_session(exmcp_adapter, turn, opts, timeout)
+    end
+  end
+
+  defp start_new_session(exmcp_adapter, turn, opts, timeout) do
+    event_listener = Keyword.get(opts, :event_listener, self())
+
+    case open_client_session(exmcp_adapter, turn, opts, event_listener) do
+      {:ok, %{client: client, session_id: session_id}} ->
+        persist_client? = Keyword.get(opts, :persist_client?, false)
+        if persist_client?, do: Process.unlink(client)
+
+        start_prompt_with_session(
+          client,
+          session_id,
+          turn,
+          opts,
+          timeout,
+          persist_client?,
+          pending_start_events(
+            client,
+            session_id,
+            persist_client?,
+            Keyword.get(opts, :acp_client_key)
+          )
+        )
+
+      {:error, reason} ->
+        raise "ex_mcp ACP session open failed: #{inspect(reason)}"
+    end
+  end
+
+  defp reusable_client(opts) do
+    client = Keyword.get(opts, :client)
+    session_id = Keyword.get(opts, :session_id)
+
+    if is_pid(client) and Process.alive?(client) and is_binary(session_id) and session_id != "" do
+      {:ok, client, session_id}
+    else
+      :none
+    end
+  end
+
+  defp open_provider_session_for_client(client, cwd, turn, opts, timeout) do
     mcp_servers = mcp_servers_param(Keyword.get(opts, :mcp_servers))
     prior_session_id = prior_provider_session_id(turn)
 
-    case open_provider_session(client, cwd, prior_session_id, timeout, mcp_servers) do
-      {:ok, session_id} when is_binary(session_id) and session_id != "" ->
-        input = build_prompt(turn, opts)
+    open_provider_session(client, cwd, prior_session_id, timeout, mcp_servers)
+  end
 
-        prompt_task =
-          Task.async(fn -> Client.prompt(client, session_id, input, timeout: timeout) end)
+  defp pending_start_events(client, session_id, true, client_key) when not is_nil(client_key) do
+    [
+      %{
+        type: :acp_client_ready,
+        client: client,
+        provider_session_id: session_id,
+        acp_client_key: client_key
+      },
+      %{type: :provider_session, provider_session_id: session_id}
+    ]
+  end
 
-        %{
-          client: client,
-          session_id: session_id,
-          # The first event emitted upstream so the `Session` persists the
-          # provider id and the NEXT turn resumes this same conversation.
-          pending_provider_event: %{type: :provider_session, provider_session_id: session_id},
-          prompt_task: prompt_task,
-          # Idle deadline for the receive loop (reset on each session update).
-          # Never longer than the total turn ceiling.
-          idle: min(timeout, @idle_timeout),
-          deadline: deadline(min(timeout, @idle_timeout)),
-          saw_text?: false,
-          done?: false,
-          tool_titles: %{}
-        }
+  defp pending_start_events(_client, session_id, _persist_client?, _client_key) do
+    [%{type: :provider_session, provider_session_id: session_id}]
+  end
 
-      {:ok, other} ->
-        _ = safe_disconnect(client)
-        raise "ex_mcp ACP session open returned unexpected result: #{inspect(other)}"
+  defp start_prompt_with_session(
+         client,
+         session_id,
+         turn,
+         opts,
+         timeout,
+         persist_client?,
+         pending_events \\ nil
+       ) do
+    input = build_prompt(turn, opts)
 
-      {:error, reason} ->
-        _ = safe_disconnect(client)
-        raise "ex_mcp ACP session open failed: #{inspect(reason)}"
-    end
+    pending_events =
+      pending_events || [%{type: :provider_session, provider_session_id: session_id}]
+
+    %{
+      client: client,
+      session_id: session_id,
+      pending_events: pending_events,
+      prompt_input: input,
+      prompt_timeout: timeout,
+      prompt_task: nil,
+      idle: min(timeout, @idle_timeout),
+      deadline: deadline(min(timeout, @idle_timeout)),
+      prompt_started_at: nil,
+      first_activity_logged?: false,
+      saw_text?: false,
+      done?: false,
+      persist_client?: persist_client?,
+      tool_titles: %{}
+    }
   end
 
   # Resume the prior provider session when we have one AND the agent advertises
@@ -190,13 +299,14 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
 
   # Emit the provider session id first (before any provider output) so the
   # `Session` persists it and the next turn can resume this conversation.
-  defp next_event(%{pending_provider_event: event} = state) when not is_nil(event) do
-    {[event], %{state | pending_provider_event: nil}}
+  defp next_event(%{pending_events: [event | rest]} = state) do
+    {[event], %{state | pending_events: rest}}
   end
 
   defp next_event(%{done?: true} = state), do: {:halt, state}
 
   defp next_event(state) do
+    state = ensure_prompt_started(state)
     %{prompt_task: task, session_id: session_id, deadline: deadline} = state
 
     receive do
@@ -213,11 +323,12 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       {:acp_session_update, ^session_id, update} ->
         # Activity — the turn is progressing; push the idle deadline forward so a
         # long-but-active turn (many doc.* edits) is never killed mid-stream.
-        state = %{state | deadline: deadline(state.idle)}
+        state = maybe_log_first_activity(%{state | deadline: deadline(state.idle)}, update)
 
         case map_update(update, state) do
           {:event, event, state} -> {[event], state}
           {:skip, state} -> next_event(state)
+          {:error, message, state} -> fail_turn(state, message)
         end
 
       {:acp_session_update, _other, _update} ->
@@ -235,7 +346,23 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     end
   end
 
+  defp ensure_prompt_started(%{prompt_task: %Task{}} = state), do: state
+
+  defp ensure_prompt_started(
+         %{client: client, session_id: session_id, prompt_input: input, prompt_timeout: timeout} =
+           state
+       ) do
+    prompt_task =
+      Task.async(fn -> Client.prompt(client, session_id, input, timeout: timeout) end)
+
+    %{state | prompt_task: prompt_task, prompt_started_at: System.monotonic_time(:millisecond)}
+  end
+
   defp handle_prompt_result({:ok, result}, state) do
+    log_acp_timing("prompt_complete", Map.get(state, :prompt_started_at),
+      status: stop_reason(result) || "ok"
+    )
+
     case stop_reason(result) do
       reason when reason in ["cancelled", "canceled"] ->
         {:halt, %{state | done?: true}}
@@ -246,7 +373,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       _ ->
         case result_text(result, state) do
           text when is_binary(text) and text != "" ->
-            {[%{type: :text_delta, delta: text}], %{state | done?: true}}
+            {[%{type: :text_delta, delta: text, source: :prompt_result}], %{state | done?: true}}
 
           _ ->
             {:halt, %{state | done?: true}}
@@ -255,16 +382,44 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   end
 
   defp handle_prompt_result({:error, reason}, state) do
+    log_acp_timing("prompt_complete", Map.get(state, :prompt_started_at), status: "error")
     fail_turn(state, "ex_mcp ACP prompt failed: #{inspect(reason)}")
+  end
+
+  defp maybe_log_first_activity(%{first_activity_logged?: true} = state, _update), do: state
+
+  defp maybe_log_first_activity(state, update) do
+    log_acp_timing("first_activity", Map.get(state, :prompt_started_at),
+      status: Map.get(update, "sessionUpdate") || "unknown"
+    )
+
+    %{state | first_activity_logged?: true}
+  end
+
+  defp log_acp_timing(_event, nil, _fields), do: :ok
+
+  defp log_acp_timing(event, started_at, fields) do
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+    fields = Keyword.put(fields, :duration_ms, duration_ms)
+
+    Logger.debug(fn ->
+      rendered =
+        fields
+        |> Enum.map(fn {key, value} -> "#{key}=#{inspect(value)}" end)
+        |> Enum.join(" ")
+
+      "[acp_stream] #{event} #{rendered}"
+    end)
   end
 
   defp result_text(result, %{saw_text?: false}) when is_map(result), do: result["text"]
   defp result_text(_result, _state), do: nil
 
-  defp cleanup(%{client: client, session_id: session_id, prompt_task: task}) do
-    _ = if session_id, do: safe_cancel(client, session_id)
+  defp cleanup(%{client: client, session_id: session_id, prompt_task: task} = state) do
+    _ = if session_id && not Map.get(state, :done?, false), do: safe_cancel(client, session_id)
+
     _ = if task, do: Task.shutdown(task, :brutal_kill)
-    _ = safe_disconnect(client)
+    _ = unless Map.get(state, :persist_client?, false), do: safe_disconnect(client)
     :ok
   end
 
@@ -374,10 +529,16 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   end
 
   defp map_update(%{"sessionUpdate" => "error"} = update, state) do
-    fail_turn(state, "ex_mcp ACP error: #{inspect(update["content"])}")
+    {:error, "ex_mcp ACP error: #{inspect(update["content"])}", state}
   end
 
   defp map_update(_update, state), do: {:skip, state}
+
+  defp ensure_update_state(state) do
+    state
+    |> Map.put_new(:saw_text?, false)
+    |> Map.put_new(:tool_titles, %{})
+  end
 
   defp update_text(%{"content" => %{"text" => text}}), do: text
   defp update_text(%{"content" => text}) when is_binary(text), do: text
@@ -511,11 +672,9 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # CRITICAL — two confirmed failure modes this preamble defends against (verified
   # live against codex gpt-5.5 via ~/.codex/logs_2.sqlite):
   #
-  # 1. Name normalization: the MCP server registers tools with a DOT
-  #    (`doc.context`), but OpenAI/Anthropic function names can't contain a dot, so
-  #    clients expose them as `doc_context`. Naming them with dots here made the
-  #    model search for a literal `doc.context`, miss it, and refuse. So name them
-  #    with underscores (and state the two forms are the same tool).
+  # 1. Tool naming: the MCP server registers dotted names (`doc.context`). Keep
+  #    the prompt aligned with that contract so the model uses the doc MCP tools
+  #    it is actually handed, instead of searching for stale underscore aliases.
   #
   # 2. Deferred MCP tools: with many MCP servers connected (the user's global
   #    codex servers + our `doc`), codex does NOT inject every MCP tool into the
@@ -553,33 +712,34 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # Kept lean ON PURPOSE — this rides EVERY turn. Only the live-verified
   # defenses stay (dot/underscore tool naming, deferred-MCP discovery, the
   # no-shell rule + render-view exception, save/read-only/no-fabrication, the
-  # caveman voice). The read/write-path teaching moved out: the `document`
-  # param takes a file path directly (#34), a miss returns the open-document
-  # catalog (#32), and pptx/docx authoring guides ride the doc_create reply.
-  defp doc_preamble(turn, opts) do
-    doc = open_document_label(turn)
-
+  # caveman voice). The current document handle is now an MCP contract:
+  # doc.context.current_document, not prompt-embedded path text.
+  defp doc_preamble(_turn, opts) do
     """
-    [System] Open doc#{doc}. Use doc MCP tools ONLY for documents — never
-    shell/file-read them. Names may appear as `doc_x` or `doc.x` (same tool);
-    if missing, load/search MCP doc tools first. The `document` param accepts
-    the file path. ONE exception: `doc_render` returns PNG paths — VIEW them
-    with your native image tool to check your work; that is expected.
+    [System] Use doc MCP tools ONLY for documents — never shell/file-read them.
+    For "this/current/open document", call `doc.context` first and use
+    `current_document.document` as the `document` param. Tool names are dotted:
+    `doc.context`, `doc.find`, `doc.read`,
+    `doc.edit`, `doc.set`, `doc.save`, `doc.render`. Do not search for
+    underscore names like `doc_edit` when `doc.edit` is available. The
+    `document` param accepts ids/paths returned by doc.context/doc.list. ONE
+    exception: `doc.render` returns PNG paths — VIEW them with your native image
+    tool to check your work; that is expected.
 
     Voice: caveman. Short answer, no filler; report result/blockers only.
 
-    Read: `doc_find` -> `doc_read {ref}`. Write: `doc_edit` (structure/text,
-    batch via ops:[...]), `doc_set` (formatting); empty cell -> insert_text,
-    non-empty cell -> set_cell. New doc -> `doc_create`. Authoring pptx/docx?
-    Follow the doc server instructions' design guide; template clones: replace
-    content in place, don't rebuild. Any
-    edit/create/set MUST end with `doc_save` before saying done. Read-only
-    refusal = stop/report. No fabrication.
+    Read current doc: `doc.context` -> `doc.find` -> `doc.read {ref}`. Write:
+    `doc.edit` (structure/text, batch via ops:[...]), `doc.set` (formatting);
+    empty cell -> insert_text, non-empty cell -> set_cell. Existing HWP
+    paragraphs are structural records: to divide one paragraph, use `doc.edit`
+    op `split` at paragraph offsets; do NOT use `replace_text` with newlines. If
+    splitting one original paragraph several times, apply offsets from largest
+    to smallest. New doc -> `doc.create`. Authoring pptx/docx? Follow the doc
+    server instructions' design guide; template clones: replace content in
+    place, don't rebuild. Any edit/create/set MUST end with `doc.save` before
+    saying done. Read-only refusal = stop/report. No fabrication.
     """ <> "\n" <> ultracode_keyword(opts)
   end
-
-  defp open_document_label(%{document_id: id}) when is_binary(id) and id != "", do: " (#{id})"
-  defp open_document_label(_turn), do: ""
 
   defp present_list(list) when is_list(list) and list != [], do: list
   defp present_list(_other), do: nil

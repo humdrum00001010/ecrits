@@ -84,9 +84,10 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "context",
       "description" =>
-        "Active/focused document id + cursor/selection ref. Reads whatever active-doc " <>
-          "and cursor state is currently available server-side. (Browser->server cursor " <>
-          "reporting that populates the live cursor is wired by the editors; see TODO.)",
+        "Current/active document metadata (current_document has document, name, path, " <>
+          "kind, backing) + cursor/selection ref. Reads whatever active-doc and cursor " <>
+          "state is currently available server-side. (Browser->server cursor reporting " <>
+          "that populates the live cursor is wired by the editors; see TODO.)",
       "risk" => "read",
       "inputSchema" => %{"type" => "object", "additionalProperties" => false, "properties" => %{}},
       "annotations" => %{"readOnlyHint" => true}
@@ -94,7 +95,7 @@ defmodule Ecrits.Doc.Tools do
     %{
       "namespace" => @namespace,
       "name" => "list",
-      "description" => "List open/available documents (id, kind, path, backing).",
+      "description" => "List open/available documents (id, name, kind, path, backing).",
       "risk" => "read",
       "inputSchema" => %{"type" => "object", "additionalProperties" => false, "properties" => %{}},
       "annotations" => %{"readOnlyHint" => true}
@@ -194,7 +195,11 @@ defmodule Ecrits.Doc.Tools do
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
-          "document" => %{"type" => "string"},
+          "document" => %{
+            "type" => "string",
+            "description" =>
+              "Document id/path. For the current/open document, call doc.context and use current_document.document."
+          },
           "ref" => %{"type" => "string", "description" => "Anchor ref from doc.find."},
           "nearby" => %{
             "type" => "object",
@@ -230,7 +235,11 @@ defmodule Ecrits.Doc.Tools do
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
-          "document" => %{"type" => "string"},
+          "document" => %{
+            "type" => "string",
+            "description" =>
+              "Document id/path. For the current/open document, call doc.context and use current_document.document."
+          },
           "pattern" => %{"type" => "string"},
           "patterns" => %{
             "type" => "array",
@@ -2513,15 +2522,17 @@ defmodule Ecrits.Doc.Tools do
     }
   end
 
-  # Active/focused document + cursor/selection. The active document is per-CALLER
+  # Current document + cursor/selection. The active document is per-CALLER
   # (design invariant 3 / Phase 3): the agent's OWN active doc, read from the
   # AgentLive (`ctx.active_doc`) — there is no global active anymore. `WorkspaceLive`
   # follows the user's open doc onto the foreground agent live (`update_options`),
   # so `doc.context` returns the doc this agent is bound to.
   #
   # We resolve ONLY the explicitly-set active doc — no "first" or "sole doc"
-  # guessing. When nothing is active, `active_document` is nil — the agent must
-  # create/open a doc rather than edit a phantom.
+  # guessing. When nothing is active, `active_document` is nil. If the workspace
+  # still knows a selected `document_path`, `current_document.document` uses that
+  # path handle so the agent can explicitly open/read the viewed document through
+  # MCP, not through prompt text.
   #
   # The `cursor`/`selection` refs still require browser->server caret reporting
   # (editors, owned separately) and remain null for now.
@@ -2533,6 +2544,7 @@ defmodule Ecrits.Doc.Tools do
 
     %{
       "active_document" => active && active.id,
+      "current_document" => current_document_json(ctx, active),
       "cursor" => nil,
       "selection" => nil,
       "cursor_reporting" => "todo:browser_wiring",
@@ -2605,10 +2617,44 @@ defmodule Ecrits.Doc.Tools do
   defp entry_json(%{} = entry) do
     %{
       "document" => entry.id,
+      "name" => document_name(entry.path),
       "kind" => to_string(entry.kind),
       "path" => entry.path,
       "backing" => to_string(entry.backing)
     }
+  end
+
+  defp current_document_json(_ctx, %{} = active) do
+    active
+    |> entry_json()
+    |> Map.put("active", true)
+  end
+
+  defp current_document_json(ctx, nil) do
+    case Map.get(ctx, :document_path) do
+      path when is_binary(path) and path != "" ->
+        %{
+          "document" => path,
+          "name" => document_name(path),
+          "kind" => path_kind(path),
+          "path" => path,
+          "backing" => nil,
+          "active" => true
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  defp document_name(path) when is_binary(path) and path != "", do: Path.basename(path)
+  defp document_name(_path), do: nil
+
+  defp path_kind(path) when is_binary(path) do
+    case Path.extname(path) do
+      "." <> ext when ext != "" -> String.downcase(ext)
+      _ -> nil
+    end
   end
 
   defp pool(ctx), do: Map.get(ctx, :pool, Ecrits.Doc.Pool)

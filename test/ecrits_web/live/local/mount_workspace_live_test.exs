@@ -1183,10 +1183,47 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex"]}"
       )
 
-    document_id = local_rhwp_document_id(lv)
     session_id = subscribe_agent(lv)
 
-    assert {:ok, %{document_id: ^document_id}} = AcpAgent.status(nil, session_id)
+    # The agent binds to the user's active document — its per-turn `document_path`
+    # (the UNIFIED handle the doc.* tools target) points at what's on screen.
+    assert {:ok, %{document_path: path}} = AcpAgent.status(nil, session_id)
+    assert is_binary(path) and String.ends_with?(path, "template.hwp")
+  end
+
+  test "ordinary document prompt uses MCP context instead of embedding selected path",
+       %{conn: conn} do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [{:text_delta, "done"}],
+        report_prompts: true,
+        test_pid: self()
+      ]
+    )
+
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex"]}"
+      )
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "read this document"})
+    |> render_submit()
+
+    assert_receive {:fake_acp_prompt, _sid, prompt}, 1_000
+    assert prompt =~ "doc.context"
+    assert prompt =~ "current_document.document"
+    assert prompt =~ "ids/paths returned by doc.context/doc.list"
+    refute prompt =~ "template.hwp"
+    refute prompt =~ "pass this as `document`"
+
+    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+                   1_000
+
+    sync_liveview(lv)
   end
 
   test "selecting a document preserves the chat-rail conversation and session", %{conn: conn} do
@@ -1264,9 +1301,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
            )
 
     # The live session's per-turn document context must follow the active doc,
-    # so the agent's doc.* tools still target what the user is viewing.
-    new_document_id = local_rhwp_document_id(lv)
-    assert {:ok, %{document_id: ^new_document_id}} = AcpAgent.status(nil, session_id)
+    # so the agent's doc.* tools still target what the user is viewing — the
+    # `document_path` followed the switch back to template.hwp.
+    assert {:ok, %{document_path: path}} = AcpAgent.status(nil, session_id)
+    assert is_binary(path) and String.ends_with?(path, "template.hwp")
   end
 
   test "a browser refresh re-attaches the SAME durable agent (pid/thread/title/transcript)",

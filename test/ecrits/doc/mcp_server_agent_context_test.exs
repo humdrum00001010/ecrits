@@ -22,7 +22,7 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
 
   # Start a headless AgentLive (no provider turn needed; we only read its
   # tool_context), bound to `pool_document_id`.
-  defp start_agent(id, pool_document_id) do
+  defp start_agent(id, pool_document_id, opts \\ []) do
     start_supervised!(
       {AgentLive,
        id: id,
@@ -31,6 +31,7 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
        exmcp_adapter: EcritsWeb.FakeAcpAdapter,
        adapter_opts: [exmcp_adapter: EcritsWeb.FakeAcpAdapter],
        workspace_root: File.cwd!(),
+       document_path: Keyword.get(opts, :document_path),
        pool_document_id: pool_document_id,
        mcp_servers: []},
       id: {:agent, id}
@@ -67,7 +68,11 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
     assert {:ok, %{content: [content1]} = response1, _} =
              call_tool("doc.context", %{"_agent_id" => id1})
 
-    assert %{"active_document" => ^a} = Jason.decode!(content1.text)
+    assert %{"active_document" => ^a, "current_document" => current1} =
+             Jason.decode!(content1.text)
+
+    assert current1["document"] == a
+    assert current1["name"] == "ctx_a.hwp"
 
     # Token economy: the result rides ONCE (the content text block) — no
     # `structuredContent` duplicate for the CLI agent to round-trip into the
@@ -75,7 +80,31 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
     refute Map.has_key?(response1, :structuredContent)
 
     assert {:ok, %{content: [content2]}, _} = call_tool("doc.context", %{"_agent_id" => id2})
-    assert %{"active_document" => ^b} = Jason.decode!(content2.text)
+
+    assert %{"active_document" => ^b, "current_document" => current2} =
+             Jason.decode!(content2.text)
+
+    assert current2["document"] == b
+    assert current2["name"] == "ctx_b.hwp"
+  end
+
+  test "doc.context exposes the UI-selected document path even before a pool id is active" do
+    id = "fg-path-#{System.unique_integer([:positive])}"
+    start_agent(id, nil, document_path: "drafts/current.hwpx")
+
+    assert {:ok, %{content: [content]}, _} = call_tool("doc.context", %{"_agent_id" => id})
+
+    assert %{"active_document" => nil, "current_document" => current} =
+             Jason.decode!(content.text)
+
+    assert current == %{
+             "document" => "drafts/current.hwpx",
+             "name" => "current.hwpx",
+             "kind" => "hwpx",
+             "path" => "drafts/current.hwpx",
+             "backing" => nil,
+             "active" => true
+           }
   end
 
   test "an absent _agent_id keeps the legacy pool-only context (back-compat)" do

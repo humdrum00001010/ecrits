@@ -3,10 +3,11 @@ defmodule Ecrits.Local.AcpAgent.Session do
   One local chat-agent session, driven directly by `ExMCP.ACP.Client`.
 
   This is the *sole* chat-agent producer: there is no bespoke provider driver or
-  safety-net fallback. The GenServer owns one ACP client per turn, selecting the
-  concrete ex_mcp ACP adapter per provider (`ExMCP.ACP.Adapters.Codex` /
-  `Claude`), translates the agent's streamed `session/update` notifications into
-  the normalized chat-rail events, and broadcasts them on
+  safety-net fallback. The GenServer owns a durable ACP client while turn-launch
+  options remain compatible, selecting the concrete ex_mcp ACP adapter per
+  provider (`ExMCP.ACP.Adapters.Codex` / `Claude`), translates the agent's
+  streamed `session/update` notifications into the normalized chat-rail events,
+  and broadcasts them on
   `local_agent:<session_id>` (the contract the workspace LiveView consumes).
 
   The session passes the `doc.*` MCP server to `new_session(..., mcp_servers:)`
@@ -16,13 +17,13 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
   ## Per-turn lifecycle
 
-      start ExMCP.ACP.Client -> new_session(cwd, mcp_servers)
+      ensure ExMCP.ACP.Client -> new_session/load_session(cwd, mcp_servers)
         -> prompt (async, blocking on the client) -> session/update* (streamed)
-        -> prompt result (stopReason) -> disconnect client
+        -> prompt result (stopReason) -> keep client for compatible next turn
 
-  Cancellation kills the streaming task; its `Stream.resource` cleanup issues the
-  ACP cancel (`turn/interrupt` for codex) and disconnects the client, which
-  terminates the agent subprocess.
+  Cancellation kills the streaming task; the Session also cancels and drops the
+  durable client so the next turn resumes from the last provider session id on a
+  fresh app-server process.
 
   ## AgentLive boundary (Phase 5)
 
@@ -39,6 +40,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
   alias Ecrits.Context
   alias Ecrits.Local.AcpAgent.AcpStream
   alias Ecrits.Local.AcpAgent.Prompt
+  alias ExMCP.ACP.Client
 
   @registry Ecrits.Local.AcpAgent.SessionRegistry
   @pubsub Ecrits.PubSub
@@ -174,20 +176,25 @@ defmodule Ecrits.Local.AcpAgent.Session do
        exmcp_adapter: Keyword.fetch!(opts, :exmcp_adapter),
        adapter_opts: Keyword.get(opts, :adapter_opts, []),
        workspace_root: Keyword.get(opts, :workspace_root),
-       document_id: Keyword.get(opts, :document_id),
+       # Workspace-relative path of the doc the user is viewing. This is exposed
+       # through doc.context so "this document" turns get the handle from MCP
+       # state rather than from prompt text.
+       document_path: Keyword.get(opts, :document_path),
        # The agent's ACTIVE doc for the doc.* MCP tools: the `Ecrits.Doc.Pool`
-       # document id (`d_<kind>_<hash>`) of the doc this agent is bound to —
-       # distinct from `document_id` (the LiveView Document id used as provider
-       # prompt context). `doc.context` returns THIS (per-agent, not the global
-       # `Pool.active`); `doc.open`/`doc.edit` honour ownership against it. The
-       # workspace LiveView sets it from `register_pool_document` and follows doc
-       # switches live via `update_options`. nil until a doc is bound.
+       # document id (`d_<kind>_<hash>`) of the doc this agent is bound to.
+       # `doc.context` returns THIS (per-agent, not the global `Pool.active`);
+       # `doc.open`/`doc.edit` honour ownership against it. The workspace LiveView
+       # sets it from `register_pool_document` and follows doc switches live via
+       # `update_options`. nil until a doc is bound.
        pool_document_id: Keyword.get(opts, :pool_document_id),
        mcp_servers: Keyword.get(opts, :mcp_servers, []),
        # The provider's session/thread id, captured on turn 1 and RESUMED on
        # turns 2+ so the conversation keeps cross-turn memory. `nil` until the
        # first turn establishes it.
        provider_session_id: nil,
+       acp_client: nil,
+       acp_client_key: nil,
+       acp_client_ref: nil,
        current: nil,
        # FIFO queue of messages received WHILE a turn was in flight (Phase 5). A
        # mid-turn send ENQUEUES instead of cancelling the running turn; the head
@@ -231,9 +238,11 @@ defmodule Ecrits.Local.AcpAgent.Session do
        active_doc: state.pool_document_id,
        agent_id: state.id,
        workspace_root: state.workspace_root,
+       # Map.get: tolerate pre-field state maps on hot-reloaded sessions.
+       document_path: Map.get(state, :document_path),
        # Access modes map to sandbox: read-only → "read-only"; ask /
        # full-workspace → "workspace-write" (see workspace_live.ex
-       # @local_agent_access_controls). So sandbox == "read-only" ⟺ the user
+       # local_agent_access_control/1). So sandbox == "read-only" ⟺ the user
        # put this agent in read-only mode; the doc.* MCP tools (which run
        # server-side and bypass the CLI sandbox) consult this to gate writes.
        read_only: Keyword.get(state.adapter_opts, :sandbox) == "read-only"
@@ -258,11 +267,14 @@ defmodule Ecrits.Local.AcpAgent.Session do
     # The active document is per-turn context, NOT a reason to recreate the
     # session — switching the document in the workspace must preserve the
     # conversation (mirrors the access/reasoning live-update path). When the
-    # caller passes a `:document_id` (LiveView Document id, provider prompt
-    # context) and/or `:pool_document_id` (the Pool doc id the doc.* tools target),
-    # follow them on the live session so the next turn's doc.* tools operate on
-    # what the user is now viewing.
-    {document_id, new_opts} = Keyword.pop(new_opts, :document_id, state.document_id)
+    # caller passes a `:pool_document_id` (the Pool doc id the doc.* tools target)
+    # and/or `:document_path` (the viewed doc), follow them on the live session so
+    # the next turn's doc.* tools operate on what the user is now viewing.
+    #
+    # Map.get (not state.document_path): a session spawned before this field
+    # existed hot-reloads with the old state map and must not crash here.
+    {document_path, new_opts} =
+      Keyword.pop(new_opts, :document_path, Map.get(state, :document_path))
 
     {pool_document_id, adapter_opts} =
       Keyword.pop(new_opts, :pool_document_id, state.pool_document_id)
@@ -270,7 +282,14 @@ defmodule Ecrits.Local.AcpAgent.Session do
     merged = Keyword.merge(state.adapter_opts, adapter_opts)
 
     {:reply, :ok,
-     %{state | adapter_opts: merged, document_id: document_id, pool_document_id: pool_document_id}}
+     state
+     |> Map.merge(%{
+       adapter_opts: merged,
+       pool_document_id: pool_document_id
+     })
+     # Map.put (not %{state | ...}): pre-field state maps on hot-reloaded
+     # sessions lack the key and the update syntax would raise.
+     |> Map.put(:document_path, document_path)}
   end
 
   def handle_call({:send_turn, ctx, raw_input, opts}, _from, state) do
@@ -295,20 +314,6 @@ defmodule Ecrits.Local.AcpAgent.Session do
     end
   end
 
-  defp merge_turn_adapter_opts(state, adapter_opts) when is_list(adapter_opts) and adapter_opts != [] do
-    %{state | adapter_opts: Keyword.merge(state.adapter_opts, adapter_opts)}
-  end
-
-  defp merge_turn_adapter_opts(state, _adapter_opts), do: state
-
-  # Caller-provided display seam: `:display` is what the transcript bubble shows
-  # (the typed text) when it differs from the provider input (e.g. the LiveView
-  # appends the picked-element JSON block for the agent only); `:picks` are the
-  # structured picked-element chips that ride along on the user transcript row.
-  defp turn_extras(opts) do
-    %{display: Keyword.get(opts, :display), picks: Keyword.get(opts, :picks) || []}
-  end
-
   def handle_call({:cancel, ctx, turn_id}, _from, state) do
     cond do
       not authorized?(ctx, state) ->
@@ -322,14 +327,10 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
       true ->
         # Cancel ONLY the in-flight turn while keeping THIS Session GenServer (and
-        # the conversation it anchors) alive. We ask the per-turn task to halt its
-        # `AcpStream` gracefully (`:acp_cancel_turn`) so the stream's `cleanup/1`
-        # runs the SAME teardown a normal turn completion uses — ACP cancel + clean
-        # client disconnect, which lets the provider subprocess flush its rollout so
-        # the NEXT turn resumes the same conversation. A brutal `Process.exit(task,
-        # :kill)` would skip that cleanup and tear the subprocess down mid-write,
-        # losing the conversation. A bounded fallback still hard-kills a task that
-        # refuses to wind down, so cancel can never hang.
+        # the conversation it anchors) alive. Drop the durable ACP client after
+        # interrupting the active turn so the next turn resumes the remembered
+        # provider session id through a fresh app-server process instead of sharing
+        # a client that may still have a pending prompt call.
         cancelled_turn_id = state.current.turn_id
         cancelled_current = state.current
 
@@ -340,6 +341,8 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
         state =
           state
+          |> cancel_acp_client_turn()
+          |> close_acp_client()
           |> record_transcript_turn(cancelled_current)
           |> emit(%{type: :turn_cancelled, turn_id: cancelled_turn_id})
           |> Map.put(:current, nil)
@@ -365,7 +368,8 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
       true ->
         # Gracefully cancel the in-flight turn (same teardown as a normal cancel)
-        # so the conversation can resume, record it, then drain the queue head.
+        # so the conversation can resume, record it, drop the durable client, then
+        # drain the queue head on a fresh app-server process.
         state =
           case state.current do
             %{turn_id: cancelled_turn_id} = current ->
@@ -375,6 +379,8 @@ defmodule Ecrits.Local.AcpAgent.Session do
               end
 
               state
+              |> cancel_acp_client_turn()
+              |> close_acp_client()
               |> record_transcript_turn(current)
               |> emit(%{type: :turn_cancelled, turn_id: cancelled_turn_id})
               |> Map.put(:current, nil)
@@ -389,11 +395,55 @@ defmodule Ecrits.Local.AcpAgent.Session do
     end
   end
 
+  defp merge_turn_adapter_opts(state, adapter_opts)
+       when is_list(adapter_opts) and adapter_opts != [] do
+    %{state | adapter_opts: Keyword.merge(state.adapter_opts, adapter_opts)}
+  end
+
+  defp merge_turn_adapter_opts(state, _adapter_opts), do: state
+
+  # Caller-provided display seam: `:display` is what the transcript bubble shows
+  # (the typed text) when it differs from the provider input (e.g. the LiveView
+  # appends the picked-element JSON block for the agent only); `:picks` are the
+  # structured picked-element chips that ride along on the user transcript row.
+  defp turn_extras(opts) do
+    %{display: Keyword.get(opts, :display), picks: Keyword.get(opts, :picks) || []}
+  end
+
   @impl true
-  # The provider session id must be captured even if the turn was just cancelled
-  # (so the conversation can still resume) — store it regardless of `current`.
+  # The durable ACP client is started with this Session as its event listener.
+  # Map streaming updates directly in this GenServer. `Client.prompt/4` resolves
+  # from a separate JSON-RPC response, so forwarding updates through the turn
+  # task can race prompt completion and drop trailing tool/text updates.
+  def handle_info({:acp_session_update, _session_id, update}, state) do
+    {:noreply, handle_acp_session_update(state, update)}
+  end
+
+  # The ACP client/provider session id must be captured even if the turn was just
+  # cancelled (so the conversation can still resume) — store it regardless of
+  # `current`.
+  def handle_info({:turn_event, turn_id, %{type: :acp_client_ready} = event}, state) do
+    {:noreply, handle_turn_event(state, turn_id, event)}
+  end
+
   def handle_info({:turn_event, turn_id, %{type: :provider_session} = event}, state) do
     {:noreply, handle_turn_event(state, turn_id, event)}
+  end
+
+  def handle_info(
+        {:turn_event, turn_id, %{type: :text_delta, source: :prompt_result} = event},
+        state
+      ) do
+    send(self(), {:finish_prompt_result_text, turn_id, event})
+    {:noreply, state}
+  end
+
+  def handle_info({:finish_prompt_result_text, turn_id, event}, state) do
+    with %{turn_id: ^turn_id} <- state.current do
+      {:noreply, handle_turn_event(state, turn_id, event)}
+    else
+      _ -> {:noreply, state}
+    end
   end
 
   def handle_info({:turn_event, turn_id, event}, state) do
@@ -405,6 +455,11 @@ defmodule Ecrits.Local.AcpAgent.Session do
   end
 
   def handle_info({:turn_done, turn_id}, state) do
+    send(self(), {:finish_turn_done, turn_id})
+    {:noreply, state}
+  end
+
+  def handle_info({:finish_turn_done, turn_id}, state) do
     with %{turn_id: ^turn_id} = current <- state.current do
       state =
         state
@@ -423,6 +478,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
     with %{turn_id: ^turn_id} = current <- state.current do
       state =
         state
+        |> close_acp_client()
         |> record_transcript_turn(current)
         |> emit(%{type: :turn_failed, turn_id: turn_id, reason: inspect(reason)})
         |> Map.put(:current, nil)
@@ -439,7 +495,14 @@ defmodule Ecrits.Local.AcpAgent.Session do
   # cannot linger. By now `current` has already been cleared, so this never
   # affects a turn that started after the cancel.
   def handle_info({:force_kill_turn, task_pid}, state) do
-    if is_pid(task_pid) and Process.alive?(task_pid), do: Process.exit(task_pid, :kill)
+    state =
+      if is_pid(task_pid) and Process.alive?(task_pid) do
+        Process.exit(task_pid, :kill)
+        close_acp_client(state)
+      else
+        state
+      end
+
     {:noreply, state}
   end
 
@@ -463,7 +526,23 @@ defmodule Ecrits.Local.AcpAgent.Session do
     {:noreply, state}
   end
 
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    state = ensure_acp_client_fields(state)
+
+    if state.acp_client_ref == ref and state.acp_client == pid do
+      {:noreply, clear_acp_client(state)}
+    else
+      {:noreply, state}
+    end
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state) do
+    _ = close_acp_client(state)
+    :ok
+  end
 
   # Pop the FIFO queue head (if any) and launch it as the next turn. Called on
   # every turn terminal (done/failed/cancelled/crash) — so a mid-turn send that
@@ -471,7 +550,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
   # no-op when no turn is in flight is impossible here: callers clear `current`
   # to nil before draining, so the head always launches into an idle session.
   defp drain_queue(%{current: nil, queue: [next | rest]} = state) do
-    {_turn_id, state} =
+    {:ok, _turn_id, state} =
       launch_turn(
         queued_provider_input(next),
         %{state | queue: rest},
@@ -513,7 +592,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
   end
 
   defp start_turn(input, extras, state) do
-    {turn_id, state} =
+    {:ok, turn_id, state} =
       launch_turn(input, state, Ecto.UUID.generate(), extras.display, extras.picks)
 
     {:reply, {:ok, %{id: turn_id, session_id: state.id, status: :running}}, state}
@@ -524,10 +603,12 @@ defmodule Ecrits.Local.AcpAgent.Session do
   defp launch_turn(input, state, turn_id, display_input, picks) do
     display_input = display_input || input
     parent = self()
+    state = state |> ensure_acp_client_fields() |> maybe_drop_incompatible_acp_client()
+    client_key = acp_client_key(state)
 
     task =
       Task.async(fn ->
-        run_turn(parent, turn_id, input, state)
+        run_turn(parent, turn_id, input, state, client_key)
       end)
 
     Process.unlink(task.pid)
@@ -541,6 +622,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
           text: "",
           pending_text: "",
           text_segment: 0,
+          acp_update_state: AcpStream.update_state(),
           items: [],
           input: display_input,
           provider_input: input,
@@ -548,10 +630,12 @@ defmodule Ecrits.Local.AcpAgent.Session do
         }
     }
 
-    state = emit(state, %{type: :turn_started, turn_id: turn_id, input: display_input})
+    state =
+      emit(state, %{type: :turn_started, turn_id: turn_id, input: display_input, picks: picks})
+
     state = maybe_emit_thread_title(state, display_input)
 
-    {turn_id, state}
+    {:ok, turn_id, state}
   end
 
   defp queue_previous_input(%{queue: queue, current: current}) do
@@ -580,21 +664,150 @@ defmodule Ecrits.Local.AcpAgent.Session do
     [%{type: :text, text: continuation_text(previous, addendum, "")} | input]
   end
 
+  defp handle_acp_session_update(%{current: %{turn_id: turn_id} = current} = state, update) do
+    acp_update_state = Map.get(current, :acp_update_state, AcpStream.update_state())
+
+    case AcpStream.map_session_update(update, acp_update_state) do
+      {:event, event, acp_update_state} ->
+        state
+        |> put_current_acp_update_state(acp_update_state)
+        |> handle_turn_event(turn_id, event)
+
+      {:skip, acp_update_state} ->
+        put_current_acp_update_state(state, acp_update_state)
+
+      {:error, message, acp_update_state} ->
+        state = put_current_acp_update_state(state, acp_update_state)
+        send(self(), {:turn_failed, turn_id, {:acp_error, message}})
+        state
+    end
+  end
+
+  defp handle_acp_session_update(state, _update), do: state
+
+  defp put_current_acp_update_state(%{current: current} = state, acp_update_state)
+       when is_map(current) do
+    %{state | current: Map.put(current, :acp_update_state, acp_update_state)}
+  end
+
+  # ── durable ACP client ────────────────────────────────────────────────
+
+  defp acp_turn_opts(state) do
+    Keyword.put(state.adapter_opts, :mcp_servers, state.mcp_servers)
+  end
+
+  defp maybe_put_reusable_client(opts, state) do
+    state = ensure_acp_client_fields(state)
+
+    if is_pid(state.acp_client) and Process.alive?(state.acp_client) and
+         is_binary(state.provider_session_id) and state.provider_session_id != "" do
+      opts
+      |> Keyword.put(:client, state.acp_client)
+      |> Keyword.put(:session_id, state.provider_session_id)
+    else
+      opts
+    end
+  end
+
+  defp ensure_acp_client_fields(state) do
+    state
+    |> Map.put_new(:acp_client, nil)
+    |> Map.put_new(:acp_client_key, nil)
+    |> Map.put_new(:acp_client_ref, nil)
+  end
+
+  defp maybe_drop_incompatible_acp_client(state) do
+    state = ensure_acp_client_fields(state)
+    client = state.acp_client
+
+    cond do
+      not is_pid(client) ->
+        clear_acp_client(state)
+
+      not Process.alive?(client) ->
+        clear_acp_client(state)
+
+      state.acp_client_key != acp_client_key(state) ->
+        close_acp_client(state)
+
+      not (is_binary(state.provider_session_id) and state.provider_session_id != "") ->
+        close_acp_client(state)
+
+      true ->
+        state
+    end
+  end
+
+  defp acp_client_key(state) do
+    {
+      state.exmcp_adapter,
+      normalize_keyword(state.adapter_opts),
+      state.mcp_servers
+    }
+  end
+
+  defp normalize_keyword(opts) when is_list(opts) do
+    Enum.sort_by(opts, fn {key, _value} -> to_string(key) end)
+  end
+
+  defp normalize_keyword(_opts), do: []
+
+  defp cancel_acp_client_turn(state) do
+    state = ensure_acp_client_fields(state)
+
+    if is_pid(state.acp_client) and is_binary(state.provider_session_id) and
+         state.provider_session_id != "" do
+      Client.cancel(state.acp_client, state.provider_session_id)
+    end
+
+    state
+  catch
+    _, _ -> state
+  end
+
+  defp close_acp_client(state) do
+    state = ensure_acp_client_fields(state)
+
+    if is_pid(state.acp_client) and Process.alive?(state.acp_client) do
+      GenServer.stop(state.acp_client, :normal, 2_000)
+    end
+
+    clear_acp_client(state)
+  catch
+    _, _ -> clear_acp_client(state)
+  end
+
+  defp clear_acp_client(state) do
+    state = ensure_acp_client_fields(state)
+
+    if is_reference(state.acp_client_ref) do
+      Process.demonitor(state.acp_client_ref, [:flush])
+    end
+
+    %{state | acp_client: nil, acp_client_key: nil, acp_client_ref: nil}
+  end
+
   # ── turn streaming (in a Task) ─────────────────────────────────────
 
-  defp run_turn(parent, turn_id, input, state) do
+  defp run_turn(parent, turn_id, input, state, client_key) do
     stream =
       AcpStream.turn_stream(
         state.exmcp_adapter,
         %{
           input: input,
           workspace_root: state.workspace_root,
-          document_id: state.document_id,
+          # Map.get: tolerate pre-field state maps on hot-reloaded sessions.
+          document_path: Map.get(state, :document_path),
           # Resume the conversation's provider session on turns 2+ (nil on turn 1)
           # so the agent keeps cross-turn memory.
           provider_session_id: state.provider_session_id
         },
-        Keyword.put(state.adapter_opts, :mcp_servers, state.mcp_servers)
+        state
+        |> acp_turn_opts()
+        |> Keyword.put(:persist_client?, true)
+        |> Keyword.put(:event_listener, parent)
+        |> Keyword.put(:acp_client_key, client_key)
+        |> maybe_put_reusable_client(state)
       )
 
     Enum.each(stream, fn event -> send(parent, {:turn_event, turn_id, event}) end)
@@ -609,21 +822,58 @@ defmodule Ecrits.Local.AcpAgent.Session do
   # `AcpStream`). Persist it on the long-lived Session so the NEXT turn resumes
   # the same provider session — this is what gives the agent cross-turn memory.
   # Not broadcast to the chat-rail (internal plumbing only).
+  defp handle_turn_event(
+         state,
+         _turn_id,
+         %{
+           type: :acp_client_ready,
+           client: client,
+           provider_session_id: id,
+           acp_client_key: client_key
+         }
+       )
+       when is_pid(client) and is_binary(id) and id != "" do
+    state = ensure_acp_client_fields(state)
+
+    state =
+      if is_pid(state.acp_client) and state.acp_client != client do
+        close_acp_client(state)
+      else
+        state
+      end
+
+    ref = Process.monitor(client)
+
+    %{
+      state
+      | acp_client: client,
+        acp_client_key: client_key,
+        acp_client_ref: ref,
+        provider_session_id: id
+    }
+  end
+
   defp handle_turn_event(state, _turn_id, %{type: :provider_session, provider_session_id: id})
        when is_binary(id) and id != "" do
     %{state | provider_session_id: id}
   end
 
+  defp handle_turn_event(
+         state,
+         turn_id,
+         %{type: :text_delta, delta: delta, source: :prompt_result}
+       )
+       when is_binary(delta) do
+    if Map.get(state.current, :acp_update_state, AcpStream.update_state()).saw_text? do
+      state
+    else
+      append_text_delta(state, turn_id, delta)
+    end
+  end
+
   defp handle_turn_event(state, turn_id, %{type: :text_delta, delta: delta})
        when is_binary(delta) do
-    current =
-      state.current
-      |> Map.update(:text, delta, &((&1 || "") <> delta))
-      |> Map.update(:pending_text, delta, &((&1 || "") <> delta))
-
-    state
-    |> Map.put(:current, current)
-    |> emit(%{type: :text_delta, turn_id: turn_id, delta: delta})
+    append_text_delta(state, turn_id, delta)
   end
 
   defp handle_turn_event(state, turn_id, %{type: :reasoning_delta, delta: delta})
@@ -693,6 +943,17 @@ defmodule Ecrits.Local.AcpAgent.Session do
   end
 
   defp handle_turn_event(state, _turn_id, _event), do: state
+
+  defp append_text_delta(state, turn_id, delta) do
+    current =
+      state.current
+      |> Map.update(:text, delta, &((&1 || "") <> delta))
+      |> Map.update(:pending_text, delta, &((&1 || "") <> delta))
+
+    state
+    |> Map.put(:current, current)
+    |> emit(%{type: :text_delta, turn_id: turn_id, delta: delta})
+  end
 
   # ── helpers ────────────────────────────────────────────────────────
 
@@ -857,8 +1118,11 @@ defmodule Ecrits.Local.AcpAgent.Session do
       id: state.id,
       owner_id: state.owner_id,
       provider: state.provider,
-      document_id: state.document_id,
       workspace_root: state.workspace_root,
+      # The doc this agent is bound to (the UNIFIED `document` path handle the
+      # doc.* tools + per-turn preamble target) — lets callers verify the agent
+      # follows the user's active document. Map.get tolerates pre-field hot-reload.
+      document_path: Map.get(state, :document_path),
       current_turn: state.current && %{id: state.current.turn_id, status: :running}
     }
   end
@@ -871,7 +1135,10 @@ defmodule Ecrits.Local.AcpAgent.Session do
       title: state.title,
       # Number of mid-turn sends still queued (Phase 5), so a refresh can repaint
       # the "N 대기" pending state.
-      pending: length(state.queue)
+      pending: length(state.queue),
+      # Stored adapter_opts so the LiveView can hydrate reasoning/access from
+      # session on re-attach (instead of reading stale URL params).
+      adapter_opts: state.adapter_opts
     }
   end
 

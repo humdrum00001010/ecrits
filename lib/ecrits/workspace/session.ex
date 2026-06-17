@@ -766,23 +766,39 @@ defmodule Ecrits.Workspace.Session do
 
   defp maybe_apply_settings(_agent_id, []), do: :ok
 
+  # Keys owned by the durable session (set via select_local_agent_reasoning/access
+  # and persisted in adapter_opts). A re-attach on page refresh must NOT push the
+  # LiveView's default assigns over the user's last-chosen values.
+  @session_owned_opts [
+    :reasoning_effort,
+    :sandbox,
+    :permission_mode,
+    :approval_policy,
+    :access_control
+  ]
+
   defp maybe_apply_settings(agent_id, settings) do
     case Keyword.get(settings, :adapter_opts) do
       opts when is_list(opts) and opts != [] ->
         live_opts =
           opts
+          |> Keyword.drop(@session_owned_opts)
           |> maybe_put_setting(settings, :document_id)
+          |> maybe_put_setting(settings, :document_path)
           |> maybe_put_setting(settings, :pool_document_id)
 
-        AcpAgent.update_session_options(agent_id, live_opts)
+        if live_opts != [], do: AcpAgent.update_session_options(agent_id, live_opts)
+        :ok
 
       _ ->
         :ok
     end
   end
 
-  # Forward a non-empty seed setting (document_id / pool_document_id) onto the
-  # live-update opts so a re-attach follows the doc the workspace is now viewing.
+  # Forward non-empty seed settings onto the live-update opts so a re-attach
+  # follows the doc the workspace is now viewing. `document_path` is the unified
+  # doc.* handle handed to the agent prompt; `pool_document_id` is what
+  # doc.context resolves for this agent.
   defp maybe_put_setting(opts, settings, key) do
     case Keyword.get(settings, key) do
       value when is_binary(value) and value != "" -> Keyword.put(opts, key, value)

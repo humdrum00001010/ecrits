@@ -141,4 +141,43 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert Process.alive?(old_pid)
     assert AcpAgent.agent_snapshot(agent_id).transcript != []
   end
+
+  test "attach and same-provider re-attach carry the current document path",
+       %{path: path} do
+    fresh_path = Path.join(path, "doc-seed")
+    File.mkdir_p!(fresh_path)
+
+    {:ok, seeded_ws} =
+      Session.attach(fresh_path,
+        provider: "codex",
+        adapter_opts: [
+          exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+          script: [{:text_delta, "seed reply"}]
+        ],
+        workspace_root: fresh_path,
+        document_path: "first.hwp",
+        pool_document_id: "d_hwp_first"
+      )
+
+    agent_id = seeded_ws.agent_id
+    old_pid = AcpAgent.whereis(agent_id)
+
+    assert {:ok, %{document_path: "first.hwp"}} = AcpAgent.status(nil, agent_id)
+
+    {:ok, reattached_ws} =
+      Session.attach(fresh_path,
+        provider: "codex",
+        adapter_opts: [
+          exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+          script: [{:text_delta, "seed reply"}]
+        ],
+        workspace_root: fresh_path,
+        document_path: "second.hwp",
+        pool_document_id: "d_hwp_second"
+      )
+
+    assert reattached_ws.agent_id == agent_id
+    assert AcpAgent.whereis(agent_id) == old_pid
+    assert {:ok, %{document_path: "second.hwp"}} = AcpAgent.status(nil, agent_id)
+  end
 end
