@@ -1,6 +1,6 @@
 # Expected projection derived from `real_contract.hwpx`.
 #
-# This file is loaded by `Ecrits.Export.HWPXRealContractTest` via
+# This fixture is loaded by `Ecrits.Export.HWPXRealContractTest` via
 # `Code.eval_file/1`. It returns a `%Ecrits.Runtime.State{}` whose
 # projection mirrors the structural skeleton of the source HWPX:
 #
