@@ -47,7 +47,12 @@ defmodule Ecrits.Local.FS do
       entries =
         names
         |> Enum.reject(&(&1 == LocalPath.metadata_dir()))
-        |> Enum.map(&entry(path, relative, &1))
+        |> Enum.flat_map(fn name ->
+          case entry(path, relative, name) do
+            nil -> []
+            entry -> [entry]
+          end
+        end)
         |> Enum.sort_by(&entry_sort_key/1)
 
       {:ok, entries}
@@ -89,14 +94,19 @@ defmodule Ecrits.Local.FS do
 
   defp entry(dir, relative, name) do
     path = Path.join(dir, name)
-    {:ok, stat} = File.lstat(path)
 
-    %{
-      name: name,
-      path: child_relative(relative, name),
-      type: entry_type(stat.type),
-      size: stat.size
-    }
+    case File.lstat(path) do
+      {:ok, stat} ->
+        %{
+          name: name,
+          path: child_relative(relative, name),
+          type: entry_type(stat.type),
+          size: stat.size
+        }
+
+      {:error, _reason} ->
+        nil
+    end
   end
 
   defp child_relative(".", name), do: name
