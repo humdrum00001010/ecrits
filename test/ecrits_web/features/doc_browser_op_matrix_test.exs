@@ -20,7 +20,10 @@ defmodule EcritsWeb.DocBrowserOpMatrixTest do
   @moduletag :browser
   @moduletag timeout: 420_000
 
-  @hwp_fixture Path.expand("../../../priv/static/assets/standard_contracts/employment_v1.hwp", __DIR__)
+  @hwp_fixture Path.expand(
+                 "../../../priv/static/assets/standard_contracts/employment_v1.hwp",
+                 __DIR__
+               )
   @docx_fixture Path.expand("../../fixtures/office/table.docx", __DIR__)
 
   setup do

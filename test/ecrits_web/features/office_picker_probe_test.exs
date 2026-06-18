@@ -201,7 +201,8 @@ defmodule EcritsWeb.OfficePickerProbeTest do
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
 
-    assert length(refs) >= 3, "hover probes do not track the pointer (refs=#{inspect(refs)}): #{raw}"
+    assert length(refs) >= 3,
+           "hover probes do not track the pointer (refs=#{inspect(refs)}): #{raw}"
 
     assert Enum.any?(result["attempts"], &(&1["type"] == "cell")),
            "sweeping across the table never resolved a cell: #{raw}"
@@ -219,7 +220,9 @@ defmodule EcritsWeb.OfficePickerProbeTest do
 
     # Footnote picking: the planted footnote resolves with an fn[<n>] ref and
     # carries its text + rects.
-    assert result["footnoteError"] == nil, "footnote leg threw: #{inspect(result["footnoteError"])}"
+    assert result["footnoteError"] == nil,
+           "footnote leg threw: #{inspect(result["footnoteError"])}"
+
     footnote = result["footnote"]
     assert footnote, "hover never resolved the planted footnote: #{raw}"
     assert footnote["ref"] =~ ~r/^fn\[\d+\]$/

@@ -56,6 +56,7 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
       IO.puts("\n[skip] LibreOffice UNO arm unavailable; skipping office op matrix (docx)")
     else
       ctx = context.ctx
+
       assert {:ok, %{"document" => doc}} =
                Tools.call(ctx, "doc.open", %{"path" => context.docx, "kind" => "docx"})
 
@@ -75,7 +76,10 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
 
       assert [%{"ref" => pb_ref} | _] = pb
 
-      assert_ok("insert_text", edit(ctx, doc, %{"op" => "insert_text", "ref" => pb_ref, "text" => "_TAIL"}))
+      assert_ok(
+        "insert_text",
+        edit(ctx, doc, %{"op" => "insert_text", "ref" => pb_ref, "text" => "_TAIL"})
+      )
 
       assert_ok(
         "replace_text (ref-scoped)",
@@ -91,12 +95,22 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
       pb_next = "p" <> Integer.to_string(para_index(pb_ref) + 1)
       assert_ok("merge", edit(ctx, doc, %{"op" => "merge", "ref" => pb_next}))
       assert_ok("delete_range", edit(ctx, doc, %{"op" => "delete_range", "ref" => pb_ref}))
-      assert_ok("delete_paragraph", edit(ctx, doc, %{"op" => "delete_paragraph", "ref" => pb_ref}))
+
+      assert_ok(
+        "delete_paragraph",
+        edit(ctx, doc, %{"op" => "delete_paragraph", "ref" => pb_ref})
+      )
 
       # ── table structure ─────────────────────────────────────────────
       assert_ok(
         "insert_table",
-        edit(ctx, doc, %{"op" => "insert_table", "ref" => "end", "rows" => 2, "cols" => 2, "name" => "MX"})
+        edit(ctx, doc, %{
+          "op" => "insert_table",
+          "ref" => "end",
+          "rows" => 2,
+          "cols" => 2,
+          "name" => "MX"
+        })
       )
 
       assert_ok(
@@ -111,11 +125,23 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
 
       assert_ok(
         "insert_table_column",
-        edit(ctx, doc, %{"op" => "insert_table_column", "ref" => "tbl[MX]", "col" => 1, "right" => true})
+        edit(ctx, doc, %{
+          "op" => "insert_table_column",
+          "ref" => "tbl[MX]",
+          "col" => 1,
+          "right" => true
+        })
       )
 
-      assert_ok("delete_table_row", edit(ctx, doc, %{"op" => "delete_table_row", "ref" => "tbl[MX]", "row" => 2}))
-      assert_ok("delete_table_column", edit(ctx, doc, %{"op" => "delete_table_column", "ref" => "tbl[MX]", "col" => 2}))
+      assert_ok(
+        "delete_table_row",
+        edit(ctx, doc, %{"op" => "delete_table_row", "ref" => "tbl[MX]", "row" => 2})
+      )
+
+      assert_ok(
+        "delete_table_column",
+        edit(ctx, doc, %{"op" => "delete_table_column", "ref" => "tbl[MX]", "col" => 2})
+      )
 
       assert_ok(
         "merge_cells",
@@ -152,7 +178,13 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
 
       assert_ok(
         "insert_picture (inline)",
-        edit(ctx, doc, %{"op" => "insert_picture", "ref" => "end", "src" => @img_fixture, "w" => 3000, "name" => "MXIMG"})
+        edit(ctx, doc, %{
+          "op" => "insert_picture",
+          "ref" => "end",
+          "src" => @img_fixture,
+          "w" => 3000,
+          "name" => "MXIMG"
+        })
       )
 
       assert_ok(
@@ -160,7 +192,10 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
         edit(ctx, doc, %{"op" => "set_geometry", "ref" => "img[MXIMG]", "w" => 2000})
       )
 
-      assert_ok("delete_node (img)", edit(ctx, doc, %{"op" => "delete_node", "ref" => "img[MXIMG]"}))
+      assert_ok(
+        "delete_node (img)",
+        edit(ctx, doc, %{"op" => "delete_node", "ref" => "img[MXIMG]"})
+      )
 
       # set_columns over a fresh footnote-free tail range
       assert_ok(
@@ -211,6 +246,7 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
       IO.puts("\n[skip] LibreOffice UNO arm unavailable; skipping office op matrix (pptx)")
     else
       ctx = context.ctx
+
       assert {:ok, %{"document" => doc}} =
                Tools.call(ctx, "doc.open", %{"path" => context.pptx, "kind" => "pptx"})
 
@@ -234,7 +270,11 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
 
       assert_ok(
         "set_geometry (shape)",
-        edit(ctx, doc, %{"op" => "set_geometry", "ref" => "page[mxslide]/shape[mxrect]", "x" => 2000})
+        edit(ctx, doc, %{
+          "op" => "set_geometry",
+          "ref" => "page[mxslide]/shape[mxrect]",
+          "x" => 2000
+        })
       )
 
       assert_ok(
@@ -256,7 +296,10 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
         edit(ctx, doc, %{"op" => "delete_node", "ref" => "page[mxslide]/shape[mxrect]"})
       )
 
-      assert_ok("delete_node (slide)", edit(ctx, doc, %{"op" => "delete_node", "ref" => "page[mxslide]"}))
+      assert_ok(
+        "delete_node (slide)",
+        edit(ctx, doc, %{"op" => "delete_node", "ref" => "page[mxslide]"})
+      )
     end
   end
 
@@ -265,17 +308,25 @@ defmodule Ecrits.Doc.OfficeUnoOpMatrixTest do
       IO.puts("\n[skip] LibreOffice UNO arm unavailable; skipping office rejection tests")
     else
       ctx = context.ctx
+
       assert {:ok, %{"document" => doc}} =
                Tools.call(ctx, "doc.open", %{"path" => context.docx, "kind" => "docx"})
 
       # HWP-form insert_shape (no page) → guidance error naming the slide form
       assert {:error, err} =
-               edit(ctx, doc, %{"op" => "insert_shape", "ref" => "p0", "width" => 100, "height" => 100})
+               edit(ctx, doc, %{
+                 "op" => "insert_shape",
+                 "ref" => "p0",
+                 "width" => 100,
+                 "height" => 100
+               })
 
       assert inspect(err) =~ "page"
 
       # table op on a non-table ref → precise "needs a table ref" from the engine
-      assert {:error, err2} = edit(ctx, doc, %{"op" => "insert_table_row", "ref" => "p0", "row" => 0})
+      assert {:error, err2} =
+               edit(ctx, doc, %{"op" => "insert_table_row", "ref" => "p0", "row" => 0})
+
       assert inspect(err2) =~ "table ref"
     end
   end

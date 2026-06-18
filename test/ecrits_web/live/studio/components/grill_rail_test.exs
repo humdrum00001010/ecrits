@@ -253,7 +253,7 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRailTest do
         n
 
       {pos, len} ->
-        <<_::binary-size(pos), _::binary-size(len), rest::binary>> = haystack
+        <<_::binary-size(^pos), _::binary-size(^len), rest::binary>> = haystack
         count_substr(rest, needle, n + 1)
     end
   end
