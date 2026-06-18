@@ -135,8 +135,16 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   # agent has touched the doc) is a no-op, and a refresh failure must never
   # fail the checkpoint itself (the snapshot store write already succeeded).
   defp sync_server_twin(%Document{path: path}, bytes) when is_binary(path) do
-    _ = Pool.refresh_by_path(path, bytes)
-    :ok
+    # Truly best-effort: the twin reload reaches a pool Editor (and, for office,
+    # its singleton Instance) over GenServer.call — a crash there `exit`s the
+    # CALLER, not just returns an error. The checkpoint/save already succeeded,
+    # so swallow any failure here instead of taking the LiveView down with it.
+    try do
+      _ = Pool.refresh_by_path(path, bytes)
+      :ok
+    catch
+      _kind, _reason -> :ok
+    end
   end
 
   defp sync_server_twin(_document, _bytes), do: :ok

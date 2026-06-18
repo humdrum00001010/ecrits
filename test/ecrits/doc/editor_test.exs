@@ -9,16 +9,16 @@ defmodule Ecrits.Doc.EditorTest do
     Application.put_env(:ehwp, :runtime, FakeEhwpRuntime)
     on_exit(fn -> restore(:ehwp, :runtime, prev) end)
 
-    {:ok, pid} =
-      Editor.start_link(
-        document_id: "d_#{System.unique_integer([:positive])}",
-        kind: :hwp,
-        backend: Ecrits.Doc.Rhwp,
-        path: "contract.hwp",
-        open_opts: [__text__: "제1조 (목적)\n제2조 (계약기간)\n제3조 (대금지급)"]
+    pid =
+      start_supervised!(
+        {Editor,
+         document_id: "d_#{System.unique_integer([:positive])}",
+         kind: :hwp,
+         backend: Ecrits.Doc.Rhwp,
+         path: "contract.hwp",
+         open_opts: [__text__: "제1조 (목적)\n제2조 (계약기간)\n제3조 (대금지급)"]}
       )
 
-    on_exit(fn -> if Process.alive?(pid), do: Editor.stop(pid) end)
     {:ok, editor: pid}
   end
 

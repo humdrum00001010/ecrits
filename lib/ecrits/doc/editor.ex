@@ -136,6 +136,13 @@ defmodule Ecrits.Doc.Editor do
 
   @impl true
   def init(opts) do
+    # Trap exits so `terminate/2` actually RUNS on a supervisor-initiated shutdown
+    # (`DynamicSupervisor.terminate_child`, which Pool.close uses on tab-close).
+    # Without this the `:shutdown` signal kills the GenServer immediately and
+    # terminate/2 is SKIPPED — so `backend.close/1` never fires and the office UNO
+    # session + its `.~lock.<file>#` leak (the "close of libre never works" bug).
+    Process.flag(:trap_exit, true)
+
     backend = Keyword.fetch!(opts, :backend)
     path = Keyword.fetch!(opts, :path)
     open_opts = Keyword.get(opts, :open_opts, [])
@@ -173,7 +180,16 @@ defmodule Ecrits.Doc.Editor do
 
   @impl true
   def terminate(_reason, %{backend: backend, handle: handle}) do
-    backend.close(handle)
+    # Best-effort: a backend whose governor is a separate process (office's
+    # singleton Instance) may already be down/restarting when we terminate, so a
+    # close call can `exit`. Swallow it — terminate must not itself crash (that
+    # turned a recoverable office error into a LiveView-channel cascade).
+    try do
+      backend.close(handle)
+    catch
+      _kind, _reason -> :ok
+    end
+
     :ok
   end
 
@@ -261,7 +277,19 @@ defmodule Ecrits.Doc.Editor do
   def handle_call({:reload_from_bytes, bytes}, _from, st) when is_binary(bytes) do
     # Open the NEW model first and only then close the old handle, so a parse
     # failure keeps the current (still-valid) model instead of losing the doc.
-    case st.backend.open(bytes, []) do
+    #
+    # Path-native backends (office/UNO) export `reopen/2`: their `open/2` opens a
+    # FILE, so handing it raw bytes would treat the byte buffer as a path (the
+    # pptx save->close crash). Bytes-native backends (rhwp) have no `reopen/2` and
+    # fall back to `open(bytes, [])`, which they accept directly.
+    reopened =
+      if function_exported?(st.backend, :reopen, 2) do
+        st.backend.reopen(st.handle, bytes)
+      else
+        st.backend.open(bytes, [])
+      end
+
+    case reopened do
       {:ok, new_handle} ->
         st.backend.close(st.handle)
         {:reply, :ok, mark_clean(%{st | handle: new_handle})}

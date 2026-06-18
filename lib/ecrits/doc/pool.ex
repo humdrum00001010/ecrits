@@ -150,6 +150,27 @@ defmodule Ecrits.Doc.Pool do
     do: GenServer.call(pool, {:close, document_id})
 
   @doc """
+  Close the twin for the doc at absolute `path` — terminates its Editor, whose
+  `terminate/2` runs `backend.close/1` (for office: `uno_close`, which releases
+  the LibreOffice `.~lock.<file>#`). No-op when no twin is open for `path`.
+
+  Used when a workspace TAB is explicitly closed: the user is done with the doc,
+  so the server twin (and, for office, its held UNO session + on-disk lock) must
+  be released. A viewer DETACH (tab switch / navigate-away) deliberately leaves
+  the twin in the pool; only an explicit close disposes it. Re-opening the path
+  transparently re-creates the twin.
+  """
+  @spec close_by_path(GenServer.server(), String.t()) :: :ok
+  def close_by_path(pool \\ @default_name, path) when is_binary(path) do
+    case info_by_path(pool, path) do
+      {:ok, %{id: id}} -> _ = close(pool, id)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  @doc """
   Refresh the SERVER twin of the doc at `path` from authoritative `bytes` (a
   browser-viewer checkpoint). While a doc is viewed, the browser WASM model is
   the authority and this pool's editor is only a shadow opened from disk —

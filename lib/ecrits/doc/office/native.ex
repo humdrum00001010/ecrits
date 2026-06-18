@@ -62,7 +62,11 @@ defmodule Ecrits.Doc.Office.Native do
       end
     end
   rescue
-    e in ErlangError -> {:error, {:office_unavailable, inspect(e.original)}}
+    # A NIF `badarg` (e.g. a non-path arg) normalises to ArgumentError, which the
+    # `e in ErlangError` clause USED to match and then blow up on `e.original`
+    # (ArgumentError has no such key) — a KeyError that crashed this singleton
+    # GenServer and cascaded. Catch any raise and surface its message instead.
+    e -> {:error, {:office_unavailable, Exception.message(e)}}
   end
 
   @doc """
@@ -79,7 +83,7 @@ defmodule Ecrits.Doc.Office.Native do
       {:error, reason} -> {:error, reason}
     end
   rescue
-    e in ErlangError -> {:error, {:office_unavailable, inspect(e.original)}}
+    e -> {:error, {:office_unavailable, Exception.message(e)}}
   end
 
   @doc "Persist a live session to `path` using the kind's export filter (eviction save)."
@@ -141,7 +145,7 @@ defmodule Ecrits.Doc.Office.Native do
       end
     end
   rescue
-    e in ErlangError -> {:error, {:office_unavailable, inspect(e.original)}}
+    e -> {:error, {:office_unavailable, Exception.message(e)}}
   end
 
   # ── resolution helpers (mirrors Ecrits.Doc.Office) ─────────────────

@@ -56,6 +56,16 @@ defmodule Ecrits.Doc do
   @doc "Create a NEW empty document (engine blank template), returning a handle."
   @callback new(opts :: keyword()) :: {:ok, handle()} | {:error, term()}
 
+  @doc """
+  Reload an OPEN handle from freshly-persisted `bytes`, returning a new handle
+  (the Editor closes the old one). Bytes-native backends (rhwp) can skip this —
+  the Editor falls back to `open(bytes, [])`. Path-native backends (office/UNO,
+  whose `open/2` opens a FILE, never a byte buffer) implement it to reopen from
+  disk; the canonical file already holds `bytes` by the time this is called (the
+  save/checkpoint twin-sync writes the file first). Optional.
+  """
+  @callback reopen(handle(), bytes :: binary()) :: {:ok, handle()} | {:error, term()}
+
   @doc "Close/release a handle."
   @callback close(handle()) :: :ok
 
@@ -110,7 +120,7 @@ defmodule Ecrits.Doc do
   """
   @callback elements(handle(), opts :: keyword()) :: {:ok, [map()]} | {:error, term()}
 
-  @optional_callbacks save: 2, new: 1, elements: 2
+  @optional_callbacks save: 2, new: 1, elements: 2, reopen: 2
 
   @doc "Backends registered for each document kind."
   @spec backend_for(kind()) :: module() | nil
