@@ -40,9 +40,9 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   @doc """
   Returns a `Stream` of normalized chat-rail events for one turn.
 
-  `turn` is `%{input, workspace_root, document_path}` and may carry
-  `:provider_session_id` — the provider session/thread id from a PRIOR turn of
-  this conversation. When present, the turn RESUMES that provider session
+  `turn` is `%{input, workspace_root}` and may carry `:provider_session_id` —
+  the provider session/thread id from a PRIOR turn of this conversation. When
+  present, the turn RESUMES that provider session
   (`session/load`) so the agent keeps cross-turn memory, instead of minting a
   brand-new one (`session/new`). The resolved provider session id is emitted as
   the FIRST stream event (`%{type: :provider_session, provider_session_id: id}`)
@@ -691,7 +691,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # one text block, exactly as before); a block list yields a leading preamble
   # text block followed by one ACP block per input block.
   defp build_prompt(turn, opts) do
-    Ecrits.Local.AcpAgent.Prompt.to_acp_content(turn.input, doc_preamble(turn, opts))
+    Ecrits.Local.AcpAgent.Prompt.to_acp_content(turn.input, doc_preamble(opts))
   end
 
   # When the rail's top "ultracode" tier is selected (Claude only), append the
@@ -714,7 +714,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # no-shell rule + render-view exception, save/read-only/no-fabrication, the
   # caveman voice). The current document handle is now an MCP contract:
   # doc.context.current_document, not prompt-embedded path text.
-  defp doc_preamble(_turn, opts) do
+  defp doc_preamble(opts) do
     """
     [System] Use doc MCP tools ONLY for documents — never shell/file-read them.
     For "this/current/open document", call `doc.context` first and use

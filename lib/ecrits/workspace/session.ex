@@ -51,9 +51,9 @@ defmodule Ecrits.Workspace.Session do
   Returns the workspace handle (`t:ws/0`) carrying the canonical path and the
   resolved foreground agent id + topic, so the caller can `subscribe/1` and
   delegate turn verbs. `settings` seed the foreground agent on FIRST attach
-  (provider/adapter_opts/workspace_root/document_id); on a later attach (browser
-  refresh) the existing agent is re-used and the settings are applied live (next
-  turn picks them up) — never recreated.
+  (provider/adapter_opts/workspace_root/document_path/pool_document_id); on a
+  later attach (browser refresh) the existing agent is re-used and the settings
+  are applied live (next turn picks them up) — never recreated.
   """
   @spec attach(String.t(), keyword()) :: {:ok, ws()} | {:error, term()}
   def attach(path, settings \\ []) when is_binary(path) do
@@ -103,8 +103,8 @@ defmodule Ecrits.Workspace.Session do
   returned topic to observe the worker's stream.
 
   `opts` seed the worker exactly like the foreground agent
-  (provider / adapter_opts / workspace_root / document_id); a fresh agent id is
-  minted unless one is passed via `:id`.
+  (provider / adapter_opts / workspace_root / document_path / pool_document_id);
+  a fresh agent id is minted unless one is passed via `:id`.
   """
   @spec spawn_worker(String.t(), String.t(), keyword()) ::
           {:ok, %{id: String.t(), pid: pid(), topic: String.t()}} | {:error, term()}
@@ -783,7 +783,6 @@ defmodule Ecrits.Workspace.Session do
         live_opts =
           opts
           |> Keyword.drop(@session_owned_opts)
-          |> maybe_put_setting(settings, :document_id)
           |> maybe_put_setting(settings, :document_path)
           |> maybe_put_setting(settings, :pool_document_id)
 
@@ -795,10 +794,9 @@ defmodule Ecrits.Workspace.Session do
     end
   end
 
-  # Forward non-empty seed settings onto the live-update opts so a re-attach
-  # follows the doc the workspace is now viewing. `document_path` is the unified
-  # doc.* handle handed to the agent prompt; `pool_document_id` is what
-  # doc.context resolves for this agent.
+  # Forward non-empty seed settings onto the live-update opts so a re-attach can
+  # refresh the idle defaults. Sends still pass document_path/pool_document_id as
+  # turn context, and the agent freezes those values for in-flight doc.* calls.
   defp maybe_put_setting(opts, settings, key) do
     case Keyword.get(settings, key) do
       value when is_binary(value) and value != "" -> Keyword.put(opts, key, value)

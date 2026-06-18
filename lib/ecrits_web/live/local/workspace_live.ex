@@ -1910,7 +1910,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_document_status, :none)
     |> assign(:local_document_snapshot, nil)
     |> clear_local_hwp_pages()
-    |> maybe_restart_local_agent_for_document(previous_document_id)
   end
 
   defp schedule_local_document_open(%{assigns: %{workspace: nil}} = socket, _path), do: socket
@@ -1942,7 +1941,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_document_snapshot, nil)
     |> assign(:local_document_error, nil)
     |> clear_local_hwp_pages()
-    |> maybe_restart_local_agent_for_document(previous_document_id)
   end
 
   # Open-or-focus tab tracking. The id is a deterministic token of the relative
@@ -2079,7 +2077,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           |> register_pool_document(document)
           |> render_local_document_pages(document)
 
-        maybe_restart_local_agent_for_document(socket, previous_document_id)
+        socket
 
       {:error, reason} ->
         _ = unregister_local_rhwp_materializer_editor(previous_document_id)
@@ -2650,7 +2648,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> Keyword.put(:workspace_root, workspace_path)
     |> Keyword.put(:document_path, socket.assigns.active_document_path)
     |> Keyword.put(:workspace_path, workspace_path)
-    |> put_current_document_id(active_document_id(socket))
     |> put_pool_document_id(socket.assigns[:pool_document_id])
 
     # NOTE: no `:id` here. The durable foreground-agent id is derived from the
@@ -2658,12 +2655,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     # refresh re-derives the SAME id and re-attaches to the SAME agent / provider
     # thread. (local_agent_attach_settings also strips any stray :id defensively.)
   end
-
-  defp put_current_document_id(opts, document_id)
-       when is_binary(document_id) and document_id != "",
-       do: Keyword.put(opts, :document_id, document_id)
-
-  defp put_current_document_id(opts, _document_id), do: opts
 
   # The agent's doc.* ACTIVE doc is the `Ecrits.Doc.Pool` id (what doc.context
   # returns and doc.edit/doc.open target), distinct from the LiveView document_id.
@@ -2674,41 +2665,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
        do: Keyword.put(opts, :pool_document_id, pool_document_id)
 
   defp put_pool_document_id(opts, _pool_document_id), do: opts
-
-  # Selecting/opening a document must NOT recreate the agent (that would wipe the
-  # chat-rail conversation). The active document is per-turn context, so apply it
-  # LIVE to the foreground agent; the next turn's doc.* tools then target the
-  # now-active document. The foreground agent is already bound by
-  # attach_workspace_session (run earlier in handle_params), so this only nudges
-  # the document_id when it actually changed.
-  defp maybe_restart_local_agent_for_document(socket, previous_document_id) do
-    current_document_id = active_document_id(socket)
-
-    cond do
-      not connected?(socket) ->
-        socket
-
-      previous_document_id == current_document_id ->
-        socket
-
-      not match?(%{}, socket.assigns.workspace_session) ->
-        socket
-
-      true ->
-        # Follow the Pool document id (the doc.* tools' active doc) AND the
-        # workspace-relative path — the UNIFIED `document` handle the per-turn
-        # preamble hands the agent, so "이 문서" turns need zero discovery
-        # round-trips. nil pool id (e.g. a Markdown file with no Pool backend)
-        # clears the agent's active doc.
-        _ =
-          WorkspaceSession.update_options(socket.assigns.workspace_session,
-            document_path: socket.assigns[:active_document_path],
-            pool_document_id: socket.assigns[:pool_document_id]
-          )
-
-        socket
-    end
-  end
 
   defp refresh_tree(%{assigns: %{workspace: nil}} = socket, _expanded_paths), do: socket
 
@@ -4047,7 +4003,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # workspace was still auto-rejected under the old approval policy).
   defp current_turn_opts(socket) do
     workspace_path = workspace_root_path(socket.assigns.workspace || %{})
-    [adapter_opts: LocalAgentConfig.adapter_opts(socket.assigns.local_agent, workspace_path)]
+
+    [
+      adapter_opts: LocalAgentConfig.adapter_opts(socket.assigns.local_agent, workspace_path),
+      document_path: socket.assigns[:active_document_path],
+      pool_document_id: socket.assigns[:pool_document_id]
+    ]
   end
 
   defp send_local_agent_turn(socket, message, picks) do

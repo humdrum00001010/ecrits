@@ -184,8 +184,8 @@ defmodule Ecrits.Local.AcpAgent.Session do
        # document id (`d_<kind>_<hash>`) of the doc this agent is bound to.
        # `doc.context` returns THIS (per-agent, not the global `Pool.active`);
        # `doc.open`/`doc.edit` honour ownership against it. The workspace LiveView
-       # sets it from `register_pool_document` and follows doc switches live via
-       # `update_options`. nil until a doc is bound.
+       # seeds it on attach; actual sends freeze the current value per turn.
+       # nil until a doc is bound.
        pool_document_id: Keyword.get(opts, :pool_document_id),
        mcp_servers: Keyword.get(opts, :mcp_servers, []),
        # The provider's session/thread id, captured on turn 1 and RESUMED on
@@ -233,13 +233,15 @@ defmodule Ecrits.Local.AcpAgent.Session do
   end
 
   def handle_call(:tool_context, _from, state) do
+    context = current_tool_context(state)
+
     {:reply,
      %{
-       active_doc: state.pool_document_id,
+       active_doc: context.pool_document_id,
        agent_id: state.id,
        workspace_root: state.workspace_root,
        # Map.get: tolerate pre-field state maps on hot-reloaded sessions.
-       document_path: Map.get(state, :document_path),
+       document_path: context.document_path,
        # Access modes map to sandbox: read-only → "read-only"; ask /
        # full-workspace → "workspace-write" (see workspace_live.ex
        # local_agent_access_control/1). So sandbox == "read-only" ⟺ the user
@@ -264,12 +266,10 @@ defmodule Ecrits.Local.AcpAgent.Session do
   end
 
   def handle_call({:update_options, new_opts}, _from, state) do
-    # The active document is per-turn context, NOT a reason to recreate the
-    # session — switching the document in the workspace must preserve the
-    # conversation (mirrors the access/reasoning live-update path). When the
-    # caller passes a `:pool_document_id` (the Pool doc id the doc.* tools target)
-    # and/or `:document_path` (the viewed doc), follow them on the live session so
-    # the next turn's doc.* tools operate on what the user is now viewing.
+    # Access/reasoning/model changes are live defaults for future turns. Document
+    # context may be seeded here on attach/re-attach, but an actual send freezes
+    # document_path/pool_document_id onto that turn so later UI events cannot
+    # retarget in-flight doc.* calls.
     #
     # Map.get (not state.document_path): a session spawned before this field
     # existed hot-reloads with the old state map and must not crash here.
@@ -308,7 +308,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
         # string stays a bare string (the byte-for-byte-unchanged legacy path), a
         # block list is validated. A malformed multi-modal send fails fast here.
         case Prompt.normalize(raw_input) do
-          {:ok, input} -> start_turn(input, turn_extras(opts), ensure_queue(state))
+          {:ok, input} -> start_turn(input, turn_extras(state, opts), ensure_queue(state))
           {:error, reason} -> {:reply, {:error, {:invalid_input, reason}}, state}
         end
     end
@@ -406,8 +406,12 @@ defmodule Ecrits.Local.AcpAgent.Session do
   # (the typed text) when it differs from the provider input (e.g. the LiveView
   # appends the picked-element JSON block for the agent only); `:picks` are the
   # structured picked-element chips that ride along on the user transcript row.
-  defp turn_extras(opts) do
-    %{display: Keyword.get(opts, :display), picks: Keyword.get(opts, :picks) || []}
+  defp turn_extras(state, opts) do
+    %{
+      display: Keyword.get(opts, :display),
+      picks: Keyword.get(opts, :picks) || [],
+      context: turn_context(state, opts)
+    }
   end
 
   @impl true
@@ -556,7 +560,8 @@ defmodule Ecrits.Local.AcpAgent.Session do
         %{state | queue: rest},
         next.turn_id,
         Map.get(next, :display) || next.input,
-        Map.get(next, :picks, [])
+        Map.get(next, :picks, []),
+        Map.get(next, :context)
       )
 
     state
@@ -580,6 +585,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
       input: input,
       display: extras.display,
       picks: extras.picks,
+      context: extras.context,
       previous_input: queue_previous_input(state)
     }
 
@@ -593,18 +599,31 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
   defp start_turn(input, extras, state) do
     {:ok, turn_id, state} =
-      launch_turn(input, state, Ecto.UUID.generate(), extras.display, extras.picks)
+      launch_turn(
+        input,
+        state,
+        Ecto.UUID.generate(),
+        extras.display,
+        extras.picks,
+        extras.context
+      )
 
     {:reply, {:ok, %{id: turn_id, session_id: state.id, status: :running}}, state}
   end
 
   # Spawn the per-turn streaming task and record it as the current turn. Shared by
   # a fresh send and by draining the FIFO queue on a turn terminal.
-  defp launch_turn(input, state, turn_id, display_input, picks) do
+  defp launch_turn(input, state, turn_id, display_input, picks, context) do
     display_input = display_input || input
     parent = self()
-    state = state |> ensure_acp_client_fields() |> maybe_drop_incompatible_acp_client()
+
+    state =
+      state
+      |> apply_turn_context(context)
+      |> ensure_acp_client_fields()
+
     client_key = acp_client_key(state)
+    state = maybe_drop_incompatible_acp_client(state, client_key)
 
     task =
       Task.async(fn ->
@@ -626,7 +645,8 @@ defmodule Ecrits.Local.AcpAgent.Session do
           items: [],
           input: display_input,
           provider_input: input,
-          picks: picks
+          picks: picks,
+          context: turn_context(state, [])
         }
     }
 
@@ -716,7 +736,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
     |> Map.put_new(:acp_client_ref, nil)
   end
 
-  defp maybe_drop_incompatible_acp_client(state) do
+  defp maybe_drop_incompatible_acp_client(state, client_key) do
     state = ensure_acp_client_fields(state)
     client = state.acp_client
 
@@ -727,7 +747,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
       not Process.alive?(client) ->
         clear_acp_client(state)
 
-      state.acp_client_key != acp_client_key(state) ->
+      state.acp_client_key != client_key ->
         close_acp_client(state)
 
       not (is_binary(state.provider_session_id) and state.provider_session_id != "") ->
@@ -796,8 +816,6 @@ defmodule Ecrits.Local.AcpAgent.Session do
         %{
           input: input,
           workspace_root: state.workspace_root,
-          # Map.get: tolerate pre-field state maps on hot-reloaded sessions.
-          document_path: Map.get(state, :document_path),
           # Resume the conversation's provider session on turns 2+ (nil on turn 1)
           # so the agent keeps cross-turn memory.
           provider_session_id: state.provider_session_id
@@ -1109,6 +1127,42 @@ defmodule Ecrits.Local.AcpAgent.Session do
   defp maybe_tool_io_part(parts, _label, ""), do: parts
   defp maybe_tool_io_part(parts, label, body), do: parts ++ ["#{label}:\n#{body}"]
 
+  defp turn_context(state, opts) do
+    %{
+      document_path: turn_context_value(state, opts, :document_path),
+      pool_document_id: turn_context_value(state, opts, :pool_document_id)
+    }
+  end
+
+  defp turn_context_value(state, opts, key) do
+    if is_list(opts) and Keyword.has_key?(opts, key) do
+      Keyword.get(opts, key)
+    else
+      Map.get(state, key)
+    end
+  end
+
+  defp apply_turn_context(state, nil), do: state
+
+  defp apply_turn_context(state, %{
+         document_path: document_path,
+         pool_document_id: pool_document_id
+       }) do
+    state
+    |> Map.put(:document_path, document_path)
+    |> Map.put(:pool_document_id, pool_document_id)
+  end
+
+  defp current_tool_context(%{
+         current: %{
+           context:
+             %{document_path: _document_path, pool_document_id: _pool_document_id} = context
+         }
+       }),
+       do: context
+
+  defp current_tool_context(state), do: turn_context(state, [])
+
   defp blank?(nil), do: true
   defp blank?(text) when is_binary(text), do: String.trim(text) == ""
   defp blank?(_), do: false
@@ -1119,9 +1173,8 @@ defmodule Ecrits.Local.AcpAgent.Session do
       owner_id: state.owner_id,
       provider: state.provider,
       workspace_root: state.workspace_root,
-      # The doc this agent is bound to (the UNIFIED `document` path handle the
-      # doc.* tools + per-turn preamble target) — lets callers verify the agent
-      # follows the user's active document. Map.get tolerates pre-field hot-reload.
+      # Last seeded/launched document path. In-flight tools use current.context;
+      # Map.get tolerates pre-field hot-reload.
       document_path: Map.get(state, :document_path),
       current_turn: state.current && %{id: state.current.turn_id, status: :running}
     }

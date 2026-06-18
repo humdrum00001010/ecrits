@@ -68,6 +68,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   import Phoenix.LiveViewTest
 
   alias Ecrits.Local.AcpAgent
+  alias Ecrits.Local.AcpAgent.Session, as: AgentSession
   alias Ecrits.Local.Document
   alias EcritsWeb.LocalDirectoryPickerStub
   alias EcritsWeb.LocalWorkspaceAdapterStub
@@ -1167,7 +1168,15 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     refute render(lv) =~ "Fake response"
   end
 
-  test "agent session starts with active local document id", %{conn: conn} do
+  test "agent turn freezes the active local document context", %{conn: conn} do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [{:text_delta, "done"}],
+        test_pid: self(),
+        wait_for: :release_context_probe
+      ]
+    )
+
     {:ok, lv, _html} =
       live(
         conn,
@@ -1175,11 +1184,23 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       )
 
     session_id = subscribe_agent(lv)
+    session_pid = AcpAgent.whereis(session_id)
+    assert is_pid(session_pid)
 
-    # The agent binds to the user's active document — its per-turn `document_path`
-    # (the UNIFIED handle the doc.* tools target) points at what's on screen.
-    assert {:ok, %{document_path: path}} = AcpAgent.status(nil, session_id)
+    lv
+    |> form("#local-agent-form", agent: %{message: "read this document"})
+    |> render_submit()
+
+    assert_receive {:local_agent_adapter_waiting, task_pid}, 2_000
+
+    # The agent binds doc.* context at send time — the UNIFIED document handle
+    # points at what's on screen without relying on idle session mutation.
+    assert %{active_doc: active_doc, document_path: path} = AgentSession.tool_context(session_pid)
+    assert is_binary(active_doc) and String.starts_with?(active_doc, "d_hwp_")
     assert is_binary(path) and String.ends_with?(path, "template.hwp")
+
+    send(task_pid, :release_context_probe)
+    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 2_000
   end
 
   test "ordinary document prompt uses MCP context instead of embedding selected path",

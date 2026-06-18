@@ -100,6 +100,49 @@ defmodule Ecrits.Local.AcpAgent.SessionQueueTest do
            ] = Session.transcript(pid)
   end
 
+  test "queued turn document context does not retarget the running turn" do
+    {_id, pid} = start_blocking_session()
+
+    {:ok, %{id: turn1, status: :running}} =
+      Session.send_turn(pid, nil, "read first",
+        document_path: "first.hwp",
+        pool_document_id: "d_hwp_first"
+      )
+
+    assert_receive {:local_agent_adapter_waiting, task1}, 2_000
+    assert_receive {:local_agent_event, %{type: :turn_started, turn_id: ^turn1}}, 2_000
+
+    assert %{
+             active_doc: "d_hwp_first",
+             document_path: "first.hwp"
+           } = Session.tool_context(pid)
+
+    {:ok, %{id: turn2, status: :queued}} =
+      Session.send_turn(pid, nil, "read second",
+        document_path: "second.hwp",
+        pool_document_id: "d_hwp_second"
+      )
+
+    assert_receive {:local_agent_event, %{type: :turn_queued, turn_id: ^turn2}}, 2_000
+
+    assert %{
+             active_doc: "d_hwp_first",
+             document_path: "first.hwp"
+           } = Session.tool_context(pid)
+
+    send(task1, :go)
+    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn1}}, 2_000
+    assert_receive {:local_agent_adapter_waiting, task2}, 2_000
+    assert_receive {:local_agent_event, %{type: :turn_started, turn_id: ^turn2}}, 2_000
+
+    assert %{
+             active_doc: "d_hwp_second",
+             document_path: "second.hwp"
+           } = Session.tool_context(pid)
+
+    send(task2, :go)
+  end
+
   test "re-Enter flushes the queue head NOW (cancel current + run head)" do
     {_id, pid} = start_blocking_session()
 
