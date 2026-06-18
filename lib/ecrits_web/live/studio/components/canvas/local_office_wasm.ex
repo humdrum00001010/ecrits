@@ -77,15 +77,21 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
   end
 
   defp office_asset_version do
-    path = Application.app_dir(:ecrits, "priv/static/assets/office/soffice.wasm")
+    # Hash BOTH the engine (soffice.wasm) and the VFS data blob (soffice.data) so
+    # a data-only redeploy (e.g. a bundled-font/fontconfig change repacked into
+    # soffice.data) still bumps the asset version and busts the browser cache —
+    # otherwise the loader fetches a stale soffice.data against fresh metadata and
+    # the sizes mismatch.
+    stats =
+      for name <- ["soffice.wasm", "soffice.data"] do
+        path = Application.app_dir(:ecrits, "priv/static/assets/office/#{name}")
 
-    case File.stat(path) do
-      {:ok, %File.Stat{mtime: mtime, size: size}} ->
-        :erlang.phash2({mtime, size})
-        |> Integer.to_string(36)
+        case File.stat(path) do
+          {:ok, %File.Stat{mtime: mtime, size: size}} -> {name, mtime, size}
+          {:error, reason} -> {name, :missing, reason}
+        end
+      end
 
-      {:error, _reason} ->
-        "missing"
-    end
+    stats |> :erlang.phash2() |> Integer.to_string(36)
   end
 end
