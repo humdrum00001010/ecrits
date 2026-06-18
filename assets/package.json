@@ -1,4 +1,8 @@
 {
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'js/**/*.test.ts'"
+  },
   "dependencies": {
     "daisyui": "5.5.20",
     "topbar": "3.0.1"
