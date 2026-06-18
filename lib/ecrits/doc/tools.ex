@@ -58,6 +58,7 @@ defmodule Ecrits.Doc.Tools do
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
   alias Ecrits.Workspace.Session
+  require Logger
 
   @namespace "doc"
 
@@ -307,7 +308,10 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "set",
       "description" =>
-        "Set element props. Use doc.get for prop names. Batch with sets:[{ref,props}].",
+        "Set element props. char (default): Bold/Italic/Underline/TextColor/FontSize(pt). " <>
+          "paragraph (props.kind:\"paragraph\"): Alignment:left|center|right|justify — center titles, " <>
+          "right-align dates/signatures. cell (props.kind:\"cell\"): BackgroundColor. " <>
+          "Use doc.get for prop names. Batch with sets:[{ref,props}].",
       "risk" => "write",
       "inputSchema" => %{
         "type" => "object",
@@ -342,16 +346,24 @@ defmodule Ecrits.Doc.Tools do
           "text: insert_text/replace_text/set_cell/delete_range. " <>
           "Paragraphs: insert_paragraph {ref, text, style?} / delete_paragraph / " <>
           "split / merge — refs like \"p3\" from doc.find, or \"end\". " <>
-          "Tables: insert_table {ref, rows, cols}, insert_table_row/" <>
-          "insert_table_column {ref, below?/right?, count?} — count inserts N rows/cols " <>
-          "in ONE op (\"add 10 rows\" = count:10), delete_table_row/_column, " <>
+          "For existing HWP paragraph division, use split at offsets; " <>
+          "replace_text with newlines does NOT create HWP paragraph nodes. " <>
+          "Tables: insert_table {ref, rows, cols, cells?, header?} — pass cells:[[\"r0c0\",\"r0c1\"],[\"r1c0\",..]] " <>
+          "(row-major) to CREATE AND FILL the table in ONE op (the reliable way to make a data " <>
+          "table; do NOT insert_table empty then type values as body text — they'd land outside the " <>
+          "table). header:true shades row 0 gray for a real-document header (use it for data tables). " <>
+          "insert_table_row/insert_table_column {ref, below?/right?, count?} — count inserts " <>
+          "N rows/cols in ONE op (\"add 10 rows\" = count:10), delete_table_row/_column, " <>
           "merge_cells {ref, start_row.., end_col}, split_cell — use a cell ref from " <>
-          "doc.find; row/col default to that cell's own position. Table-op replies " <>
+          "doc.find; row/col default to that cell's own position. To edit ONE existing cell use " <>
+          "set_cell {ref(from doc.find), text}. Table-op replies " <>
           "echo rows_after/cols_after — CHECK them against what you intended. " <>
           "Objects: insert_picture {src}, insert_shape, set_geometry {ref, x?, y?, " <>
           "w?, h?}, delete_node {ref}. Notes: insert_footnote/insert_endnote " <>
           "{ref, text}, insert_equation {ref, script}. Slides (pptx): insert_slide " <>
-          "{name}; canvas 28000x15750 in 1/100 mm. Layout: set_columns {count, from, " <>
+          "{name}; coordinates use the deck's actual slide size in 1/100 mm. " <>
+          "Check doc.render slide_size/pixel_width/pixel_height before placing shapes. " <>
+          "Layout: set_columns {count, from, " <>
           "to} — footnoted paragraphs must stay outside the range. " <>
           "Authoring pptx/docx slides/sections? Follow this server's instructions " <>
           "(the design guide); doc.render after each slide/section and LOOK at it.",
@@ -382,6 +394,22 @@ defmodule Ecrits.Doc.Tools do
                 "type" => "integer",
                 "description" => "insert_table: number of columns."
               },
+              "cells" => %{
+                "type" => "array",
+                "description" =>
+                  "insert_table: row-major cell text [[r0c0,r0c1,..],[r1c0,..],..] — creates AND fills the table in one op. \\n in a cell splits it into cell paragraphs.",
+                "items" => %{"type" => "array", "items" => %{"type" => "string"}}
+              },
+              "header" => %{
+                "type" => "boolean",
+                "description" =>
+                  "insert_table: shade row 0 with a light-gray fill (real-document header look). Use for any data table with a header row. Optional header_color overrides the fill."
+              },
+              "header_color" => %{
+                "type" => "string",
+                "description" =>
+                  "insert_table: header row fill color (hex, e.g. \"#d9d9d9\"); implies header."
+              },
               "query" => %{
                 "type" => "string",
                 "description" => "replace_text: literal text to find."
@@ -389,7 +417,7 @@ defmodule Ecrits.Doc.Tools do
               "replacement" => %{
                 "type" => "string",
                 "description" =>
-                  "replace_text: text to substitute in. Newlines are folded to spaces. REQUIRED for replace_text."
+                  "replace_text: text to substitute in. Newlines are folded to spaces; for existing HWP paragraph division use split instead. REQUIRED for replace_text."
               },
               "ref" => %{
                 "type" => "string",
@@ -458,12 +486,12 @@ defmodule Ecrits.Doc.Tools do
               "w" => %{
                 "type" => "integer",
                 "description" =>
-                  "insert_shape (slide form): shape width in 1/100 mm (the 16:9 slide canvas is 28000 wide). REQUIRED with `page`."
+                  "insert_shape (slide form): shape width in 1/100 mm, relative to the deck's actual slide size. REQUIRED with `page`."
               },
               "h" => %{
                 "type" => "integer",
                 "description" =>
-                  "insert_shape (slide form): shape height in 1/100 mm (16:9 slide is 19050 tall). REQUIRED with `page`."
+                  "insert_shape (slide form): shape height in 1/100 mm, relative to the deck's actual slide size. REQUIRED with `page`."
               },
               "page" => %{
                 "type" => "string",
@@ -814,11 +842,16 @@ defmodule Ecrits.Doc.Tools do
         {:server, editor} ->
           render_pages(editor, args)
 
-        {:browser, _lv} ->
-          # The browser WASM model is the authority for a viewed doc; the server
-          # copy would render stale content. The authoring flow is headless.
-          {:error,
-           error_json({:not_supported, "doc.render works on headless (server-backed) documents"})}
+        {:browser, lv} ->
+          # The browser WASM model is the authority for a viewed doc — so render
+          # THAT: snapshot its current bytes (the same channel doc.save uses),
+          # open them in a throwaway headless handle, rasterize, drop the
+          # handle. The agent gets pixels of exactly what the user is looking
+          # at, unsaved edits included. Routing is the backend's job; opening a
+          # doc in a viewer must not cost the agent its render feedback loop
+          # (live failure 2026-06-13: doc.render -> not_supported on the
+          # active document).
+          render_viewed_pages(ctx, lv, document, args)
 
         {:error, :not_found} ->
           {:error, error_json(:not_found)}
@@ -829,6 +862,152 @@ defmodule Ecrits.Doc.Tools do
   end
 
   def call(_ctx, tool_name, _args), do: {:error, {:unknown_tool, tool_name}}
+
+  # ── doc.render, browser (viewed) arm ────────────────────────────────────
+  # Pull the viewer's CURRENT bytes and render headless. The throwaway handle
+  # never touches the Pool/Editor registry (no doc.list pollution, no
+  # ownership questions) — it lives for exactly one render call.
+  defp render_viewed_pages(ctx, lv, document, args) do
+    case browser_call(lv, args, :save, %{}) do
+      {:ok, %{} = saved} ->
+        b64 = saved["bytes_base64"] || saved[:bytes_base64]
+
+        case is_binary(b64) && Base.decode64(b64) do
+          {:ok, bytes} ->
+            render_viewed_bytes(bytes, viewed_kind(ctx, document, saved), args)
+
+          _ ->
+            {:error, error_json({:render_failed, "viewer returned no/invalid bytes"})}
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp viewed_kind(ctx, document, saved) do
+    case Pool.info(pool(ctx), document) do
+      {:ok, %{kind: kind}} when kind in [:hwp, :hwpx, :docx, :pptx] ->
+        kind
+
+      _ ->
+        case saved["format"] || saved[:format] do
+          "hwpx" -> :hwpx
+          "docx" -> :docx
+          "pptx" -> :pptx
+          _ -> :hwp
+        end
+    end
+  end
+
+  defp render_viewed_bytes(bytes, kind, args) when kind in [:hwp, :hwpx] do
+    case Ehwp.open(bytes) do
+      {:ok, ehwp_handle, _meta} ->
+        try do
+          run_page_renders(args, ["1"], fn page, out, width ->
+            Ecrits.Doc.Rhwp.render_page(%{ehwp: ehwp_handle, sec: 0}, page, out, width)
+          end)
+        after
+          Ehwp.close(ehwp_handle)
+        end
+
+      {:error, reason} ->
+        {:error, error_json({:render_failed, "viewer bytes did not reopen: #{inspect(reason)}"})}
+    end
+  end
+
+  defp render_viewed_bytes(bytes, kind, args) when kind in [:docx, :pptx] do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "ecrits_viewed_render_#{System.unique_integer([:positive])}.#{kind}"
+      )
+
+    with :ok <- File.write(tmp, bytes),
+         {:ok, handle} <- Ecrits.Doc.Office.open(tmp, kind: kind) do
+      try do
+        # find_page falls back to positional "SlideN" names for unnamed slides.
+        default = if kind == :pptx, do: ["Slide1"], else: ["1"]
+
+        slide_size = if kind == :pptx, do: pptx_slide_size_from_bytes(bytes), else: nil
+
+        run_page_renders(
+          args,
+          default,
+          fn page, out, width ->
+            Ecrits.Doc.Office.render_page(handle, page, out, width)
+          end,
+          slide_size: slide_size
+        )
+      after
+        Ecrits.Doc.Office.close(handle)
+        File.rm(tmp)
+      end
+    else
+      {:error, reason} ->
+        File.rm(tmp)
+        {:error, error_json({:render_failed, "viewer bytes did not reopen: #{inspect(reason)}"})}
+    end
+  end
+
+  # Shared page loop for the viewed arm: same width clamp, tmp naming and
+  # result shape as the server arm's render_pages (files + note, no base64).
+  defp run_page_renders(args, default_pages, render_fun, opts \\ []) do
+    width =
+      case get(args, ["width"]) do
+        w when is_integer(w) -> w |> max(320) |> min(1920)
+        _other -> 880
+      end
+
+    pages =
+      case get(args, ["page"]) do
+        page when is_binary(page) and page != "" -> [page]
+        _other -> default_pages
+      end
+
+    doc_token =
+      args
+      |> get(["document"])
+      |> to_string()
+      |> String.replace(~r/[^A-Za-z0-9_-]/, "_")
+
+    dir = Path.join(System.tmp_dir!(), "ecrits_render")
+    File.mkdir_p!(dir)
+
+    {files, failures} =
+      Enum.reduce(pages, {[], []}, fn page, {ok_acc, err_acc} ->
+        page_token = page |> to_string() |> String.replace(~r/[^A-Za-z0-9_-]/, "_")
+        out = Path.join(dir, "#{doc_token}_#{page_token}_w#{width}.png")
+
+        case render_fun.(page, out, width) do
+          :ok ->
+            {[rendered_file_result(page, out) | ok_acc], err_acc}
+
+          {:error, reason} ->
+            File.rm(out)
+            {ok_acc, [%{"page" => page, "error" => format_render_error(reason)} | err_acc]}
+        end
+      end)
+
+    files = Enum.reverse(files)
+    failures = Enum.reverse(failures)
+
+    if files == [] do
+      {:error, error_json({:render_failed, failures})}
+    else
+      result =
+        %{
+          "ok" => true,
+          "rendered" => Enum.map(files, & &1["page"]),
+          "width" => width,
+          "files" => files,
+          "note" => "PNG files on local disk — VIEW them with your image tool to check the result"
+        }
+        |> maybe_put("slide_size", Keyword.get(opts, :slide_size))
+
+      if failures == [], do: {:ok, result}, else: {:ok, Map.put(result, "failed", failures)}
+    end
+  end
 
   # Render the requested slide (or all, capped) to PNG FILES and return their
   # paths. NO inline base64: the receivers are CLI agents whose vision path is
@@ -857,50 +1036,134 @@ defmodule Ecrits.Doc.Tools do
           end
       end
 
-    if pages == [] do
-      {:error, error_json({:invalid_params, "document has no slides to render"})}
+    doc_token =
+      args
+      |> get(["document"])
+      |> to_string()
+      |> String.replace(~r/[^A-Za-z0-9_-]/, "_")
+
+    dir = Path.join(System.tmp_dir!(), "ecrits_render")
+    File.mkdir_p!(dir)
+
+    {files, failures} =
+      Enum.reduce(pages, {[], []}, fn page, {ok_acc, err_acc} ->
+        page_token = page |> to_string() |> String.replace(~r/[^A-Za-z0-9_-]/, "_")
+        out = Path.join(dir, "#{doc_token}_#{page_token}_w#{width}.png")
+
+        case Editor.render(editor, page, out, width: width) do
+          :ok ->
+            {[rendered_file_result(page, out) | ok_acc], err_acc}
+
+          {:error, reason} ->
+            File.rm(out)
+            {ok_acc, [%{"page" => page, "error" => format_render_error(reason)} | err_acc]}
+        end
+      end)
+
+    files = Enum.reverse(files)
+    failures = Enum.reverse(failures)
+
+    if files == [] do
+      {:error, error_json({:render_failed, failures})}
     else
-      doc_token =
-        args
-        |> get(["document"])
-        |> to_string()
-        |> String.replace(~r/[^A-Za-z0-9_-]/, "_")
-
-      dir = Path.join(System.tmp_dir!(), "ecrits_render")
-      File.mkdir_p!(dir)
-
-      {files, failures} =
-        Enum.reduce(pages, {[], []}, fn page, {ok_acc, err_acc} ->
-          page_token = page |> to_string() |> String.replace(~r/[^A-Za-z0-9_-]/, "_")
-          out = Path.join(dir, "#{doc_token}_#{page_token}_w#{width}.png")
-
-          case Editor.render(editor, page, out, width: width) do
-            :ok ->
-              {[%{"page" => page, "file" => out} | ok_acc], err_acc}
-
-            {:error, reason} ->
-              File.rm(out)
-              {ok_acc, [%{"page" => page, "error" => format_render_error(reason)} | err_acc]}
-          end
-        end)
-
-      files = Enum.reverse(files)
-      failures = Enum.reverse(failures)
-
-      if files == [] do
-        {:error, error_json({:render_failed, failures})}
-      else
-        result = %{
+      result =
+        %{
           "ok" => true,
           "rendered" => Enum.map(files, & &1["page"]),
           "width" => width,
           "files" => files,
           "note" => "PNG files on local disk — VIEW them with your image tool to check the result"
         }
+        |> maybe_put("slide_size", pptx_slide_size_from_editor(editor))
 
-        result = if failures == [], do: result, else: Map.put(result, "failed", failures)
-        {:ok, result}
-      end
+      result = if failures == [], do: result, else: Map.put(result, "failed", failures)
+      {:ok, result}
+    end
+  end
+
+  defp rendered_file_result(page, path) do
+    %{"page" => page, "file" => path}
+    |> maybe_put_png_dimensions(path)
+  end
+
+  defp maybe_put_png_dimensions(file, path) do
+    case png_dimensions(path) do
+      {:ok, width, height} ->
+        file
+        |> Map.put("pixel_width", width)
+        |> Map.put("pixel_height", height)
+        |> Map.put("pixel_aspect", rounded_aspect(width, height))
+
+      :error ->
+        file
+    end
+  end
+
+  defp png_dimensions(path) when is_binary(path) do
+    case File.read(path) do
+      {:ok,
+       <<137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, "IHDR", width::unsigned-big-32,
+         height::unsigned-big-32, _rest::binary>>} ->
+        {:ok, width, height}
+
+      _other ->
+        :error
+    end
+  end
+
+  defp png_dimensions(_path), do: :error
+
+  defp rounded_aspect(_width, 0), do: nil
+  defp rounded_aspect(width, height), do: Float.round(width / height, 4)
+
+  defp pptx_slide_size_from_editor(editor) do
+    case Editor.info(editor) do
+      %{kind: :pptx, path: path} when is_binary(path) -> pptx_slide_size_from_path(path)
+      _other -> nil
+    end
+  catch
+    :exit, _ -> nil
+  end
+
+  defp pptx_slide_size_from_path(path) do
+    with true <- File.regular?(path),
+         {:ok, bytes} <- File.read(path) do
+      pptx_slide_size_from_bytes(bytes)
+    else
+      _other -> nil
+    end
+  end
+
+  defp pptx_slide_size_from_bytes(bytes) when is_binary(bytes) do
+    with {:ok, entries} <- :zip.unzip(bytes, [:memory]),
+         {_name, xml} <-
+           Enum.find(entries, fn {name, _xml} -> to_string(name) == "ppt/presentation.xml" end),
+         {:ok, cx, cy} <- extract_pptx_slide_size(xml) do
+      %{
+        "width_emu" => cx,
+        "height_emu" => cy,
+        "width_100mm" => round(cx / 360),
+        "height_100mm" => round(cy / 360),
+        "aspect" => rounded_aspect(cx, cy),
+        "orientation" => if(cx >= cy, do: "landscape", else: "portrait"),
+        "coordinate_unit" => "1/100 mm"
+      }
+    else
+      _other -> nil
+    end
+  end
+
+  defp pptx_slide_size_from_bytes(_bytes), do: nil
+
+  defp extract_pptx_slide_size(xml) do
+    xml = IO.iodata_to_binary(xml)
+
+    with [tag] <- Regex.run(~r/<p:sldSz\b[^>]*>/, xml),
+         [_, cx] <- Regex.run(~r/\bcx="(\d+)"/, tag),
+         [_, cy] <- Regex.run(~r/\bcy="(\d+)"/, tag) do
+      {:ok, String.to_integer(cx), String.to_integer(cy)}
+    else
+      _other -> :error
     end
   end
 
@@ -1214,15 +1477,15 @@ defmodule Ecrits.Doc.Tools do
   defp authoring_guide(:pptx) do
     "PPTX guide. Blank deck starts with ONE empty slide page[page1]: design it " <>
       "first, insert_slide {name} for the rest. insert_shape {page, service, name, " <>
-      "x, y, w, h, text?, ...} in 1/100 mm; canvas is 28000x15750 (16:9) — keep " <>
-      "x+w<=28000 and y+h<=15750 or content CLIPS. service: " <>
+      "x, y, w, h, text?, ...} in 1/100 mm; use doc.render slide_size for the " <>
+      "deck's actual canvas and keep x+w/y+h inside it or content CLIPS. service: " <>
       "com.sun.star.drawing.RectangleShape / .EllipseShape / .TextShape / .LineShape. " <>
       "All other keys are raw UNO props: FillColor/LineColor/CharColor (int 0xRRGGBB " <>
       "or \"#RRGGBB\"), CharHeight (pt), CharWeight (150=bold), CharPosture (2=italic), " <>
       "CharFontName, TextHorizontalAdjust. ALWAYS set FillColor on Rectangle/Ellipse " <>
       "(engine default fill is an ugly green); no outline unless LineColor/LineStyle. " <>
       "Text wraps at box width and grows DOWN over content below: box height ~= " <>
-      "lines x CharHeight x 45; ~4.5 x CharHeight of width per char (28000-wide at " <>
+      "lines x CharHeight x 45; ~4.5 x CharHeight of width per char (full-width at " <>
       "CharHeight 20 ~= 46 chars/line) — leave vertical gaps. insert_picture {page, " <>
       "name, src, x, y, w, h} embeds real images (use them for hero visuals/logos). " <>
       "New shape ref = page[<page>]/shape[<name>]: set_geometry moves/resizes, " <>
@@ -1336,7 +1599,15 @@ defmodule Ecrits.Doc.Tools do
 
     case Editor.elements(editor) do
       {:ok, nodes} when is_list(nodes) ->
-        matches = Enum.map(nodes, &element_to_match/1)
+        # Runs (`…/pN/rM`) duplicate their text_frame/cell text, so a ±N window
+        # around a target fills with the target's OWN run fragments instead of real
+        # siblings. Drop them from the read window (the raw `nodes` are kept for the
+        # table helpers, which key on cells, not runs). (#56)
+        matches =
+          nodes
+          |> Enum.map(&element_to_match/1)
+          |> Enum.reject(&(Map.get(&1, "type") == "run"))
+
         read_nearby_from_matches(nodes, matches, ref, nearby)
 
       {:error, reason} ->
@@ -1377,27 +1648,62 @@ defmodule Ecrits.Doc.Tools do
 
       {resolved_ref, idx} ->
         target = Enum.at(matches, idx)
-        before_n = Map.get(nearby, "before", 2)
-        after_n = Map.get(nearby, "after", 2)
-        start = max(0, idx - before_n)
-        count = before_n + 1 + after_n
-        elements = matches |> Enum.slice(start, count) |> Enum.map(&nearby_element/1)
 
-        base =
-          %{
-            "ref" => ref_string,
-            "target" => nearby_element(target),
-            "elements" => elements,
-            "text" => Enum.map_join(elements, "\n", &(Map.get(&1, "text") || ""))
-          }
-          |> maybe_put("resolved_ref", if(resolved_ref != ref_string, do: resolved_ref))
-
-        if Map.get(target, "type") == "cell" or table_key_from_ref(resolved_ref) do
-          {:ok, Map.merge(base, table_nearby(nodes, target, nearby))}
+        if Map.get(target, "type") == "slide" do
+          # Reading a pptx slide: a flat ±N window only spans the slide's first few
+          # shapes. Aggregate the WHOLE slide instead — every text_frame/cell/shape
+          # under it, in slide order — so one doc.read returns the full slide (#56).
+          {:ok, slide_read(matches, resolved_ref, ref_string, target)}
         else
-          {:ok, base}
+          before_n = Map.get(nearby, "before", 2)
+          after_n = Map.get(nearby, "after", 2)
+          start = max(0, idx - before_n)
+          count = before_n + 1 + after_n
+          elements = matches |> Enum.slice(start, count) |> Enum.map(&nearby_element/1)
+
+          base =
+            %{
+              "ref" => ref_string,
+              "target" => nearby_element(target),
+              "elements" => elements,
+              "text" => Map.get(target, "text") || ""
+            }
+            |> maybe_put("resolved_ref", if(resolved_ref != ref_string, do: resolved_ref))
+
+          if Map.get(target, "type") == "cell" or table_key_from_ref(resolved_ref) do
+            {:ok, Map.merge(base, table_nearby(nodes, target, nearby))}
+          else
+            {:ok, base}
+          end
         end
     end
+  end
+
+  # Aggregate a whole slide's text: every text-bearing leaf (text_frame/cell/shape)
+  # whose ref is nested under the slide, joined in document order. The slide's own
+  # `target.text` (just the slide name) is replaced with this aggregate so a single
+  # doc.read on a `page[<name>]` ref returns the entire slide (#56).
+  defp slide_read(matches, slide_ref, ref_string, target) do
+    prefix = slide_ref <> "/"
+
+    leaves =
+      Enum.filter(matches, fn m ->
+        ref = Map.get(m, "ref")
+
+        is_binary(ref) and String.starts_with?(ref, prefix) and
+          Map.get(m, "type") in ["text_frame", "cell", "shape"] and
+          (Map.get(m, "text") || "") != ""
+      end)
+
+    text = Enum.map_join(leaves, "\n", &(Map.get(&1, "text") || ""))
+
+    %{
+      "ref" => ref_string,
+      "target" => Map.put(nearby_element(target), "text", text),
+      "elements" => Enum.map(leaves, &nearby_element/1),
+      "text" => text
+    }
+    |> maybe_put("resolved_ref", if(slide_ref != ref_string, do: slide_ref))
   end
 
   defp nearby_element(match) do
@@ -2038,7 +2344,7 @@ defmodule Ecrits.Doc.Tools do
   # the picks block's stamped id, a workspace-relative path, a bare basename, or
   # "active". Resolve all of those here so EVERY doc tool accepts what an agent
   # reasonably passes; on a miss, fail with the open-document catalog so the
-  # agent self-corrects in one step instead of a doc_context round-trip (#32 —
+  # agent self-corrects in one step instead of a doc.context round-trip (#32 —
   # observed live: "local-* id not accepted. Trying given document name." both
   # failed before this resolver existed).
   defp canonical_document(ctx, document) do
@@ -2159,7 +2465,7 @@ defmodule Ecrits.Doc.Tools do
   # form (`page` set) is left untouched.
   defp normalize_browser_op(op) do
     with {:ok, atom_op} <- Ecrits.Doc.Op.normalize(op),
-         {:ok, produced} <- Ecrits.Doc.Rhwp.picture_op_for_browser(atom_op) do
+         {:ok, produced} <- Ecrits.Doc.Rhwp.Image.for_browser(atom_op) do
       {:ok, Map.new(produced, fn {k, v} -> {to_string(k), v} end)}
     end
   end
@@ -2384,16 +2690,38 @@ defmodule Ecrits.Doc.Tools do
   # MCP process (NOT the LiveView), so we use a tagged send + selective receive.
   defp browser_call(lv, _args, verb, payload) when is_pid(lv) do
     ref = make_ref()
+    started_at = System.monotonic_time(:millisecond)
     send(lv, {:doc_browser_request, self(), ref, verb, payload})
 
-    receive do
-      {:doc_browser_reply, ^ref, {:ok, result}} -> {:ok, stringify(result)}
-      {:doc_browser_reply, ^ref, {:error, reason}} -> {:error, error_json(reason)}
-    after
-      @browser_timeout_ms ->
-        {:error, error_json({:browser_timeout, "viewer did not apply the edit in time"})}
-    end
+    result =
+      receive do
+        {:doc_browser_reply, ^ref, {:ok, result}} -> {:ok, stringify(result)}
+        {:doc_browser_reply, ^ref, {:error, reason}} -> {:error, error_json(reason)}
+      after
+        @browser_timeout_ms ->
+          {:error, error_json({:browser_timeout, "viewer did not apply the edit in time"})}
+      end
+
+    log_browser_timing(verb, result, started_at)
+    result
   end
+
+  defp log_browser_timing(verb, result, started_at) do
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+    status = browser_result_status(result)
+
+    Logger.debug(fn ->
+      "[doc_tools] browser_call verb=#{verb} status=#{status} duration_ms=#{duration_ms}"
+    end)
+  end
+
+  defp browser_result_status({:ok, _result}), do: "ok"
+
+  defp browser_result_status({:error, %{} = error}),
+    do: "error:#{Map.get(error, "error", "structured")}"
+
+  defp browser_result_status({:error, reason}) when is_atom(reason), do: "error:#{reason}"
+  defp browser_result_status({:error, _reason}), do: "error"
 
   defp with_server_editor(ctx, document, fun) do
     case Pool.with_doc(pool(ctx), document, fun) do

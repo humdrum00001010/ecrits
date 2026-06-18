@@ -69,7 +69,7 @@ defmodule Ecrits.Doc.ToolsTest do
       # auto-open) still get the design lessons: they ride the MCP initialize
       # `instructions`, once per session.
       instructions = Tools.instructions()
-      assert instructions =~ "28000x15750"
+      assert instructions =~ "deck's actual canvas"
       assert instructions =~ "FillColor"
       assert instructions =~ "insert_paragraph"
 
@@ -232,6 +232,9 @@ defmodule Ecrits.Doc.ToolsTest do
 
       assert text =~ "제2조"
       assert target["text"] =~ "제2조"
+      assert text == target["text"]
+      refute text =~ "제1조"
+      refute text =~ "제3조"
       assert length(elements) == 3
     end
 
@@ -614,7 +617,7 @@ defmodule Ecrits.Doc.ToolsTest do
                  "props" => %{"Bold" => false}
                })
 
-      assert msg =~ "set_properties"
+      assert msg =~ ~r/(apply_char_format|set_properties)/
     end
 
     test "doc.save writes bytes", %{pool: pool, doc_id: doc_id} do
@@ -788,7 +791,6 @@ defmodule Ecrits.Doc.ToolsTest do
 
       assert {:ok, %{"active_document" => ^a, "current_document" => current_a}} =
                Tools.call(%{pool: pool, agent_id: "y", active_doc: a}, "doc.context", %{})
-    end
 
       assert current_a["document"] == a
       assert current_a["name"] == "a.hwp"
@@ -817,6 +819,7 @@ defmodule Ecrits.Doc.ToolsTest do
                "backing" => nil,
                "active" => true
              }
+    end
 
     test "context + get are exposed in the tool catalog as read tools" do
       by_name = Map.new(Tools.tools(), &{&1["namespace"] <> "." <> &1["name"], &1["risk"]})
@@ -853,11 +856,11 @@ defmodule Ecrits.Doc.ToolsTest do
       assert {:ok, %{"active_document" => ^b, "current_document" => current_b}} =
                Tools.call(agent_ctx(pool, path, "agent-2", b), "doc.context", %{})
 
-      # An agent with no bound doc sees none.
-      assert {:ok, %{"active_document" => nil, "current_document" => nil}} =
       assert current_b["document"] == b
       assert current_b["name"] == "b.hwp"
 
+      # An agent with no bound doc sees none.
+      assert {:ok, %{"active_document" => nil, "current_document" => nil}} =
                Tools.call(agent_ctx(pool, path, "agent-3", nil), "doc.context", %{})
     end
 
@@ -954,7 +957,7 @@ defmodule Ecrits.Doc.ToolsTest do
 
     test "unknown document", %{pool: pool} do
       # #32: the miss is structured — it names the unknown id and carries the
-      # open-document catalog so the agent self-corrects without doc_context.
+      # open-document catalog so the agent self-corrects without doc.context.
       assert {:error,
               %{"error" => "document_not_found", "document" => "ghost", "open_documents" => []}} =
                Tools.call(ctx(pool), "doc.read", %{"document" => "ghost", "ref" => "ghost-ref"})

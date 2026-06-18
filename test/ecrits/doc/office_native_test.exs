@@ -51,6 +51,37 @@ defmodule Ecrits.Doc.OfficeNativeTest do
     end
   end
 
+  test "real UNO NIF (pptx): doc.read on a slide ref aggregates the whole slide in ONE read (#56)",
+       %{} = context do
+    unless context[:native] do
+      IO.puts("\n[skip] LibreOffice UNO arm unavailable; skipping pptx slide-read test")
+    else
+      ctx = context.ctx
+
+      assert {:ok, %{"document" => pptx}} =
+               Tools.call(ctx, "doc.open", %{"path" => context.pptx_path})
+
+      # any match → its slide ancestor ref `page[<name>]`
+      assert {:ok, %{"matches" => [%{"ref" => shape_ref} | _]}} =
+               Tools.call(ctx, "doc.find", %{
+                 "document" => pptx,
+                 "pattern" => "ECRITS_PPTX_ORIGINAL"
+               })
+
+      assert [slide_ref] = Regex.run(~r/^page\[[^\]]+\]/, shape_ref)
+
+      assert {:ok, read} = Tools.call(ctx, "doc.read", %{"document" => pptx, "ref" => slide_ref})
+
+      # Whole-slide aggregate: target.text carries the slide content (not the bare
+      # slide name), equal to the joined read text; and run fragments (…/pN/rM)
+      # never leak into the read window.
+      assert read["target"]["type"] == "slide"
+      assert read["text"] =~ "ECRITS_PPTX_ORIGINAL"
+      assert read["target"]["text"] == read["text"]
+      refute Enum.any?(read["elements"], &(&1["type"] == "run"))
+    end
+  end
+
   test "real UNO NIF: open -> find/elements -> set -> apply -> save -> reopen persists",
        %{} = context do
     unless context[:native] do
@@ -508,7 +539,13 @@ defmodule Ecrits.Doc.OfficeNativeTest do
 
       # The feedback loop: render the slide to a real PNG FILE (doc.render
       # returns paths — CLI agents view images from disk, never inline base64).
-      assert {:ok, %{"ok" => true, "rendered" => ["hero"], "files" => [img]}} =
+      assert {:ok,
+              %{
+                "ok" => true,
+                "rendered" => ["hero"],
+                "files" => [img],
+                "slide_size" => slide_size
+              }} =
                Tools.call(ctx, "doc.render", %{
                  "document" => doc,
                  "page" => "hero",
@@ -516,6 +553,11 @@ defmodule Ecrits.Doc.OfficeNativeTest do
                })
 
       assert <<137, ?P, ?N, ?G, _::binary>> = File.read!(img["file"])
+      assert img["pixel_width"] == 480
+      assert is_integer(img["pixel_height"])
+      assert slide_size["coordinate_unit"] == "1/100 mm"
+      assert is_integer(slide_size["width_100mm"])
+      assert is_integer(slide_size["height_100mm"])
 
       # set_geometry moves an existing shape (the fix-up verb).
       assert {:ok, %{"ok" => true}} =
@@ -567,7 +609,10 @@ defmodule Ecrits.Doc.OfficeNativeTest do
                })
 
       assert {:ok, %{"values" => rect_values}} =
-               Tools.call(ctx, "doc.get", %{"document" => doc, "ref" => "page[hero]/shape[accent]"})
+               Tools.call(ctx, "doc.get", %{
+                 "document" => doc,
+                 "ref" => "page[hero]/shape[accent]"
+               })
 
       assert round(rect_values["FillColor"]) == 0x2563EB
 
@@ -606,6 +651,40 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       assert {:ok, %{"document" => reopened}} = Tools.call(ctx2, "doc.open", %{"path" => path})
       assert_find(ctx2, reopened, "Aria IR direct")
       assert :ok = Pool.close(pool2, reopened)
+    end
+  end
+
+  test "twin-sync of a viewed pptx (refresh_by_path then close) never crashes the Instance",
+       %{} = context do
+    unless context[:native] do
+      IO.puts("\n[skip] LibreOffice UNO arm unavailable; skipping office twin-sync crash test")
+    else
+      ctx = context.ctx
+      path = context.pptx_path
+
+      # Open the SERVER twin the way a browser-viewed pptx does.
+      assert {:ok, %{"document" => doc}} =
+               Tools.call(ctx, "doc.open", %{"path" => path, "kind" => "pptx"})
+
+      instance = Process.whereis(Ecrits.Doc.Office.Instance)
+      assert is_pid(instance)
+
+      # The browser-save twin-sync feeds the saved bytes back through
+      # Pool.refresh_by_path -> Editor.reload_from_bytes. The Office backend's
+      # open/2 is PATH-based, so before the fix these bytes were treated as a
+      # filesystem path -> NIF badarg -> KeyError crashed this singleton ->
+      # cascade. It must now reopen from disk and return :ok, repeatedly.
+      saved_bytes = File.read!(path)
+      assert :ok = Pool.refresh_by_path(ctx.pool, path, saved_bytes)
+      assert :ok = Pool.refresh_by_path(ctx.pool, path, saved_bytes)
+
+      # The singleton governor must be the SAME live process (never crashed).
+      assert Process.whereis(Ecrits.Doc.Office.Instance) == instance
+      assert Process.alive?(instance)
+
+      # And closing (the second half of "save then close") is clean.
+      assert :ok = Pool.close(ctx.pool, doc)
+      assert Process.alive?(instance)
     end
   end
 

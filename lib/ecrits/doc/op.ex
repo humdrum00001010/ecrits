@@ -159,7 +159,7 @@ defmodule Ecrits.Doc.Op do
                is_integer(op[:h])) ->
         {:error,
          {:invalid_op,
-          "insert_shape (slide) requires integer \"x\", \"y\", \"w\", \"h\" in 1/100 mm (the 16:9 slide canvas is 28000 x 15750)"}}
+          "insert_shape (slide) requires integer \"x\", \"y\", \"w\", \"h\" in 1/100 mm; use the deck's actual slide size from doc.render, not a hardcoded canvas"}}
 
       true ->
         {:ok, op}
