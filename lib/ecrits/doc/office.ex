@@ -110,6 +110,19 @@ defmodule Ecrits.Doc.Office do
 
   def close(_handle), do: :ok
 
+  @impl true
+  # Reload the server twin from disk. UNO opens a FILE/URL, never a byte buffer,
+  # so we IGNORE `bytes` and reopen the doc's own path — by the time the browser
+  # save's twin-sync calls this, `Document.save` has already written those exact
+  # bytes to the canonical file. (Feeding bytes to `open/2`, which treats its arg
+  # as a path, is what crashed pptx save->close.) The Editor closes the old
+  # handle once we hand back the new one.
+  def reopen(%{path: path, kind: kind}, _bytes) when is_binary(path) do
+    Instance.open(path, kind: kind)
+  end
+
+  def reopen(_handle, _bytes), do: {:error, :invalid_handle}
+
   @doc """
   Write a LibreOffice factory-blank document to `path` — the engine's own "new
   presentation" (`private:factory/simpress`), exported as pptx/docx. This is the
@@ -217,9 +230,9 @@ defmodule Ecrits.Doc.Office do
       props
       |> Map.delete("kind")
       |> Map.delete(:kind)
-      |> Enum.flat_map(fn {k, v} -> normalize_office_prop(to_string(k), v) end)
+      |> Enum.flat_map(fn {k, v} -> Ecrits.Doc.Office.Props.normalize(to_string(k), v) end)
       |> Map.new()
-      |> pair_fill_styles()
+      |> Ecrits.Doc.Office.Props.pair_fill_styles()
 
     Instance.run(
       Instance,
@@ -355,7 +368,8 @@ defmodule Ecrits.Doc.Office do
         {:error,
          %{
            kind: "invalid_params",
-           message: "docx page must be a 1-based page NUMBER string (\"1\", \"2\", …), got: #{inspect(page)}"
+           message:
+             "docx page must be a 1-based page NUMBER string (\"1\", \"2\", …), got: #{inspect(page)}"
          }}
     end
   end
@@ -438,7 +452,30 @@ defmodule Ecrits.Doc.Office do
   # behaviour's `{:not_supported, _}` so callers fall back to find/3/read/2.
   def elements(handle, _opts), do: elements(handle)
 
-  # --- edit op -> uno_apply JSON -------------------------------------------
+  # --- edit op -> typed Ecrits.Doc.Office.Op -> uno_apply wire map ----------
+  # Classify the agent IR op (handling the conditional dispatch — replace_text→
+  # set_text/replace_all, insert_picture→insert_shape), build the matching typed
+  # Op struct (@enforce_keys validates required fields at construction), and
+  # serialise it with to_wire/1 — byte-identical to the legacy maps (#49 O1).
+
+  alias Ecrits.Doc.Office.Op
+
+  # Verbs whose sole required field is a binary `ref` and that Op.normalize does
+  # NOT field-check — when the agent omits the ref they match no value-guarded
+  # to_uno_op clause and hit the catch-all, which used to mislabel them "not
+  # supported by the UNO arm". They ARE supported; the ref is just missing. (#49 —
+  # accurate construction errors; the rest are caught earlier in Op.normalize.)
+  @office_ref_required_verbs ~w(delete_paragraph split merge merge_cells split_cell delete_node)
+
+  @doc false
+  # Test seam: the op→wire classification that edit/3 runs BEFORE touching a UNO
+  # session (the IR Ecrits.Doc.Op.normalize, then to_uno_op). Pure — no LOK/session
+  # needed. NB `Op` is rebound to Ecrits.Doc.Office.Op just below, so the IR
+  # normaliser is fully qualified here.
+  @spec classify(map()) :: {:ok, map()} | {:error, term()}
+  def classify(op) do
+    with {:ok, op} <- Ecrits.Doc.Op.normalize(op), do: to_uno_op(op)
+  end
 
   defp to_uno_op(%{op: "replace_text"} = op) do
     query = op[:query]
@@ -446,12 +483,12 @@ defmodule Ecrits.Doc.Office do
 
     cond do
       is_binary(op[:ref]) and op[:ref] != "" ->
-        # Ref-scoped: replace the WHOLE element's text (the UNO arm has no
-        # in-element offset; set_text replaces the covered text).
-        {:ok, %{"op" => "set_text", "ref" => op[:ref], "text" => replacement}}
+        # Ref-scoped: the UNO arm has no in-element offset; set_text replaces the
+        # whole covered element text.
+        {:ok, Op.SetText.to_wire(%Op.SetText{ref: op[:ref], text: replacement})}
 
       is_binary(query) and query != "" and is_binary(replacement) ->
-        {:ok, %{"op" => "replace_all", "find" => query, "replace" => replacement}}
+        {:ok, Op.ReplaceAll.to_wire(%Op.ReplaceAll{find: query, replace: replacement})}
 
       true ->
         {:error, {:invalid_op, "replace_text needs a ref or (query + replacement)"}}
@@ -460,36 +497,32 @@ defmodule Ecrits.Doc.Office do
 
   defp to_uno_op(%{op: "insert_text", ref: ref, text: text})
        when is_binary(ref) and is_binary(text) do
-    {:ok, %{"op" => "insert_text", "ref" => ref, "text" => text}}
+    {:ok, Op.InsertText.to_wire(%Op.InsertText{ref: ref, text: text})}
   end
 
-  # HWP-arm verb agents reuse on office tables: set the whole cell's text
-  # (tbl[<name>]/cell[A1] / shape-table cell refs both resolve server-side).
+  # HWP-arm verb agents reuse on office tables: set the whole cell's text.
   defp to_uno_op(%{op: "set_cell", ref: ref} = op) when is_binary(ref) do
-    {:ok, %{"op" => "set_text", "ref" => ref, "text" => op[:text] || ""}}
+    {:ok, Op.SetText.to_wire(%Op.SetText{ref: ref, text: op[:text] || ""})}
   end
 
   defp to_uno_op(%{op: "delete_range", ref: ref}) when is_binary(ref) do
-    {:ok, %{"op" => "delete", "ref" => ref}}
+    {:ok, Op.Delete.to_wire(%Op.Delete{ref: ref})}
   end
 
   defp to_uno_op(%{op: "insert_slide"} = op) do
-    {:ok, op |> Map.take([:op, :name, :index]) |> scalar_op_fields()}
+    {:ok, Op.InsertSlide.to_wire(%Op.InsertSlide{name: op[:name], index: op[:index]})}
   end
 
+  # IR-direct: typed slide-frame fields + arbitrary UNO props (FillColor,
+  # CharHeight, …) carried verbatim in :props (see build_insert_shape/1).
   defp to_uno_op(%{op: "insert_shape", page: page} = op) when is_binary(page) do
-    # IR-direct: every scalar field passes through verbatim — service (any UNO
-    # shape service), name, x/y/w/h (1/100 mm), text, and raw UNO props
-    # (FillColor, CharHeight, …). The NIF applies props with the same
-    # char-cursor/object routing as uno_set.
-    {:ok, op |> scalar_op_fields() |> pair_fill_styles() |> default_no_outline()}
+    {:ok, Op.InsertShape.to_wire(build_insert_shape(op))}
   end
 
+  # Office form of the HWP picture verb: an embedded image is a
+  # GraphicObjectShape whose GraphicURL points at the source file; route through
+  # the insert_shape clause. `src` is a plain path or file:// URL.
   defp to_uno_op(%{op: "insert_picture", page: page} = op) when is_binary(page) do
-    # Office form of the existing HWP verb: an embedded image is just a
-    # GraphicObjectShape whose GraphicURL points at the source file (the engine
-    # embeds the bytes into ppt/media on save). `src` is a plain path or
-    # file:// URL.
     src = op[:src] || op[:path]
 
     if is_binary(src) and src != "" do
@@ -509,11 +542,12 @@ defmodule Ecrits.Doc.Office do
   end
 
   defp to_uno_op(%{op: "set_geometry", ref: ref} = op) when is_binary(ref) do
-    {:ok, op |> Map.take([:op, :ref, :x, :y, :w, :h]) |> scalar_op_fields()}
+    {:ok,
+     Op.SetGeometry.to_wire(%Op.SetGeometry{ref: ref, x: op[:x], y: op[:y], w: op[:w], h: op[:h]})}
   end
 
   defp to_uno_op(%{op: "delete_node", ref: ref}) when is_binary(ref) do
-    {:ok, %{"op" => "delete_node", "ref" => ref}}
+    {:ok, Op.DeleteNode.to_wire(%Op.DeleteNode{ref: ref})}
   end
 
   defp to_uno_op(%{op: "insert_shape"}) do
@@ -526,37 +560,42 @@ defmodule Ecrits.Doc.Office do
   end
 
   # ── Writer (docx) structural verbs ─────────────────────────────────────
-  # The UNO arm's text-document ops: same verb names as the HWP arm, anchored
-  # on body paragraph refs ("p3") or "end".
-
   defp to_uno_op(%{op: "insert_paragraph"} = op) do
-    {:ok, op |> Map.take([:op, :ref, :text, :style]) |> Map.put_new(:ref, "end") |> scalar_op_fields()}
+    {:ok,
+     Op.InsertParagraph.to_wire(%Op.InsertParagraph{
+       ref: op[:ref] || "end",
+       text: op[:text],
+       style: op[:style]
+     })}
   end
 
   defp to_uno_op(%{op: "insert_table"} = op) do
     {:ok,
-     op |> Map.take([:op, :ref, :rows, :cols, :name]) |> Map.put_new(:ref, "end") |> scalar_op_fields()}
+     Op.InsertTable.to_wire(%Op.InsertTable{
+       ref: op[:ref] || "end",
+       rows: op[:rows],
+       cols: op[:cols],
+       name: op[:name]
+     })}
   end
 
   defp to_uno_op(%{op: "insert_footnote"} = op) do
-    {:ok, op |> Map.take([:op, :ref, :text]) |> scalar_op_fields()}
+    {:ok, Op.InsertFootnote.to_wire(%Op.InsertFootnote{ref: op[:ref], text: op[:text]})}
   end
 
-  # Writer inline image (no slide `page:` — that form maps to insert_shape
-  # above). `src` is a plain path or file:// URL; w/h in 1/100 mm (defaults to
-  # the image's natural size).
+  # Writer inline image (no slide `page:`). `src` is a path or file:// URL.
   defp to_uno_op(%{op: "insert_picture"} = op) do
     src = op[:src] || op[:path]
 
     if is_binary(src) and src != "" do
       {:ok,
-       %{op: "insert_picture", ref: op[:ref] || "end", src: to_file_url(src)}
-       |> Map.merge(Map.take(op, [:w, :h, :name]))
-       |> Map.put_new(:w, op[:width])
-       |> Map.put_new(:h, op[:height])
-       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-       |> Map.new()
-       |> scalar_op_fields()}
+       Op.InsertPicture.to_wire(%Op.InsertPicture{
+         ref: op[:ref] || "end",
+         src: to_file_url(src),
+         w: op[:w] || op[:width],
+         h: op[:h] || op[:height],
+         name: op[:name]
+       })}
     else
       {:error,
        {:invalid_op,
@@ -566,34 +605,46 @@ defmodule Ecrits.Doc.Office do
   end
 
   defp to_uno_op(%{op: "set_columns"} = op) do
-    {:ok, op |> Map.take([:op, :count, :from, :to, :name]) |> scalar_op_fields()}
+    {:ok,
+     Op.SetColumns.to_wire(%Op.SetColumns{
+       count: op[:count],
+       from: op[:from],
+       to: op[:to],
+       name: op[:name]
+     })}
   end
 
-  # Paragraph structure (Writer): delete a whole paragraph node / split at a
-  # char offset / merge into the previous paragraph. The cpp walks the body
-  # enumeration so a delete/merge can never silently span a table.
   defp to_uno_op(%{op: "delete_paragraph", ref: ref}) when is_binary(ref) do
-    {:ok, %{"op" => "delete_paragraph", "ref" => ref}}
+    {:ok, Op.DeleteParagraph.to_wire(%Op.DeleteParagraph{ref: ref})}
   end
 
   defp to_uno_op(%{op: "split", ref: ref} = op) when is_binary(ref) do
-    {:ok, op |> Map.take([:op, :ref, :at]) |> scalar_op_fields()}
+    {:ok, Op.Split.to_wire(%Op.Split{ref: ref, at: op[:at]})}
   end
 
   defp to_uno_op(%{op: "merge", ref: ref}) when is_binary(ref) do
-    {:ok, %{"op" => "merge", "ref" => ref}}
+    {:ok, Op.Merge.to_wire(%Op.Merge{ref: ref})}
   end
 
-  # Table structure: row/col insert+delete on Writer tables (tbl[<name>] /
-  # tbl[<name>]/cell[<A1>]) AND Impress table shapes; merge_cells/split_cell on
-  # Writer tables (the cpp refuses Impress merge/split precisely). A /cell[..]
-  # ref defaults row/col to that cell's position.
+  # Table row/col insert+delete — the 4 verbs share one field set; the verb tag
+  # picks the struct (each carries @enforce_keys [:ref]).
   defp to_uno_op(%{op: verb} = op)
        when verb in ~w(insert_table_row delete_table_row insert_table_column delete_table_column) do
     case op[:ref] do
       ref when is_binary(ref) and ref != "" ->
-        {:ok,
-         op |> Map.take([:op, :ref, :row, :col, :count, :below, :right]) |> scalar_op_fields()}
+        mod = Module.concat(Op, Macro.camelize(verb))
+
+        wire =
+          struct!(mod,
+            ref: ref,
+            row: op[:row],
+            col: op[:col],
+            count: op[:count],
+            below: op[:below],
+            right: op[:right]
+          )
+
+        {:ok, mod.to_wire(wire)}
 
       _ ->
         {:error,
@@ -605,124 +656,70 @@ defmodule Ecrits.Doc.Office do
 
   defp to_uno_op(%{op: "merge_cells", ref: ref} = op) when is_binary(ref) do
     {:ok,
-     op
-     |> Map.take([:op, :ref, :start_row, :start_col, :end_row, :end_col])
-     |> scalar_op_fields()}
+     Op.MergeCells.to_wire(%Op.MergeCells{
+       ref: ref,
+       start_row: op[:start_row],
+       start_col: op[:start_col],
+       end_row: op[:end_row],
+       end_col: op[:end_col]
+     })}
   end
 
   defp to_uno_op(%{op: "split_cell", ref: ref} = op) when is_binary(ref) do
-    {:ok, op |> Map.take([:op, :ref, :row, :col, :rows, :cols]) |> scalar_op_fields()}
+    {:ok,
+     Op.SplitCell.to_wire(%Op.SplitCell{
+       ref: ref,
+       row: op[:row],
+       col: op[:col],
+       rows: op[:rows],
+       cols: op[:cols]
+     })}
   end
 
-  # Writer notes/equation: insert_endnote mirrors insert_footnote (collects at
-  # the document end); insert_equation embeds a Math object whose `script` is
-  # StarMath markup (the agent's HWP equation markup is close enough for the
-  # common operators; complex HWP-specific syntax may need rephrasing).
   defp to_uno_op(%{op: "insert_endnote"} = op) do
-    {:ok, op |> Map.take([:op, :ref, :text]) |> scalar_op_fields()}
+    {:ok, Op.InsertEndnote.to_wire(%Op.InsertEndnote{ref: op[:ref], text: op[:text]})}
   end
 
   defp to_uno_op(%{op: "insert_equation"} = op) do
-    {:ok, op |> Map.take([:op, :ref, :script]) |> Map.put_new(:ref, "end") |> scalar_op_fields()}
+    {:ok,
+     Op.InsertEquation.to_wire(%Op.InsertEquation{ref: op[:ref] || "end", script: op[:script]})}
+  end
+
+  # A SUPPORTED verb that fell through every value-guarded clause above is missing
+  # its required binary `ref` — say THAT, rather than the bare catch-all's "not
+  # supported" (which sends the agent hunting for a different verb instead of
+  # supplying the ref it already has from doc.find). #49: accurate errors.
+  defp to_uno_op(%{op: verb}) when verb in @office_ref_required_verbs do
+    {:error,
+     {:invalid_op,
+      "office #{verb} requires a \"ref\" (from doc.find) identifying the target " <>
+        "paragraph/cell/table/shape"}}
   end
 
   defp to_uno_op(%{op: verb}),
     do: {:error, {:not_supported, "office edit verb \"#{verb}\" is not supported by the UNO arm"}}
 
-  # The NIF's flat-JSON channel carries scalars only: stringify keys, drop nils
-  # and non-scalar values (structs/lists cannot cross; geometry is already
-  # flattened to x/y/w/h).
-  defp scalar_op_fields(op) do
-    op
-    |> Enum.flat_map(fn {k, v} ->
-      if is_binary(v) or is_number(v) or is_boolean(v),
-        do: normalize_office_prop(to_string(k), v),
-        else: []
-    end)
-    |> Map.new()
+  # IR-direct insert_shape: typed slide-frame fields + the rest (arbitrary UNO
+  # props) carried verbatim in :props; Op.InsertShape.to_wire applies the
+  # scalar-filter + UNO prop normalisation + fill/line style pairing.
+  defp build_insert_shape(op) do
+    %Op.InsertShape{
+      page: op[:page],
+      name: op[:name],
+      service: op[:service],
+      x: op[:x],
+      y: op[:y],
+      w: op[:w],
+      h: op[:h],
+      text: op[:text],
+      props: Map.drop(op, [:op, :page, :name, :service, :x, :y, :w, :h, :text])
+    }
   end
 
-  # The doc.edit op schema documents BOTH arms, so agents mix the HWP shape
-  # vocabulary into slide ops (observed live: `fillColor: "#0F1B2D"` — UNO has
-  # no such property, so the prop was SILENTLY dropped and every backdrop
-  # rendered in LibreOffice's default fill). Normalize the known aliases and
-  # accept CSS hex for any *Color property; drop keys that only mean something
-  # to the HWP arm rather than letting them no-op invisibly.
-  @hwp_only_shape_keys ~w(fillBgColor BackgroundColor shape_type width height)
-
-  defp normalize_office_prop(key, _value) when key in @hwp_only_shape_keys, do: []
-  defp normalize_office_prop("fillColor", value), do: normalize_office_prop("FillColor", value)
-  defp normalize_office_prop("lineColor", value), do: normalize_office_prop("LineColor", value)
-  defp normalize_office_prop("charColor", value), do: normalize_office_prop("CharColor", value)
-
-  # HWP-arm fillType maps onto UNO FillStyle (enum: 0=NONE, 1=SOLID).
-  defp normalize_office_prop("fillType", "none"), do: [{"FillStyle", 0}]
-  defp normalize_office_prop("fillType", "solid"), do: [{"FillStyle", 1}]
-  defp normalize_office_prop("fillType", _other), do: []
-
-  defp normalize_office_prop(key, value) when is_binary(value) do
-    if String.ends_with?(key, "Color") do
-      case css_hex_to_int(value) do
-        {:ok, int} -> [{key, int}]
-        :error -> [{key, value}]
-      end
-    else
-      [{key, value}]
-    end
-  end
-
-  defp normalize_office_prop(key, value), do: [{key, value}]
-
-  # Setting UNO FillColor/LineColor alone does NOT make the fill/line visible —
-  # the style enums stay in their default state and the OOXML exporter then
-  # writes NO fill element, so the theme default (green) paints the shape.
-  # Pair the color with its style=SOLID unless the caller set the style.
-  defp pair_fill_styles(fields) do
-    fields
-    |> maybe_pair("FillColor", "FillStyle", 1)
-    |> maybe_pair("LineColor", "LineStyle", 1)
-    # The default graphic style binds the fill to the THEME color (accent1 —
-    # LibreOffice green). A numeric FillColor does not clear that binding and
-    # the OOXML exporter prefers the theme ref (writes schemeClr accent1), so
-    # the concrete color never reaches the file. -1 = no theme color. The LINE
-    # channel has the same binding (exported a schemeClr outline that Keynote's
-    # importer stumbles over even when LineColor was set explicitly).
-    |> maybe_pair("FillColor", "FillColorTheme", -1)
-    |> maybe_pair("LineColor", "LineColorTheme", -1)
-  end
-
-  defp maybe_pair(fields, color_key, style_key, solid) do
-    if Map.has_key?(fields, color_key) and not Map.has_key?(fields, style_key) do
-      Map.put(fields, style_key, solid)
-    else
-      fields
-    end
-  end
-
-  # A new shape with no Line* keys gets NO outline rather than LibreOffice's
-  # default (a solid green border on every card/circle). Callers wanting a
-  # border say so (LineColor / LineStyle / LineWidth).
-  defp default_no_outline(fields) do
-    if Enum.any?(Map.keys(fields), &String.starts_with?(&1, "Line")) do
-      fields
-    else
-      Map.put(fields, "LineStyle", 0)
-    end
-  end
-
+  # Slide picture src → file:// URL (Op.InsertShape.to_wire owns the UNO prop
+  # normalisation + scalar filtering that the legacy helpers did, now #49 O1).
   defp to_file_url("file://" <> _ = url), do: url
   defp to_file_url(path), do: "file://" <> Path.expand(path)
-
-  defp css_hex_to_int("#" <> hex), do: css_hex_to_int(hex)
-
-  defp css_hex_to_int(hex) when byte_size(hex) == 6 do
-    case Integer.parse(hex, 16) do
-      {int, ""} -> {:ok, int}
-      _other -> :error
-    end
-  end
-
-  defp css_hex_to_int(_other), do: :error
 
   # --- find / read / outline helpers ---------------------------------------
 
