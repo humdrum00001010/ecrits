@@ -16,6 +16,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   alias Ecrits.Local.Workspace
   alias Ecrits.Workspace.Session, as: WorkspaceSession
   alias EcritsWeb.Components.LocalFileTree
+  alias EcritsWeb.Local.LocalAgentConfig
   alias EcritsWeb.Live.Studio.Components.ChatRail
   alias EcritsWeb.Live.Studio.Components.EditorSurface
   alias EcritsWeb.Local.WorkspaceAdapter
@@ -100,32 +101,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       description: "Opus plans, Sonnet executes"
     }
   ]
-  @local_agent_access_controls [
-    %{
-      id: "read-only",
-      label: "Read only",
-      approval_policy: :on_write,
-      adapter_approval_policy: "on_write",
-      sandbox: "read-only",
-      permission_mode: "plan"
-    },
-    %{
-      id: "ask",
-      label: "Ask",
-      approval_policy: :on_write,
-      adapter_approval_policy: "on_write",
-      sandbox: "workspace-write",
-      permission_mode: "default"
-    },
-    %{
-      id: "full-workspace",
-      label: "Full workspace",
-      approval_policy: :never,
-      adapter_approval_policy: "never",
-      sandbox: "workspace-write",
-      permission_mode: "dontAsk"
-    }
-  ]
+  # The access modes, in dropdown order. The full record for each is pattern-
+  # matched in `local_agent_access_control/1` (the id is the type discriminator),
+  # not looked up in a list — adding a mode is a new clause + this id.
+  @local_agent_access_ids ~w(read-only ask full-workspace)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -218,13 +197,15 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:local_agent_title_user_edited?, false)
      |> assign(:local_agent_title_form, local_agent_title_form())
      |> assign(:local_agent_form, local_agent_form())
-     |> assign(:local_agent_provider, local_agent_provider_display())
-     |> assign(:local_agent_provider_warning, nil)
-     |> assign(:local_agent_model, default_agent_model_id(default_provider_id()))
+     |> assign(:local_agent, %LocalAgentConfig{
+       provider: local_agent_provider_display(),
+       provider_warning: nil,
+       model: default_agent_model_id(default_provider_id()),
+       reasoning_effort: default_reasoning_effort(),
+       access: local_agent_access_control(default_access_control()),
+       integrations: local_agent_integrations()
+     })
      |> assign(:local_agent_model_modal_open, false)
-     |> assign(:local_agent_reasoning_effort, default_reasoning_effort())
-     |> assign_local_agent_access(default_access_control())
-     |> assign(:local_agent_integrations, local_agent_integrations())
      |> assign(:local_agent_options_form, local_agent_options_form())
      |> allow_upload(:local_document_import,
        accept: ~w(.hwp .hwpx .doc .docx),
@@ -237,67 +218,32 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   @impl true
   def handle_params(%{"path" => path} = params, _uri, socket) do
-    requested_provider = Map.get(params, "provider")
-    requested_model = Map.get(params, "model")
-    {provider, provider_warning} = local_agent_provider_from_params(requested_provider)
-    model = local_agent_model_from_params(requested_model, provider.key)
-    provider = local_agent_provider_display(model.provider)
-    # `model.provider` already drives `provider`, so a Claude model selected while
-    # on Codex flips `provider` here — `provider_changed?` therefore captures BOTH
-    # a dropdown provider switch AND a cross-provider model selection (each is a
-    # genuine provider/adapter change, not a per-turn option).
-    provider_changed? = provider.key != socket.assigns.local_agent_provider.key
-    # Whether a foreground agent was ALREADY bound (under the OLD provider) before
-    # this phase. A provider switch only RESTARTS when one already exists; the very
-    # first connected attach seeds the right provider directly (no restart needed).
-    had_bound_agent? = is_binary(socket.assigns.local_agent_session_id)
-    model_changed? = model.id != socket.assigns.local_agent_model
-    reasoning_effort = normalize_reasoning_effort(Map.get(params, "reasoning"), model.provider)
-    reasoning_changed? = reasoning_effort != socket.assigns.local_agent_reasoning_effort
-    access_control = normalize_access_control(Map.get(params, "access"))
-    access_changed? = access_control != socket.assigns.local_agent_access_control
+    {provider, provider_warning, model} = resolve_provider_and_model(params)
+
+    # Classify the agent-session transition from the CURRENTLY bound provider/
+    # model — this MUST happen before the assigns below overwrite them.
+    transition = agent_transition(socket, provider, model)
 
     socket =
       socket
-      |> assign(:local_agent_provider, provider)
-      |> assign(:local_agent_provider_warning, provider_warning)
-      |> assign(:local_agent_model, model.id)
-      |> assign(:local_agent_reasoning_effort, reasoning_effort)
-      |> assign_local_agent_access(access_control)
-      |> assign(:local_agent_integrations, local_agent_integrations())
+      |> put_local_agent(
+        provider: provider,
+        provider_warning: provider_warning,
+        model: model.id,
+        integrations: local_agent_integrations()
+      )
       |> mount_workspace(path)
       # Attach the durable per-path workspace Session and bind its foreground
       # agent BEFORE opening the document — this is the refresh-survival seam.
       # `Session.attach` get-or-starts the path-keyed Session (cookieless), which
       # get-or-starts the foreground agent: on a browser refresh the SAME agent
       # pid / provider thread / transcript / title are re-attached, NOT recreated.
+      # reasoning_effort / access_control are NOT read from URL params — they live
+      # in the durable session (adapter_opts) and are hydrated in snapshot_local_agent.
       |> attach_workspace_session()
       |> maybe_open_local_document(params)
-
-    # A PROVIDER change (codex<->claude, or a cross-provider model selection) is
-    # NOT a per-turn option: the ACP adapter is bound at start_session and cannot
-    # be swapped on a running session. So when an agent is already bound under the
-    # old provider, KILL it and start a fresh one (empty transcript, "New Chat"),
-    # then re-bind the LiveView. SAME-provider changes (access / reasoning /
-    # same-provider model) stay on the live-apply path — they preserve the
-    # conversation.
-    restart_for_provider? = provider_changed? and had_bound_agent? and connected?(socket)
-
-    socket =
-      if restart_for_provider? do
-        restart_local_agent_for_provider(socket)
-      else
-        options_changed? = access_changed? or reasoning_changed? or model_changed?
-        maybe_apply_live_local_agent_options(socket, options_changed?)
-      end
-
-    socket =
-      if (provider_param_invalid?(requested_provider) or model_param_invalid?(requested_model)) and
-           is_nil(socket.assigns.workspace_error) do
-        push_patch(socket, to: workspace_provider_path(socket, provider.key))
-      else
-        socket
-      end
+      |> apply_agent_transition(transition)
+      |> canonicalize_provider_path(params, provider)
 
     {:noreply, socket}
   end
@@ -306,6 +252,66 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     # No workspace path in the URL — there is no cookie/store to restore from
     # (the path keys everything now), so send to the folder picker ("/").
     {:noreply, push_navigate(socket, to: ~p"/")}
+  end
+
+  # Resolve the provider + model from the URL params. `model.provider` is
+  # authoritative — a cross-provider model selection re-derives the provider —
+  # so the returned provider comes from the resolved model, not the raw param.
+  defp resolve_provider_and_model(params) do
+    {provider, provider_warning} = local_agent_provider_from_params(Map.get(params, "provider"))
+    model = local_agent_model_from_params(Map.get(params, "model"), provider.key)
+    {local_agent_provider_display(model.provider), provider_warning, model}
+  end
+
+  # The transition this navigation implies, as a tag `apply_agent_transition/2`
+  # matches on:
+  #   :restart_provider — a provider change (codex<->claude, or a cross-provider
+  #       model pick) rebinds the ACP adapter, which can't be swapped on a live
+  #       session, so an already-bound agent is killed + restarted. The first
+  #       connected attach seeds the right provider directly (no restart).
+  #   :live_options     — a same-provider model change applies live (preserves
+  #       the conversation).
+  #   :keep             — nothing agent-affecting changed.
+  defp agent_transition(socket, provider, model) do
+    cond do
+      provider_change?(socket, provider) and agent_bound?(socket) and connected?(socket) ->
+        :restart_provider
+
+      model.id != socket.assigns.local_agent.model ->
+        :live_options
+
+      true ->
+        :keep
+    end
+  end
+
+  defp apply_agent_transition(socket, :restart_provider),
+    do: restart_local_agent_for_provider(socket)
+
+  defp apply_agent_transition(socket, :live_options),
+    do: maybe_apply_live_local_agent_options(socket, true)
+
+  defp apply_agent_transition(socket, :keep),
+    do: maybe_apply_live_local_agent_options(socket, false)
+
+  defp provider_change?(socket, provider),
+    do: provider.key != socket.assigns.local_agent.provider.key
+
+  defp agent_bound?(socket), do: is_binary(socket.assigns.local_agent_session_id)
+
+  # Rewrite the URL to the resolved provider when the requested provider/model
+  # param was invalid (so a bad `?provider=foo` becomes the canonical one),
+  # unless a workspace error already needs surfacing.
+  defp canonicalize_provider_path(socket, params, provider) do
+    invalid? =
+      provider_param_invalid?(Map.get(params, "provider")) or
+        model_param_invalid?(Map.get(params, "model"))
+
+    if invalid? and is_nil(socket.assigns.workspace_error) do
+      push_patch(socket, to: workspace_provider_path(socket, provider.key))
+    else
+      socket
+    end
   end
 
   @impl true
@@ -547,7 +553,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       nil ->
         {:noreply, socket}
 
-      provider_id when provider_id == socket.assigns.local_agent_provider.key ->
+      provider_id when provider_id == socket.assigns.local_agent.provider.key ->
         {:noreply, socket}
 
       provider_id ->
@@ -846,7 +852,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     <Layouts.app flash={@flash} variant="split">
       <main
         id="local-workspace-root"
-        class="h-[calc(100dvh-60px)] min-h-0 overflow-hidden bg-[var(--cs-bg)] text-[var(--cs-ink)]"
+        class="h-[calc(100dvh-60px)] min-h-0 min-w-[1024px] overflow-hidden bg-[var(--cs-bg)] text-[var(--cs-ink)]"
       >
         <div
           :if={@workspace_error}
@@ -863,16 +869,16 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           :if={!@workspace_error}
           id="local-workspace-grid"
           phx-hook="LocalChatRailResizer"
-          data-mobile-pane="chat"
+          data-mobile-pane="desktop"
           style="--local-editor-z: 0; --local-agent-rail-z: 30"
-          class="isolate grid h-full min-h-0 grid-cols-1 overflow-hidden max-lg:grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[minmax(0,1fr)_var(--local-chat-rail-width,340px)] lg:grid-cols-[var(--local-file-tree-width,260px)_minmax(0,1fr)_var(--local-chat-rail-width,340px)] lg:overflow-hidden"
+          class="isolate grid h-full min-h-0 grid-cols-[var(--local-file-tree-width,260px)_minmax(0,1fr)_var(--local-chat-rail-width,340px)] overflow-hidden"
         >
           <aside
             id="local-file-tree-panel"
             data-component="repo-browser"
             data-local-file-tree-panel="true"
             data-collapsed="false"
-            class="relative flex min-h-0 flex-col overflow-hidden border-b border-base-300 bg-base-100 max-md:hidden max-lg:col-start-1 max-lg:row-start-1 lg:border-b-0 lg:border-r"
+            class="relative flex min-h-0 flex-col overflow-hidden border-r border-base-300 bg-base-100"
           >
             <div
               id="local-file-tree-content"
@@ -896,7 +902,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                     data-role="mobile-open-chat"
                     aria-controls="local-editor-shell local-agent-sidebar"
                     aria-pressed="false"
-                    class="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content md:hidden"
+                    class="hidden h-7 shrink-0 items-center gap-1 rounded border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content"
                   >
                     <.icon name="hero-chat-bubble-left-right" class="size-3.5" />
                     <span>Chat</span>
@@ -915,7 +921,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                 </div>
               </div>
 
-              <div class="max-h-[42vh] overflow-auto lg:min-h-0 lg:flex-1 lg:max-h-none">
+              <div class="min-h-0 flex-1 overflow-auto">
                 <LocalFileTree.tree
                   id="local-file-tree"
                   nodes={@tree}
@@ -928,7 +934,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             <div
               id="local-file-tree-restore"
               data-role="file-tree-restore"
-              class="hidden border-b border-base-300 bg-base-100 px-1.5 py-1.5 lg:border-b-0"
+              class="hidden bg-base-100 px-1.5 py-1.5"
             >
               <button
                 id="local-file-tree-show"
@@ -949,7 +955,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               data-role="file-tree-resizer"
               aria-label="Resize file tree"
               class={[
-                "absolute -right-1 top-0 z-10 hidden h-full w-2 cursor-col-resize touch-none select-none lg:block",
+                "absolute -right-1 top-0 z-10 block h-full w-2 cursor-col-resize touch-none select-none",
                 "focus:outline-none focus-visible:ring-2 focus-visible:ring-base-content/35",
                 "before:absolute before:left-1/2 before:top-0 before:h-full before:w-px before:-translate-x-1/2",
                 "before:bg-base-300 before:transition-colors before:duration-150",
@@ -962,7 +968,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           <section
             id="local-editor-shell"
             data-local-editor-shell="true"
-            class="relative z-[var(--local-editor-z)] h-full min-h-0 min-w-0 overflow-hidden bg-[var(--cs-bg)] max-md:hidden max-lg:col-start-1 max-lg:row-start-2"
+            class="relative z-[var(--local-editor-z)] h-full min-h-0 min-w-0 overflow-hidden bg-[var(--cs-bg)]"
           >
             <EditorSurface.local_document
               :if={@active_document || @open_documents != []}
@@ -1020,8 +1026,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             data-agent-status={to_string(@local_agent_status)}
             data-component="chat-rail"
             data-local-chat-rail="true"
-            data-provider-key={@local_agent_provider.key}
-            class="relative z-[var(--local-agent-rail-z)] flex h-full min-h-0 flex-col overflow-visible border-t border-base-300 bg-base-200 text-base-content max-lg:row-start-1 max-lg:row-span-2 md:col-start-2 md:border-l md:border-t-0 lg:col-start-3"
+            data-provider-key={@local_agent.provider.key}
+            class="relative z-[var(--local-agent-rail-z)] col-start-3 flex h-full min-h-0 flex-col overflow-visible border-l border-base-300 bg-base-200 text-base-content"
           >
             <button
               id="local-agent-rail-resizer"
@@ -1029,7 +1035,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               data-role="chat-rail-resizer"
               aria-label="Resize chat rail"
               class={[
-                "absolute -left-1 top-0 z-10 hidden h-full w-2 cursor-col-resize touch-none select-none lg:block",
+                "absolute -left-1 top-0 z-10 block h-full w-2 cursor-col-resize touch-none select-none",
                 "focus:outline-none focus-visible:ring-2 focus-visible:ring-base-content/35",
                 "before:absolute before:left-1/2 before:top-0 before:h-full before:w-px before:-translate-x-1/2",
                 "before:bg-base-300 before:transition-colors before:duration-150",
@@ -1039,11 +1045,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             </button>
 
             <p
-              :if={@local_agent_provider_warning}
+              :if={@local_agent.provider_warning}
               id="local-agent-provider-warning"
               class="border-b border-warning/20 bg-warning/10 px-3 py-2 text-xs leading-5 text-warning"
             >
-              {@local_agent_provider_warning}
+              {@local_agent.provider_warning}
             </p>
 
             <%!-- The chat thread + composer + queue + title are rendered INLINE
@@ -1110,7 +1116,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                 data-role="mobile-open-document"
                 aria-controls="local-editor-shell local-agent-sidebar"
                 aria-pressed="false"
-                class="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content md:hidden"
+                class="hidden h-7 shrink-0 items-center gap-1 rounded border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content"
               >
                 <.icon name="hero-document-text" class="size-3.5" />
                 <span>Document</span>
@@ -1131,6 +1137,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               <div
                 id="local-agent-thread"
                 phx-update="stream"
+                phx-hook=".StickToBottom"
+                data-stick-events="phx:local_agent_text_append,phx:local_agent_reasoning_append"
                 data-role="chat-stream"
                 class="flex min-h-0 flex-1 flex-col items-stretch gap-3 overflow-x-hidden overflow-y-auto px-4 py-3"
               >
@@ -1413,10 +1421,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                     id="local-agent-provider-options"
                     phx-change="validate_local_document_upload"
                     data-role="provider-options"
-                    data-selected-provider={@local_agent_provider.key}
-                    data-selected-model={@local_agent_model}
-                    data-selected-reasoning={@local_agent_reasoning_effort}
-                    data-selected-access={@local_agent_access_control}
+                    data-selected-provider={@local_agent.provider.key}
+                    data-selected-model={@local_agent.model}
+                    data-selected-reasoning={@local_agent.reasoning_effort}
+                    data-selected-access={@local_agent.access.id}
                     class="flex min-w-0 flex-wrap items-center gap-1 border-t border-base-300 px-2 py-1.5 text-[11px] leading-5 text-base-content/60"
                   >
                     <div class="block min-w-0 shrink-0">
@@ -1424,20 +1432,20 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                       <details
                         id="local-agent-model-select"
                         data-role="agent-model-select"
-                        data-selected-provider={@local_agent_provider.key}
-                        data-selected-model={@local_agent_model}
+                        data-selected-provider={@local_agent.provider.key}
+                        data-selected-model={@local_agent.model}
                         class="group relative inline-block min-w-0 max-w-32 align-top"
                       >
                         <summary class="inline-flex h-7 max-w-32 min-w-0 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-left text-[11px] text-base-content transition-colors hover:border-base-content/25 marker:hidden">
                           <img
-                            src={@local_agent_provider.favicon_src}
+                            src={@local_agent.provider.favicon_src}
                             data-role="agent-model-provider-favicon"
                             aria-hidden="true"
                             alt=""
                             class="size-3.5 shrink-0 opacity-85 [[data-theme=studio-dark]_&]:invert"
                           />
                           <span class="min-w-0 truncate">
-                            {local_agent_selected_model_label(@local_agent_model)}
+                            {local_agent_selected_model_label(@local_agent.model)}
                           </span>
                           <.icon
                             name="hero-chevron-down"
@@ -1449,7 +1457,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                           class="absolute bottom-8 left-0 z-40 max-h-[min(24rem,calc(100vh-8rem))] w-[min(17rem,calc(100vw-2rem))] max-w-[calc(var(--local-chat-rail-width,340px)-2rem)] overflow-y-auto rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm"
                         >
                           <button
-                            :for={model <- local_agent_models_for_provider(@local_agent_provider.key)}
+                            :for={model <- local_agent_models_for_provider(@local_agent.provider.key)}
                             id={"local-agent-inline-model-#{model.id}"}
                             type="button"
                             phx-click="select_local_agent_model"
@@ -1457,11 +1465,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                             data-role="agent-model-option"
                             data-model={model.id}
                             data-provider={model.provider}
-                            data-selected={to_string(@local_agent_model == model.id)}
+                            data-selected={to_string(@local_agent.model == model.id)}
                             title={model.description}
                             class={[
                               "flex w-full items-start justify-between gap-2 px-2 py-1.5 text-left transition-colors hover:bg-base-200/70",
-                              if(@local_agent_model == model.id,
+                              if(@local_agent.model == model.id,
                                 do: "text-base-content",
                                 else: "text-base-content/70"
                               )
@@ -1482,7 +1490,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                               </span>
                             </span>
                             <.icon
-                              :if={@local_agent_model == model.id}
+                              :if={@local_agent.model == model.id}
                               name="hero-check"
                               class="size-3.5 shrink-0 text-base-content/65"
                             />
@@ -1515,12 +1523,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                     <details
                       id="local-agent-reasoning-select"
                       data-role="provider-reasoning-select"
-                      data-selected-reasoning={@local_agent_reasoning_effort}
+                      data-selected-reasoning={@local_agent.reasoning_effort}
                       class="group relative min-w-0 max-w-28"
                     >
                       <summary class="inline-flex h-6 min-w-0 max-w-28 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-[11px] text-base-content transition-colors hover:border-base-content/25 marker:hidden">
                         <span class="min-w-0 truncate">
-                          {local_agent_reasoning_short_label(@local_agent_reasoning_effort)}
+                          {local_agent_reasoning_short_label(@local_agent.reasoning_effort)}
                         </span>
                         <.icon
                           name="hero-chevron-down"
@@ -1529,18 +1537,18 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                       </summary>
                       <div class="absolute bottom-7 right-0 z-40 w-52 rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm">
                         <button
-                          :for={effort <- local_agent_reasoning_efforts(@local_agent_provider.key)}
+                          :for={effort <- local_agent_reasoning_efforts(@local_agent.provider.key)}
                           id={"local-agent-inline-reasoning-#{effort}"}
                           type="button"
                           phx-click="select_local_agent_reasoning"
                           phx-value-reasoning={effort}
                           data-role="provider-reasoning-option"
                           data-value={effort}
-                          data-selected={to_string(@local_agent_reasoning_effort == effort)}
+                          data-selected={to_string(@local_agent.reasoning_effort == effort)}
                           title={local_agent_reasoning_title(effort)}
                           class={[
                             "flex h-8 w-full items-center justify-between gap-2 px-2 text-left transition-colors hover:bg-base-200/70",
-                            if(@local_agent_reasoning_effort == effort,
+                            if(@local_agent.reasoning_effort == effort,
                               do: "text-base-content",
                               else: "text-base-content/70"
                             )
@@ -1550,7 +1558,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                             {local_agent_reasoning_label(effort)}
                           </span>
                           <.icon
-                            :if={@local_agent_reasoning_effort == effort}
+                            :if={@local_agent.reasoning_effort == effort}
                             name="hero-check"
                             class="size-3.5 shrink-0 text-base-content/65"
                           />
@@ -1560,12 +1568,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                     <details
                       id="local-agent-access-select"
                       data-role="agent-access-control"
-                      data-selected-access={@local_agent_access_control}
+                      data-selected-access={@local_agent.access.id}
                       class="group relative min-w-0 max-w-36"
                     >
                       <summary class="inline-flex h-7 min-w-0 max-w-36 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-xs text-base-content transition-colors hover:border-base-content/25 marker:hidden">
                         <span class="min-w-0 truncate">
-                          {local_agent_access_control(@local_agent_access_control).label}
+                          {local_agent_access_control(@local_agent.access.id).label}
                         </span>
                         <.icon name="hero-chevron-down" class="size-3 shrink-0 text-base-content/45" />
                       </summary>
@@ -1578,11 +1586,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                           phx-value-access={access.id}
                           data-role="agent-access-option"
                           data-access={access.id}
-                          data-selected={to_string(@local_agent_access_control == access.id)}
-                          title={local_agent_access_title(access)}
+                          data-selected={to_string(@local_agent.access.id == access.id)}
+                          title={access.title}
                           class={[
                             "flex h-8 w-full items-center justify-between gap-2 px-2 text-left transition-colors hover:bg-base-200/70",
-                            if(@local_agent_access_control == access.id,
+                            if(@local_agent.access.id == access.id,
                               do: "text-base-content",
                               else: "text-base-content/70"
                             )
@@ -1590,7 +1598,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                         >
                           <span class="whitespace-nowrap">{access.label}</span>
                           <.icon
-                            :if={@local_agent_access_control == access.id}
+                            :if={@local_agent.access.id == access.id}
                             name="hero-check"
                             class="size-3.5 shrink-0 text-base-content/65"
                           />
@@ -1636,19 +1644,19 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                   </header>
                   <div class="divide-y divide-base-300 px-3 py-1">
                     <button
-                      :for={provider <- local_agent_provider_details(@local_agent_integrations)}
+                      :for={provider <- local_agent_provider_details(@local_agent.integrations)}
                       id={"local-agent-model-detail-#{provider.id}"}
                       type="button"
                       phx-click="select_local_agent_provider"
                       phx-value-provider={provider.id}
                       data-provider={provider.id}
-                      data-selected={to_string(provider.id == @local_agent_provider.key)}
+                      data-selected={to_string(provider.id == @local_agent.provider.key)}
                       data-status={to_string(provider.status)}
-                      aria-pressed={to_string(provider.id == @local_agent_provider.key)}
+                      aria-pressed={to_string(provider.id == @local_agent.provider.key)}
                       class={[
                         "flex w-full items-center justify-between gap-3 py-2 text-left text-sm transition-colors hover:bg-base-200/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-base-content/25",
-                        provider.id == @local_agent_provider.key && "text-base-content",
-                        provider.id != @local_agent_provider.key && "text-base-content/75"
+                        provider.id == @local_agent.provider.key && "text-base-content",
+                        provider.id != @local_agent.provider.key && "text-base-content/75"
                       ]}
                     >
                       <div class="flex min-w-0 items-center gap-2">
@@ -1769,6 +1777,59 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                   this.form.removeEventListener("click", this.onFormClick)
                   this.form.removeEventListener("submit", this.onFormSubmit)
                 }
+              }
+            </script>
+            <%!-- Generic "stick to the bottom while content streams in" hook. Follows
+                  new content only while the user is pinned near the bottom; scrolling
+                  up to read history detaches the follow until they return.
+                    data-stick-threshold  px slack from the bottom that still counts as
+                                          "at the bottom" (default 80).
+                    data-stick-events     comma-separated window events for content
+                                          arriving OUTSIDE a LiveView patch (the chat's
+                                          streamed deltas). Stream/DOM patches already
+                                          fire updated(); list only the out-of-band ones. --%>
+            <script :type={Phoenix.LiveView.ColocatedHook} name=".StickToBottom">
+              export default {
+                mounted() {
+                  this.threshold = parseInt(this.el.dataset.stickThreshold, 10) || 80
+                  this.stick = true
+
+                  this.onScroll = () => {
+                    const dist = this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight
+                    this.stick = dist <= this.threshold
+                  }
+                  this.el.addEventListener("scroll", this.onScroll, {passive: true})
+
+                  this.events = (this.el.dataset.stickEvents || "")
+                    .split(",")
+                    .map(s => s.trim())
+                    .filter(Boolean)
+                  this.onEvent = () => this.maybeScroll()
+                  this.events.forEach(name => window.addEventListener(name, this.onEvent))
+
+                  this.scrollToBottom()
+                },
+
+                updated() {
+                  this.maybeScroll()
+                },
+
+                destroyed() {
+                  this.el.removeEventListener("scroll", this.onScroll)
+                  this.events.forEach(name => window.removeEventListener(name, this.onEvent))
+                },
+
+                maybeScroll() {
+                  if (this.stick) this.scrollToBottom()
+                },
+
+                scrollToBottom() {
+                  // rAF so the just-inserted node's height is laid out before we
+                  // measure scrollHeight — otherwise we'd scroll to a stale bottom.
+                  requestAnimationFrame(() => {
+                    this.el.scrollTop = this.el.scrollHeight
+                  })
+                },
               }
             </script>
           </aside>
@@ -1917,6 +1978,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
       index ->
         active? = socket.assigns.active_document_id == id
+        closed_tab = Enum.at(tabs, index)
         remaining = List.delete_at(tabs, index)
 
         socket =
@@ -1925,6 +1987,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           # A closed doc must never linger as dirty (and its auto-save timer
           # would otherwise fire against a doc with no open tab).
           |> mark_doc_clean(id)
+          # Dispose the server office twin so its libreofficex session +
+          # `.~lock.<file>#` are released — a detach-on-switch keeps the twin,
+          # but an explicit close must let go of it.
+          |> release_office_twin_on_close(closed_tab)
 
         cond do
           not active? ->
@@ -1947,6 +2013,30 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         end
     end
   end
+
+  # Closing an OFFICE (docx/pptx) tab must dispose its server Pool twin — else the
+  # libreofficex UNO session lingers and its `.~lock.<file>#` is never released
+  # (the user-reported "close of libre never works"; the twin then survives until
+  # an LRU eviction that never comes with few docs open). A VIEWED office twin is
+  # only a disk SHADOW — the browser WASM is the save authority — so disposing it
+  # on close loses no edits. HWP twins keep their own twin-sync lifecycle.
+  # Best-effort; keyed by absolute path exactly like `open_document_exists?/2`.
+  defp release_office_twin_on_close(socket, %{path: rel_path}) when is_binary(rel_path) do
+    ext = rel_path |> Path.extname() |> String.downcase()
+
+    if connected?(socket) and ext in [".docx", ".pptx", ".ppt"] do
+      root = workspace_root_path(socket.assigns.workspace)
+
+      with {:ok, rel} <- LocalPath.normalize(rel_path),
+           {:ok, absolute} <- LocalPath.join(root, rel) do
+        _ = DocPool.close_by_path(absolute)
+      end
+    end
+
+    socket
+  end
+
+  defp release_office_twin_on_close(socket, _tab), do: socket
 
   # Close streams/handles for the currently active document, mirroring the
   # teardown that `maybe_open_local_document/2` performs on empty navigation.
@@ -2196,6 +2286,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # re-attached pane is blank — repaint the prior bubbles from the transcript.
   defp snapshot_local_agent(socket, ws, agent_id) do
     snapshot = WorkspaceSession.snapshot(ws)
+    stored_opts = Map.get(snapshot, :adapter_opts, [])
 
     socket
     |> assign(:workspace_session, ws)
@@ -2206,9 +2297,43 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     # pre-Phase-5 agent has no `:pending` key → default 0.
     |> assign(:local_agent_pending, Map.get(snapshot, :pending, 0))
     |> maybe_restore_agent_title(snapshot.title)
+    # Hydrate reasoning/access from the session's stored adapter_opts so that a
+    # browser refresh shows the SAME setting the user last selected — not the URL
+    # param (which is no longer written for these settings).
+    |> hydrate_agent_options_from_session(stored_opts)
     |> stream(:local_agent_items, [], reset: true)
     |> replay_local_agent_transcript(snapshot.transcript)
   end
+
+  # Settings the durable session OWNS and we hydrate back into the assigns on
+  # attach. Each is resolved optimistically as `session_value || default` — read
+  # from the session adapter_opts, falling back to the configured default when a
+  # fresh agent has none yet — then assigned unconditionally (no per-option
+  # branching). access_control is the stored id; a legacy/initial session that
+  # only has `permission_mode` is mapped back through it before the default.
+  defp hydrate_agent_options_from_session(socket, opts) when is_list(opts) do
+    provider_key = socket.assigns.local_agent.provider.key
+
+    reasoning =
+      normalize_reasoning_effort(
+        opts[:reasoning_effort] || default_reasoning_effort(),
+        provider_key
+      )
+
+    access =
+      opts[:access_control] || access_from_permission_mode(opts[:permission_mode]) ||
+        default_access_control()
+
+    socket
+    |> put_local_agent(reasoning_effort: reasoning)
+    |> put_local_agent_access(access)
+  end
+
+  defp hydrate_agent_options_from_session(socket, _), do: socket
+
+  defp access_from_permission_mode("plan"), do: "read-only"
+  defp access_from_permission_mode("dontAsk"), do: "full-workspace"
+  defp access_from_permission_mode(_), do: nil
 
   # GENUINE restart of the foreground agent on a PROVIDER switch (codex<->claude,
   # or a cross-provider model selection). The ACP adapter is bound at the agent's
@@ -2302,7 +2427,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     _ =
       WorkspaceSession.update_options(
         ws,
-        local_agent_provider_adapter_opts(socket, workspace_path)
+        LocalAgentConfig.adapter_opts(socket.assigns.local_agent, workspace_path)
       )
 
     socket
@@ -2311,12 +2436,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp maybe_apply_live_local_agent_options(socket, _changed?), do: socket
 
   # Turn-completion auto-save safety net. The agent may stall/stop BEFORE its
-  # final `doc_save` (observed with codex/gpt-5.5 on "make a worksheet …"),
+  # final `doc.save` (observed with codex/gpt-5.5 on "make a worksheet …"),
   # leaving in-memory edits that never reach disk — so the file the user opens
   # stays the unedited template. On turn end we persist any server-backed pooled
   # doc that is *dirty* and carries a real
   # save-target path (the created/cloned/headless worksheet case). It is
-  # idempotent: a turn that already `doc_save`d leaves nothing dirty -> no-op.
+  # idempotent: a turn that already `doc.save`d leaves nothing dirty -> no-op.
   # `Pool.dirty_docs/1` already excludes browser-backed (viewed) docs, so a doc
   # the agent did not edit through the server Editor is never auto-overwritten.
   defp persist_pending_agent_docs(socket) do
@@ -2515,12 +2640,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     adapter_opts =
       local_agent_ui
       |> Keyword.get(:adapter_opts, [])
-      |> Keyword.merge(local_agent_provider_adapter_opts(socket, workspace_path))
+      |> Keyword.merge(LocalAgentConfig.adapter_opts(socket.assigns.local_agent, workspace_path))
 
     local_agent_ui
-    |> Keyword.put(:provider, socket.assigns.local_agent_provider.key)
-    |> Keyword.put(:approval_policy, socket.assigns.local_agent_approval_policy)
-    |> Keyword.put(:access_control, socket.assigns.local_agent_access_control)
+    |> Keyword.put(:provider, socket.assigns.local_agent.provider.key)
+    |> Keyword.put(:approval_policy, socket.assigns.local_agent.access.approval_policy)
+    |> Keyword.put(:access_control, socket.assigns.local_agent.access.id)
     |> Keyword.put(:adapter_opts, adapter_opts)
     |> Keyword.put(:workspace_root, workspace_path)
     |> Keyword.put(:document_path, socket.assigns.active_document_path)
@@ -2570,29 +2695,19 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         socket
 
       true ->
-        # Follow BOTH the LiveView document_id (provider prompt context) and the
-        # Pool document id (the doc.* tools' active doc) so the agent's tool
-        # context tracks what the user is now viewing. nil pool id (e.g. a
-        # Markdown file with no Pool backend) clears the agent's active doc.
+        # Follow the Pool document id (the doc.* tools' active doc) AND the
+        # workspace-relative path — the UNIFIED `document` handle the per-turn
+        # preamble hands the agent, so "이 문서" turns need zero discovery
+        # round-trips. nil pool id (e.g. a Markdown file with no Pool backend)
+        # clears the agent's active doc.
         _ =
           WorkspaceSession.update_options(socket.assigns.workspace_session,
-            document_id: current_document_id,
+            document_path: socket.assigns[:active_document_path],
             pool_document_id: socket.assigns[:pool_document_id]
           )
 
         socket
     end
-  end
-
-  defp local_agent_provider_adapter_opts(socket, workspace_path) do
-    [
-      cwd: workspace_path,
-      model: local_agent_adapter_model(socket.assigns.local_agent_model),
-      reasoning_effort: socket.assigns.local_agent_reasoning_effort,
-      approval_policy: socket.assigns.local_agent_adapter_approval_policy,
-      sandbox: socket.assigns.local_agent_sandbox,
-      permission_mode: socket.assigns.local_agent_permission_mode
-    ]
   end
 
   defp refresh_tree(%{assigns: %{workspace: nil}} = socket, _expanded_paths), do: socket
@@ -2804,11 +2919,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp workspace_root_path(workspace), do: Map.get(workspace, :root_path) || ""
 
   defp workspace_document_path(socket, relative_path) do
-    ~p"/workspace?#{workspace_query(socket, document: relative_path, provider: socket.assigns.local_agent_provider.key)}"
+    ~p"/workspace?#{workspace_query(socket, document: relative_path, provider: socket.assigns.local_agent.provider.key)}"
   end
 
   defp workspace_no_document_path(socket) do
-    ~p"/workspace?#{workspace_query(socket, provider: socket.assigns.local_agent_provider.key)}"
+    ~p"/workspace?#{workspace_query(socket, provider: socket.assigns.local_agent.provider.key)}"
   end
 
   defp workspace_provider_path(socket, provider_id, overrides \\ []) do
@@ -2829,10 +2944,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp workspace_query(socket, overrides) do
     [
       path: workspace_root_path(socket.assigns.workspace),
-      provider: socket.assigns.local_agent_provider.key,
-      model: socket.assigns.local_agent_model,
-      reasoning: socket.assigns.local_agent_reasoning_effort,
-      access: socket.assigns.local_agent_access_control
+      provider: socket.assigns.local_agent.provider.key,
+      model: socket.assigns.local_agent.model
     ]
     |> Keyword.merge(overrides)
   end
@@ -3405,37 +3518,41 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
+  # No "did it change?" guard: assign the new value, then persist the WHOLE
+  # canonical session-owned bundle (session_owned_agent_opts/1). Re-persisting
+  # the unchanged fields is idempotent — the session merges identical opts — so
+  # the old `if value == current, do: noop` branches are dead weight.
   defp select_local_agent_reasoning(value, socket) do
-    reasoning_effort = normalize_reasoning_effort(value, socket.assigns.local_agent_provider.key)
+    effort = normalize_reasoning_effort(value, socket.assigns.local_agent.provider.key)
 
-    if reasoning_effort == socket.assigns.local_agent_reasoning_effort do
-      {:noreply, socket}
-    else
-      {:noreply,
-       push_patch(socket,
-         to:
-           workspace_provider_path(socket, socket.assigns.local_agent_provider.key,
-             reasoning: reasoning_effort
-           )
-       )}
-    end
+    socket
+    |> put_local_agent(reasoning_effort: effort)
+    |> persist_agent_options()
+    |> noreply()
   end
 
   defp select_local_agent_access(value, socket) do
-    access_control = normalize_access_control(value)
-
-    if access_control == socket.assigns.local_agent_access_control do
-      {:noreply, socket}
-    else
-      {:noreply,
-       push_patch(socket,
-         to:
-           workspace_provider_path(socket, socket.assigns.local_agent_provider.key,
-             access: access_control
-           )
-       )}
-    end
+    socket
+    |> put_local_agent_access(normalize_access_control(value))
+    |> persist_agent_options()
+    |> noreply()
   end
+
+  # Persist the canonical bundle to the durable session; returns the socket so it
+  # threads in a pipe. No-op (returns socket) when no session is bound yet.
+  defp persist_agent_options(%{assigns: %{workspace_session: %{} = ws}} = socket) do
+    _ =
+      WorkspaceSession.update_options(
+        ws,
+        LocalAgentConfig.session_opts(socket.assigns.local_agent)
+      )
+
+    socket
+  end
+
+  defp persist_agent_options(socket), do: socket
+
+  defp noreply(socket), do: {:noreply, socket}
 
   defp local_agent_provider_display(provider \\ default_provider_id()) do
     provider_id = normalize_allowed_provider_id(provider) || default_provider_id()
@@ -3468,18 +3585,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp default_agent_model_id(_provider), do: "gpt-5.5"
 
   # The model id forwarded to the adapter (→ `--model <id>` on the provider CLI).
-  # Claude's `default` alias forwards NO `--model` (the CLI picks its own
-  # recommended latest); every other catalog id is a real accepted alias/id and
-  # is forwarded verbatim. An unknown/blank id yields nil.
-  defp local_agent_adapter_model("default"), do: nil
-
-  defp local_agent_adapter_model(model_id) do
-    case local_agent_model(model_id) do
-      %{id: id} -> id
-      _model -> nil
-    end
-  end
-
   defp local_agent_provider_from_params(nil), do: {local_agent_provider_display(), nil}
 
   defp local_agent_provider_from_params(provider) do
@@ -3685,32 +3790,60 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp provider_integration_status_label(:ready), do: "ready"
   defp provider_integration_status_label(_status), do: "setup"
 
-  defp assign_local_agent_access(socket, access_control) do
-    access = local_agent_access_control(access_control)
-
-    socket
-    |> assign(:local_agent_access_control, access.id)
-    |> assign(:local_agent_approval_policy, access.approval_policy)
-    |> assign(:local_agent_adapter_approval_policy, access.adapter_approval_policy)
-    |> assign(:local_agent_sandbox, access.sandbox)
-    |> assign(:local_agent_permission_mode, access.permission_mode)
+  # Merge fields into the bound `%LocalAgentConfig{}` (the `:local_agent` assign) —
+  # the ONE seam every provider/model/reasoning/access update flows through.
+  defp put_local_agent(socket, fields) do
+    assign(socket, :local_agent, struct(socket.assigns.local_agent, fields))
   end
 
-  defp local_agent_access_controls, do: @local_agent_access_controls
-
-  defp local_agent_access_control(access_control) do
-    Enum.find(@local_agent_access_controls, &(&1.id == access_control)) ||
-      List.first(@local_agent_access_controls)
+  # Resolve an access-mode id to its full record and store it as `access`, so the
+  # five access-derived values read off `@local_agent.access.*`.
+  defp put_local_agent_access(socket, access_control) do
+    put_local_agent(socket, access: local_agent_access_control(access_control))
   end
 
-  defp local_agent_access_title(%{id: "read-only"}),
-    do: "Read workspace context. Write tools stay gated."
+  defp local_agent_access_controls,
+    do: Enum.map(@local_agent_access_ids, &local_agent_access_control/1)
 
-  defp local_agent_access_title(%{id: "ask"}),
-    do: "Read and request approval before local writes."
+  # Each access mode as a complete record, dispatched by id (the type). Unknown
+  # ids fall back to the safest mode (read-only).
+  defp local_agent_access_control("read-only") do
+    %{
+      id: "read-only",
+      label: "Read only",
+      title: "Read workspace context. Write tools stay gated.",
+      approval_policy: :on_write,
+      adapter_approval_policy: "on_write",
+      sandbox: "read-only",
+      permission_mode: "plan"
+    }
+  end
 
-  defp local_agent_access_title(%{id: "full-workspace"}),
-    do: "Allow workspace writes without per-tool approval."
+  defp local_agent_access_control("ask") do
+    %{
+      id: "ask",
+      label: "Ask",
+      title: "Read and request approval before local writes.",
+      approval_policy: :on_write,
+      adapter_approval_policy: "on_write",
+      sandbox: "workspace-write",
+      permission_mode: "default"
+    }
+  end
+
+  defp local_agent_access_control("full-workspace") do
+    %{
+      id: "full-workspace",
+      label: "Full workspace",
+      title: "Allow workspace writes without per-tool approval.",
+      approval_policy: :never,
+      adapter_approval_policy: "never",
+      sandbox: "workspace-write",
+      permission_mode: "dontAsk"
+    }
+  end
+
+  defp local_agent_access_control(_), do: local_agent_access_control("read-only")
 
   defp default_access_control do
     local_agent = Application.get_env(:ecrits, :local_agent, [])
@@ -3847,7 +3980,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # The agent-visible prompt: typed text + the picked-element JSON block (the
   # format the picker used to inject into the textarea), plus the #32 read-path
   # override — the refs are already resolved, so the turn must not burn calls
-  # on doc_context/doc_find rediscovery. The pick's `document` (its workspace
+  # on doc.context/doc.find rediscovery. The pick's `document` (its workspace
   # path) IS the tools' document handle: doc.* resolves paths directly,
   # auto-opening from disk when needed (#34 path-first).
   defp compose_picks_message(message, []), do: message
@@ -3857,9 +3990,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       "Selected document elements (#{length(picks)}):\n```json\n" <>
         Jason.encode!(picks, pretty: true) <>
         "\n```\n" <>
-        "Picked refs are authoritative. Skip doc_context/doc_find discovery: " <>
-        "call doc_read/doc_edit/doc_set directly on these refs, passing each " <>
-        "pick's `document` value (the file path) as the tools' `document` param.\n"
+        "Picked refs are authoritative. Skip doc.context/doc.find discovery: " <>
+        "call doc.read/doc.edit/doc.set directly on these refs, passing each " <>
+        "pick's `document` value (the file path) as the tools' `document` param. " <>
+        "For existing HWP paragraph division, use doc.edit op `split` at offsets; " <>
+        "do not use replace_text with newlines.\n"
 
     sep = if message == "" or String.ends_with?(message, "\n"), do: "", else: "\n\n"
     message <> sep <> block
@@ -3876,10 +4011,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
            compose_picks_message(message, picks),
            current_turn_opts(socket) ++ [display: message, picks: picks]
          ) do
-      {:ok, %{id: queued_id}} ->
+      # The turn is QUEUED, not running yet — do NOT render the user bubble here.
+      # It renders only when the queue drains to this turn (the :turn_started
+      # context switch), so the transcript shows what the agent is ACTUALLY
+      # processing, not what is merely waiting in line.
+      {:ok, %{id: _queued_id}} ->
         {:noreply,
          socket
-         |> stream_insert(:local_agent_items, agent_user_item(queued_id, message, picks))
          |> assign(:local_agent_pending, socket.assigns.local_agent_pending + 1)
          |> assign(:local_agent_error, nil)
          |> assign(:local_agent_form, local_agent_form())}
@@ -3909,7 +4047,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # workspace was still auto-rejected under the old approval policy).
   defp current_turn_opts(socket) do
     workspace_path = workspace_root_path(socket.assigns.workspace || %{})
-    [adapter_opts: local_agent_provider_adapter_opts(socket, workspace_path)]
+    [adapter_opts: LocalAgentConfig.adapter_opts(socket.assigns.local_agent, workspace_path)]
   end
 
   defp send_local_agent_turn(socket, message, picks) do
@@ -3990,12 +4128,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   # A QUEUED turn just drained (Phase 5): `local_agent_turn_id` was nil (the prior
-  # turn cleared it) and this is a fresh id. The user bubble was already rendered
-  # when the message was enqueued; render the reasoning + assistant placeholders
-  # now, reset the per-turn buffers, and decrement the pending count.
+  # turn cleared it) and this is a fresh id — i.e. the chat context just SWITCHED
+  # to this message. Render the user bubble NOW (it is intentionally NOT rendered
+  # at enqueue time, so a queued message only appears once the agent is actually
+  # on it), then the reasoning + assistant placeholders, reset the per-turn
+  # buffers, and decrement pending. The bubble's `input`/`picks` ride on the event.
   defp apply_local_agent_event(
          %{assigns: %{local_agent_turn_id: nil}} = socket,
-         %{type: :turn_started, turn_id: turn_id}
+         %{type: :turn_started, turn_id: turn_id} = event
        )
        when is_binary(turn_id) do
     socket
@@ -4005,6 +4145,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_text_segment, 0)
     |> assign(:local_agent_reasoning_text, "")
     |> assign(:local_agent_pending, max(socket.assigns.local_agent_pending - 1, 0))
+    |> stream_insert(
+      :local_agent_items,
+      agent_user_item(turn_id, Map.get(event, :input, ""), Map.get(event, :picks, []))
+    )
     |> stream_insert(:local_agent_items, agent_reasoning_item(turn_id, "", :pending))
     |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "", :running, 0))
   end
