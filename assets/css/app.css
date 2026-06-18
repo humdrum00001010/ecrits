@@ -849,7 +849,7 @@ body[data-chat-rail-dragging="true"] {
   font-family: var(--font-mono);
   font-size: 0.72rem;
   letter-spacing: 0.01em;
-  color: color-mix(in oklab, var(--cs-ink) 42%, transparent);
+  color: color-mix(in oklab, var(--cs-ink) 70%, transparent);
 }
 
 .mount-panel__crumb-icon {
@@ -877,7 +877,7 @@ body[data-chat-rail-dragging="true"] {
   margin: 0.4rem 0 0;
   font-size: 0.84rem;
   line-height: 1.5;
-  color: color-mix(in oklab, var(--cs-ink) 58%, transparent);
+  color: color-mix(in oklab, var(--cs-ink) 70%, transparent);
 }
 
 .mount-actions {
@@ -898,8 +898,12 @@ body[data-chat-rail-dragging="true"] {
   padding: 0 1rem;
   border: 1px solid transparent;
   border-radius: var(--cs-radius-sm);
-  background: var(--color-primary, var(--cs-blue));
-  color: var(--color-primary-content, #fff);
+  /* Fixed accessible brand-green: white text clears WCAG AA in both themes. The
+     theme primary (oklch 54%/70%) is a mid-tone where neither white nor dark
+     content text reaches 4.5:1, so the CTA pins its own darker green. */
+  --mount-open: oklch(44% 0.13 162);
+  background: var(--mount-open);
+  color: #fff;
   font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
@@ -907,15 +911,15 @@ body[data-chat-rail-dragging="true"] {
 }
 
 .mount-open:hover {
-  background: color-mix(in oklab, var(--color-primary, var(--cs-blue)) 90%, #000);
+  background: color-mix(in oklab, var(--mount-open) 90%, #000);
 }
 
 .mount-open:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary, var(--cs-blue)) 32%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--mount-open) 38%, transparent);
 }
 
-.mount-open:active { background: color-mix(in oklab, var(--color-primary, var(--cs-blue)) 82%, #000); }
+.mount-open:active { background: color-mix(in oklab, var(--mount-open) 82%, #000); }
 .mount-open[disabled] { opacity: 0.65; cursor: progress; }
 
 .mount-open__icon {
@@ -933,7 +937,7 @@ body[data-chat-rail-dragging="true"] {
   font-size: 0.72rem;
   font-weight: 500;
   letter-spacing: 0.02em;
-  color: color-mix(in oklab, var(--cs-ink) 50%, transparent);
+  color: color-mix(in oklab, var(--cs-ink) 70%, transparent);
 }
 
 .mount-field {
@@ -1047,7 +1051,7 @@ body[data-chat-rail-dragging="true"] {
   padding-top: 1rem;
   border-top: 1px solid color-mix(in oklab, var(--cs-ink) 7%, transparent);
   font-size: 0.74rem;
-  color: color-mix(in oklab, var(--cs-ink) 46%, transparent);
+  color: color-mix(in oklab, var(--cs-ink) 70%, transparent);
 }
 
 .mount-foot__item {

@@ -19,7 +19,7 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/ecrits"
 import topbar from "topbar"
-import {WasmHwpEditor} from "./wasm_hwp_editor.js"
+import {WasmHwpEditor} from "./wasm_hwp_editor"
 import {WasmOfficeEditor} from "./wasm_office_editor.js"
 import {MarkdownEditor} from "./markdown_editor.js"
 import {ObservexPreview} from "./observex_preview.js"
@@ -114,11 +114,7 @@ const LocalChatRailResizer = {
     this.fileTreeCollapsedWidth = 40
     this.editorMinWidth = 360
     this.desktopMinWidth = 1024
-    // Below this width the layout is single-pane (chat OR document, toggled).
-    // Between this and `desktopMinWidth` the editor + chat share a two-pane
-    // layout; the file tree only returns at `desktopMinWidth` (Tailwind `lg`).
-    this.singlePaneMaxWidth = 768
-    this.mobilePane = "chat"
+    this.mobilePane = "desktop"
     this.dragging = false
     this.dragKind = null
 
@@ -320,8 +316,6 @@ const LocalChatRailResizer = {
   },
 
   startDragFromEvent(event) {
-    if (window.innerWidth < this.desktopMinWidth) return
-
     const fileTreeHandle = event.target.closest('[data-role="file-tree-resizer"]')
     if (fileTreeHandle && this.el.contains(fileTreeHandle) && !this.fileTreeCollapsed) {
       this.startDrag("fileTree", event)
@@ -434,37 +428,16 @@ const LocalChatRailResizer = {
     this.root.style.setProperty("--local-file-tree-width", `${width}px`)
   },
 
-  applyMobilePane(pane, {focus = false} = {}) {
-    this.mobilePane = pane === "document" ? "document" : "chat"
+  applyMobilePane(_pane, _opts = {}) {
+    this.mobilePane = "desktop"
     this.el.setAttribute("data-mobile-pane", this.mobilePane)
 
-    const showingDocument = this.mobilePane === "document"
-    // Single-pane (true mobile) only below `md`. Between `md` and `lg` the editor
-    // and chat share a two-pane layout (the file tree stays hidden via its static
-    // `max-lg:hidden`), so the document is always visible on those wider screens.
-    const singlePane = window.innerWidth < this.singlePaneMaxWidth
+    this.fileTreePanel?.classList.remove("max-md:hidden")
+    this.editorShell?.classList.remove("max-md:hidden")
+    this.chatRail?.classList.remove("max-md:hidden")
 
-    if (singlePane) {
-      // The document view stacks the file tree (the file picker) above the
-      // editor so a phone user can both open documents and get back to chat.
-      this.fileTreePanel?.classList.toggle("max-md:hidden", !showingDocument)
-      this.editorShell?.classList.toggle("max-md:hidden", !showingDocument)
-      this.chatRail?.classList.toggle("max-md:hidden", showingDocument)
-    } else {
-      this.fileTreePanel?.classList.remove("max-md:hidden")
-      this.editorShell?.classList.remove("max-md:hidden")
-      this.chatRail?.classList.remove("max-md:hidden")
-    }
-
-    this.mobileOpenDocument?.setAttribute("aria-pressed", String(showingDocument))
-    this.mobileOpenChatButtons?.forEach(btn =>
-      btn.setAttribute("aria-pressed", String(!showingDocument))
-    )
-
-    if (focus && singlePane) {
-      const target = showingDocument ? this.mobileOpenChatButtons?.[0] : this.mobileOpenDocument
-      target?.focus({preventScroll: true})
-    }
+    this.mobileOpenDocument?.setAttribute("aria-pressed", "false")
+    this.mobileOpenChatButtons?.forEach(btn => btn.setAttribute("aria-pressed", "false"))
   },
 
   applyFileTreeWidth(width) {
@@ -511,23 +484,27 @@ const LocalChatRailResizer = {
   },
 
   availableFileTreeMaxWidth() {
-    if (window.innerWidth < this.desktopMinWidth) return this.fileTreeMaxWidth
-
-    const layoutMax = window.innerWidth - this.currentChatWidth() - this.editorMinWidth
+    const layoutMax = this.layoutWidth() - this.currentChatWidth() - this.editorMinWidth
     return Math.max(this.fileTreeMinWidth, Math.min(this.fileTreeMaxWidth, layoutMax))
   },
 
   availableChatMaxWidth() {
-    if (window.innerWidth < this.desktopMinWidth) return this.chatMaxWidth
-
     const fileTreeWidth = this.fileTreeCollapsed
       ? this.fileTreeCollapsedWidth
       : this.currentFileTreeWidth()
-    const layoutMax = window.innerWidth - fileTreeWidth - this.editorMinWidth
+    const layoutMax = this.layoutWidth() - fileTreeWidth - this.editorMinWidth
     return Math.max(this.chatMinWidth, Math.min(this.chatMaxWidth, layoutMax))
+  },
+
+  layoutWidth() {
+    return Math.max(window.innerWidth, this.desktopMinWidth)
   },
 }
 
+// Keeps the chat thread scrolled to the latest message WHILE a turn streams —
+// but only when the user is already pinned to the bottom. If they scroll up to
+// read earlier messages, new content no longer yanks them back down (the
+// `stick` flag, recomputed on every manual scroll, gates the follow).
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},

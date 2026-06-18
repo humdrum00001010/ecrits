@@ -73,7 +73,10 @@ defmodule EcritsWeb.Local.MountLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} variant="default" show_footer={false}>
-      <main id="local-mount-root" class="mount-screen">
+      <%!-- A plain <div>, not <main>: Layouts.app already wraps the slot in the
+            page's single <main> landmark; a nested second <main> here tripped the
+            duplicate / non-top-level main landmark rules. --%>
+      <div id="local-mount-root" class="mount-screen">
         <section
           id="local-native-directory-picker"
           data-role="native-directory-picker"
@@ -188,7 +191,7 @@ defmodule EcritsWeb.Local.MountLive do
             </footer>
           </div>
         </section>
-      </main>
+      </div>
     </Layouts.app>
     """
   end

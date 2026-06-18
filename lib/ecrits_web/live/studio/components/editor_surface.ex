@@ -50,14 +50,14 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
           <div id={@toolbar_id} class="contents">
             <header
               id="studio-document-header"
-              class="flex min-h-9 items-stretch justify-between border-b border-base-300 bg-base-100 max-sm:min-h-0"
+              class="flex min-h-9 items-stretch justify-between border-b border-base-300 bg-base-100"
             >
               <div
                 id="studio-document-tabs"
                 role="tablist"
                 aria-label="Open documents"
                 data-role="document-tabs"
-                class="flex min-w-0 flex-1 items-stretch overflow-hidden max-sm:w-full"
+                class="flex min-w-0 flex-1 items-stretch overflow-hidden"
               >
                 <div
                   :for={tab <- @open_documents}
@@ -109,7 +109,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 </div>
               </div>
 
-              <div class="ml-auto inline-flex min-w-0 shrink-0 items-center justify-end gap-1.5 pl-2 pr-3 max-sm:w-full">
+              <div class="ml-auto inline-flex min-w-0 shrink-0 items-center justify-end gap-1.5 pl-2 pr-3">
                 <span
                   id="local-rhwp-save-state"
                   class="hidden max-w-48 truncate text-xs text-base-content/55 2xl:inline"
@@ -124,7 +124,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                   data-role="mobile-open-chat"
                   aria-controls="local-editor-shell local-agent-sidebar"
                   aria-pressed="false"
-                  class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content md:hidden"
+                  class="hidden h-8 shrink-0 items-center gap-1.5 rounded-md border border-base-300 bg-base-100 px-2 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content"
                   title="Show chat"
                 >
                   <.icon name="hero-chat-bubble-left-right" class="size-4" />
@@ -135,7 +135,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                   id="local-document-element-picker"
                   type="button"
                   phx-click={JS.dispatch("ecrits:document-element-picker.toggle", to: "body")}
-                  class="hidden h-8 w-8 shrink-0 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content data-[active=true]:bg-base-200 data-[active=true]:text-base-content md:inline-flex"
+                  class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-transparent text-base-content/60 transition-colors hover:border-base-content/15 hover:bg-base-200 hover:text-base-content focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cs-blue)] data-[active=true]:border-[var(--cs-blue)] data-[active=true]:bg-[color-mix(in_oklab,var(--cs-blue)_12%,transparent)] data-[active=true]:text-[var(--cs-blue)]"
                   aria-label="Pick document element"
                   aria-controls="local-editor-shell local-agent-input"
                   aria-pressed="false"
@@ -150,7 +150,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                   id="local-rhwp-fullscreen"
                   type="button"
                   phx-click={toggle_local_fullscreen()}
-                  class="hidden h-8 w-8 shrink-0 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content md:inline-flex"
+                  class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
                   aria-label="Toggle fullscreen"
                   aria-controls="local-editor-shell local-file-tree-panel local-agent-sidebar"
                   aria-pressed="false"
@@ -168,7 +168,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
             </header>
           </div>
 
-          <article class="relative m-0 flex min-h-0 flex-1 overflow-hidden border-0 bg-transparent p-0 font-sans text-[15px] leading-[1.78] text-base-content shadow-none max-sm:mx-3 max-sm:px-5 max-sm:py-7">
+          <article class="relative m-0 flex min-h-0 flex-1 overflow-hidden border-0 bg-transparent p-0 font-sans text-[15px] leading-[1.78] text-base-content shadow-none">
             <div class="relative h-full min-h-0 w-full">
               <div :if={@document} id={@frame_id} class="contents">
                 <LocalHwpPages.render
@@ -238,7 +238,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
     js
     |> JS.toggle_class("hidden", to: "#local-file-tree-panel")
     |> JS.toggle_class("hidden", to: "#local-agent-sidebar")
-    |> JS.toggle_class("md:col-span-2 lg:col-span-3", to: "#local-editor-shell")
+    |> JS.toggle_class("col-span-3", to: "#local-editor-shell")
     |> JS.toggle_attribute({"aria-pressed", "true", "false"})
     |> JS.toggle(to: "#local-rhwp-fullscreen [data-role='enter-fullscreen']")
     |> JS.toggle(to: "#local-rhwp-fullscreen [data-role='exit-fullscreen']")

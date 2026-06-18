@@ -51,7 +51,17 @@ defmodule EcritsWeb.Layouts do
   def app(assigns) do
     ~H"""
     <div class="drawer">
-      <input id="mobile-nav-drawer" type="checkbox" class="drawer-toggle" />
+      <%!-- Presentational drawer state toggle: operated only by the labelled
+            open/close controls (for="mobile-nav-drawer"), never directly, so it
+            is hidden from the a11y tree (no orphan unlabelled form control, and
+            it stops being page content outside a landmark). --%>
+      <input
+        id="mobile-nav-drawer"
+        type="checkbox"
+        class="drawer-toggle"
+        aria-hidden="true"
+        tabindex="-1"
+      />
 
       <div class="drawer-content flex flex-col min-h-screen pt-[60px]">
         <.top_nav current_scope={@current_scope} chrome={@chrome} />

@@ -261,7 +261,8 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert has_element?(workspace_lv, "#local-workspace-grid[class*='isolate']")
     assert has_element?(workspace_lv, "#local-workspace-grid[style*='--local-editor-z']")
     assert has_element?(workspace_lv, "#local-workspace-grid[style*='--local-agent-rail-z']")
-    assert has_element?(workspace_lv, "#local-workspace-grid[class*='lg:overflow-hidden']")
+    assert has_element?(workspace_lv, "#local-workspace-grid[class*='overflow-hidden']")
+    refute has_element?(workspace_lv, "#local-workspace-grid[class*='max-lg:']")
 
     assert has_element?(
              workspace_lv,
@@ -294,7 +295,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              workspace_lv,
-             ~s(#local-file-tree-resizer[data-role="file-tree-resizer"][aria-label="Resize file tree"][class*="lg:block"])
+             ~s(#local-file-tree-resizer[data-role="file-tree-resizer"][aria-label="Resize file tree"][class*="block"])
            )
 
     assert has_element?(
@@ -325,7 +326,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-rail-resizer[data-role='chat-rail-resizer'][aria-label='Resize chat rail'][class*='lg:block']"
+             "#local-agent-rail-resizer[data-role='chat-rail-resizer'][aria-label='Resize chat rail'][class*='block']"
            )
 
     assert has_element?(workspace_lv, "#local-agent-sidebar[data-agent-status='idle']")
@@ -534,11 +535,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     |> element("#local-agent-inline-reasoning-high")
     |> render_click()
 
-    assert_patch(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.5", reasoning: "high", access: "read-only"]}"
-    )
-
+    # #42: reasoning persists in the durable session, NOT the URL — the click
+    # does NOT push_patch; it updates the bound config in place (the selection is
+    # reflected in the re-rendered control below).
     assert has_element?(
              lv,
              "#local-agent-provider-options #local-agent-reasoning-select[data-selected-reasoning='high'] button#local-agent-inline-reasoning-high[data-selected='true']",
@@ -561,9 +560,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     |> element("#local-agent-model-detail-claude")
     |> render_click()
 
+    # Provider/model stay URL-driven; reasoning/access do NOT (#42 — session).
     assert_patch(
       lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "claude", model: "default", reasoning: "medium", access: "read-only"]}"
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "claude", model: "default"]}"
     )
 
     assert has_element?(
@@ -614,28 +614,21 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     |> element(~s([id="local-agent-inline-model-gpt-5.3-codex-spark"]))
     |> render_click()
 
+    # Model stays URL-driven (reasoning/access dropped from the URL — #42).
     assert_patch(
       lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.3-codex-spark", reasoning: "medium", access: "read-only"]}"
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.3-codex-spark"]}"
     )
 
+    # reasoning + access select into the durable SESSION (no URL patch); the
+    # submit below proves they were forwarded to the adapter (echoed back).
     lv
     |> element("#local-agent-inline-reasoning-xhigh")
     |> render_click()
 
-    assert_patch(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.3-codex-spark", reasoning: "xhigh", access: "read-only"]}"
-    )
-
     lv
     |> element("#local-agent-inline-access-full-workspace")
     |> render_click()
-
-    assert_patch(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.3-codex-spark", reasoning: "xhigh", access: "full-workspace"]}"
-    )
 
     session_id = subscribe_agent(lv)
 
@@ -762,7 +755,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert_patch(
       lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx", provider: "codex", model: "gpt-5.5", reasoning: "medium", access: "read-only"]}"
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx", provider: "codex", model: "gpt-5.5"]}"
     )
 
     assert has_element?(lv, ~s([data-node-path="drafts/service.hwpx"][data-selected="true"]))
@@ -779,7 +772,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert_patch(
       lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex", model: "gpt-5.5", reasoning: "medium", access: "read-only"]}"
+      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex", model: "gpt-5.5"]}"
     )
 
     refute has_element?(lv, "#local-file-tree-breadcrumb")
@@ -932,7 +925,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert_patch(
       lv,
-      ~p"/workspace?#{[path: root, document: upload_name, provider: "codex", model: "gpt-5.5", reasoning: "medium", access: "read-only"]}"
+      ~p"/workspace?#{[path: root, document: upload_name, provider: "codex", model: "gpt-5.5"]}"
     )
 
     assert File.read!(upload_path) == upload_bytes
@@ -974,7 +967,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
            )
   end
 
-  test "header picker + fullscreen buttons show in every tier that shows the editor (md+)", %{
+  test "header picker + fullscreen buttons are desktop controls without responsive gates", %{
     conn: conn
   } do
     {:ok, lv, _html} =
@@ -985,19 +978,16 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     html = render(lv)
 
-    # The md–lg middle tier renders the editor two-pane, so the header actions
-    # must appear from md up — `lg:inline-flex` leaves the visible editor with
-    # no picker/fullscreen buttons between md and lg.
     picker_class = header_action_class(html, "#local-document-element-picker")
-    assert picker_class =~ "md:inline-flex"
+    assert picker_class =~ "inline-flex"
+    refute picker_class =~ "md:inline-flex"
     refute picker_class =~ "lg:inline-flex"
 
     fullscreen_class = header_action_class(html, "#local-rhwp-fullscreen")
-    assert fullscreen_class =~ "md:inline-flex"
+    assert fullscreen_class =~ "inline-flex"
+    refute fullscreen_class =~ "md:inline-flex"
     refute fullscreen_class =~ "lg:inline-flex"
 
-    # Fullscreen at the md tier must also span the chat-rail grid column, or
-    # hiding the rail leaves a dead 340px column.
     fullscreen_click =
       html
       |> LazyHTML.from_fragment()
@@ -1005,8 +995,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       |> LazyHTML.attribute("phx-click")
       |> List.first()
 
-    assert fullscreen_click =~ "md:col-span-2"
-    assert fullscreen_click =~ "lg:col-span-3"
+    assert fullscreen_click =~ "col-span-3"
+    refute fullscreen_click =~ "md:col-span-2"
+    refute fullscreen_click =~ "lg:col-span-3"
   end
 
   defp header_action_class(html, selector) do
@@ -1432,9 +1423,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     # #32/#34 (path-first): the pick's `document` path IS the tools' document
     # handle — no separate id is stamped, and the turn tells the agent to skip
-    # doc_context/doc_find discovery and pass the path directly.
+    # doc.context/doc.find discovery and pass the path directly.
     refute prompt =~ "document_id"
-    assert prompt =~ "Skip doc_context/doc_find discovery"
+    assert prompt =~ "Skip doc.context/doc.find discovery"
     assert prompt =~ "`document` value (the file path)"
 
     assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},

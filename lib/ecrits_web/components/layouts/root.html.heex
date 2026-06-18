@@ -2,7 +2,7 @@
 <html lang="ko">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=1024, initial-scale=1" />
     <meta name="csrf-token" content={get_csrf_token()} />
     <meta
       name="description"
@@ -66,7 +66,7 @@
       })();
     </script>
   </head>
-  <body class="min-h-full bg-base-100 text-base-content antialiased font-sans">
+  <body class="min-h-full min-w-[1024px] bg-base-100 text-base-content antialiased font-sans">
     {@inner_content}
   </body>
 </html>
