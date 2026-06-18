@@ -31,6 +31,12 @@
 // log the resolved surface so a missing/renamed export is a clear console error
 // (not a silent blank canvas).
 import { appendPickedElementToComposer, bindElementPickerTarget } from "./document_element_picker.js"
+import { rewriteOfficeOp } from "./wasm_office_ops"
+import {
+  normalizeOfficeNearby as normalizeOfficeNearbyValue,
+  officeReadRefCandidates as officeReadRefCandidatesValue,
+  readOfficeElements,
+} from "./wasm_office_read"
 
 const OFFICE_BASE = "/assets/office/"
 
@@ -587,7 +593,11 @@ const WasmOfficeEditor = {
           }
         }
       },
-      { root: this.el, rootMargin: "1200px 0px", threshold: 0 }
+      // Render-ahead band: rasterize pages well BEFORE they scroll into view so
+      // they're ready (not blank/late) on arrival, and keep them rendered for a
+      // wider band so a short scroll-back doesn't re-blank+repaint. Bounds the
+      // retained-canvas set too (pages beyond this margin are released). (#57 B)
+      { root: this.el, rootMargin: "2000px 0px", threshold: 0 }
     )
 
     // ─── Interactive editing: mouse (caret + drag-select) ───────────────────
@@ -1085,9 +1095,18 @@ const WasmOfficeEditor = {
     this.renderQueueTimer = null
     if (!this.api || !this.renderQueue.size) return
 
-    const first = this.renderQueue.entries().next().value
-    if (!first) return
-    const [index, force] = first
+    // Prefer a forced or currently-VISIBLE page over FIFO order, so the page the
+    // user is actually looking at paints first instead of an off-screen page that
+    // happened to be queued earlier (the "slide 5 painted while slide 4 still
+    // blank" scroll artifact). (#57 B)
+    let pick = null
+    for (const entry of this.renderQueue) {
+      const [index, force] = entry
+      if (force || this.visible.has(index)) { pick = entry; break }
+    }
+    if (!pick) pick = this.renderQueue.entries().next().value
+    if (!pick) return
+    const [index, force] = pick
     this.renderQueue.delete(index)
     if (force || this.visible.has(index) || (this.visible.size === 0 && index === 0)) {
       this.renderPage(index, { force })
@@ -2647,31 +2666,11 @@ const WasmOfficeEditor = {
   officeRead({ opts }) {
     const o = opts || {}
     if (!o.ref) return { error: "doc.read requires ref from doc.find" }
-    const ref = String(o.ref || "")
-    const nearby = this.normalizeOfficeNearby(o.nearby)
-    const elements = this.officeElements()
-    const candidates = this.officeReadRefCandidates(ref)
-    const hit = this.findOfficeReadMatch(elements, candidates)
-    if (!hit) {
-      const table = this.officeCompactTableRead(candidates, nearby)
-      return table && !table.error ? { ref, ...table } : { ref, error: "ref not found" }
-    }
-    const idx = hit.idx
-    const resolvedRef = hit.ref
-    const start = Math.max(0, idx - nearby.before)
-    const win = elements.slice(start, idx + nearby.after + 1).map((el) => ({ ...el }))
-    const target = { ...elements[idx] }
-    const out = {
-      ref,
-      target,
-      elements: win,
-      text: win.map((el) => el.text || "").join("\n")
-    }
-    if (resolvedRef !== ref) out.resolved_ref = resolvedRef
-    if (target.type === "cell" || this.officeTableKey(resolvedRef)) {
-      Object.assign(out, this.officeTableNearby(elements, target, nearby))
-    }
-    return out
+    return readOfficeElements(this.officeElements(), o.ref, o.nearby, {
+      tableRead: (refs, nearby) => this.officeCompactTableRead(refs, nearby),
+      tableNearby: (elements, target, nearby) => this.officeTableNearby(elements, target, nearby),
+      tableKey: (ref) => this.officeTableKey(ref),
+    })
   },
 
   findOfficeReadMatch(elements, refs) {
@@ -2683,26 +2682,11 @@ const WasmOfficeEditor = {
   },
 
   officeReadRefCandidates(ref) {
-    const s = String(ref || "")
-    const refs = [s]
-    const run = /^(.*\/p\d+)\/r\d+$/.exec(s)
-    if (run) refs.push(run[1])
-    return Array.from(new Set(refs.filter(Boolean)))
+    return officeReadRefCandidatesValue(ref)
   },
 
   normalizeOfficeNearby(input) {
-    const n = input && typeof input === "object" ? input : {}
-    const clamp = (value, fallback) => {
-      const x = Number(value)
-      return Number.isFinite(x) ? Math.max(0, Math.min(10, Math.floor(x))) : fallback
-    }
-    return {
-      before: clamp(n.before, 2),
-      after: clamp(n.after, 2),
-      row: n.row !== false,
-      column: n.column === true,
-      headers: n.headers !== false
-    }
+    return normalizeOfficeNearbyValue(input)
   },
 
   officeCompactTableRead(ref, nearby) {
@@ -2990,74 +2974,16 @@ const WasmOfficeEditor = {
   // Targets the text-bearing element by its `ref` (paragraph `p<idx>` or a shape
   // `…/shape[Name]` text frame); a run ref `…/r<n>` collapses to its paragraph,
   // which is the only ref `set_text` resolves against (verified).
+  // Office-arm edit-op shim → typed dispatch (wasm_office_ops.ts, #49 O4). The 3
+  // IR-composed verbs (replace_text/delete_range/set_cell) rewrite to set_text;
+  // every other (native) verb passes through to uno_apply (null). The editor
+  // instance is the handler ctx (officeElements/setTextRefFor/replaceAllCounted/…).
   rewriteUnsupportedEditOp(op) {
-    const verb = op.op
-    if (verb !== "replace_text" && verb !== "delete_range" && verb !== "set_cell") {
-      // Everything else (incl. delete_paragraph and the structural ops) is
-      // native in the relinked binary — pass through.
-      return null
-    }
-
-    // Resolve the target element(s) from the IR.
-    let elements
     try {
-      elements = this.officeElements()
+      return rewriteOfficeOp(this, op)
     } catch (error) {
       return { error: String((error && error.message) || error) }
     }
-    const setTargetRef = (ref) => this.setTextRefFor(String(ref))
-    const elementForRef = (ref) => this.officeElementForEdit(elements, String(ref))
-
-    if (verb === "set_cell") {
-      if (op.ref == null) return { error: "set_cell requires a 'ref'" }
-      const targetRef = setTargetRef(op.ref)
-      const el = elementForRef(targetRef) || elementForRef(op.ref)
-      if (!el) return { error: `unresolved ref: ${op.ref}` }
-      return { op: { op: "set_text", ref: targetRef, text: String(op.text == null ? "" : op.text) } }
-    }
-
-    if (verb === "delete_range") {
-      // The binary has no offset granularity; a whole-element delete (the only
-      // granularity the IR ref gives us) is the closest faithful effect — empty
-      // the target's text so the agent then sees an empty paragraph/shape.
-      if (op.ref == null) return { error: `${verb} requires a 'ref'` }
-      const targetRef = setTargetRef(op.ref)
-      const el = elementForRef(targetRef) || elementForRef(op.ref)
-      if (!el) return { error: `unresolved ref: ${op.ref}` }
-      return { op: { op: "set_text", ref: targetRef, text: "" } }
-    }
-
-    // replace_text: substitute `query` -> `replacement` in the target's text and
-    // re-set it whole. With a ref, scope to that element; without one, the server
-    // schema still allows it — replace in the FIRST text-bearing element that
-    // contains the query (mirrors a doc-wide first-match replace).
-    const query = op.query
-    const replacement = this.singleParagraphText(op.replacement)
-    if (typeof query !== "string" || query === "") {
-      return { error: "replace_text requires a non-empty string 'query'" }
-    }
-
-    if (op.ref != null) {
-      const targetRef = setTargetRef(op.ref)
-      const el = elementForRef(targetRef) || elementForRef(op.ref)
-      if (!el) return { error: `unresolved ref: ${op.ref}` }
-      if (!el.text.includes(query)) {
-        return { error: `query not found in ${op.ref}: ${JSON.stringify(query)}` }
-      }
-      const { text: next, count } = this.replaceAllCounted(el.text, query, replacement)
-      return { op: { op: "set_text", ref: targetRef, text: next }, replaced: count }
-    }
-
-    // No ref: first text-bearing PARAGRAPH/SHAPE element containing the query
-    // (skip run refs to avoid double-application; set_text targets paragraphs).
-    const target = elements.find(
-      (el) => this.isSetTextTarget(el.ref) && el.text.includes(query)
-    )
-    if (!target) return { error: `query not found in document: ${JSON.stringify(query)}` }
-    const targetRef = setTargetRef(target.ref)
-    const el = elementForRef(targetRef) || target
-    const { text: next, count } = this.replaceAllCounted(el.text, query, replacement)
-    return { op: { op: "set_text", ref: targetRef, text: next }, replaced: count }
   },
 
   officeElementForEdit(elements, ref) {
