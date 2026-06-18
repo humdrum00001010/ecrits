@@ -161,7 +161,7 @@ defmodule Ecrits.MixProject do
         "esbuild ecrits --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
+      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test test"],
       "test.pure": ["test --no-start"]
     ]
   end
