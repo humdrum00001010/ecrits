@@ -43,6 +43,8 @@ defmodule Ecrits.Doc.Rhwp do
   @behaviour Ecrits.Doc
 
   alias Ecrits.Doc.Op
+  alias Ecrits.Doc.Rhwp.Image
+  alias Ecrits.Doc.Rhwp.PropSpec
   alias Ecrits.Doc.Rhwp.Ref
 
   @typedoc "Engine handle: the `Ehwp.Handle` plus cached paragraph offsets."
@@ -527,36 +529,211 @@ defmodule Ecrits.Doc.Rhwp do
   #
   # `kind` comes from the props map if the caller embedded it (e.g. {kind:"cell",
   # BackgroundColor}), else it is inferred from the ref.
+  #
+  # ── Property translation specs ───────────────────────────────────────────
+  # The engine's char/para parsers read camelCase/lowercase keys; agents send
+  # the design's PascalCase or Office UNO names. Each spec maps a source key to a
+  # typed `%PropSpec{key, cast}` (the engine key + how to coerce the value).
+  # `translate/2` is the single eval: for every prop, look up its spec and
+  # `cast/2` the value by its `cast` type; a key with no spec is already an
+  # engine key (or unknown) and passes through verbatim. Adding a vocabulary
+  # alias is one row, not another `case` arm.
+  @char_prop_spec %{
+    # Office UNO vocabulary
+    "CharWeight" => %PropSpec{key: "bold", cast: :weight_threshold},
+    "FontWeight" => %PropSpec{key: "bold", cast: :font_weight},
+    "CharPosture" => %PropSpec{key: "italic", cast: :positive},
+    "CharUnderline" => %PropSpec{key: "underline", cast: :positive},
+    "CharColor" => %PropSpec{key: "textColor", cast: :verbatim},
+    "CharHeight" => %PropSpec{key: "fontSize", cast: :font_size},
+    # Design PascalCase → engine
+    "Bold" => %PropSpec{key: "bold", cast: :bool},
+    "Italic" => %PropSpec{key: "italic", cast: :bool},
+    "Underline" => %PropSpec{key: "underline", cast: :bool},
+    "StrikeOut" => %PropSpec{key: "strikethrough", cast: :bool},
+    "Strikethrough" => %PropSpec{key: "strikethrough", cast: :bool},
+    "TextColor" => %PropSpec{key: "textColor", cast: :verbatim},
+    "ShadeColor" => %PropSpec{key: "shadeColor", cast: :verbatim},
+    "FontSize" => %PropSpec{key: "fontSize", cast: :font_size},
+    "SuperScript" => %PropSpec{key: "superscript", cast: :bool},
+    "SubScript" => %PropSpec{key: "subscript", cast: :bool},
+    "fontSize" => %PropSpec{key: "fontSize", cast: :font_size}
+  }
+
+  @para_prop_spec %{
+    "Alignment" => %PropSpec{key: "alignment", cast: :align},
+    "alignment" => %PropSpec{key: "alignment", cast: :align},
+    "LineSpacing" => %PropSpec{key: "lineSpacing", cast: :int},
+    "IndentLeft" => %PropSpec{key: "marginLeft", cast: :int},
+    "IndentRight" => %PropSpec{key: "marginRight", cast: :int},
+    "IndentFirst" => %PropSpec{key: "indent", cast: :int},
+    "SpaceBefore" => %PropSpec{key: "spacingBefore", cast: :int},
+    "SpaceAfter" => %PropSpec{key: "spacingAfter", cast: :int}
+  }
+
   def set(%{ehwp: ehwp_handle}, ref, props) when is_map(props) do
     {kind, prop_map} = pop_kind(props)
     resolved = kind || ref_kind(ref)
 
-    if resolved == "char" do
-      # Char-run formatting: the only working char path is apply_char_format,
-      # which is a RANGE op — `at` (flattened start) plus a nested `to` Ref at
-      # the run's end (start offset + run length, same paragraph/cell). The find
-      # ref carries the run length, so derive the end from it.
-      char_format_op(ref, prop_map)
-      |> apply_one(ehwp_handle)
-    else
-      %{op: "set_properties", props: prop_map, kind: resolved}
-      |> Map.merge(flatten_ref(ref))
-      |> apply_one(ehwp_handle)
+    cond do
+      resolved == "char" ->
+        # Agents mix PARAGRAPH props (Alignment) into a char set ({Bold, CharHeight,
+        # Alignment}) — alignment is a paragraph property, so route each prop to the
+        # right setter instead of dropping the misfiled ones (this is how
+        # "center the bold title" silently stayed left-aligned).
+        {para_props, char_props} = split_para_char(prop_map)
+
+        char_result =
+          if char_props != %{} do
+            char_format_op(ehwp_handle, ref, char_props) |> apply_one(ehwp_handle)
+          else
+            {:ok, %{op: "noop", native: []}}
+          end
+
+        para_result =
+          if para_props != %{} do
+            para_format_op(ref, para_props) |> apply_one(ehwp_handle)
+          else
+            {:ok, %{op: "noop", native: []}}
+          end
+
+        merge_set_results(char_result, para_result)
+
+      true ->
+        %Ehwp.Op.SetProperties{
+          at: Ehwp.Op.Ref.new(flatten_ref(ref)),
+          kind: resolved,
+          props: translate_props_for_kind(resolved, prop_map)
+        }
+        |> apply_one(ehwp_handle)
+    end
+  end
+
+  # set_properties kinds: only paragraph props need translation (cell/picture/
+  # shape/table/equation props are already engine-native).
+  defp translate_props_for_kind("paragraph", props), do: translate(props, @para_prop_spec)
+  defp translate_props_for_kind(_kind, props), do: props
+
+  # The ONE eval of a translation spec: map each property through its
+  # `%PropSpec{}`, casting the value by its declared type. A key absent from the
+  # spec passes through verbatim (already an engine key, or unknown).
+  defp translate(props, spec) when is_map(props) do
+    Map.new(props, fn {k, v} ->
+      case Map.get(spec, to_string(k)) do
+        %PropSpec{key: key, cast: cast} -> {key, cast(cast, v)}
+        nil -> {to_string(k), v}
+      end
+    end)
+  end
+
+  defp cast(:bool, v), do: truthy(v)
+  defp cast(:weight_threshold, v), do: to_number(v) >= 150
+  defp cast(:font_weight, v), do: v == "bold" or to_number(v) >= 600
+  defp cast(:positive, v), do: to_number(v) > 0
+  defp cast(:verbatim, v), do: v
+  defp cast(:font_size, v), do: font_size_hu(v)
+  defp cast(:int, v), do: round(to_number(v))
+  defp cast(:align, v), do: downcase_align(v)
+
+  # Paragraph-scoped property keys an agent might mix into a char set. Split them
+  # out so a `doc.set {Bold, Alignment}` applies BOTH (char + paragraph).
+  @para_prop_keys ~w(Alignment alignment LineSpacing IndentLeft IndentRight
+                     IndentFirst SpaceBefore SpaceAfter)
+  defp split_para_char(props) do
+    Enum.split_with(props, fn {k, _v} -> to_string(k) in @para_prop_keys end)
+    |> then(fn {para, char} -> {Map.new(para), Map.new(char)} end)
+  end
+
+  defp para_format_op(ref, prop_map) do
+    %Ehwp.Op.SetProperties{
+      at: Ehwp.Op.Ref.new(flatten_ref(ref)),
+      kind: "paragraph",
+      props: translate(prop_map, @para_prop_spec)
+    }
+  end
+
+  defp merge_set_results({:error, _} = e, _), do: e
+  defp merge_set_results(_, {:error, _} = e), do: e
+
+  defp merge_set_results({:ok, a}, {:ok, b}),
+    do: {:ok, %{op: "set", native: List.wrap(a[:native]) ++ List.wrap(b[:native])}}
+
+  # Alignment value normalized to the engine's lowercase tokens.
+  defp downcase_align(v) do
+    case v |> to_string() |> String.downcase() do
+      a when a in ~w(left right center justify distribute) -> a
+      _ -> "justify"
     end
   end
 
   # Build the `apply_char_format` op for a char/cell-char ref. `at` is the
   # flattened start position; `to` is a nested Ref at the run END (same
-  # paragraph/cell, offset = start + len). Falls back to a zero-length range
-  # (`to == at`) when the ref carries no length.
-  defp char_format_op(ref, prop_map) do
+  # paragraph/cell, offset = start + len). A paragraph-level find ref (e.g.
+  # "make the title bold") carries NO length, which would yield a zero-length
+  # range that formats NOTHING (this is how "make it bold" silently no-op'd) —
+  # so when the ref has no span, default to the WHOLE paragraph (offset 0 → its
+  # text length, resolved live from the doc).
+  defp char_format_op(handle, ref, prop_map) do
     at = flatten_ref(ref)
     len = ref_run_len(ref)
-    to = Map.update(at, :offset, len, &(&1 + len))
 
-    %{op: "apply_char_format", props: prop_map, to: to}
-    |> Map.merge(at)
+    to =
+      if len > 0 do
+        Map.update(at, :offset, len, &(&1 + len))
+      else
+        whole_paragraph_end(handle, at)
+      end
+
+    %Ehwp.Op.ApplyCharFormat{
+      at: Ehwp.Op.Ref.new(at),
+      to: Ehwp.Op.Ref.new(to),
+      props: translate(prop_map, @char_prop_spec)
+    }
   end
+
+  # The end position of `at`'s paragraph: same section/paragraph (+ cell address,
+  # if any), offset = that paragraph's text length. Used to expand a span-less
+  # char-format ref into a whole-paragraph range.
+  defp whole_paragraph_end(handle, at) do
+    sec = at[:section] || 0
+    para = at[:paragraph] || 0
+    {_s, _p, len} = end_position(handle, body_ref(sec, para, 0))
+    Map.put(at, :offset, len)
+  end
+
+  # The engine's `fontSize` is in 1/100 pt (10pt = 1000). Agents say "36" meaning
+  # 36 POINTS — passing 36 verbatim renders a 0.36pt (invisible) glyph (observed:
+  # a 36pt certificate title vanishing). Treat a point-scale value (≤ 200) as
+  # points → ×100; a value already in 1/100 pt (> 200) passes through.
+  defp font_size_hu(v) do
+    n = to_number(v)
+
+    cond do
+      n <= 0 -> 1000
+      n <= 200 -> round(n * 100)
+      true -> round(n)
+    end
+  end
+
+  defp truthy(true), do: true
+  defp truthy(false), do: false
+  defp truthy(v) when is_number(v), do: v > 0
+  defp truthy("true"), do: true
+  defp truthy("false"), do: false
+  defp truthy(v) when is_binary(v), do: v != ""
+  defp truthy(nil), do: false
+  defp truthy(_), do: true
+
+  defp to_number(v) when is_number(v), do: v
+
+  defp to_number(v) when is_binary(v) do
+    case Float.parse(v) do
+      {n, _} -> n
+      :error -> 0
+    end
+  end
+
+  defp to_number(_), do: 0
 
   # The run length encoded in a find ref (e.g. `hwp:s0/p0/c0+5` -> 5); 0 when the
   # ref does not encode a span.
@@ -583,21 +760,273 @@ defmodule Ecrits.Doc.Rhwp do
   # to the NIF. No per-verb translation/wrapper.
   def edit(%{ehwp: ehwp_handle}, op) do
     with {:ok, op} <- Op.normalize(op),
-         {:ok, op} <- resolve_picture_src(op) do
-      {bins, op} = pop_bins(op)
-
-      case Ehwp.apply_op(ehwp_handle, expand_ops(op), bins) do
-        {:ok, results} ->
-          {:ok, %{op: op.op, native: decode_write(results)}}
-
-        {:error, {index, kind, msg}} ->
-          {:error, %{op_index: index, kind: to_string(kind), message: to_string(msg)}}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+         {:ok, op} <- resolve_authoring_refs(ehwp_handle, op) do
+      apply_resolved(ehwp_handle, op)
     end
   end
+
+  # `insert_picture` → the TYPED engine op. The ref is already resolved (above), so
+  # flatten it into the `at` and let `Image.resolve_src/2` produce the
+  # `%Ehwp.Op.InsertPicture{}` + raw `bins`. A picture with neither src nor bins
+  # falls back to the generic path (the engine reports the missing source).
+  defp apply_resolved(handle, %{op: "insert_picture"} = op) do
+    at = Ehwp.Op.Ref.new(flatten_ref(op[:ref]))
+
+    case Image.resolve_src(op, at) do
+      {:ok, %Ehwp.Op.InsertPicture{} = pic, bins} ->
+        apply_struct(handle, "insert_picture", pic, bins)
+
+      {:ok, op} ->
+        apply_generic(handle, op)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp apply_resolved(handle, op) do
+    if op.op == "insert_table" and is_list(op[:cells]) and op[:cells] != [] do
+      insert_table_with_cells(handle, op)
+    else
+      apply_generic(handle, op)
+    end
+  end
+
+  # Generic IR-direct path: flatten the ref, pull the out-of-band bins, hand the
+  # batch to the NIF verbatim.
+  defp apply_generic(handle, op) do
+    {bins, op} = pop_bins(op)
+    finish(op.op, Ehwp.apply_op(handle, expand_ops(op), bins))
+  end
+
+  # A single already-typed engine op (e.g. `%Ehwp.Op.InsertPicture{}`) + its bins.
+  defp apply_struct(handle, verb, struct, bins),
+    do: finish(verb, Ehwp.apply_op(handle, [struct], bins))
+
+  defp finish(verb, {:ok, results}), do: {:ok, %{op: verb, native: decode_write(results)}}
+
+  defp finish(_verb, {:error, {index, kind, msg}}),
+    do: {:error, %{op_index: index, kind: to_string(kind), message: to_string(msg)}}
+
+  defp finish(_verb, {:error, reason}), do: {:error, reason}
+
+  # `insert_table {ref, rows, cols, cells: [[..row..], ..]}` — create the table
+  # AND fill its cells in ONE op. Per-cell ref juggling (doc.find every cell →
+  # set_cell each) is where weak models corrupt the doc (the table data ends up
+  # prepended to the title because a mis-formatted cell ref silently defaults to
+  # para-0/offset-0). Filling cells server-side from the freshly-created table's
+  # own control index is deterministic: cellIndex is row-major (r*cols + c).
+  defp insert_table_with_cells(handle, op) do
+    cells = coerce_cells(op[:cells])
+    rows = op[:rows] || length(cells)
+    cols = op[:cols] || cells |> Enum.map(&safe_len/1) |> Enum.max(fn -> 0 end)
+    at = flatten_ref(op[:ref])
+    section = at[:section] || 0
+
+    # (#46) The engine fills cells ATOMICALLY at create time — `cells` rides on
+    # the InsertTable op, so there's no second round-trip + no row-major
+    # `r*cols + c` index math in Elixir (that lives in the Rust op handler now).
+    # Header SHADING stays app-side (presentation): style row 0 after the fill.
+    table_op =
+      op
+      |> Map.drop([:data])
+      |> Map.put(:rows, rows)
+      |> Map.put(:cols, cols)
+      |> Map.put(:cells, cells)
+
+    {bins, table_op} = pop_bins(table_op)
+
+    case Ehwp.apply_op(handle, expand_ops(table_op), bins) do
+      {:ok, results} ->
+        case decode_write(results) do
+          [%{"controlIdx" => ctrl, "paraIdx" => ppara} = meta | _] ->
+            _ = maybe_style_header(handle, op, section, ppara, ctrl, cols, cells)
+
+            {:ok,
+             %{
+               op: "insert_table",
+               native: decode_write(results),
+               rows_after: rows,
+               cols_after: cols,
+               cells_filled: meta["cellsFilled"] || 0,
+               header_styled: header?(op)
+             }}
+
+          decoded ->
+            # Table created but no control index came back — return what we have
+            # rather than silently dropping the cell data.
+            {:ok, %{op: "insert_table", native: decoded, cells_filled: 0}}
+        end
+
+      {:error, {index, kind, msg}} ->
+        {:error, %{op_index: index, kind: to_string(kind), message: to_string(msg)}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp safe_len(l) when is_list(l), do: length(l)
+  defp safe_len(_), do: 0
+
+  # The engine's InsertTable `cells` is a row-major `[[String]]` (serde
+  # `Vec<Vec<String>>`); coerce each entry to a string so a numeric/nil cell from
+  # a weak model doesn't trip serde (`bad_ops_json`). A non-list row becomes a
+  # single-cell row.
+  defp coerce_cells(cells) when is_list(cells) do
+    Enum.map(cells, fn
+      row when is_list(row) -> Enum.map(row, &to_string/1)
+      other -> [to_string(other)]
+    end)
+  end
+
+  defp coerce_cells(_), do: []
+
+  defp header?(op), do: op[:header] == true or is_binary(op[:header_color])
+
+  # `insert_table {..., header: true}` styles the first row like a real document
+  # header: a light-gray fill + bold + centered text. The cell control/index are
+  # known (row 0 = cells 0..cols-1), so this is deterministic — no doc.find.
+  defp maybe_style_header(handle, op, section, ppara, ctrl, cols, _cells) do
+    if header?(op) do
+      color = op[:header_color] || "#e8e8e8"
+
+      # Shade row 0 with a light-gray fill — the primary real-document header cue.
+      # (Header-text bold is intentionally omitted: a char-format applied to a cell
+      # in the SAME session right after set_cell_text does not commit until a
+      # save/reopen, so it would silently no-op; the shading alone reads as a
+      # header.)
+      fill_ops =
+        for c <- 0..(cols - 1) do
+          %{
+            op: "set_properties",
+            kind: "cell",
+            section: section,
+            paragraph: ppara,
+            control: ctrl,
+            cell: c,
+            props: %{"BackgroundColor" => color}
+          }
+        end
+
+      Ehwp.apply_op(handle, fill_ops, [])
+    else
+      :ok
+    end
+  end
+
+  # Authoring refs need the LIVE doc to resolve, so do it here (handle in scope),
+  # not in the handle-less flatten_ref:
+  #
+  #   * `ref: "end"` — the server's flatten_ref can't turn "end" into the last
+  #     paragraph, so it silently fell back to section-0/paragraph-0. A
+  #     from-scratch authoring loop (`insert_paragraph end` per line) therefore
+  #     stacked every paragraph at the TOP, in reverse.
+  #   * `insert_paragraph {text: ...}` — the engine's `insert_paragraph` IGNORES
+  #     the text arg (it only makes the break), so the text vanished while the op
+  #     still replied `ok:true`. The agent then flailed (the mangled
+  #     "____근로계약서" title, duplicated footnotes).
+  #
+  # Resolve both into the working `insert_text` primitive (which build_multi_para
+  # already expands): append the text as a NEW paragraph at the document end —
+  # filling the trailing empty paragraph in place, or splitting after a non-empty
+  # one.
+  defp resolve_authoring_refs(handle, %{op: "insert_paragraph"} = op) do
+    text = Map.get(op, :text)
+
+    if is_binary(text) and text != "" do
+      {sec, para, len} = end_position(handle, Map.get(op, :ref))
+
+      {off, text} = if len == 0, do: {0, text}, else: {len, "\n" <> text}
+
+      {:ok,
+       op
+       |> Map.put(:op, "insert_text")
+       |> Map.put(:ref, body_ref(sec, para, off))
+       |> Map.put(:text, text)
+       |> Map.delete(:count)}
+    else
+      {:ok, resolve_end_ref(handle, op)}
+    end
+  end
+
+  # Every OTHER op (insert_text/insert_shape/insert_picture/insert_table/
+  # insert_footnote/…) that targets `ref:"end"` also needs it resolved to the
+  # document end — otherwise the handle-less flatten_ref defaults to para-0/off-0
+  # and the object anchors at the TITLE (observed: shapes rendering by the title
+  # instead of below the body).
+  defp resolve_authoring_refs(handle, op), do: {:ok, resolve_end_ref(handle, op)}
+
+  # Rewrite a bare `ref: "end"` (or missing ref) to the concrete last-body-para
+  # position so an `insert_text end` appends instead of hitting para 0.
+  defp resolve_end_ref(handle, op) do
+    case Map.get(op, :ref) do
+      ref when ref in ["end", "END", nil, ""] ->
+        {sec, para, len} = end_position(handle, "end")
+        Map.put(op, :ref, body_ref(sec, para, len))
+
+      _ ->
+        op
+    end
+  end
+
+  # The JSON body ref doc.find emits — `{"section","paragraph","offset"}`. The
+  # `hwp:` PositionalIndex char form is `cOFF+LEN`; the JSON form is unambiguous
+  # for a zero-length caret, so use it for synthesized authoring positions.
+  defp body_ref(sec, para, off),
+    do: ~s({"section":#{sec},"paragraph":#{para},"offset":#{off}})
+
+  # {section, paragraph, text_length} for a ref. "end"/nil → the LAST body
+  # paragraph; a concrete ref → that paragraph. Length comes from the Elements
+  # enumeration (the same surface doc.find reads), filtering out footnote/cell
+  # sub-paragraphs (control/cell present).
+  defp end_position(handle, ref) do
+    body_paras =
+      case Ehwp.query(handle, %{q: "elements"}) do
+        {:ok, json} ->
+          json
+          |> Jason.decode!()
+          |> Enum.filter(fn e ->
+            e["type"] == "paragraph" and is_map(e["ref"]) and
+              is_nil(e["ref"]["control"]) and is_nil(e["ref"]["cell"])
+          end)
+
+        _ ->
+          []
+      end
+
+    target =
+      case decode_concrete_ref(ref) do
+        {s, p} ->
+          Enum.find(body_paras, fn e ->
+            e["ref"]["section"] == s and e["ref"]["paragraph"] == p
+          end)
+
+        :end ->
+          Enum.max_by(
+            body_paras,
+            fn e -> {e["ref"]["section"] || 0, e["ref"]["paragraph"] || 0} end,
+            fn -> nil end
+          )
+      end
+
+    case target do
+      nil -> {0, 0, 0}
+      e -> {e["ref"]["section"] || 0, e["ref"]["paragraph"] || 0, String.length(e["text"] || "")}
+    end
+  end
+
+  defp decode_concrete_ref(ref) when ref in ["end", "END", nil, ""], do: :end
+
+  defp decode_concrete_ref(ref) when is_binary(ref) do
+    case Ref.decode(ref) do
+      {:ok, %{kind: :char, sec: s, para: p}} -> {s, p}
+      {:ok, %{kind: :paragraph, sec: s, para: p}} -> {s, p}
+      _ -> :end
+    end
+  end
+
+  defp decode_concrete_ref(_), do: :end
 
   @doc """
   Rasterize one page to a PNG at `path` — the HWP arm of the doc.render visual
@@ -701,15 +1130,7 @@ defmodule Ecrits.Doc.Rhwp do
       # comes from the flattened cell ref. ONE op, no per-cell_para surgery.
       ir[:op] == "set_cell" ->
         lines = String.split(text || "", "\n")
-
-        engine_op =
-          ir
-          |> Map.delete(:text)
-          |> Map.delete(:cell_para)
-          |> Map.put(:op, "set_cell_text")
-          |> Map.put(:lines, lines)
-
-        [engine_op]
+        [%Ehwp.Op.SetCellText{at: Ehwp.Op.Ref.new(ir), lines: lines}]
 
       # An `insert_text` whose text contains `\n` is authoring MULTIPLE paragraphs.
       # The engine treats `\n` as a literal char (no paragraph break) and
@@ -722,6 +1143,12 @@ defmodule Ecrits.Doc.Rhwp do
         off = ir[:offset] || 0
         build_multi_para(sec, para, off, String.split(text, "\n"))
 
+      # Multi-column with NO inter-column gap renders the two columns nearly
+      # touching (text runs together, unreadable). Default a real-document
+      # gutter (~8mm = 2268 HWPUNIT) when the agent doesn't specify spacing.
+      ir[:op] == "set_columns" and (is_nil(ir[:spacing]) or ir[:spacing] == 0) ->
+        [Map.put(ir, :spacing, 2268)]
+
       true ->
         [ir]
     end
@@ -731,18 +1158,28 @@ defmodule Ecrits.Doc.Rhwp do
     first_ops =
       if first == "",
         do: [],
-        else: [%{op: "insert_text", section: sec, paragraph: para0, offset: off0, text: first}]
+        else: [
+          %Ehwp.Op.InsertText{
+            at: %Ehwp.Op.Ref{section: sec, paragraph: para0, offset: off0},
+            text: first
+          }
+        ]
 
     {ops, _acc} =
       Enum.reduce(rest, {first_ops, {para0, off0 + String.length(first)}}, fn line,
                                                                               {acc, {p, end_off}} ->
-        split = %{op: "split", section: sec, paragraph: p, offset: end_off}
+        split = %Ehwp.Op.Split{at: %Ehwp.Op.Ref{section: sec, paragraph: p, offset: end_off}}
         next_p = p + 1
 
         ins =
           if line == "",
             do: [],
-            else: [%{op: "insert_text", section: sec, paragraph: next_p, offset: 0, text: line}]
+            else: [
+              %Ehwp.Op.InsertText{
+                at: %Ehwp.Op.Ref{section: sec, paragraph: next_p, offset: 0},
+                text: line
+              }
+            ]
 
         {acc ++ [split] ++ ins, {next_p, String.length(line)}}
       end)
@@ -852,155 +1289,6 @@ defmodule Ecrits.Doc.Rhwp do
     end
   end
 
-  # PRODUCER: turn an `insert_picture` `src` (a file path) into the fields the
-  # ehwp `InsertPicture` EditOp wants. The engine takes the image BYTES out-of-band
-  # (the `bins` arg of apply_op, referenced by `bin_index`) plus `extension` and
-  # BOTH the placed geometry (`width`/`height`, HWPUNIT) and the image's natural
-  # pixel size (`natural_width_px`/`natural_height_px`, neither serde-default — so
-  # they MUST be set). We read the file, base64 it into a 1-element `:bins` list
-  # (consumed by `pop_bins`), set `bin_index: 0`, derive `extension` from the path,
-  # and sniff the natural pixel dims from the PNG IHDR / JPEG SOF / GIF header.
-  #
-  # Ops without `src` (or non-insert_picture ops, or ops the caller already filled
-  # with `bins`/`bin_index`) pass through untouched.
-  defp resolve_picture_src(%{op: "insert_picture", src: src} = op)
-       when is_binary(src) and src != "" do
-    cond do
-      # Caller already supplied raw bytes — respect it, just make sure bin_index is set.
-      is_list(op[:bins]) and op[:bins] != [] ->
-        {:ok, Map.put_new(op, :bin_index, 0)}
-
-      true ->
-        with {:ok, bytes} <- read_picture_file(src) do
-          ext = src |> Path.extname() |> String.trim_leading(".") |> String.downcase()
-          {nw, nh} = image_pixel_dims(bytes, ext)
-
-          op =
-            op
-            |> Map.delete(:src)
-            |> Map.put(:bins, [Base.encode64(bytes)])
-            |> Map.put(:bin_index, op[:bin_index] || 0)
-            |> Map.put(:extension, present_string(op[:extension]) || ext)
-            |> Map.put(:natural_width_px, op[:natural_width_px] || nw)
-            |> Map.put(:natural_height_px, op[:natural_height_px] || nh)
-
-          {:ok, op}
-        end
-    end
-  end
-
-  defp resolve_picture_src(op), do: {:ok, op}
-
-  @doc """
-  Producer for the BROWSER arm's inline `insert_picture`. The viewer's WASM model
-  cannot read the server filesystem, so — like the headless `resolve_picture_src`,
-  but emitting `image_base64` instead of the NIF `:bins` slice — this reads `src`,
-  base64-encodes the bytes, derives `extension`, and sniffs the natural pixel dims
-  so the browser handler (`wasm_hwp_editor.applyOneOp` insert_picture) can decode
-  and call `insertPicture`.
-
-  Only fires for the INLINE form (`src` present, no `page`); the pptx slide form
-  (`page` set) is left untouched for the office arm. Non-picture / no-`src` ops
-  pass through. Pure (no NIF), so it is safe to call on the shared browser path.
-  """
-  @spec picture_op_for_browser(map()) :: {:ok, map()} | {:error, map()}
-  def picture_op_for_browser(%{op: "insert_picture", src: src} = op)
-      when is_binary(src) and src != "" do
-    if Map.has_key?(op, :page) do
-      {:ok, op}
-    else
-      with {:ok, bytes} <- read_picture_file(src) do
-        ext = src |> Path.extname() |> String.trim_leading(".") |> String.downcase()
-        {nw, nh} = image_pixel_dims(bytes, ext)
-
-        op =
-          op
-          |> Map.delete(:src)
-          |> Map.put(:image_base64, Base.encode64(bytes))
-          |> Map.put(:extension, present_string(op[:extension]) || ext)
-          |> Map.put(:natural_width_px, op[:natural_width_px] || nw)
-          |> Map.put(:natural_height_px, op[:natural_height_px] || nh)
-
-        {:ok, op}
-      end
-    end
-  end
-
-  def picture_op_for_browser(op), do: {:ok, op}
-
-  defp read_picture_file(src) do
-    case File.read(src) do
-      {:ok, bytes} when byte_size(bytes) > 0 ->
-        {:ok, bytes}
-
-      {:ok, _empty} ->
-        {:error, %{kind: "insert_picture", message: "image file is empty: #{src}"}}
-
-      {:error, reason} ->
-        {:error,
-         %{
-           kind: "insert_picture",
-           message: "cannot read image #{src}: #{:file.format_error(reason)}"
-         }}
-    end
-  end
-
-  defp present_string(s) when is_binary(s) and s != "", do: s
-  defp present_string(_), do: nil
-
-  # Sniff the natural pixel size from the image header. PNG: IHDR width/height are
-  # the two big-endian u32s right after the 8-byte signature + "IHDR" length/type.
-  # JPEG: scan the marker segments for an SOF (0xC0..0xCF except C4/C8/CC) whose
-  # payload holds height/width as big-endian u16s. GIF: bytes 6..9 are LE u16
-  # width/height. Falls back to {0, 0} when the header can't be parsed (the engine
-  # then has no natural size hint but still places the image at width/height).
-  defp image_pixel_dims(
-         <<0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, _len::32, "IHDR", w::32, h::32,
-           _rest::binary>>,
-         _ext
-       ),
-       do: {w, h}
-
-  defp image_pixel_dims(<<0xFF, 0xD8, rest::binary>>, _ext), do: jpeg_sof_dims(rest)
-
-  defp image_pixel_dims(<<"GIF", _v::24, w::little-16, h::little-16, _rest::binary>>, _ext),
-    do: {w, h}
-
-  defp image_pixel_dims(_bytes, _ext), do: {0, 0}
-
-  # Walk JPEG marker segments looking for a Start-Of-Frame. A segment starts with
-  # 0xFF then a type byte; SOF markers (C0..CF, excluding the non-frame C4/C8/CC)
-  # carry [length:16, precision:8, height:16, width:16, ...]. Every other framed
-  # marker carries a 16-bit length (which INCLUDES the 2 length bytes), so we skip
-  # `length - 2` payload bytes to land on the next marker. Padding 0xFF fill bytes
-  # are skipped; standalone RSTn/SOI/EOI markers (D0..D9) have no payload.
-  defp jpeg_sof_dims(<<0xFF, 0xFF, rest::binary>>), do: jpeg_sof_dims(<<0xFF, rest::binary>>)
-
-  defp jpeg_sof_dims(<<0xFF, marker, len::16, payload::binary>>)
-       when marker in 0xC0..0xCF and marker not in [0xC4, 0xC8, 0xCC] do
-    _ = len
-
-    case payload do
-      <<_precision::8, h::16, w::16, _tail::binary>> -> {w, h}
-      _ -> {0, 0}
-    end
-  end
-
-  defp jpeg_sof_dims(<<0xFF, marker, len::16, payload::binary>>)
-       when marker not in 0xD0..0xD9 do
-    body = max(len - 2, 0)
-
-    case payload do
-      <<_seg::binary-size(^body), next::binary>> -> jpeg_sof_dims(next)
-      _ -> {0, 0}
-    end
-  end
-
-  defp jpeg_sof_dims(<<0xFF, marker, rest::binary>>) when marker in 0xD0..0xD9,
-    do: jpeg_sof_dims(rest)
-
-  defp jpeg_sof_dims(_), do: {0, 0}
-
   # `insert_picture` carries image bytes as base64 in `:bins`; pull them into the
   # binary list `apply_op` takes (the op references them by `bin_index`).
   defp pop_bins(op) do
@@ -1020,10 +1308,15 @@ defmodule Ecrits.Doc.Rhwp do
   defp decode_bin(b), do: b
 
   # Apply ONE already-built IR op (atom-keyed, ref pre-flattened) via the NIF.
+  # The op verb, whether `op` is a typed `Ehwp.Op.*` struct (tag via op_tag/0) or
+  # a legacy map (the `:op` key). Used only for the informational echo in results.
+  defp op_verb(%{__struct__: mod}), do: mod.op_tag()
+  defp op_verb(op) when is_map(op), do: op[:op]
+
   defp apply_one(op, ehwp_handle) do
     case Ehwp.apply_op(ehwp_handle, [op], []) do
       {:ok, results} ->
-        {:ok, %{op: op[:op], native: decode_write(results)}}
+        {:ok, %{op: op_verb(op), native: decode_write(results)}}
 
       {:error, {index, kind, msg}} ->
         {:error, %{op_index: index, kind: to_string(kind), message: to_string(msg)}}

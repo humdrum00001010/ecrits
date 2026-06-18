@@ -164,7 +164,7 @@ defmodule Ecrits.Doc.RhwpTest do
       assert {:error, %{kind: "unsupported", message: msg}} =
                Rhwp.set(handle, "hwp:s0/p1", %{"Bold" => false})
 
-      assert msg =~ "set_properties"
+      assert msg =~ ~r/(apply_char_format|set_properties)/
     end
   end
 

@@ -77,7 +77,10 @@ defmodule Ecrits.Doc.RhwpOpMatrixTest do
       anchor = List.last(paras)["ref"]
 
       # ── body text + paragraph structure ────────────────────────────
-      assert_ok("insert_paragraph", edit(ctx, doc, %{"op" => "insert_paragraph", "ref" => anchor}))
+      assert_ok(
+        "insert_paragraph",
+        edit(ctx, doc, %{"op" => "insert_paragraph", "ref" => anchor})
+      )
 
       assert_ok(
         "insert_text",
@@ -95,7 +98,11 @@ defmodule Ecrits.Doc.RhwpOpMatrixTest do
       )
 
       assert_ok("split", edit(ctx, doc, %{"op" => "split", "ref" => anchor}))
-      assert_ok("merge follow-up", edit(ctx, doc, %{"op" => "merge", "ref" => bump_para(anchor, 1)}))
+
+      assert_ok(
+        "merge follow-up",
+        edit(ctx, doc, %{"op" => "merge", "ref" => bump_para(anchor, 1)})
+      )
 
       assert_ok(
         "delete_range",
@@ -114,7 +121,10 @@ defmodule Ecrits.Doc.RhwpOpMatrixTest do
       assert length(new_cells) >= 4, "expected the new 2x2 table's cells in doc.find"
       cell = hd(new_cells)["ref"]
 
-      assert_ok("set_cell", edit(ctx, doc, %{"op" => "set_cell", "ref" => cell, "text" => "HWPMX_CELL"}))
+      assert_ok(
+        "set_cell",
+        edit(ctx, doc, %{"op" => "set_cell", "ref" => cell, "text" => "HWPMX_CELL"})
+      )
 
       # `count` inserts N rows in ONE op — the agent's natural "add N rows"
       # shape (silently dropping it is how a live "10 rows added" claim turned
@@ -133,7 +143,10 @@ defmodule Ecrits.Doc.RhwpOpMatrixTest do
       assert length(table_cells(ctx, doc) -- before_cells) == 8,
              "expected count:2 to add TWO rows (4x2 grid)"
 
-      assert_ok("delete_table_row (undo one)", edit(ctx, doc, %{"op" => "delete_table_row", "ref" => cell, "row" => 2}))
+      assert_ok(
+        "delete_table_row (undo one)",
+        edit(ctx, doc, %{"op" => "delete_table_row", "ref" => cell, "row" => 2})
+      )
 
       assert_ok(
         "insert_table_row",
@@ -142,10 +155,18 @@ defmodule Ecrits.Doc.RhwpOpMatrixTest do
 
       assert_ok(
         "insert_table_column",
-        edit(ctx, doc, %{"op" => "insert_table_column", "ref" => cell, "col" => 0, "right" => true})
+        edit(ctx, doc, %{
+          "op" => "insert_table_column",
+          "ref" => cell,
+          "col" => 0,
+          "right" => true
+        })
       )
 
-      assert_ok("delete_table_row", edit(ctx, doc, %{"op" => "delete_table_row", "ref" => cell, "row" => 2}))
+      assert_ok(
+        "delete_table_row",
+        edit(ctx, doc, %{"op" => "delete_table_row", "ref" => cell, "row" => 2})
+      )
 
       assert_ok(
         "delete_table_column",
@@ -166,7 +187,14 @@ defmodule Ecrits.Doc.RhwpOpMatrixTest do
 
       assert_ok(
         "split_cell",
-        edit(ctx, doc, %{"op" => "split_cell", "ref" => cell, "row" => 1, "col" => 0, "rows" => 1, "cols" => 2})
+        edit(ctx, doc, %{
+          "op" => "split_cell",
+          "ref" => cell,
+          "row" => 1,
+          "col" => 0,
+          "rows" => 1,
+          "cols" => 2
+        })
       )
 
       # ── objects + notes + layout ───────────────────────────────────
@@ -194,7 +222,11 @@ defmodule Ecrits.Doc.RhwpOpMatrixTest do
 
       assert_ok(
         "insert_equation",
-        edit(ctx, doc, %{"op" => "insert_equation", "ref" => anchor, "script" => "x^2 + y^2 = z^2"})
+        edit(ctx, doc, %{
+          "op" => "insert_equation",
+          "ref" => anchor,
+          "script" => "x^2 + y^2 = z^2"
+        })
       )
 
       assert_ok(
@@ -207,10 +239,14 @@ defmodule Ecrits.Doc.RhwpOpMatrixTest do
         edit(ctx, doc, %{"op" => "insert_endnote", "ref" => anchor, "text" => "HWPMX_END"})
       )
 
-      assert_ok("set_columns", edit(ctx, doc, %{"op" => "set_columns", "ref" => anchor, "count" => 2}))
+      assert_ok(
+        "set_columns",
+        edit(ctx, doc, %{"op" => "set_columns", "ref" => anchor, "count" => 2})
+      )
 
       # delete_node drops the WHOLE table the cell belongs to
       assert_ok("delete_node", edit(ctx, doc, %{"op" => "delete_node", "ref" => cell}))
+
       assert table_cells(ctx, doc) -- before_cells == [],
              "expected the matrix table to be gone after delete_node"
 

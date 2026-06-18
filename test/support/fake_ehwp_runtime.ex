@@ -148,7 +148,7 @@ defmodule Ecrits.Test.FakeEhwpRuntime do
 
   defp apply_one_op(agent, op) do
     op = stringify_op(op)
-    verb = op["op"]
+    verb = op["op"] || inferred_op(op)
     body = text(agent)
 
     case do_op(verb, body, op) do
@@ -161,11 +161,23 @@ defmodule Ecrits.Test.FakeEhwpRuntime do
     end
   end
 
-  # Coerce an atom-keyed op map to string keys (the fake works in string keys,
-  # matching how the JSON the real NIF receives is keyed).
-  defp stringify_op(op) do
+  # Coerce typed ops and atom-keyed op maps to string keys (the fake works in
+  # string keys, matching how the JSON the real NIF receives is keyed).
+  defp stringify_op(%{__struct__: module} = op) when is_atom(module) do
+    if function_exported?(module, :to_map, 1) do
+      module.to_map(op)
+    else
+      op |> Map.from_struct() |> stringify_op()
+    end
+  end
+
+  defp stringify_op(op) when is_map(op) do
     Map.new(op, fn {k, v} -> {to_string(k), v} end)
   end
+
+  defp inferred_op(%{"kind" => _kind, "props" => _props}), do: "set_properties"
+  defp inferred_op(%{"to" => _to, "props" => _props}), do: "apply_char_format"
+  defp inferred_op(_op), do: nil
 
   defp do_op("replace_text", body, op) do
     query = op["query"]
