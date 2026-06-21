@@ -1,5 +1,54 @@
 import Config
 
+if config_env() == :prod do
+  load_env_file = fn path ->
+    if is_binary(path) and File.exists?(path) do
+      path
+      |> File.stream!()
+      |> Stream.map(&String.trim/1)
+      |> Stream.reject(&(&1 == "" or String.starts_with?(&1, "#")))
+      |> Enum.each(fn line ->
+        line =
+          if String.starts_with?(line, "export "),
+            do: String.trim_leading(line, "export "),
+            else: line
+
+        case String.split(line, "=", parts: 2) do
+          [key, value] ->
+            key = String.trim(key)
+
+            value =
+              value
+              |> String.trim()
+              |> String.trim_leading("\"")
+              |> String.trim_trailing("\"")
+              |> String.trim_leading("'")
+              |> String.trim_trailing("'")
+
+            if key != "" and System.get_env(key) in [nil, ""] do
+              System.put_env(key, value)
+            end
+
+          _ ->
+            :ok
+        end
+      end)
+    end
+  end
+
+  [
+    System.get_env("ECRITS_PROD_ENV"),
+    System.get_env("__BURRITO_BIN_PATH") &&
+      Path.join(Path.dirname(System.fetch_env!("__BURRITO_BIN_PATH")), ".env.prod"),
+    System.get_env("RELEASE_ROOT") && Path.join(System.fetch_env!("RELEASE_ROOT"), ".env.prod"),
+    Path.expand(".env.prod"),
+    Path.expand(".env.prod", __DIR__)
+  ]
+  |> Enum.reject(&is_nil/1)
+  |> Enum.uniq()
+  |> Enum.each(load_env_file)
+end
+
 # config/runtime.exs is executed for all environments, including during
 # releases. It runs after compilation and before the system starts, so
 # it's the right place to pull secrets from .env / the process environment.

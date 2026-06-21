@@ -13,12 +13,12 @@ defmodule Ecrits.Config do
 
   require Logger
 
-  # The SaaS provider stack (OpenAI, Upstage, the SMTP mailer) was retired
-  # with the legacy DB/studio layer. The local-first app only needs the
-  # Korean Law MCP credential and, in :prod, the endpoint secret.
-  @required_prod ~w(LAW_OC SECRET_KEY_BASE)
+  # The SaaS provider stack (OpenAI, Upstage, the SMTP mailer) and Law MCP
+  # credential are no longer required for the local-first app. Production still
+  # needs the endpoint secret.
+  @required_prod ~w(SECRET_KEY_BASE)
 
-  @required_nonprod ~w(LAW_OC)
+  @required_nonprod []
 
   @doc """
   Verify that required env vars are present for the given Mix env.
@@ -52,10 +52,7 @@ defmodule Ecrits.Config do
         :ok
 
       keys ->
-        Logger.warning(
-          "Ecrits.Config: missing env vars (#{env}): #{Enum.join(keys, ", ")} — " <>
-            "Korean Law MCP search will not work."
-        )
+        Logger.warning("Ecrits.Config: missing env vars (#{env}): #{Enum.join(keys, ", ")}")
 
         :ok
     end

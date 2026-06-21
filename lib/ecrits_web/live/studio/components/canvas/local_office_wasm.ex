@@ -77,14 +77,11 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
   end
 
   defp office_asset_version do
-    # Hash BOTH the engine (soffice.wasm) and the VFS data blob (soffice.data) so
-    # a data-only redeploy (e.g. a bundled-font/fontconfig change repacked into
-    # soffice.data) still bumps the asset version and busts the browser cache —
-    # otherwise the loader fetches a stale soffice.data against fresh metadata and
-    # the sizes mismatch.
+    # Hash the matched LibreOffice WASM set from the canonical dep priv dir so
+    # glue, engine, metadata, or data-only redeploys all bust the browser cache.
     stats =
-      for name <- ["soffice.wasm", "soffice.data"] do
-        path = Application.app_dir(:ecrits, "priv/static/assets/office/#{name}")
+      for name <- ["soffice.js", "soffice.wasm", "soffice.data", "soffice.data.js.metadata"] do
+        path = Application.app_dir(:libreofficex, "priv/wasm/#{name}")
 
         case File.stat(path) do
           {:ok, %File.Stat{mtime: mtime, size: size}} -> {name, mtime, size}

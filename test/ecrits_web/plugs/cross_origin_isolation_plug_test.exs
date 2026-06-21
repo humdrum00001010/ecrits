@@ -5,14 +5,34 @@ defmodule EcritsWeb.Plugs.CrossOriginIsolationPlugTest do
 
   alias EcritsWeb.Plugs.CrossOriginIsolationPlug
 
-  # Simulate the real pipeline: Plug.Static would set `cache-control: public`
-  # before the response is sent; the plug's before_send must override it for
-  # office assets. send_resp/3 fires the registered before_send callbacks.
+  # Simulate a prior plug setting cache-control so these assertions prove the
+  # WASM asset responses replace it with the no-cache policy.
   defp run(path) do
-    conn(:get, path)
-    |> put_resp_header("cache-control", "public")
-    |> CrossOriginIsolationPlug.call([])
-    |> send_resp(200, "")
+    conn =
+      conn(:get, path)
+      |> put_req_header("accept-encoding", "identity")
+      |> put_resp_header("cache-control", "public")
+      |> CrossOriginIsolationPlug.call([])
+
+    if conn.halted do
+      conn
+    else
+      send_resp(conn, 200, "")
+    end
+  end
+
+  defp run_head(path, accept_encoding) do
+    conn =
+      conn(:head, path)
+      |> put_req_header("accept-encoding", accept_encoding)
+      |> put_resp_header("cache-control", "public")
+      |> CrossOriginIsolationPlug.call([])
+
+    if conn.halted do
+      conn
+    else
+      send_resp(conn, 200, "")
+    end
   end
 
   test "office WASM artifacts are isolated AND forced to revalidate (no stale-mixed bundle)" do
@@ -22,6 +42,28 @@ defmodule EcritsWeb.Plugs.CrossOriginIsolationPlugTest do
     assert get_resp_header(conn, "cross-origin-embedder-policy") == ["require-corp"]
     # The matched glue/wasm/data set must never be served stale-mixed, so the
     # before_send overrides Plug.Static's `public` with `no-cache`.
+    assert get_resp_header(conn, "cache-control") == ["no-cache"]
+  end
+
+  test "office WASM artifacts ignore optional brotli scratch siblings" do
+    conn = run_head("/assets/office/soffice.wasm", "br")
+
+    assert get_resp_header(conn, "content-encoding") == []
+    assert get_resp_header(conn, "vary") == []
+  end
+
+  test "HWP WASM artifacts are forced to revalidate without office isolation" do
+    conn = run("/assets/rhwp/rhwp_bg.wasm")
+
+    assert get_resp_header(conn, "cross-origin-opener-policy") == []
+    assert get_resp_header(conn, "cache-control") == ["no-cache"]
+  end
+
+  test "HWP wasm-bindgen module is served without office isolation" do
+    conn = run("/assets/rhwp/rhwp.js")
+
+    assert get_resp_header(conn, "content-type") == ["text/javascript; charset=utf-8"]
+    assert get_resp_header(conn, "cross-origin-opener-policy") == []
     assert get_resp_header(conn, "cache-control") == ["no-cache"]
   end
 

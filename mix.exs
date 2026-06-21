@@ -4,12 +4,13 @@ defmodule Ecrits.MixProject do
   def project do
     [
       app: :ecrits,
-      version: "0.1.0",
+      version: "0.1.2",
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      releases: releases(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader]
     ]
@@ -101,7 +102,26 @@ defmodule Ecrits.MixProject do
       {:stream_data, "~> 1.1", only: [:test, :dev]},
       {:bypass, "~> 2.1", only: :test},
       {:mox, "~> 1.2", only: :test},
-      {:wallaby, "~> 0.30", only: :test, runtime: false}
+      {:wallaby, "~> 0.30", only: :test, runtime: false},
+      {:burrito,
+       github: "burrito-elixir/burrito",
+       ref: "8fa7eda03deabb74956f5f16027f540cb2df5385",
+       runtime: false}
+    ]
+  end
+
+  defp releases do
+    [
+      ecrits: [
+        steps: [:assemble, &Burrito.wrap/1],
+        burrito: [
+          debug: false,
+          targets: [
+            macos_silicon: [os: :darwin, cpu: :aarch64],
+            linux_aarch64: [os: :linux, cpu: :aarch64]
+          ]
+        ]
+      ]
     ]
   end
 
@@ -120,32 +140,17 @@ defmodule Ecrits.MixProject do
         "cmd npm ci --prefix assets",
         "assets.observex"
       ],
-      # The rhwp_core WASM binary (`assets/vendor/rhwp/rhwp_bg.wasm`) is a vendored
-      # build artifact (produced by `wasm-pack build --target web --out-dir
-      # assets/vendor/rhwp <rhwp_core checkout>`). esbuild bundles the ES-module
-      # glue (`rhwp.js`) into app.js, but the `.wasm` itself must be served as a
-      # static file, so copy it under `priv/static/assets/rhwp/` where Plug.Static
-      # (only: ~w(assets ...)) serves it at `/assets/rhwp/rhwp_bg.wasm`.
-      # Sourced from the `ehwp` dep (delivered by `mix deps.get` + git-lfs), NOT a
-      # manual cp from a local ~/Desktop checkout — so a fresh clone gets the wasm
-      # and it is pinned lockstep with the NIF. esbuild bundles `rhwp.js` from
-      # assets/vendor/rhwp; `rhwp_bg.wasm` is served static at /assets/rhwp/.
+      # The HWP wasm-bindgen ES module and `rhwp_bg.wasm` are served directly
+      # from the canonical `:ehwp` dependency priv/wasm directory. Keep retired
+      # copied app-static and vendor scratch output out of releases.
       "assets.rhwp_wasm": [
-        ~s(cmd sh -c "mkdir -p assets/vendor/rhwp priv/static/assets/rhwp && cp deps/ehwp/priv/wasm/rhwp.js deps/ehwp/priv/wasm/rhwp.d.ts deps/ehwp/priv/wasm/rhwp_bg.wasm deps/ehwp/priv/wasm/rhwp_bg.wasm.d.ts assets/vendor/rhwp/ && cp deps/ehwp/priv/wasm/rhwp_bg.wasm priv/static/assets/rhwp/rhwp_bg.wasm")
+        ~s(cmd sh -c "set -eu; rm -rf priv/static/assets/rhwp assets/vendor/rhwp")
       ],
-      # The LibreOffice->WASM client editor (client-interactive arm of the office
-      # dual-arch). The Emscripten build artifacts live under
-      # `assets/vendor/office/` (gitignored, ~210MB, built from the LibreOffice
-      # `core` checkout). Unlike rhwp's wasm-bindgen ES module, this is an
-      # auto-running Emscripten module: the JS glue (`soffice.js`) is loaded as a
-      # <script> tag at runtime (not bundled by esbuild) and fetches `soffice.wasm`
-      # + `soffice.data` via `Module.locateFile`. All three are served statically
-      # under `/assets/office/` (Plug.Static `only: ~w(assets ...)`). The copy is
-      # best-effort (the shell loop skips missing files) so a checkout without the
-      # (large, local-only) office artifacts still builds.
-      # Sourced from the `libreofficex` dep (mix deps.get + git-lfs), NOT assets/vendor.
+      # The LibreOffice->WASM client editor is served directly from the canonical
+      # `:libreofficex` priv/wasm directory. Keep retired app-static/vendor
+      # scratch output and stale local `.br` siblings out of releases.
       "assets.office_wasm": [
-        ~s(cmd sh -c "mkdir -p priv/static/assets/office && for f in soffice.js soffice.wasm soffice.data soffice.data.js.metadata; do src=deps/libreofficex/priv/wasm/$f; dst=priv/static/assets/office/$f; rm -f $dst $dst.br; if [ -f $src ]; then cp $src $dst; command -v brotli >/dev/null 2>&1 && brotli -f -q 11 $dst || true; fi; done")
+        ~s(cmd sh -c "set -eu; rm -rf priv/static/assets/office assets/vendor/office; env=${MIX_ENV:-dev}; wasm_dir=_build/$env/lib/libreofficex/priv/wasm; if [ ! -d $wasm_dir ]; then echo >&2 missing-wasm-dir:$wasm_dir; exit 1; fi; rm -f $wasm_dir/soffice.js.br $wasm_dir/soffice.wasm.br $wasm_dir/soffice.data.br $wasm_dir/soffice.data.js.metadata.br")
       ],
       "assets.build": [
         "compile",
