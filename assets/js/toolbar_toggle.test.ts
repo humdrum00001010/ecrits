@@ -1230,6 +1230,17 @@ describe("WasmHwpEditor edit shortcuts", () => {
 })
 
 describe("WasmHwpEditor image move", () => {
+  const imagePick = {
+    document: "/tmp/doc.hwp",
+    backend: "hwp",
+    format: "hwp",
+    type: "image",
+    ref: JSON.stringify({ section: 0, paragraph: 2, control: 3 }),
+    text: "",
+    rects: [{ pageIndex: 0, x: 4, y: 5, width: 120, height: 80 }],
+    ir: {},
+  }
+
   const imageDrag = (props: Record<string, unknown> = {}) => ({
     mode: "move",
     moved: true,
@@ -1241,6 +1252,7 @@ describe("WasmHwpEditor image move", () => {
     curY: 36,
     w: 120,
     h: 80,
+    pick: imagePick,
     props: {
       binDataId: "image-bin",
       width: 10,
@@ -1282,6 +1294,78 @@ describe("WasmHwpEditor image move", () => {
     })
     assert.ok(calls.some(call => call.name === "scheduleSnapshot"))
     assert.ok(calls.some(call => call.name === "paintPickedHighlights"))
+    assert.equal(editor.localImagePick, imagePick)
+  })
+
+  it("plain image clicks select locally without adding chat composer picks", () => {
+    const picker = (globalThis as any).window.EcritsDocumentElementPicker
+    picker.clearPicks()
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      imageDrag: {
+        ...imageDrag(),
+        moved: false,
+      },
+      localImagePick: null,
+      clearImageDragGhost: (...args: unknown[]) => calls.push({ name: "clearImageDragGhost", args }),
+      clearSelection: () => calls.push({ name: "clearSelection" }),
+      paintPickedHighlights: () => calls.push({ name: "paintPickedHighlights" }),
+    } as any
+
+    editor.endImageDrag()
+
+    assert.deepEqual(picker.picks, [])
+    assert.equal(editor.localImagePick, imagePick)
+    assert.ok(calls.some(call => call.name === "paintPickedHighlights"))
+  })
+
+  it("uses the global picker state when deciding whether an image click goes to chat", () => {
+    const picker = (globalThis as any).window.EcritsDocumentElementPicker
+    picker.clearPicks()
+    picker.setEnabled(false)
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      elementPickerEnabled: true,
+      doc: {},
+      format: "hwp",
+      el: { dataset: { documentPath: "/tmp/doc.hwp" } },
+      hitTestEvent: () => ({ hit: { x: 10, y: 20 }, pageIndex: 0 }),
+      hwpPick: () => ({
+        type: "image",
+        ref: { section: 0, paragraph: 2, control: 3 },
+        rects: [{ pageIndex: 0, x: 4, y: 5, width: 120, height: 80 }],
+        controlIndex: 3,
+      }),
+      hwpTextForPick: () => "",
+      beginImageDrag: (...args: unknown[]) => calls.push({ name: "beginImageDrag", args }),
+    } as any
+    const event = {
+      button: 0,
+      preventDefault: () => calls.push({ name: "preventDefault" }),
+      stopPropagation: () => calls.push({ name: "stopPropagation" }),
+    } as any
+
+    editor.onCanvasMouseDown(event)
+
+    assert.equal(editor.elementPickerEnabled, false)
+    assert.deepEqual(picker.picks, [])
+    assert.ok(calls.some(call => call.name === "beginImageDrag"))
+    assert.equal(calls.some(call => call.name === "stopPropagation"), false)
+  })
+
+  it("uses local image selection for document adornments without exposing it to current chat picks", () => {
+    const picker = (globalThis as any).window.EcritsDocumentElementPicker
+    picker.clearPicks()
+    const editor = {
+      ...WasmHwpEditor,
+      el: { dataset: { documentPath: "/tmp/doc.hwp" } },
+      localImagePick: imagePick,
+    } as any
+
+    assert.deepEqual(editor.currentDocumentPicks(), [])
+    assert.deepEqual(editor.documentAdornmentPicks(), [imagePick])
   })
 
   it("commits picture resizes with geometry-only properties", () => {

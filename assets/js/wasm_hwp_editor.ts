@@ -28,7 +28,7 @@
 // `HwpDocument` class. The generated ES module is served directly from the
 // dependency-owned `/assets/rhwp/rhwp.js` path so its `import.meta.url` fallback
 // remains a real module URL instead of being rewritten by esbuild's IIFE bundle.
-import { appendPickedElementToComposer, bindElementPickerTarget } from "./document_element_picker.js"
+import { appendPickedElementToComposer, bindElementPickerTarget, elementPickerEnabled as documentElementPickerEnabled } from "./document_element_picker.js"
 import { OPS } from "./wasm_ops.ts"
 // Keyboard / IME / text-input hook methods, split into their own file. Spread
 // into the hook below so `this` is the editor instance (same pattern as OPS).
@@ -155,6 +155,9 @@ const WasmHwpEditor = {
     // anchor = where mousedown landed; focus = where the pointer is now. A
     // selection collapses to a plain caret when anchor and focus coincide.
     this.selection = null
+    // Local editor selection for a picture in normal edit mode. This paints the
+    // resize handle but is deliberately not part of the chat/composer picker.
+    this.localImagePick = null
     // Live image gesture (press on a picture): click = select, drag = move.
     this.imageDrag = null
     // Live drag-select gesture (only set while the mouse button is held).
@@ -320,6 +323,7 @@ const WasmHwpEditor = {
       this.pageCount = this.doc.pageCount()
       this.caret = null
       this.selection = null
+      this.localImagePick = null
       this.composing = null
       this.undoStack = []
       this.redoStack = []
@@ -460,9 +464,11 @@ const WasmHwpEditor = {
     const { hit, pageIndex } = hitInfo
     window.__rhwpLastHit = hit
 
+    this.elementPickerEnabled = documentElementPickerEnabled()
     if (this.elementPickerEnabled) {
       event.preventDefault()
       event.stopPropagation()
+      this.localImagePick = null
       const pick = this.hwpPickFromHit(hit, pageIndex)
       // Toggle into the multi-select set; bindElementPickerTarget's picks
       // listener repaints every highlight (incl. removal).
@@ -479,7 +485,7 @@ const WasmHwpEditor = {
     }
 
     // A press on a picture arms an image gesture: release WITHOUT moving →
-    // SELECT it (pick), release AFTER dragging → MOVE it. (See begin/end
+    // SELECT it locally, release AFTER dragging → MOVE it. (See begin/end
     // ImageDrag.) The engine resolves what's under the point — no TS hit-test.
     const pressPick = this.hwpPick(hit, pageIndex)
     if (pressPick && /image|picture/i.test(pressPick.type || "")) {
@@ -493,12 +499,14 @@ const WasmHwpEditor = {
           bbox: (pressPick.rects || [])[0]
         },
         hit,
-        pageIndex
+        pageIndex,
+        this.hwpPickEnvelope(pressPick, pageIndex, hit)
       )
       return
     }
 
     // Place the caret at the press point (this is also the selection anchor).
+    this.localImagePick = null
     this.setCaretFromHit(hit, pageIndex)
 
     // Arm a drag-select gesture. mousemove (while pressed) extends the focus;
@@ -598,7 +606,7 @@ const WasmHwpEditor = {
     // text highlight stays until the next press. Picks persist after picker
     // mode ends, and the drag's overlay clears wiped them on OTHER pages
     // (drawCaret only restores the caret's page) — repaint the full set.
-    if (this.currentDocumentPicks().length > 0) this.paintPickedHighlights()
+    if (this.documentAdornmentPicks().length > 0) this.paintPickedHighlights()
   },
 
   onCanvasDoubleClick(event) {
@@ -1210,6 +1218,10 @@ const WasmHwpEditor = {
   hwpPickFromHit(hit, pageIndex) {
     const pick = this.hwpPick(hit, pageIndex)
     if (!pick) return null
+    return this.hwpPickEnvelope(pick, pageIndex, hit)
+  },
+
+  hwpPickEnvelope(pick, pageIndex, hit) {
     return {
       document: this.el.dataset.documentPath || "",
       backend: "hwp",
@@ -1253,7 +1265,7 @@ const WasmHwpEditor = {
   // → select (pick) the image. If dragged it's a MOVE → one Paper-anchored float
   // committed on release (a ghost box previews; per-mousemove engine calls would
   // corrupt the bin).
-  beginImageDrag(control, hit, pageIndex) {
+  beginImageDrag(control, hit, pageIndex, pick = null) {
     // `control` came from hwpControlAtHit → getPageControlLayout, and was picked
     // by containment on its bbox — so control.bbox.{x,y,width,height} is always
     // present. No `?? 0` geometry fallback: trust the engine's layout.
@@ -1280,6 +1292,7 @@ const WasmHwpEditor = {
       startMouseX: hit.x,
       startMouseY: hit.y,
       props,
+      pick,
       moved: false
     }
     this.dragSelect = null
@@ -1367,8 +1380,11 @@ const WasmHwpEditor = {
     }
 
     if (!drag.moved) {
-      // A plain click → SELECT (pick) the image.
-      appendPickedElementToComposer(this.hwpPickFromHit(drag.hit, drag.pageIndex))
+      // A plain click in normal edit mode selects the image locally for the
+      // resize handle. It must not add a composer/chat pick.
+      this.localImagePick = drag.pick || this.hwpPickFromHit(drag.hit, drag.pageIndex)
+      this.clearSelection()
+      this.paintPickedHighlights()
       return
     }
 
@@ -1390,6 +1406,7 @@ const WasmHwpEditor = {
     }
     this.renderPage(drag.pageIndex)
     this.scheduleSnapshot()
+    this.localImagePick = drag.pick || this.hwpPickFromHit(drag.hit, drag.pageIndex)
     // Repaint the selection live so the box + handle follow the moved picture
     // (its bbox comes straight from rhwp's getPageControlLayout — never stale).
     this.paintPickedHighlights()
@@ -1461,7 +1478,7 @@ const WasmHwpEditor = {
   pictureResizeHandleAtHit(hit) {
     if (!hit || hit.x === undefined || hit.y === undefined) return null
     const H = this.IMAGE_HANDLE_HALF + 2
-    for (const pick of this.currentDocumentPicks()) {
+    for (const pick of this.documentAdornmentPicks()) {
       if (!/picture|image/i.test(pick.type || "")) continue
       const pageIndex = ((pick.rects || [])[0] || {}).pageIndex ?? 0
       let layout = []
@@ -1548,7 +1565,7 @@ const WasmHwpEditor = {
     if (this.caret) this.drawCaret(this.caret)
 
     const pages = new Set()
-    for (const pick of this.currentDocumentPicks()) {
+    for (const pick of this.documentAdornmentPicks()) {
       for (const rect of pick.rects || []) pages.add(rect.pageIndex ?? 0)
     }
     if (this.elementPickerEnabled && this.pickerHover) {
@@ -1565,6 +1582,16 @@ const WasmHwpEditor = {
     return picks.filter(p => p.document === docPath)
   },
 
+  documentAdornmentPicks() {
+    const picks = this.currentDocumentPicks().slice()
+    const docPath = this.el.dataset.documentPath || ""
+    if (this.localImagePick && this.localImagePick.document === docPath) {
+      const key = this.localImagePick.ref || ""
+      if (!picks.some(p => (p.ref || "") === key)) picks.push(this.localImagePick)
+    }
+    return picks
+  },
+
   // Paint the pick highlights + hover preview that fall on ONE page's overlay,
   // without clearing it (the caller owns the clear). Solid indigo for picks,
   // dashed for the hover preview.
@@ -1576,7 +1603,7 @@ const WasmHwpEditor = {
     const s = this.scale
 
     let layout // lazily-fetched live control layout for this page (rhwp geometry)
-    for (const pick of this.currentDocumentPicks()) {
+    for (const pick of this.documentAdornmentPicks()) {
       const isPicture = /picture|image/i.test(pick.type || "")
       // A picture's selection box is derived LIVE from rhwp's getPageControlLayout
       // each paint, so it always tracks the engine's current geometry (move/
@@ -1692,6 +1719,7 @@ const WasmHwpEditor = {
       this.pickerHoverRaf = null
     }
     this.pickerHoverEvent = null
+    if (enabled) this.localImagePick = null
     this.setPickerHover(null)
   },
 
