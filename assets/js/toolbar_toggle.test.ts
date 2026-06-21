@@ -1174,6 +1174,33 @@ describe("WasmHwpEditor edit shortcuts", () => {
     assert.equal(editor.imeProxy.value, "")
   })
 
+  it("routes HWP undo even when only an image is selected", () => {
+    const calls: string[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {},
+      caret: null,
+      undoHistory: () => { calls.push("undoHistory"); return true },
+      redoHistory: () => { calls.push("redoHistory"); return true },
+      imeProxy: { value: "stale" },
+    } as any
+    const event = {
+      key: "z",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      isComposing: false,
+      preventDefault: () => calls.push("preventDefault"),
+      stopPropagation: () => calls.push("stopPropagation"),
+    } as any
+
+    editor.handleKeyDown(event)
+
+    assert.deepEqual(calls, ["preventDefault", "stopPropagation", "undoHistory"])
+    assert.equal(editor.imeProxy.value, "")
+  })
+
   it("copies selected HWP model text instead of the IME proxy textarea", () => {
     const clipboard: Record<string, string> = {}
     const calls: string[] = []
@@ -1273,6 +1300,7 @@ describe("WasmHwpEditor image move", () => {
       clearImageDragGhost: (...args: unknown[]) => calls.push({ name: "clearImageDragGhost", args }),
       renderPage: (...args: unknown[]) => calls.push({ name: "renderPage", args }),
       pictureGeometryProps: WasmHwpEditor.pictureGeometryProps,
+      pushUndoCheckpoint: () => calls.push({ name: "pushUndoCheckpoint" }),
       scheduleSnapshot: () => calls.push({ name: "scheduleSnapshot" }),
       paintPickedHighlights: () => calls.push({ name: "paintPickedHighlights" }),
     } as any
@@ -1280,7 +1308,11 @@ describe("WasmHwpEditor image move", () => {
     editor.endImageDrag()
 
     const setCall = calls.find(call => call.name === "setPictureProperties")
+    const setIndex = calls.findIndex(call => call.name === "setPictureProperties")
+    const undoIndex = calls.findIndex(call => call.name === "pushUndoCheckpoint")
     assert.ok(setCall)
+    assert.ok(undoIndex >= 0)
+    assert.ok(undoIndex < setIndex)
     assert.deepEqual(JSON.parse(setCall.args?.[3] as string), {
       width: 10,
       height: 20,
@@ -1339,6 +1371,7 @@ describe("WasmHwpEditor image move", () => {
         controlIndex: 3,
       }),
       hwpTextForPick: () => "",
+      imeProxy: { focus: (...args: unknown[]) => calls.push({ name: "focus", args }) },
       beginImageDrag: (...args: unknown[]) => calls.push({ name: "beginImageDrag", args }),
     } as any
     const event = {
@@ -1352,6 +1385,7 @@ describe("WasmHwpEditor image move", () => {
     assert.equal(editor.elementPickerEnabled, false)
     assert.deepEqual(picker.picks, [])
     assert.ok(calls.some(call => call.name === "beginImageDrag"))
+    assert.ok(calls.some(call => call.name === "focus"))
     assert.equal(calls.some(call => call.name === "stopPropagation"), false)
   })
 
@@ -1400,6 +1434,7 @@ describe("WasmHwpEditor image move", () => {
       clearImageDragGhost: (...args: unknown[]) => calls.push({ name: "clearImageDragGhost", args }),
       renderPage: (...args: unknown[]) => calls.push({ name: "renderPage", args }),
       pictureGeometryProps: WasmHwpEditor.pictureGeometryProps,
+      pushUndoCheckpoint: () => calls.push({ name: "pushUndoCheckpoint" }),
       scheduleSnapshot: () => calls.push({ name: "scheduleSnapshot" }),
       paintPickedHighlights: () => calls.push({ name: "paintPickedHighlights" }),
     } as any
@@ -1407,7 +1442,11 @@ describe("WasmHwpEditor image move", () => {
     editor.endImageDrag()
 
     const setCall = calls.find(call => call.name === "setPictureProperties")
+    const setIndex = calls.findIndex(call => call.name === "setPictureProperties")
+    const undoIndex = calls.findIndex(call => call.name === "pushUndoCheckpoint")
     assert.ok(setCall)
+    assert.ok(undoIndex >= 0)
+    assert.ok(undoIndex < setIndex)
     assert.deepEqual(JSON.parse(setCall.args?.[3] as string), {
       width: 440,
       height: 330,

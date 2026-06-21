@@ -249,9 +249,10 @@ export const keyboardSubsystem = {
       this.saveLocalDocument({})
       return
     }
-    if (!this.doc || !this.caret) return
+    if (!this.doc) return
     if (event.isComposing) return // IME owns the keystroke
     if (this.handleEditShortcut(event)) return
+    if (!this.caret) return
     if (event.metaKey || event.ctrlKey || event.altKey) return // unhandled shortcuts pass through
     if (event.key === "Tab") {
       event.preventDefault()

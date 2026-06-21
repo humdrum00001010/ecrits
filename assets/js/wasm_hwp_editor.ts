@@ -480,6 +480,7 @@ const WasmHwpEditor = {
     const handle = this.pictureResizeHandleAtHit(hit)
     if (handle) {
       event.preventDefault()
+      if (this.imeProxy) this.imeProxy.focus({ preventScroll: true })
       this.beginImageResize(handle, hit, pageIndex)
       return
     }
@@ -490,6 +491,7 @@ const WasmHwpEditor = {
     const pressPick = this.hwpPick(hit, pageIndex)
     if (pressPick && /image|picture/i.test(pressPick.type || "")) {
       event.preventDefault()
+      if (this.imeProxy) this.imeProxy.focus({ preventScroll: true })
       this.beginImageDrag(
         {
           section: pressPick.ref.section,
@@ -1367,6 +1369,7 @@ const WasmHwpEditor = {
         width: this.doc.pxToHwpUnit(drag.curW),
         height: this.doc.pxToHwpUnit(drag.curH)
       })
+      this.pushUndoCheckpoint()
       try {
         this.doc.setPictureProperties(drag.section, drag.paraIdx, drag.controlIdx, JSON.stringify(next))
       } catch (_) {
@@ -1399,6 +1402,7 @@ const WasmHwpEditor = {
       horzOffset: this.doc.pxToHwpUnit(drag.curX),
       vertOffset: this.doc.pxToHwpUnit(drag.curY)
     })
+    this.pushUndoCheckpoint()
     try {
       this.doc.setPictureProperties(drag.section, drag.paraIdx, drag.controlIdx, JSON.stringify(floatProps))
     } catch (_) {
