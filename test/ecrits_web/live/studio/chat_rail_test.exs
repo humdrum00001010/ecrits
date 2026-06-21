@@ -222,7 +222,8 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
         |> LazyHTML.attribute("class")
 
       assert favicon_class =~ "size-4"
-      assert favicon_class =~ "[[data-theme=studio-dark]_&]:invert"
+      assert favicon_class =~ "opacity-85"
+      refute favicon_class =~ "invert"
       refute favicon_class =~ "rounded"
       refute favicon_class =~ "size-7"
       refute favicon_class =~ "size-5"

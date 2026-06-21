@@ -11,6 +11,19 @@ defmodule EcritsWeb.Layouts do
   alias EcritsWeb.Components.Breadcrumbs
   alias EcritsWeb.Components.CommandPalette
 
+  def static_asset_version(path) when is_binary(path) do
+    app = :ecrits
+    static_path = Path.join("priv/static", String.trim_leading(path, "/"))
+
+    app
+    |> Application.app_dir(static_path)
+    |> File.stat(time: :posix)
+    |> case do
+      {:ok, %{mtime: mtime, size: size}} -> "#{mtime}-#{size}"
+      _ -> app |> Application.spec(:vsn) |> to_string()
+    end
+  end
+
   # Embed all files in layouts/* within this module.
   embed_templates "layouts/*"
 
@@ -113,24 +126,16 @@ defmodule EcritsWeb.Layouts do
   """
   def top_nav(assigns) do
     ~H"""
-    <header class="navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px] flex-nowrap border-b border-base-300 bg-base-200/90 supports-[backdrop-filter]:backdrop-blur-md px-7 max-md:px-4">
+    <header class="navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px] flex-nowrap border-b border-base-300 bg-base-100 supports-[backdrop-filter]:backdrop-blur-md px-7 max-md:px-4">
       <div class="navbar-start gap-6 min-w-0">
         <.link
           navigate={~p"/"}
-          class="link link-hover inline-flex items-center gap-2 min-w-0 text-base-content text-sm font-semibold leading-none"
+          class="link link-hover inline-flex items-center gap-2 min-w-0 text-sm font-semibold leading-none text-base-content/85 hover:text-base-content"
           aria-label="Ecrits"
         >
-          <img
-            src={~p"/assets/icons/brand-mark.svg"}
-            alt=""
-            class="block w-[22px] h-[22px] flex-none dark:invert dark:brightness-110"
-          />
+          <Brand.mark class="flex-none" />
           <span class="inline-flex h-[22px] items-center leading-none">Ecrits</span>
         </.link>
-      </div>
-
-      <div class="navbar-end gap-3">
-        <.theme_toggle />
       </div>
     </header>
     """
@@ -307,46 +312,6 @@ defmodule EcritsWeb.Layouts do
           }
         }
       </script>
-    </div>
-    """
-  end
-
-  @doc """
-  Provides dark vs light theme toggle based on themes defined in app.css.
-
-  See <head> in root.html.heex which applies the theme before page load.
-  """
-  def theme_toggle(assigns) do
-    ~H"""
-    <div class="relative inline-flex flex-row items-center border-2 border-base-300 bg-base-300 rounded-full h-9">
-      <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=studio]_&]:left-1/3 [[data-theme=studio-dark]_&]:left-2/3 transition-[left]" />
-
-      <button
-        class="inline-flex items-center justify-center px-2 h-full cursor-pointer w-1/3 relative"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="system"
-        aria-label={dgettext("layouts", "System theme")}
-      >
-        <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="inline-flex items-center justify-center px-2 h-full cursor-pointer w-1/3 relative"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="studio"
-        aria-label={dgettext("layouts", "Light theme")}
-      >
-        <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="inline-flex items-center justify-center px-2 h-full cursor-pointer w-1/3 relative"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="studio-dark"
-        aria-label={dgettext("layouts", "Dark theme")}
-      >
-        <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
     </div>
     """
   end

@@ -36,6 +36,7 @@ defmodule EcritsWeb.Components.AppShell do
     router: EcritsWeb.Router,
     statics: EcritsWeb.static_paths()
 
+  alias EcritsWeb.Brand
   alias EcritsWeb.Layouts
 
   attr :active, :string,
@@ -67,11 +68,7 @@ defmodule EcritsWeb.Components.AppShell do
             class="link link-hover inline-flex items-center gap-2 min-w-0 text-base-content text-sm font-semibold leading-none"
             aria-label="Ecrits"
           >
-            <img
-              src={~p"/assets/icons/brand-mark.svg"}
-              alt=""
-              class="block w-[22px] h-[22px] flex-none dark:invert dark:brightness-110"
-            />
+            <Brand.mark class="flex-none" />
             <span class="inline-flex h-[22px] items-center leading-none">Ecrits</span>
           </.link>
 
@@ -93,7 +90,6 @@ defmodule EcritsWeb.Components.AppShell do
         </div>
 
         <div class="navbar-end gap-3">
-          <Layouts.theme_toggle />
           <Layouts.user_menu :if={@current_scope} current_scope={@current_scope} />
         </div>
       </header>

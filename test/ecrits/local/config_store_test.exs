@@ -29,11 +29,11 @@ defmodule Ecrits.Local.ConfigStoreTest do
     root = tmp_root()
 
     assert :ok = ConfigStore.put(root, :locale, "en")
-    assert :ok = ConfigStore.put(root, "theme", "system")
+    assert :ok = ConfigStore.put(root, "workspace_name", "Matter")
 
     assert {:ok, config} = ConfigStore.load(root)
     refute Map.has_key?(config, "locale")
-    refute Map.has_key?(config, "theme")
+    refute Map.has_key?(config, "workspace_name")
     refute File.exists?(Path.join(root, ".ecrits"))
   end
 

@@ -93,7 +93,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
             data-role="chat-title-favicon"
             aria-hidden="true"
             alt=""
-            class="size-4 shrink-0 opacity-85 [[data-theme=studio-dark]_&]:invert"
+            class="size-4 shrink-0 opacity-85"
           />
           <form
             id="chat-thread-title-form"

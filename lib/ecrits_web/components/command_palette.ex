@@ -139,9 +139,8 @@ defmodule EcritsWeb.Components.CommandPalette do
   @doc """
   Stateless navbar trigger for the command palette.
 
-  Renders a button styled to match the other `top_nav/1` items
-  (`inline-flex items-center h-9` — same baseline as the theme-toggle
-  pill and the persona dropdown). Clicking it pushes the `"toggle"`
+  Renders a button styled to match the other `top_nav/1` items.
+  Clicking it pushes the `"toggle"`
   event to the palette `LiveComponent` (`#cmd-k-palette`) — same handler
   the Cmd/Ctrl+K keybind ultimately invokes via the JS hook.
 

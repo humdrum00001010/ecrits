@@ -6,36 +6,26 @@
 @source "../js";
 @source "../../lib/ecrits_web";
 
-/* Design v31 token namespace (additive — DaisyUI studio theme below is
-   unchanged; --cs-* tokens are scoped for the landing/dashboard/studio
-   refresh wave). See DESIGN.md §2. */
-
-/* === v33 tokens ===
-   Palette tokens are theme-scoped. daisyUI swaps `--color-*` via
-   `[data-theme=...]`; `--cs-*` tokens must follow the same scope or
-   the chrome (topbar, app-shell, brand, etc.) stays in light mode
-   even when daisyUI flips to studio-dark. See feedback memory
-   `css-philosophy`: palette in CSS, shapes in Tailwind utilities. */
-:root,
-[data-theme="studio"] {
-  --cs-bg: #fbfaf7;
-  --cs-surface: #ffffff;
-  --cs-surface-soft: #f6f4ee;
-  --cs-ink: #171717;
-  --cs-muted: #6b7280;
-  --cs-subtle: #9ca3af;
-  --cs-line: #e5e7eb;
-  --cs-line-strong: #d1d5db;
-  --cs-green: #1f6b48;
-  --cs-green-2: #2f7c58;
-  --cs-blue: #2f6feb;
-  --cs-amber: #9a6b24;
-  --cs-red: #b45342;
+/* Design v33 token namespace. Palette lives in CSS; shapes stay in utilities. */
+:root {
+  --cs-bg: oklch(18% 0.02 248);
+  --cs-surface: oklch(22% 0.022 248);
+  --cs-surface-soft: oklch(20% 0.021 248);
+  --cs-ink: oklch(86% 0.012 246);
+  --cs-muted: oklch(63% 0.016 248);
+  --cs-subtle: oklch(50% 0.016 248);
+  --cs-line: oklch(28% 0.024 248);
+  --cs-line-strong: oklch(35% 0.026 248);
+  --cs-green: oklch(68% 0.06 185);
+  --cs-green-2: oklch(62% 0.055 187);
+  --cs-blue: oklch(62% 0.072 250);
+  --cs-amber: oklch(74% 0.06 84);
+  --cs-red: oklch(64% 0.12 22);
   --cs-radius-sm: 6px;
   --cs-radius-md: 10px;
   --cs-radius-lg: 16px;
-  --cs-shadow-card: 0 8px 28px rgba(17, 24, 39, 0.06);
-  --cs-shadow-popover: 0 18px 44px rgba(17, 24, 39, 0.12);
+  --cs-shadow-card: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --cs-shadow-popover: 0 18px 44px rgba(0, 0, 0, 0.55);
 }
 
 /* Chat-rail "agent is responding" typing dots: same interval, STAGGERED start
@@ -61,24 +51,6 @@
     animation: none;
     opacity: 0.6;
   }
-}
-
-[data-theme="studio-dark"] {
-  --cs-bg: #111111;
-  --cs-surface: #181818;
-  --cs-surface-soft: #1f1f1f;
-  --cs-ink: #ededed;
-  --cs-muted: #a3a3a3;
-  --cs-subtle: #737373;
-  --cs-line: #2a2a2a;
-  --cs-line-strong: #3a3a3a;
-  --cs-green: #6dbf95;
-  --cs-green-2: #7fd1a7;
-  --cs-blue: #7aa6ff;
-  --cs-amber: #d6a86a;
-  --cs-red: #e89485;
-  --cs-shadow-card: 0 8px 28px rgba(0, 0, 0, 0.45);
-  --cs-shadow-popover: 0 18px 44px rgba(0, 0, 0, 0.6);
 }
 
 /* Chat rail width is set inline by the StudioLive RailResizer hook
@@ -509,76 +481,39 @@ body[data-chat-rail-dragging="true"] {
   themes: false;
 }
 
-/* ecrits "studio" theme — quiet, low-chroma surfaces with an
-   emerald primary, slate-blue secondary, amber accent. Tuned for long
-   contract-reading sessions; see SPEC.md §10 for the design rationale. */
+/* ecrits studio palette — "Night": one concentrated blue-indigo family
+   (~258°), deep and low-chroma. Stillness is soft contrast, not glare —
+   base is near-black-blue, text is a dim off-white (not pure white), and a
+   single luminous blue carries the voice. Tuned for long contract-reading
+   sessions at night; see SPEC.md §10 for the design rationale. */
 @plugin "daisyui/theme" {
   name: "studio";
   default: true;
-  prefersdark: false;
-  color-scheme: "light";
-
-  --color-base-100: oklch(98.5% 0 0);
-  --color-base-200: oklch(96% 0 0);
-  --color-base-300: oklch(92% 0 0);
-  --color-base-content: oklch(20% 0 0);
-
-  --color-primary: oklch(54% 0.13 162);
-  --color-primary-content: oklch(98% 0 0);
-  --color-secondary: oklch(46% 0.10 240);
-  --color-secondary-content: oklch(98% 0 0);
-  --color-accent: oklch(70% 0.15 60);
-  --color-accent-content: oklch(15% 0.02 60);
-  --color-neutral: oklch(28% 0.01 250);
-  --color-neutral-content: oklch(95% 0 0);
-
-  --color-info: oklch(62% 0.14 245);
-  --color-info-content: oklch(98% 0 0);
-  --color-success: oklch(60% 0.14 145);
-  --color-success-content: oklch(98% 0 0);
-  --color-warning: oklch(75% 0.15 80);
-  --color-warning-content: oklch(20% 0.02 80);
-  --color-error: oklch(58% 0.20 25);
-  --color-error-content: oklch(98% 0 0);
-
-  --radius-selector: 0.25rem;
-  --radius-field: 0.375rem;
-  --radius-box: 0.5rem;
-  --size-selector: 0.21875rem;
-  --size-field: 0.21875rem;
-  --border: 1px;
-  --depth: 0;
-  --noise: 0;
-}
-
-@plugin "daisyui/theme" {
-  name: "studio-dark";
-  default: false;
-  prefersdark: false;
+  prefersdark: true;
   color-scheme: "dark";
 
-  --color-base-100: oklch(18% 0 0);
-  --color-base-200: oklch(22% 0 0);
-  --color-base-300: oklch(26% 0 0);
-  --color-base-content: oklch(92% 0 0);
+  --color-base-100: oklch(18% 0.02 248);
+  --color-base-200: oklch(22% 0.022 248);
+  --color-base-300: oklch(28% 0.024 248);
+  --color-base-content: oklch(86% 0.012 246);
 
-  --color-primary: oklch(70% 0.15 162);
-  --color-primary-content: oklch(15% 0.02 162);
-  --color-secondary: oklch(72% 0.12 240);
-  --color-secondary-content: oklch(15% 0.02 240);
-  --color-accent: oklch(78% 0.16 60);
-  --color-accent-content: oklch(15% 0.02 60);
-  --color-neutral: oklch(72% 0.01 250);
-  --color-neutral-content: oklch(15% 0 0);
+  --color-primary: oklch(62% 0.072 250);
+  --color-primary-content: oklch(15% 0.018 250);
+  --color-secondary: oklch(52% 0.055 248);
+  --color-secondary-content: oklch(93% 0.01 248);
+  --color-accent: oklch(66% 0.05 235);
+  --color-accent-content: oklch(15% 0.018 235);
+  --color-neutral: oklch(27% 0.022 248);
+  --color-neutral-content: oklch(86% 0.012 246);
 
-  --color-info: oklch(70% 0.14 245);
-  --color-info-content: oklch(15% 0.02 245);
-  --color-success: oklch(70% 0.14 145);
-  --color-success-content: oklch(15% 0.02 145);
-  --color-warning: oklch(80% 0.15 80);
-  --color-warning-content: oklch(20% 0.02 80);
-  --color-error: oklch(70% 0.20 25);
-  --color-error-content: oklch(15% 0.02 25);
+  --color-info: oklch(68% 0.07 245);
+  --color-info-content: oklch(15% 0.018 245);
+  --color-success: oklch(68% 0.06 185);
+  --color-success-content: oklch(15% 0.018 185);
+  --color-warning: oklch(75% 0.07 85);
+  --color-warning-content: oklch(18% 0.02 85);
+  --color-error: oklch(64% 0.12 22);
+  --color-error-content: oklch(97% 0 0);
 
   --radius-selector: 0.25rem;
   --radius-field: 0.375rem;
@@ -590,27 +525,28 @@ body[data-chat-rail-dragging="true"] {
   --noise: 0;
 }
 
-/* Typography:
-   - sans for chrome (Inter + Pretendard for Korean glyphs)
-   - mono for contract body (Iosevka first)
-   - serif for landing headings (Source Serif 4 — adds editorial gravitas;
-     see feedback-mature-visual-language.md "Use serif for headings on
-     landing" rule)
+/* Typography — concentrated on the IBM Plex family for the night system,
+   with one deliberate literary serif:
+   - sans for chrome (IBM Plex Sans + IBM Plex Sans KR — one designed family
+     across Latin AND Korean, replacing the Inter+Pretendard split)
+   - mono for contract body / code (IBM Plex Mono first, Iosevka fallback)
+   - serif for headings (Spectral — a still, restrained reading serif; used at
+     light weights it reads as quiet editorial restraint, not authority. See
+     feedback-mature-visual-language.md "Use serif for headings on landing")
 
-   The Hangul fallback chain matters. Inter, Source Serif 4, and Iosevka
-   have NO Hangul coverage. Without an explicit Hangul-capable face in
-   the chain, browsers can fall back to compatibility-jamo glyphs and
-   render `검` as three separate jamo (ㄱㅓㅁ). Pretendard is the
-   primary Hangul-aware face; the per-OS system Hangul fonts (Apple SD
-   Gothic Neo, Malgun Gothic, Noto Sans CJK KR) follow as backups.
+   The Hangul fallback chain matters. IBM Plex Sans, Spectral, and IBM Plex
+   Mono have NO Hangul coverage. Without an explicit Hangul-capable face in
+   the chain, browsers can fall back to compatibility-jamo glyphs and render
+   `검` as three separate jamo (ㄱㅓㅁ). IBM Plex Sans KR is the primary
+   Hangul-aware face (right after Plex Sans); the per-OS system Hangul fonts
+   (Apple SD Gothic Neo, Malgun Gothic, Noto Sans CJK KR) follow as backups.
 */
-@import url("https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap");
-@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css");
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Spectral:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap");
 
 :root {
-  --font-sans: "Inter", "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "Iosevka", "JetBrains Mono", "D2Coding", ui-monospace, "SF Mono", Menlo, monospace;
-  --font-serif: "Source Serif 4", "Nanum Myeongjo", "Apple SD Gothic Neo", "Noto Serif KR", "Noto Serif CJK KR", ui-serif, Georgia, "Times New Roman", serif;
+  --font-sans: "IBM Plex Sans", "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "Iosevka", "JetBrains Mono", "D2Coding", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-serif: "Spectral", "Nanum Myeongjo", "Apple SD Gothic Neo", "Noto Serif KR", "Noto Serif CJK KR", ui-serif, Georgia, "Times New Roman", serif;
 }
 
 /* Tailwind v4 reads font-family tokens via @theme. Register sans/serif/
@@ -627,9 +563,6 @@ body[data-chat-rail-dragging="true"] {
 @custom-variant phx-submit-loading (.phx-submit-loading&, .phx-submit-loading &);
 @custom-variant phx-change-loading (.phx-change-loading&, .phx-change-loading &);
 
-/* Use the data attribute for dark mode  */
-@custom-variant dark (&:where([data-theme=studio-dark], [data-theme=studio-dark] *));
-
 /* Make LiveView wrapper divs transparent for layout */
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
@@ -644,8 +577,7 @@ body[data-chat-rail-dragging="true"] {
    (the `pre.lumis` background + per-token `style=`) — we DON'T fight those, we
    only give the block a frame and let it scroll horizontally.
 
-   All colours route through the daisyUI base tokens so the rail follows the
-   active studio / studio-dark theme. */
+   All colours route through the static daisyUI base tokens. */
 .chat-markdown {
   font-size: inherit;
   line-height: 1.5;
@@ -786,8 +718,7 @@ body[data-chat-rail-dragging="true"] {
    editor welcome panel, NOT a marketing landing. Deliberately quiet, dense,
    and utilitarian: a single restrained panel with an editor-style title bar,
    a compact open-folder action, and a mono path input. All colour routes
-   through the --cs-* tokens / daisyUI base palette so it follows both the
-   `studio` and `studio-dark` themes. UI text uses the sans stack; the path
+   through the --cs-* tokens / daisyUI base palette. UI text uses the sans stack; the path
    input and crumb use the mono stack (Iosevka) shared with StudioLive. */
 
 .mount-screen {
@@ -898,9 +829,9 @@ body[data-chat-rail-dragging="true"] {
   padding: 0 1rem;
   border: 1px solid transparent;
   border-radius: var(--cs-radius-sm);
-  /* Fixed accessible brand-green: white text clears WCAG AA in both themes. The
-     theme primary (oklch 54%/70%) is a mid-tone where neither white nor dark
-     content text reaches 4.5:1, so the CTA pins its own darker green. */
+  /* Fixed accessible brand-green: white text clears WCAG AA. The primary
+     palette value is a mid-tone where neither white nor dark content text
+     reaches 4.5:1, so the CTA pins its own darker green. */
   --mount-open: oklch(44% 0.13 162);
   background: var(--mount-open);
   color: #fff;
@@ -1017,6 +948,13 @@ body[data-chat-rail-dragging="true"] {
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary, var(--cs-blue)) 35%, transparent);
 }
 
+/* Chat composer: the shared <.input> wraps the textarea in a daisyUI
+   `fieldset mb-2` with its own block padding/gap. In this single-row
+   composer that stacks into dead space between the text and the icon row.
+   Collapse the wrapper here (scoped) so the textarea sits flush. */
+#local-agent-form .fieldset { margin: 0; padding: 0; gap: 0; }
+#local-agent-form .fieldset > label { display: block; margin: 0; }
+
 .mount-field__submit-label { line-height: 1; }
 
 /* === Error ============================================================== */
@@ -1040,35 +978,6 @@ body[data-chat-rail-dragging="true"] {
   flex: none;
   margin-top: 0.08rem;
   color: var(--cs-red);
-}
-
-/* === Footer ============================================================= */
-.mount-foot {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  margin-top: 1.25rem;
-  padding-top: 1rem;
-  border-top: 1px solid color-mix(in oklab, var(--cs-ink) 7%, transparent);
-  font-size: 0.74rem;
-  color: color-mix(in oklab, var(--cs-ink) 70%, transparent);
-}
-
-.mount-foot__item {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-}
-
-.mount-foot__icon {
-  width: 0.85rem;
-  height: 0.85rem;
-  flex: none;
-  color: color-mix(in oklab, var(--color-primary, var(--cs-blue)) 75%, var(--cs-ink));
-}
-
-.mount-foot__sep {
-  color: color-mix(in oklab, var(--cs-ink) 24%, transparent);
 }
 
 /* Document element picker: make picker mode visible while the pointer is over

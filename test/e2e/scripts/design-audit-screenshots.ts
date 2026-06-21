@@ -123,8 +123,7 @@ async function capture(
   const url = `${BASE_URL}${surface.path}`;
   await page.goto(url, { waitUntil: 'networkidle', timeout: 30_000 });
 
-  // A small settle delay — some components (theme toggle, sticky nav)
-  // run a JS frame after networkidle.
+  // A small settle delay for sticky nav and other JS-driven chrome after networkidle.
   await page.waitForTimeout(500);
 
   const filename = `${surface.slug}-${viewport.name}-${SUFFIX}.png`;

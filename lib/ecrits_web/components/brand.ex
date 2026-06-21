@@ -1,14 +1,13 @@
 defmodule EcritsWeb.Brand do
   @moduledoc """
   Brand bits for Ecrits — wordmark, mark, and the Korean flag glyph
-  used in the language switcher. Text-first; we don't ship a pictorial logo
-  yet, the wordmark is the brand.
+  used in the language switcher.
 
   Used by the landing page, auth chrome, and the post-login navbar.
   """
   use Phoenix.Component
 
-  attr :class, :string, default: nil
+  attr :class, :any, default: nil
   attr :size, :string, default: "base", values: ~w(sm base lg xl)
 
   @doc """
@@ -29,27 +28,47 @@ defmodule EcritsWeb.Brand do
     """
   end
 
-  attr :class, :string, default: nil
+  attr :class, :any, default: nil
   attr :size, :string, default: "base", values: ~w(sm base lg xl)
 
   @doc """
-  Just the symbol — a small emerald disc paired with the "e" monogram.
-  Used where the full wordmark is too wide (favicons, mobile navbar, dense
-  list rows). Pure CSS; no raster asset.
+  Inline symbol used in dense chrome. It paints with `currentColor`, so it
+  follows the surrounding nav color without relying on external SVG image color
+  handling.
   """
   def mark(assigns) do
     ~H"""
-    <span class={[
-      "inline-flex items-center justify-center rounded-full bg-primary text-primary-content font-semibold chrome leading-none",
-      mark_size(@size),
-      @class
-    ]}>
-      e
-    </span>
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      class={[
+        "block shrink-0 text-current",
+        mark_size(@size),
+        @class
+      ]}
+    >
+      <rect
+        x="4"
+        y="4"
+        width="16"
+        height="16"
+        rx="4"
+        stroke="currentColor"
+        stroke-width="1.8"
+      />
+      <path
+        d="M8 9.5h8M8 14.5h8M12 4v16"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+      />
+    </svg>
     """
   end
 
-  attr :class, :string, default: nil
+  attr :class, :any, default: nil
 
   @doc """
   Inline SVG taegukgi — used by the language switcher to indicate the Korean
@@ -125,8 +144,8 @@ defmodule EcritsWeb.Brand do
   defp size_class("lg"), do: "text-lg"
   defp size_class("xl"), do: "text-xl"
 
-  defp mark_size("sm"), do: "h-5 w-5 text-[0.55rem]"
-  defp mark_size("base"), do: "h-7 w-7 text-[0.6rem]"
-  defp mark_size("lg"), do: "h-9 w-9 text-xs"
-  defp mark_size("xl"), do: "h-12 w-12 text-sm"
+  defp mark_size("sm"), do: "h-5 w-5"
+  defp mark_size("base"), do: "h-[22px] w-[22px]"
+  defp mark_size("lg"), do: "h-9 w-9"
+  defp mark_size("xl"), do: "h-12 w-12"
 end
