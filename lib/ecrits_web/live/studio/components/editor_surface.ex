@@ -22,6 +22,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   attr :save_state, :string, default: nil
   attr :open_documents, :list, default: []
   attr :active_document_id, :string, default: nil
+  attr :tab_close_hrefs, :map, default: %{}
   attr :dirty_document_ids, :any, default: nil
   attr :hwp_pages, :any, required: true
   attr :hwp_page_count, :integer, default: 0
@@ -96,16 +97,16 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                     </span>
                     <span class="min-w-0 truncate">{tab.name}</span>
                   </button>
-                  <button
-                    type="button"
-                    phx-click="tab_close"
-                    phx-value-id={tab.id}
+                  <a
+                    href={Map.get(@tab_close_hrefs, tab.id, "#")}
+                    role="button"
+                    phx-click={tab_close_js(tab)}
                     data-role="document-tab-close"
                     aria-label={"Close #{tab.name}"}
-                    class="my-auto mr-2 inline-flex size-4 shrink-0 items-center justify-center rounded text-base-content/45 transition-colors hover:bg-base-200 hover:text-base-content"
+                    class="my-auto mr-1.5 inline-flex size-6 shrink-0 items-center justify-center rounded text-base-content/45 transition-colors hover:bg-base-200 hover:text-base-content"
                   >
                     <.icon name="hero-x-mark" class="size-3" />
-                  </button>
+                  </a>
                 </div>
               </div>
 
@@ -340,5 +341,10 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
     |> JS.toggle_attribute({"aria-pressed", "true", "false"})
     |> JS.toggle(to: "#local-rhwp-fullscreen [data-role='enter-fullscreen']")
     |> JS.toggle(to: "#local-rhwp-fullscreen [data-role='exit-fullscreen']")
+  end
+
+  defp tab_close_js(tab) do
+    JS.hide(to: "#studio-document-tab-#{tab.id}")
+    |> JS.push("tab_close", value: %{id: tab.id})
   end
 end

@@ -1081,6 +1081,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               }
               open_documents={@open_documents}
               active_document_id={@active_document_id}
+              tab_close_hrefs={local_document_tab_close_hrefs(assigns)}
               dirty_document_ids={@dirty_document_ids}
               hwp_pages={@streams.local_hwp_pages}
               hwp_page_count={@local_hwp_page_count}
@@ -3339,6 +3340,36 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     assigns.tree
     |> local_file_tree_paths()
     |> Map.new(&{&1, workspace_document_path(assigns, &1)})
+  end
+
+  defp local_document_tab_close_hrefs(assigns) do
+    tabs = assigns.open_documents || []
+    active_id = assigns.active_document_id
+
+    tabs
+    |> Enum.with_index()
+    |> Map.new(fn {tab, index} ->
+      target =
+        if tab.id == active_id do
+          remaining = List.delete_at(tabs, index)
+
+          case remaining do
+            [] ->
+              ~p"/workspace?#{workspace_query(assigns, [])}"
+
+            _ ->
+              neighbor = Enum.at(remaining, min(index, length(remaining) - 1))
+              workspace_document_path(assigns, neighbor.path)
+          end
+        else
+          case assigns.active_document_path do
+            path when is_binary(path) and path != "" -> workspace_document_path(assigns, path)
+            _ -> ~p"/workspace?#{workspace_query(assigns, [])}"
+          end
+        end
+
+      {tab.id, target}
+    end)
   end
 
   defp local_file_tree_paths(nodes) do
