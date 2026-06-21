@@ -1252,9 +1252,7 @@ const WasmHwpEditor = {
   // Pressing a picture arms a gesture. If released without dragging it's a CLICK
   // → select (pick) the image. If dragged it's a MOVE → one Paper-anchored float
   // committed on release (a ghost box previews; per-mousemove engine calls would
-  // corrupt the bin). SAFEGUARD: an image the engine can't render floats as an
-  // opaque white box over the text (large bins, #51) — if the committed move
-  // renders blank-white, revert to inline rather than hide the document.
+  // corrupt the bin).
   beginImageDrag(control, hit, pageIndex) {
     // `control` came from hwpControlAtHit → getPageControlLayout, and was picked
     // by containment on its bbox — so control.bbox.{x,y,width,height} is always
@@ -1352,7 +1350,7 @@ const WasmHwpEditor = {
 
     if (drag.mode === "resize") {
       if (!drag.moved) { this.paintPickedHighlights(); return }
-      const next = Object.assign({}, drag.props, {
+      const next = this.pictureGeometryProps(drag.props, {
         width: this.doc.pxToHwpUnit(drag.curW),
         height: this.doc.pxToHwpUnit(drag.curH)
       })
@@ -1376,7 +1374,7 @@ const WasmHwpEditor = {
 
     // A drag → commit the move (single Paper-anchored float). Page-px → HWPUNIT
     // is the engine's `pxToHwpUnit` (authoritative, DPI-based) — no constant.
-    const floatProps = Object.assign({}, drag.props, {
+    const floatProps = this.pictureGeometryProps(drag.props, {
       treatAsChar: false,
       horzRelTo: "Paper",
       vertRelTo: "Paper",
@@ -1418,6 +1416,19 @@ const WasmHwpEditor = {
     const overlay = this.pageOverlay(pageIndex)
     const ctx = overlay && overlay.getContext("2d")
     if (ctx) ctx.clearRect(0, 0, overlay.width, overlay.height)
+  },
+
+  pictureGeometryProps(props, overrides = {}) {
+    const out = {}
+    for (const key of [
+      "width", "height",
+      "treatAsChar", "horzRelTo", "vertRelTo", "horzAlign", "vertAlign",
+      "horzOffset", "vertOffset", "textWrap",
+      "cropLeft", "cropTop", "cropRight", "cropBottom"
+    ]) {
+      if (props && props[key] !== undefined) out[key] = props[key]
+    }
+    return Object.assign(out, overrides)
   },
 
   // Half-size (doc px) of the square resize handle drawn at a selected picture's

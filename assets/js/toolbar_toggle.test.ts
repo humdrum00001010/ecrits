@@ -1228,3 +1228,110 @@ describe("WasmHwpEditor edit shortcuts", () => {
     assert.ok(calls.some(call => call.name === "insertPlainTextAtCaret" && call.args?.[0] === "A\nB"))
   })
 })
+
+describe("WasmHwpEditor image move", () => {
+  const imageDrag = (props: Record<string, unknown> = {}) => ({
+    mode: "move",
+    moved: true,
+    section: 0,
+    paraIdx: 2,
+    controlIdx: 3,
+    pageIndex: 0,
+    curX: 24,
+    curY: 36,
+    w: 120,
+    h: 80,
+    props: {
+      binDataId: "image-bin",
+      width: 10,
+      height: 20,
+      ...props,
+    },
+  })
+
+  it("commits picture moves with geometry-only properties", () => {
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      imageDrag: imageDrag(),
+      doc: {
+        pxToHwpUnit: (px: number) => px * 10,
+        setPictureProperties: (...args: unknown[]) => calls.push({ name: "setPictureProperties", args }),
+      },
+      clearImageDragGhost: (...args: unknown[]) => calls.push({ name: "clearImageDragGhost", args }),
+      renderPage: (...args: unknown[]) => calls.push({ name: "renderPage", args }),
+      pictureGeometryProps: WasmHwpEditor.pictureGeometryProps,
+      scheduleSnapshot: () => calls.push({ name: "scheduleSnapshot" }),
+      paintPickedHighlights: () => calls.push({ name: "paintPickedHighlights" }),
+    } as any
+
+    editor.endImageDrag()
+
+    const setCall = calls.find(call => call.name === "setPictureProperties")
+    assert.ok(setCall)
+    assert.deepEqual(JSON.parse(setCall.args?.[3] as string), {
+      width: 10,
+      height: 20,
+      treatAsChar: false,
+      horzRelTo: "Paper",
+      vertRelTo: "Paper",
+      horzAlign: "Left",
+      vertAlign: "Top",
+      horzOffset: 240,
+      vertOffset: 360,
+    })
+    assert.ok(calls.some(call => call.name === "scheduleSnapshot"))
+    assert.ok(calls.some(call => call.name === "paintPickedHighlights"))
+  })
+
+  it("commits picture resizes with geometry-only properties", () => {
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      imageDrag: {
+        mode: "resize",
+        moved: true,
+        section: 0,
+        paraIdx: 2,
+        controlIdx: 3,
+        pageIndex: 0,
+        x: 4,
+        y: 5,
+        curW: 44,
+        curH: 33,
+        props: {
+          binDataId: "image-bin",
+          width: 10,
+          height: 20,
+          cropLeft: 0,
+          cropTop: 0,
+          cropRight: 0,
+          cropBottom: 0,
+        },
+      },
+      doc: {
+        pxToHwpUnit: (px: number) => px * 10,
+        setPictureProperties: (...args: unknown[]) => calls.push({ name: "setPictureProperties", args }),
+      },
+      clearImageDragGhost: (...args: unknown[]) => calls.push({ name: "clearImageDragGhost", args }),
+      renderPage: (...args: unknown[]) => calls.push({ name: "renderPage", args }),
+      pictureGeometryProps: WasmHwpEditor.pictureGeometryProps,
+      scheduleSnapshot: () => calls.push({ name: "scheduleSnapshot" }),
+      paintPickedHighlights: () => calls.push({ name: "paintPickedHighlights" }),
+    } as any
+
+    editor.endImageDrag()
+
+    const setCall = calls.find(call => call.name === "setPictureProperties")
+    assert.ok(setCall)
+    assert.deepEqual(JSON.parse(setCall.args?.[3] as string), {
+      width: 440,
+      height: 330,
+      cropLeft: 0,
+      cropTop: 0,
+      cropRight: 0,
+      cropBottom: 0,
+    })
+    assert.ok(calls.some(call => call.name === "scheduleSnapshot"))
+  })
+})
