@@ -25,16 +25,18 @@
 // server-side ehwp UX.
 //
 // The wasm-bindgen `--target web` glue exposes `init(wasmUrl)` plus the
-// `HwpDocument` class. esbuild bundles `rhwp.js` into app.js; the 5MB
-// `rhwp_bg.wasm` is served as a static file under `/assets/rhwp/`.
-import init, { HwpDocument } from "../vendor/rhwp/rhwp.js"
+// `HwpDocument` class. The generated ES module is served directly from the
+// dependency-owned `/assets/rhwp/rhwp.js` path so its `import.meta.url` fallback
+// remains a real module URL instead of being rewritten by esbuild's IIFE bundle.
 import { appendPickedElementToComposer, bindElementPickerTarget } from "./document_element_picker.js"
-import { OPS } from "./wasm_ops"
+import { OPS } from "./wasm_ops.ts"
 // Keyboard / IME / text-input hook methods, split into their own file. Spread
 // into the hook below so `this` is the editor instance (same pattern as OPS).
-import { keyboardSubsystem } from "./wasm_hwp_keys"
+import { keyboardSubsystem } from "./wasm_hwp_keys.ts"
 
 const WASM_URL = "/assets/rhwp/rhwp_bg.wasm"
+const RHWP_JS_URL = "/assets/rhwp/rhwp.js"
+const LOCAL_EDITOR_COMMAND_EVENT = "ecrits:local-editor-command"
 
 // How long the doc must stay idle (no edits) before we export+snapshot bytes
 // to the server. Each edit is instant locally; persistence is debounced so we
@@ -44,11 +46,15 @@ const SNAPSHOT_IDLE_MS = 1500
 // Module-level singleton: `init()` instantiates the wasm module ONCE per page
 // load (every hook instance shares the same wasm memory + HwpDocument class).
 let wasmReady = null
+let HwpDocument = null
 function ensureWasm() {
   if (!wasmReady) {
-    wasmReady = init(WASM_URL).then(() => {
-      window.__rhwpWasmReady = true
-      return true
+    wasmReady = import(RHWP_JS_URL).then((module) => {
+      HwpDocument = module.HwpDocument
+      return module.default(WASM_URL).then(() => {
+        window.__rhwpWasmReady = true
+        return true
+      })
     })
   }
   return wasmReady
@@ -163,6 +169,8 @@ const WasmHwpEditor = {
     this.skipNextCompositionInput = null
     this.snapshotTimer = null
     this.snapshotSeq = 0
+    this.undoStack = []
+    this.redoStack = []
     this.caretBlinkOn = true
     this.elementPickerEnabled = false
     this.pickerHover = null
@@ -212,10 +220,12 @@ const WasmHwpEditor = {
     this.onMouseMove = event => this.onCanvasMouseMove(event)
     this.onMouseUp = event => this.onCanvasMouseUp(event)
     this.onDoubleClick = event => this.onCanvasDoubleClick(event)
+    this.onToolbarCommand = event => this.handleToolbarCommand(event.detail || {})
     this.el.addEventListener("mousedown", this.onMouseDown)
     this.el.addEventListener("dblclick", this.onDoubleClick)
     document.addEventListener("mousemove", this.onMouseMove)
     document.addEventListener("mouseup", this.onMouseUp)
+    document.addEventListener(LOCAL_EDITOR_COMMAND_EVENT, this.onToolbarCommand)
 
     // Wire the edit loop to the IME proxy (the OS-focused editable element).
     this.bindEditing()
@@ -266,6 +276,7 @@ const WasmHwpEditor = {
     this.el.removeEventListener("dblclick", this.onDoubleClick)
     document.removeEventListener("mousemove", this.onMouseMove)
     document.removeEventListener("mouseup", this.onMouseUp)
+    document.removeEventListener(LOCAL_EDITOR_COMMAND_EVENT, this.onToolbarCommand)
     if (this.unbindElementPicker) this.unbindElementPicker()
     this.unbindEditing()
     if (this.doc) {
@@ -308,7 +319,10 @@ const WasmHwpEditor = {
 
       this.pageCount = this.doc.pageCount()
       this.caret = null
+      this.selection = null
       this.composing = null
+      this.undoStack = []
+      this.redoStack = []
       window.__rhwpDoc = this.doc
 
       this.buildPageStack()
@@ -749,6 +763,327 @@ const WasmHwpEditor = {
     this.clearSelection()
     this.clearSelectionOverlays()
     if (this.caret) this.drawCaret(this.caret)
+  },
+
+  selectedText() {
+    if (!this.hasSelection() || !this.doc) return ""
+    const sel = this.selection
+    const [start, end] = this.orderedSelection(sel)
+    const chunks = []
+    for (let paragraph = start.paragraph; paragraph <= end.paragraph; paragraph++) {
+      const startOffset = paragraph === start.paragraph ? start.offset : 0
+      const endOffset = paragraph === end.paragraph
+        ? end.offset
+        : this.hwpToolbarParagraphLength(sel.section, paragraph, sel.cell)
+      if (endOffset < startOffset) continue
+      try {
+        if (sel.cell) {
+          const ref = this.hwpToolbarRef(sel.section, paragraph, 0, sel.cell)
+          chunks.push(this.getTextInCellRef(ref, ref.cell, paragraph, startOffset, endOffset - startOffset) || "")
+        } else {
+          chunks.push(this.doc.getTextRange(sel.section, paragraph, startOffset, endOffset - startOffset) || "")
+        }
+      } catch (_) {
+        chunks.push("")
+      }
+    }
+    return chunks.join("\n")
+  },
+
+  cloneEditorPoint(point) {
+    return point ? JSON.parse(JSON.stringify(point)) : null
+  },
+
+  captureHistorySnapshot() {
+    if (!this.doc) return null
+    try {
+      const bytes = this.format === "hwpx" ? this.doc.exportHwpx() : this.doc.exportHwp()
+      return {
+        format: this.format,
+        bytes: new Uint8Array(bytes),
+        caret: this.cloneEditorPoint(this.caret),
+        selection: this.cloneEditorPoint(this.selection),
+        pageCount: this.pageCount
+      }
+    } catch (error) {
+      console.error("[wasm-hwp] history snapshot failed", error)
+      return null
+    }
+  },
+
+  historyBytesEqual(a, b) {
+    if (!a || !b || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+    return true
+  },
+
+  pushUndoCheckpoint() {
+    const snapshot = this.captureHistorySnapshot()
+    if (!snapshot) return false
+    const last = this.undoStack && this.undoStack[this.undoStack.length - 1]
+    if (last && this.historyBytesEqual(last.bytes, snapshot.bytes)) return false
+    this.undoStack.push(snapshot)
+    if (this.undoStack.length > 30) this.undoStack.shift()
+    this.redoStack = []
+    return true
+  },
+
+  restoreHistorySnapshot(snapshot) {
+    if (!snapshot || !snapshot.bytes) return false
+    try {
+      const previous = this.doc
+      this.doc = new HwpDocument(snapshot.bytes)
+      try { this.doc.convertToEditable() } catch (_) {}
+      if (previous) {
+        try { previous.free() } catch (_) {}
+      }
+      this.format = snapshot.format || this.format
+      this.pageCount = this.doc.pageCount()
+      this.caret = this.cloneEditorPoint(snapshot.caret)
+      this.selection = this.cloneEditorPoint(snapshot.selection)
+      this.composing = null
+      window.__rhwpDoc = this.doc
+      this.buildPageStack()
+      this.renderVisiblePages()
+      this.clearSelectionOverlays()
+      if (this.selection) this.renderSelection()
+      if (this.caret) {
+        this.refreshCursorRect()
+        this.renderCaretPage()
+        this.drawCaret(this.caret)
+        this.anchorProxy()
+      }
+      this.scheduleSnapshot()
+      return true
+    } catch (error) {
+      console.error("[wasm-hwp] history restore failed", error)
+      return false
+    }
+  },
+
+  undoHistory() {
+    if (!this.undoStack || !this.undoStack.length) return false
+    const redo = this.captureHistorySnapshot()
+    const snapshot = this.undoStack.pop()
+    if (!this.restoreHistorySnapshot(snapshot)) return false
+    if (redo) this.redoStack.push(redo)
+    return true
+  },
+
+  redoHistory() {
+    if (!this.redoStack || !this.redoStack.length) return false
+    const undo = this.captureHistorySnapshot()
+    const snapshot = this.redoStack.pop()
+    if (!this.restoreHistorySnapshot(snapshot)) return false
+    if (undo) this.undoStack.push(undo)
+    return true
+  },
+
+  handleToolbarCommand(detail) {
+    if (!this.activeToolbarTarget() || !this.doc || !this.toolbarCommandMatchesDocument(detail)) return
+
+    switch (detail.command) {
+      case "bold":
+        this.hwpToolbarToggleCharProp("Bold", "bold")
+        break
+      case "italic":
+        this.hwpToolbarToggleCharProp("Italic", "italic")
+        break
+      case "image":
+        this.hwpToolbarImage(detail)
+        break
+      default:
+        break
+    }
+  },
+
+  activeToolbarTarget() {
+    return !!(this.el && this.el.isConnected && /^(hwp|hwpx)$/i.test(this.format || ""))
+  },
+
+  toolbarCommandMatchesDocument(detail) {
+    const commandDocumentId = detail && (detail.document_id || detail.documentId)
+    if (!commandDocumentId) return true
+    return !!(this.documentId && String(commandDocumentId) === String(this.documentId))
+  },
+
+  hwpToolbarApplyProps(props) {
+    const refs = this.hwpToolbarCharRefs()
+    return this.hwpToolbarApplyPropsToRefs(refs, props)
+  },
+
+  hwpToolbarToggleCharProp(prop, engineKey) {
+    const refs = this.hwpToolbarCharRefs()
+    if (!refs.length) return
+
+    const enabled = refs.every((ref) => this.hwpToolbarCharPropEnabled(ref, engineKey))
+    this.hwpToolbarApplyPropsToRefs(refs, { [prop]: !enabled })
+  },
+
+  hwpToolbarApplyPropsToRefs(refs, props) {
+    if (!refs.length) return
+
+    let applied = 0
+    for (const ref of refs) {
+      const result = this.applySetOne(ref, { kind: "char", ...props })
+      if (result && result.error) {
+        console.warn("[wasm-hwp] toolbar format failed", result.error)
+      } else {
+        applied++
+      }
+    }
+    if (applied > 0) this.finishAgentEdit({})
+  },
+
+  hwpToolbarCharPropEnabled(ref, engineKey) {
+    const parsed = this.parseRef(ref)
+    if (!parsed) return false
+
+    const offset = this.hwpToolbarCharPropProbeOffset(parsed)
+    try {
+      let raw
+      const cl = parsed.cell
+      if (cl) {
+        raw = this.doc.getCellCharPropertiesAt(
+          parsed.section,
+          cl.parentParaIndex,
+          cl.controlIndex,
+          cl.cellIndex,
+          cl.cellParaIndex,
+          offset
+        )
+      } else {
+        raw = this.doc.getCharPropertiesAt(parsed.section, parsed.paragraph, offset)
+      }
+      const props = typeof raw === "string" ? JSON.parse(raw || "{}") : (raw || {})
+      return props && props[engineKey] === true
+    } catch (_) {
+      return false
+    }
+  },
+
+  hwpToolbarCharPropProbeOffset(parsed) {
+    let offset = Number.isInteger(parsed.offset) ? parsed.offset : 0
+    const span = Number(parsed.length ?? parsed.len ?? 0)
+    if (!(Number.isFinite(span) && span > 0) && offset > 0) offset -= 1
+    return Math.max(0, offset)
+  },
+
+  hwpToolbarImage(detail) {
+    if (!detail || !detail.image_base64) return
+    const ref = this.hwpToolbarCaretRef() || this.resolveEndRef("end")
+    if (!ref) return
+
+    const size = this.hwpToolbarImageSize(detail, 8504)
+    const result = this.applyOneOp({
+      op: "insert_picture",
+      ref,
+      image_base64: detail.image_base64,
+      extension: detail.extension || "png",
+      natural_width_px: detail.natural_width_px || 0,
+      natural_height_px: detail.natural_height_px || 0,
+      width: size.width,
+      height: size.height,
+      description: detail.file_name || "image"
+    })
+
+    if (result && result.error) {
+      console.warn("[wasm-hwp] toolbar image failed", result.error)
+      return
+    }
+    this.finishAgentEdit(result && result.extra ? result.extra : {})
+  },
+
+  hwpToolbarCharRefs() {
+    if (this.hasSelection()) {
+      const sel = this.selection
+      const [start, end] = this.orderedSelection(sel)
+      const refs = []
+
+      for (let paragraph = start.paragraph; paragraph <= end.paragraph; paragraph++) {
+        const startOffset = paragraph === start.paragraph ? start.offset : 0
+        const endOffset = paragraph === end.paragraph
+          ? end.offset
+          : this.hwpToolbarParagraphLength(sel.section, paragraph, sel.cell)
+        if (endOffset <= startOffset) continue
+
+        const ref = this.hwpToolbarRef(sel.section, paragraph, startOffset, sel.cell)
+        ref.length = endOffset - startOffset
+        refs.push(ref)
+      }
+
+      if (refs.length) return refs
+    }
+
+    const caretRef = this.hwpToolbarCaretRef()
+    return caretRef ? [caretRef] : this.hwpToolbarDefaultRefs()
+  },
+
+  hwpToolbarDefaultRefs() {
+    if (!this.doc) return []
+
+    let sections = 1
+    try {
+      if (typeof this.doc.sectionCount === "function") {
+        sections = Math.max(1, Number(this.doc.sectionCount()) || 1)
+      }
+    } catch (_) {}
+
+    for (let section = 0; section < sections; section++) {
+      let paragraphs = 0
+      try { paragraphs = this.doc.getParagraphCount(section) } catch (_) {}
+      if (Number.isFinite(paragraphs) && paragraphs > 0) {
+        return [this.hwpToolbarRef(section, 0, 0, null)]
+      }
+    }
+
+    return []
+  },
+
+  hwpToolbarCaretRef() {
+    const c = this.caret
+    if (!c) return null
+    return this.hwpToolbarRef(c.section, c.paragraph, c.offset, c.cell)
+  },
+
+  hwpToolbarRef(section, paragraph, offset, cell) {
+    const ref = { section, paragraph, offset } as any
+    if (cell) {
+      ref.cell = {
+        parentParaIndex: cell.parentParaIndex,
+        controlIndex: cell.controlIndex,
+        cellIndex: cell.cellIndex,
+        cellParaIndex: paragraph
+      }
+      if (cell.cellPath) ref.cellPath = cell.cellPath
+    }
+    return ref
+  },
+
+  hwpToolbarParagraphLength(section, paragraph, cell) {
+    if (cell) {
+      const ref = this.hwpToolbarRef(section, paragraph, 0, cell)
+      return this.cellParagraphLength(ref, ref.cell, paragraph)
+    }
+    return this.paragraphLength(section, paragraph)
+  },
+
+  hwpToolbarImageSize(detail, maxUnit) {
+    const widthPx = Math.max(1, Number(detail.natural_width_px || 1))
+    const heightPx = Math.max(1, Number(detail.natural_height_px || 1))
+    const aspect = widthPx / heightPx
+
+    if (aspect >= 1) {
+      return {
+        width: maxUnit,
+        height: Math.max(1, Math.round(maxUnit / aspect))
+      }
+    }
+
+    return {
+      width: Math.max(1, Math.round(maxUnit * aspect)),
+      height: maxUnit
+    }
   },
 
   // Delete the active selection from the document and collapse the caret to the
@@ -1338,10 +1673,15 @@ const WasmHwpEditor = {
     this.paintPickedHighlights()
   },
 
-  // bindElementPickerTarget calls this on picker mode changes: leaving picker
-  // mode must erase the hover preview (picks are cleared by the picker module).
+  // bindElementPickerTarget calls this on picker mode changes: every transition
+  // starts with a blank hover preview. Picks persist independently.
   onElementPickerState(enabled) {
-    if (!enabled) this.setPickerHover(null)
+    if (this.pickerHoverRaf) {
+      cancelAnimationFrame(this.pickerHoverRaf)
+      this.pickerHoverRaf = null
+    }
+    this.pickerHoverEvent = null
+    this.setPickerHover(null)
   },
 
   // Refresh `cursorRect` from the engine for the current caret position. Used
@@ -2218,7 +2558,9 @@ const WasmHwpEditor = {
     const paragraph = Number(r.paragraph ?? r.paragraphIndex)
     if (!Number.isInteger(paragraph)) return null
     const offset = Number(r.offset ?? r.charOffset ?? 0)
-    const out = { section: Number.isInteger(section) ? section : 0, paragraph, offset: Number.isInteger(offset) ? offset : 0 }
+    const out = { section: Number.isInteger(section) ? section : 0, paragraph, offset: Number.isInteger(offset) ? offset : 0 } as any
+    const length = Number(r.length ?? r.len)
+    if (Number.isFinite(length) && length > 0) out.length = length
     const cellPath = this.normalizeCellPath(r.cellPath ?? r.cell_path)
     if (cellPath) {
       const last = cellPath[cellPath.length - 1]

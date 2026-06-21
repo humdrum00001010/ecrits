@@ -17,6 +17,8 @@ export const keyboardSubsystem = {
     this.onCompositionUpdate = e => this.handleCompositionUpdate(e)
     this.onCompositionEnd = e => this.handleCompositionEnd(e)
     this.onKeyDown = e => this.handleKeyDown(e)
+    this.onCopy = e => this.handleCopy(e)
+    this.onPaste = e => this.handlePaste(e)
 
     this.imeProxy.addEventListener("beforeinput", this.onBeforeInput)
     this.imeProxy.addEventListener("input", this.onInput)
@@ -24,6 +26,8 @@ export const keyboardSubsystem = {
     this.imeProxy.addEventListener("compositionupdate", this.onCompositionUpdate)
     this.imeProxy.addEventListener("compositionend", this.onCompositionEnd)
     this.imeProxy.addEventListener("keydown", this.onKeyDown)
+    this.imeProxy.addEventListener("copy", this.onCopy)
+    this.imeProxy.addEventListener("paste", this.onPaste)
   },
 
   unbindEditing() {
@@ -34,6 +38,8 @@ export const keyboardSubsystem = {
     this.imeProxy.removeEventListener("compositionupdate", this.onCompositionUpdate)
     this.imeProxy.removeEventListener("compositionend", this.onCompositionEnd)
     this.imeProxy.removeEventListener("keydown", this.onKeyDown)
+    this.imeProxy.removeEventListener("copy", this.onCopy)
+    this.imeProxy.removeEventListener("paste", this.onPaste)
   },
 
   // beforeinput lets us swallow the proxy's own echo (we never want the textarea
@@ -69,8 +75,9 @@ export const keyboardSubsystem = {
       const data = event.data != null ? event.data : this.imeProxy.value
       // Typing over a selection replaces it: delete the range, then insert.
       if (data) {
+        this.pushUndoCheckpoint()
         if (this.hasSelection()) this.deleteSelection()
-        this.insertAtCaret(data)
+        this.insertPlainTextAtCaret(data)
       }
     }
     // Always drain the proxy so it never accumulates state.
@@ -80,6 +87,7 @@ export const keyboardSubsystem = {
   // Korean IME — compositionstart arms a provisional (empty) region at the caret.
   handleCompositionStart(_event) {
     if (!this.doc || !this.caret) return
+    this.pushUndoCheckpoint()
     // Composing over a selection replaces it first.
     if (this.hasSelection()) this.deleteSelection()
     this.skipNextCompositionInput = null
@@ -243,7 +251,8 @@ export const keyboardSubsystem = {
     }
     if (!this.doc || !this.caret) return
     if (event.isComposing) return // IME owns the keystroke
-    if (event.metaKey || event.ctrlKey || event.altKey) return // shortcuts pass through
+    if (this.handleEditShortcut(event)) return
+    if (event.metaKey || event.ctrlKey || event.altKey) return // unhandled shortcuts pass through
     if (event.key === "Tab") {
       event.preventDefault()
       event.stopPropagation()
@@ -256,6 +265,7 @@ export const keyboardSubsystem = {
     if (this.hasSelection() &&
         (event.key === "Backspace" || event.key === "Delete" || event.key === "Enter")) {
       event.preventDefault()
+      this.pushUndoCheckpoint()
       this.deleteSelection()
       if (event.key === "Enter") this.splitAtCaret()
       return
@@ -264,14 +274,17 @@ export const keyboardSubsystem = {
     switch (event.key) {
       case "Backspace":
         event.preventDefault()
+        this.pushUndoCheckpoint()
         this.deleteBackward()
         break
       case "Delete":
         event.preventDefault()
+        this.pushUndoCheckpoint()
         this.deleteForward()
         break
       case "Enter":
         event.preventDefault()
+        this.pushUndoCheckpoint()
         this.splitAtCaret()
         break
       case "ArrowLeft":
@@ -297,6 +310,48 @@ export const keyboardSubsystem = {
       default:
         break
     }
+  },
+
+  handleEditShortcut(event) {
+    if (event.altKey || !(event.metaKey || event.ctrlKey)) return false
+    const key = String(event.key || "").toLowerCase()
+    const undo = key === "z" && !event.shiftKey
+    const redo = (key === "z" && event.shiftKey) || (key === "y" && event.ctrlKey && !event.metaKey)
+    if (!undo && !redo) return false
+    event.preventDefault()
+    event.stopPropagation()
+    if (redo) this.redoHistory()
+    else this.undoHistory()
+    if (this.imeProxy) this.imeProxy.value = ""
+    return true
+  },
+
+  handleCopy(event) {
+    const text = this.selectedText ? this.selectedText() : ""
+    if (!text || !event.clipboardData) return
+    event.preventDefault()
+    event.clipboardData.setData("text/plain", text)
+    if (this.imeProxy) this.imeProxy.value = ""
+  },
+
+  handlePaste(event) {
+    if (!this.doc || !this.caret) return
+    const text = event.clipboardData && event.clipboardData.getData("text/plain")
+    if (!text) return
+    event.preventDefault()
+    this.pushUndoCheckpoint()
+    if (this.hasSelection()) this.deleteSelection()
+    this.insertPlainTextAtCaret(text)
+  },
+
+  insertPlainTextAtCaret(text) {
+    const value = String(text || "").replace(/\r\n?/g, "\n")
+    if (!value) return
+    const parts = value.split("\n")
+    parts.forEach((part, index) => {
+      if (part) this.insertAtCaret(part)
+      if (index < parts.length - 1) this.splitAtCaret()
+    })
   },
 
   deleteBackward() {

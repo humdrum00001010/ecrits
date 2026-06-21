@@ -25,6 +25,7 @@ import {MarkdownEditor} from "./markdown_editor.js"
 import {ObservexPreview} from "./observex_preview.js"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+const LOCAL_EDITOR_COMMAND_EVENT = "ecrits:local-editor-command"
 
 const DirectR2Upload = {
   mounted() {
@@ -97,6 +98,117 @@ const DirectR2Upload = {
     const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer())
     return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")
   },
+}
+
+const LocalEditorToolbar = {
+  mounted() {
+    this.imageInput = this.el.querySelector("[data-role='local-editor-toolbar-image-input']")
+    this.onClick = event => this.handleClick(event)
+    this.onImageChange = event => this.handleImageChange(event)
+
+    this.el.addEventListener("click", this.onClick)
+    if (this.imageInput) this.imageInput.addEventListener("change", this.onImageChange)
+  },
+
+  destroyed() {
+    this.el.removeEventListener("click", this.onClick)
+    if (this.imageInput) this.imageInput.removeEventListener("change", this.onImageChange)
+  },
+
+  handleClick(event) {
+    const button = event.target.closest("[data-command]")
+    if (!button || !this.el.contains(button)) return
+
+    event.preventDefault()
+    const command = button.dataset.command
+    if (command === "image") {
+      if (this.imageInput) this.imageInput.click()
+      return
+    }
+
+    this.dispatchCommand(command)
+  },
+
+  async handleImageChange(event) {
+    const file = event.target.files?.[0]
+    event.target.value = ""
+    if (!file) return
+
+    try {
+      this.dispatchCommand("image", await this.imagePayload(file))
+    } catch (error) {
+      console.warn("[local-editor-toolbar] image command failed", error)
+    }
+  },
+
+  dispatchCommand(command, payload = {}) {
+    const documentId =
+      this.el.dataset.localDocumentId ||
+      this.el.closest("[data-local-document-id]")?.dataset.localDocumentId ||
+      ""
+
+    document.dispatchEvent(new CustomEvent(LOCAL_EDITOR_COMMAND_EVENT, {
+      detail: {
+        command,
+        source: "local-editor-toolbar",
+        document_id: documentId,
+        format: this.el.dataset.localDocumentFormat || "",
+        ...payload
+      }
+    }))
+  },
+
+  async imagePayload(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    const extension = this.fileExtension(file)
+    const image = await this.imageSize(file)
+    const imageBase64 = this.bytesToBase64(bytes)
+
+    return {
+      file_name: file.name || "image",
+      mime_type: file.type || "application/octet-stream",
+      extension,
+      bytes,
+      image_base64: imageBase64,
+      data_url: `data:${file.type || "application/octet-stream"};base64,${imageBase64}`,
+      natural_width_px: image.width,
+      natural_height_px: image.height
+    }
+  },
+
+  fileExtension(file) {
+    const name = String(file.name || "")
+    const ext = name.includes(".") ? name.split(".").pop().toLowerCase() : ""
+    if (ext) return ext
+    const subtype = String(file.type || "").split("/")[1] || "png"
+    return subtype.replace(/[^a-z0-9]/gi, "") || "png"
+  },
+
+  imageSize(file) {
+    return new Promise(resolve => {
+      const url = URL.createObjectURL(file)
+      const image = new Image()
+      const done = (value) => {
+        URL.revokeObjectURL(url)
+        resolve(value)
+      }
+      image.onload = () => done({
+        width: Math.max(1, Math.round(image.naturalWidth || 1)),
+        height: Math.max(1, Math.round(image.naturalHeight || 1))
+      })
+      image.onerror = () => done({width: 1, height: 1})
+      image.src = url
+    })
+  },
+
+  bytesToBase64(bytes) {
+    let binary = ""
+    const chunk = 0x8000
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk))
+    }
+    return btoa(binary)
+  }
 }
 
 const LocalChatRailResizer = {
@@ -227,6 +339,17 @@ const LocalChatRailResizer = {
   },
 
   handleLayoutClick(event) {
+    const fileRow = event.target.closest('a[data-role="repo-browser-row"][data-node-kind="file"][href]')
+    if (fileRow && this.el.contains(fileRow) && this.isPlainPrimaryClick(event)) {
+      const path = fileRow.dataset.nodePath
+      if (!path) return
+
+      event.preventDefault()
+      event.stopPropagation()
+      this.pushEvent("open_file", {path})
+      return
+    }
+
     const openDocument = event.target.closest('[data-role="mobile-open-document"]')
     if (openDocument && this.el.contains(openDocument)) {
       event.preventDefault()
@@ -263,6 +386,10 @@ const LocalChatRailResizer = {
       this.applyFileTreeCollapsed(false)
       this.normalizeLayout()
     }
+  },
+
+  isPlainPrimaryClick(event) {
+    return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
   },
 
   handleAgentMenuDocumentClick(event) {
@@ -508,7 +635,7 @@ const LocalChatRailResizer = {
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, DirectR2Upload, WasmHwpEditor, WasmOfficeEditor, MarkdownEditor, ObservexPreview, LocalChatRailResizer},
+  hooks: {...colocatedHooks, DirectR2Upload, LocalEditorToolbar, WasmHwpEditor, WasmOfficeEditor, MarkdownEditor, ObservexPreview, LocalChatRailResizer},
 })
 
 // Show progress bar on live navigation and form submits

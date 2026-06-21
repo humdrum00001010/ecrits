@@ -46,28 +46,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalMarkdownEditor do
       data-local-document-id={@document_id}
       data-local-document-format={@local_document_format}
     >
-      <%!-- Header with the single PREVIEW <-> SOURCE toggle. The button flips
-            which pane is visible (client-side; no server round-trip) and swaps
-            its own label — "Source" while previewing, "Preview" while editing. --%>
-      <header class="flex min-h-8 shrink-0 items-center justify-between border-b border-base-300 bg-base-200/60 px-3 text-[11px] font-medium uppercase tracking-wide text-base-content/55">
-        <span data-role="markdown-editor-mode">
-          <span data-mode-label="preview">Preview</span>
-          <span data-mode-label="source" class="hidden">Source</span>
-        </span>
-        <button
-          type="button"
-          data-role="markdown-editor-toggle"
-          phx-click={toggle_markdown_view(@id)}
-          class="rounded px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide text-base-content/70 hover:bg-base-300/60 hover:text-base-content"
-        >
-          <span data-toggle-label="preview" title="Edit source">
-            <.icon name="hero-code-bracket" class="size-4 align-middle" />
-          </span>
-          <span data-toggle-label="source" class="hidden" title="Show preview">
-            <.icon name="hero-eye" class="size-4 align-middle" />
-          </span>
-        </button>
-      </header>
+      <%!-- No header here: the PREVIEW <-> SOURCE toggle lives in the shared
+            quick toolbar (editor_surface.ex), which calls toggle_markdown_view/1
+            below. Both panes stay mounted; the toggle only flips visibility. --%>
 
       <%!-- Source pane: editable plain-text markdown. The hook seeds the value
             from data-initial-source, debounces input -> markdown.source_changed,
@@ -103,18 +84,26 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalMarkdownEditor do
     """
   end
 
-  # Single-pane PREVIEW <-> SOURCE toggle, run entirely client-side so it never
-  # touches the LiveView/document state: flip the `hidden` utility on the two
-  # panes (and the mode/toggle labels). Toggling the `hidden` class — rather than
-  # JS.toggle's inline `display` — is what lets the flex panes (`flex-1`) keep
-  # their natural display when shown.
-  defp toggle_markdown_view(id) do
+  @doc """
+  Single-pane PREVIEW <-> SOURCE toggle, run entirely client-side so it never
+  touches the LiveView/document state: flip the `hidden` utility on the two panes
+  (addressed by the `<id>-source` / `<id>-preview` element ids) and on the toggle
+  button's two icon labels. The button lives in the shared quick toolbar
+  (editor_surface.ex), outside this component's container, so the label icons are
+  addressed globally by their `data-role`/`data-toggle-label` rather than scoped
+  under the container id. Toggling the `hidden` class — rather than JS.toggle's
+  inline `display` — lets the flex panes (`flex-1`) keep their natural display
+  when shown.
+  """
+  def toggle_markdown_view(id) do
     %JS{}
     |> JS.toggle_class("hidden", to: "##{id}-source")
     |> JS.toggle_class("hidden", to: "##{id}-preview")
-    |> JS.toggle_class("hidden", to: "##{id} [data-mode-label='preview']")
-    |> JS.toggle_class("hidden", to: "##{id} [data-mode-label='source']")
-    |> JS.toggle_class("hidden", to: "##{id} [data-toggle-label='preview']")
-    |> JS.toggle_class("hidden", to: "##{id} [data-toggle-label='source']")
+    |> JS.toggle_class("hidden",
+      to: "[data-role='markdown-editor-toggle'] [data-toggle-label='preview']"
+    )
+    |> JS.toggle_class("hidden",
+      to: "[data-role='markdown-editor-toggle'] [data-toggle-label='source']"
+    )
   end
 end

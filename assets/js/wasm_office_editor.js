@@ -31,14 +31,31 @@
 // log the resolved surface so a missing/renamed export is a clear console error
 // (not a silent blank canvas).
 import { appendPickedElementToComposer, bindElementPickerTarget } from "./document_element_picker.js"
-import { rewriteOfficeOp } from "./wasm_office_ops"
+import { rewriteOfficeOp } from "./wasm_office_ops.ts"
 import {
   normalizeOfficeNearby as normalizeOfficeNearbyValue,
   officeReadRefCandidates as officeReadRefCandidatesValue,
   readOfficeElements,
-} from "./wasm_office_read"
+} from "./wasm_office_read.ts"
 
 const OFFICE_BASE = "/assets/office/"
+const LOCAL_EDITOR_COMMAND_EVENT = "ecrits:local-editor-command"
+const OFFICE_ELEMENT_METADATA_FIELDS = [
+  "sheet",
+  "address",
+  "display",
+  "value",
+  "value_type",
+  "valueType",
+  "formula",
+  "cached_value",
+  "cachedValue",
+  "formula_error",
+  "formulaError",
+  "number_format",
+  "numberFormat"
+]
+const OFFICE_FIND_TEXT_LIMIT = 48
 
 function withAssetVersion(url, version) {
   if (!version) return url
@@ -49,13 +66,25 @@ function officeAssetUrl(path, version) {
   return withAssetVersion(OFFICE_BASE + path, version)
 }
 
-// Module-level singleton: the Emscripten runtime is heavy (127MB wasm + 82MB
+// Module-level singleton: the Emscripten runtime is heavy (153MB wasm + 112MB
 // data) and pthread-based; we instantiate it ONCE per page load and share it
 // across hook instances.
 let runtimePromise = null
 let runtimeAssetVersion = null
 let runtimeModule = null
 let activeOfficeDocument = null
+let activeOfficeShortcutEditor = null
+// Global engine-load serializer + supersede tracking. The LOK runtime and the
+// `activeOfficeDocument` cache are a SINGLE module-global instance, but LiveView
+// remounts the hook on EVERY tab switch — so without a global lock two hook
+// instances fire concurrent loadFromBytes on the one engine (which corrupts it
+// and poisons every later load) and rapid switching piles up a backlog of
+// redundant re-imports of heavy decks (the "stuck on Loading…/Opening…" wedge).
+// Serialize all imports through one chain and drop superseded ones so a burst of
+// tab switches imports only the final document.
+let engineLoadChain = Promise.resolve()
+let latestRequestedUrl = null
+const RUNTIME_INIT_MAX_MS = 300000
 
 function runtimeReadyFor(assetVersion = "") {
   return !!runtimePromise && !!runtimeModule && runtimeAssetVersion === assetVersion
@@ -79,6 +108,26 @@ function closeCachedOfficeDocument() {
   } else if (cached.api && typeof cached.api.closeDocument === "function") {
     try { cached.api.closeDocument() } catch (_) {}
   }
+}
+
+// Serialize an engine import behind any in-flight one. `run` performs the actual
+// fetch + loadFromBytes and must populate `activeOfficeDocument` (the module
+// cache). The import is SKIPPED when the doc is already cached ("cached"), or
+// when a newer load has superseded this url ("superseded", rapid tab switching)
+// — collapsing a switch burst to a single import and guaranteeing the one LOK
+// engine never runs two loadFromBytes at once. Returns "loaded"/"cached"/
+// "superseded".
+function serializeEngineLoad(url, assetVersion, format, run) {
+  const link = engineLoadChain.then(async () => {
+    if (cachedDocumentMatches(url, assetVersion, format)) return "cached"
+    if (latestRequestedUrl !== url) return "superseded"
+    await run()
+    return "loaded"
+  })
+  // Keep the chain alive even if this link rejects, so one failed import can't
+  // wedge every later load.
+  engineLoadChain = link.then(() => {}, () => {})
+  return link
 }
 
 // Ring buffer of the last stderr/stdout lines. A WebAssembly `unreachable`
@@ -231,6 +280,35 @@ function ensureRuntime(assetVersion = "") {
       // "exit" (it parks in the emscripten main loop); don't let Emscripten
       // tear down the runtime.
       ignoreApplicationExit: true,
+      preRun: [
+        () => {
+          if (typeof Module.FS_createDataFile !== "function") return
+          const ensureParentDirs = (path) => {
+            if (typeof Module.FS_createPath !== "function") return
+            const parts = String(path).split("/").filter(Boolean)
+            let parent = "/"
+            for (const part of parts.slice(0, -1)) {
+              try { Module.FS_createPath(parent, part, true, true) } catch (_) {}
+              parent = parent === "/" ? "/" + part : parent + "/" + part
+            }
+          }
+          const createDataFile = Module.FS_createDataFile
+          Module.FS_createDataFile = function (parent, name, data, canRead, canWrite, canOwn) {
+            try {
+              return createDataFile.apply(this, arguments)
+            } catch (error) {
+              const path = name == null ? parent : String(parent).replace(/\/$/, "") + "/" + name
+              ensureParentDirs(path)
+              try {
+                return createDataFile.apply(this, arguments)
+              } catch (retryError) {
+                console.error("[office-wasm] FS_createDataFile failed", path, retryError)
+                throw retryError
+              }
+            }
+          }
+        }
+      ],
       // LOK-FULLY-READY gate (THE first-load fix). Our WASM main()
       // (desktop/source/app/main.c) runs libreofficekit_hook_2 -> lo_initialize,
       // which BLOCKS in RequestHandler::WaitForReady() until lo_startmain's
@@ -329,16 +407,16 @@ function ensureRuntime(assetVersion = "") {
     // libreofficekit_hook_2 -> lo_initialize fully returns (past WaitForReady /
     // InitVCL). uno_main fires too early (mid initialize_uno, before InitVCL) and
     // gating on it caused the first-load SolarMutexGuard OOB, so we poll
-    // lok_is_ready() instead. A grace fallback bounds the wait so a missing
-    // lok_is_ready export can never reproduce a 120s hang (the export being
-    // attached means the bindings are live; a real load failure self-reports).
+    // lok_is_ready() instead. A grace fallback is allowed only for older builds
+    // that do not expose lok_is_ready at all. If the export exists and reports
+    // false, keep waiting for the real ready signal instead of racing loadFromBytes.
     const GRACE_MS = 30000
     const probeUnoInit = () => {
       tlog("gating on lok_is_ready() (full-VCL-ready); export=", exportReady())
       setTimeout(() => {
         if (settled || unoReady) return
-        if (exportReady()) {
-          tlog("lok_is_ready() not true within " + GRACE_MS + "ms but export is live — proceeding")
+        if (exportReady() && typeof Module.lok_is_ready !== "function") {
+          tlog("lok_is_ready export missing after " + GRACE_MS + "ms; proceeding with legacy readiness gate")
           unoReady = true
           finish()
         }
@@ -346,7 +424,7 @@ function ensureRuntime(assetVersion = "") {
     }
 
     const POLL_INTERVAL_MS = 50
-    const POLL_MAX_MS = 120000 // 2 min: first instantiate of a 127MB wasm is slow
+    const POLL_MAX_MS = 180000
     Module.onRuntimeInitialized = () => {
       tlog("runtime initialized (wasm instantiated)")
       probeUnoInit()
@@ -399,13 +477,14 @@ function ensureRuntime(assetVersion = "") {
         ", crossOriginIsolated=" + self.crossOriginIsolated +
         ", SharedArrayBuffer=" + (typeof SharedArrayBuffer) + ")")
       fail(new Error(
-        "office WASM: runtime never initialized within 120s (wasm did not instantiate). " +
+        "office WASM: runtime never initialized within " + (RUNTIME_INIT_MAX_MS / 1000) +
+          "s (wasm did not instantiate). " +
           "crossOriginIsolated=" + self.crossOriginIsolated +
           ", SharedArrayBuffer=" + (typeof SharedArrayBuffer) +
-          ". This tab likely is not cross-origin isolated (needs COOP/COEP). Last engine output:\n" +
+          ". Last engine output:\n" +
           dumpLog()
       ))
-    }, 120000)
+    }, RUNTIME_INIT_MAX_MS)
 
     const script = document.createElement("script")
     script.src = glueUrl
@@ -518,6 +597,8 @@ const WasmOfficeEditor = {
     this.visible = new Set()
     this.renderQueue = new Map()
     this.renderQueueTimer = null
+    this.dragRenderPages = new Set()
+    this.dragRenderFrame = null
     this.scale = window.devicePixelRatio || 1
     // Deferred caret-settle bookkeeping (fixes the one-click-stale embind
     // hitTest — see placeCaret/settleCaretAfterHit).
@@ -537,15 +618,22 @@ const WasmOfficeEditor = {
     // True while an active LOK selection exists (so typing/keys know to let LOK
     // replace it and we know to repaint).
     this.hasActiveSelection = false
+    this.selectionVisual = null
     this.nativeTextEditReady = false
     this.nativeInteractionState = null
     this.elementPickerEnabled = false
+    this.pickerHoverTimer = null
+    this.pickerHoverLoc = null
+    this.pickerHoverCache = new Map()
     // True while the OS IME is composing (Korean). While composing, keydown and
     // the plain input path must NOT also post keys — the composition* path owns
     // the keystrokes (else Hangul double-inserts).
     this.composing = false
     this.skipNextCompositionInput = null
     this._compositionCommittedText = ""
+    this.spreadsheetEditBuffer = ""
+    this.spreadsheetEditTimer = null
+    this.spreadsheetKeyPostTimer = null
 
     this.pageStack = this.el.querySelector("[data-role='office-wasm-pages']")
     this.statusEl = this.el.querySelector("[data-role='office-wasm-status']")
@@ -608,10 +696,16 @@ const WasmOfficeEditor = {
     this.onMouseMove = event => this.onCanvasMouseMove(event)
     this.onMouseUp = event => this.onCanvasMouseUp(event)
     this.onDoubleClick = event => this.onCanvasDoubleClick(event)
+    this.onToolbarCommand = event => this.handleToolbarCommand(event.detail || {})
+    this.onDocumentKeyDown = event => this.handleDocumentKeyDown(event)
+    this.onDocumentPointerDown = event => this.handleDocumentPointerDown(event)
     this.el.addEventListener("mousedown", this.onMouseDown)
     this.el.addEventListener("dblclick", this.onDoubleClick)
     document.addEventListener("mousemove", this.onMouseMove)
     document.addEventListener("mouseup", this.onMouseUp)
+    document.addEventListener("keydown", this.onDocumentKeyDown, true)
+    document.addEventListener("mousedown", this.onDocumentPointerDown, true)
+    document.addEventListener(LOCAL_EDITOR_COMMAND_EVENT, this.onToolbarCommand)
 
     // Keyboard + Korean IME — bound to the hidden IME proxy (the OS-focused
     // editable element). Plain keys and composition both use the real LOK key
@@ -624,7 +718,6 @@ const WasmOfficeEditor = {
       if (this.caret) this.drawCaret()
     }, 530)
 
-    window.__officeWasmEditor = this
     this.unbindElementPicker = bindElementPickerTarget(this)
   },
 
@@ -633,6 +726,14 @@ const WasmOfficeEditor = {
     if (this.blink) clearInterval(this.blink)
     if (this._caretSettle) { clearTimeout(this._caretSettle); this._caretSettle = null }
     if (this.renderQueueTimer) { clearTimeout(this.renderQueueTimer); this.renderQueueTimer = null }
+    if (this.spreadsheetEditTimer) { clearTimeout(this.spreadsheetEditTimer); this.spreadsheetEditTimer = null }
+    if (this.spreadsheetKeyPostTimer) { clearTimeout(this.spreadsheetKeyPostTimer); this.spreadsheetKeyPostTimer = null }
+    if (this.dragRenderFrame) {
+      const caf = window.cancelAnimationFrame || clearTimeout
+      caf(this.dragRenderFrame)
+      this.dragRenderFrame = null
+    }
+    if (this.dragRenderPages) this.dragRenderPages.clear()
     if (this.pickerHoverTimer) { clearTimeout(this.pickerHoverTimer); this.pickerHoverTimer = null }
     if (this.renderQueue) this.renderQueue.clear()
     window.removeEventListener("resize", this.onResize)
@@ -640,12 +741,15 @@ const WasmOfficeEditor = {
     this.el.removeEventListener("dblclick", this.onDoubleClick)
     document.removeEventListener("mousemove", this.onMouseMove)
     document.removeEventListener("mouseup", this.onMouseUp)
+    document.removeEventListener("keydown", this.onDocumentKeyDown, true)
+    document.removeEventListener("mousedown", this.onDocumentPointerDown, true)
+    document.removeEventListener(LOCAL_EDITOR_COMMAND_EVENT, this.onToolbarCommand)
     if (this.unbindElementPicker) this.unbindElementPicker()
     this.unbindEditing()
+    if (activeOfficeShortcutEditor === this) activeOfficeShortcutEditor = null
     // Keep the loaded Office document attached to the module-level runtime cache.
     // LiveView remounts this hook while switching/reopening tabs; closing here
     // would force the next mount to fetch and import the same document again.
-    if (window.__officeWasmEditor === this) window.__officeWasmEditor = null
   },
 
   setInitialStatus(bytesUrl) {
@@ -667,6 +771,10 @@ const WasmOfficeEditor = {
   async loadDocument({ url, asset_version }) {
     this.officeAssetVersion = asset_version || this.el.dataset.officeAssetVersion || this.officeAssetVersion || ""
     if (this.loadedUrl === url && this.parts.length) return
+    // Record the most-recent load intent SYNCHRONOUSLY: the global serializer
+    // uses it to drop superseded imports when the user switches tabs faster than
+    // a heavy deck imports (see serializeEngineLoad).
+    latestRequestedUrl = url
     // Serialize loads: the hook fires loadDocument both on mount AND on the
     // server's `office_wasm_load` push, which can race two concurrent
     // (async, worker-dispatched) loadFromBytes for the same URL — overwriting
@@ -686,71 +794,66 @@ const WasmOfficeEditor = {
         this.api = resolveApi(Module)
         console.log("[office-wasm] API shape:", this.api.shape, this.api)
       }
+      // Fast path: the module cache already holds this exact doc (e.g. re-select
+      // the current tab) — attach its view without touching the engine.
       if (this.attachCachedDocument(url)) return
 
-      this.setStatus("Fetching document…")
-      const response = await fetch(url, { credentials: "same-origin" })
-      if (!response.ok) throw new Error(`document bytes HTTP ${response.status}`)
-      const bytes = new Uint8Array(await response.arrayBuffer())
+      this.setStatus(
+        runtimeReadyFor(this.officeAssetVersion)
+          ? "Opening document…"
+          : "Loading office engine… (large WASM, first load is slow)"
+      )
 
-      this.setStatus("Opening document…")
-      closeCachedOfficeDocument()
-      this.handle = null
-      await this.openWithBytes(Module, bytes)
-      this.loadedUrl = url
+      // The engine + activeOfficeDocument cache are a SINGLE shared instance, so
+      // run the actual import through the GLOBAL serializer: only one
+      // loadFromBytes runs at a time across all hook instances, and a superseded
+      // url is dropped so rapid tab switching can't pile up redundant re-imports.
+      const result = await serializeEngineLoad(url, this.officeAssetVersion, this.format, async () => {
+        this.setStatus("Fetching document…")
+        const response = await fetch(url, { credentials: "same-origin" })
+        if (!response.ok) throw new Error(`document bytes HTTP ${response.status}`)
+        const bytes = new Uint8Array(await response.arrayBuffer())
 
-      // Page rects (per-page document-twip rectangles) FIRST: queryParts needs
-      // them to build the page geometry for a Writer doc (whose getDocumentSize
-      // reports the WHOLE multi-page document, not one page — see queryParts).
-      this.pageRects = this.queryPageRects()
-      this.parts = this.queryParts()
-      this.caret = null
-      this.hasActiveSelection = false
-      this.nativeTextEditReady = false
-      this.nativeInteractionState = null
-      this.composing = false
-      console.log("[office-wasm] parts/geometry:", this.parts, "pageRects:", this.pageRects)
-      this.setStatus("")
-      this.loaded = true
-      // The browser becomes the doc's authority ONLY now that the model is
-      // actually loaded — the LiveView attaches the Session viewer on this
-      // event. Registering at tab-open routed doc.* calls to an editor that
-      // (e.g. in a non-isolated context) never loaded anything.
-      this.notifyViewerState(true)
-      this.rememberActiveDocument(url)
-      // A clean load clears any prior one-shot reload guard for this document.
-      try { sessionStorage.removeItem("office-wasm-retry:" + url) } catch (_) {}
-      this.buildPageStack()
-      this.renderVisiblePages()
+        this.setStatus("Opening document…")
+        closeCachedOfficeDocument()
+        this.handle = null
+        await this.openWithBytes(Module, bytes)
+        this.loadedUrl = url
+
+        // Page rects (per-page document-twip rectangles) FIRST: queryParts needs
+        // them to build the page geometry for a Writer doc (whose getDocumentSize
+        // reports the WHOLE multi-page document, not one page — see queryParts).
+        this.pageRects = this.queryPageRects()
+        this.parts = this.queryParts()
+        console.log("[office-wasm] parts/geometry:", this.parts, "pageRects:", this.pageRects)
+        this.rememberActiveDocument(url)
+      })
+
+      // After the (possibly long) serialized import the module cache holds `url`
+      // iff this load — or a concurrent one for the same doc — actually loaded
+      // it. attachCachedDocument then builds THIS hook's view from the cache
+      // (parts/geometry, caret reset, viewer-ready claim, page stack, render).
+      // If a newer navigation superseded us the cache holds a different doc:
+      // this hook is stale (the user moved on), so stop quietly WITHOUT claiming
+      // the doc.* viewer authority — the current doc's hook builds its own view.
+      if (!this.attachCachedDocument(url)) {
+        this.loaded = false
+        if (result === "superseded") this.setStatus("")
+        return
+      }
     } catch (error) {
       const dump = dumpLog()
       console.error("[office-wasm] load failed", error)
       if (dump) console.error("[office-wasm] last engine output:\n" + dump)
 
-      // A LOK init failure POISONS the heavy WASM runtime singleton for the WHOLE
-      // page session: once `ensure_office` fails, every later loadFromBytes short-
-      // circuits to "lok office init previously failed", masking the real first
-      // error. The runtime can't be re-instantiated in place — re-injecting the
-      // 144MB pthreads glue beside the dead instance risks a SharedArrayBuffer/OOM
-      // clash — so the only reliable recovery is a fresh page. Self-heal with ONE
-      // guarded full reload per document (sessionStorage guard => can never loop);
-      // if the load still fails after a clean reload, surface the error so the user
-      // isn't stuck in a reload cycle.
+      // A LOK init failure can poison the heavy WASM runtime singleton for the
+      // current page session. Do not auto-reload from the hook: in embedded,
+      // longpoll, or error-recovery contexts that can become a LiveView remount
+      // loop. Leave the page stable and report the failure instead.
       const msg = (error && error.message) || String(error)
       this.loaded = false
       this.notifyViewerState(false)
-      if (/cross-origin isolated/.test(msg)) {
-        const retryKey = "office-wasm-coi-retry:" + location.pathname + location.search
-        let alreadyRetried = false
-        try { alreadyRetried = !!sessionStorage.getItem(retryKey) } catch (_) {}
-
-        if (window.top === window && !alreadyRetried) {
-          try { sessionStorage.setItem(retryKey, "1") } catch (_) {}
-          this.setStatus("Reloading workspace to enable Office engine…")
-          setTimeout(() => location.reload(), 100)
-          return
-        }
-
+      if (/requires a cross-origin isolated workspace tab/.test(msg)) {
         this.setStatus(
           "Office WASM cannot load in this browser context: " + msg +
             " Open the workspace in a top-level tab and reload."
@@ -758,19 +861,9 @@ const WasmOfficeEditor = {
         return
       }
       const poisoned = /previously failed|importScripts|postMessage|abort\(|unreachable/i.test(msg + "\n" + dump)
-      const retryKey = "office-wasm-retry:" + url
-      let alreadyRetried = false
-      try { alreadyRetried = !!sessionStorage.getItem(retryKey) } catch (_) {}
-
-      if (poisoned && !alreadyRetried) {
-        try { sessionStorage.setItem(retryKey, "1") } catch (_) {}
-        this.setStatus("Office engine hit a failed state — reloading to recover…")
-        setTimeout(() => location.reload(), 1200)
-        return
-      }
-
       this.setStatus(
-        "Office WASM failed to load: " + msg + " — reload the page (Cmd/Ctrl+Shift+R) to retry."
+        "Office WASM failed to load: " + msg +
+          (poisoned ? " — reload the page (Cmd/Ctrl+Shift+R) to retry." : "")
       )
     }
     })()
@@ -792,9 +885,14 @@ const WasmOfficeEditor = {
     this.parts = activeOfficeDocument.parts.map((part) => ({ ...part }))
     this.caret = null
     this.hasActiveSelection = false
+    this.selectionVisual = null
+    window.__officeWasmSelectionVisual = null
     this.nativeTextEditReady = false
     this.nativeInteractionState = null
     this.composing = false
+    this.spreadsheetEditBuffer = ""
+    if (this.spreadsheetEditTimer) { clearTimeout(this.spreadsheetEditTimer); this.spreadsheetEditTimer = null }
+    if (this.spreadsheetKeyPostTimer) { clearTimeout(this.spreadsheetKeyPostTimer); this.spreadsheetKeyPostTimer = null }
     this.loaded = true
     this.notifyViewerState(true)
     this.setStatus("")
@@ -1197,6 +1295,9 @@ const WasmOfficeEditor = {
         overlay.height = pxH
       }
       this.rendered.set(index, true)
+      if (this.selectionVisual && this.selectionVisual.pages && this.selectionVisual.pages.has(index)) {
+        this.paintPickedHighlights()
+      }
       if (this.caret && this.caret.page - 1 === index) this.drawCaret()
     } catch (error) {
       console.error(`[office-wasm] renderPage(${index}) failed`, error)
@@ -1248,6 +1349,10 @@ const WasmOfficeEditor = {
   LOK_MOUSEEVENT_MOUSEBUTTONDOWN: 0,
   LOK_MOUSEEVENT_MOUSEBUTTONUP: 1,
   LOK_MOUSEEVENT_MOUSEMOVE: 2,
+  // LibreOfficeKitSetTextSelectionType
+  LOK_SETTEXTSELECTION_START: 0,
+  LOK_SETTEXTSELECTION_END: 1,
+  LOK_SETTEXTSELECTION_RESET: 2,
   // vcl mouse/key modifier bits.
   LOK_MOUSE_LEFT: 1,
   LOK_KEY_SHIFT: 0x1000,
@@ -1258,6 +1363,7 @@ const WasmOfficeEditor = {
   // `keyCode` arg is exactly these; `charCode` is the Unicode code point (and the
   // ASCII control char for Backspace/Delete/Enter, matching init.cxx usage).
   AWT_KEY: {
+    Y: 536, Z: 537,
     DOWN: 1024, UP: 1025, LEFT: 1026, RIGHT: 1027,
     HOME: 1028, END: 1029, PAGEUP: 1030, PAGEDOWN: 1031,
     RETURN: 1280, ESCAPE: 1281, TAB: 1282, BACKSPACE: 1283,
@@ -1299,6 +1405,10 @@ const WasmOfficeEditor = {
     return this.docType === 2 || this.docType === 3
   },
 
+  spreadsheetLikeDoc() {
+    return this.docType === 1
+  },
+
   nativeDoubleClickAvailable() {
     return (this.api.shape === "embind-class" && this.handle && typeof this.handle.doubleClick === "function") ||
       typeof this.api.doubleClick === "function"
@@ -1312,8 +1422,89 @@ const WasmOfficeEditor = {
     return mask
   },
 
+  nativeMousePage(loc) {
+    return this.spreadsheetLikeDoc() ? loc.pageIndex : loc.pageIndex + 1
+  },
+
   postNativeMouseEvent(type, loc, count = 1, buttons = this.LOK_MOUSE_LEFT, modifier = 0) {
-    this.callApi("postMouseEvent", type, loc.pageIndex + 1, loc.x, loc.y, count, buttons, modifier)
+    this.callApi("postMouseEvent", type, this.nativeMousePage(loc), loc.x, loc.y, count, buttons, modifier)
+  },
+
+  documentTwipPoint(loc) {
+    const rect = !this.presentationLikeDoc() && this.pageRects && this.pageRects[loc.pageIndex]
+    return {
+      x: Math.round((rect && Number(rect.x) || 0) + Number(loc.x || 0) * 1440 / 96),
+      y: Math.round((rect && Number(rect.y) || 0) + Number(loc.y || 0) * 1440 / 96)
+    }
+  },
+
+  postTextSelection(type, loc) {
+    const point = this.documentTwipPoint(loc)
+    const nativeType =
+      this.presentationLikeDoc() && type === this.LOK_SETTEXTSELECTION_RESET
+        ? this.LOK_SETTEXTSELECTION_START
+        : type
+    this.callApi("setTextSelection", nativeType, point.x, point.y)
+  },
+
+  presentationTextSelectionDragReady() {
+    if (!this.presentationLikeDoc() || !this.hasApiMethod("setTextSelection")) return false
+    try {
+      if (this.hasApiMethod("isTextEditActive") && this.callApi("isTextEditActive") === true) {
+        this.nativeTextEditReady = true
+        return true
+      }
+    } catch (error) {
+      console.error("[office-wasm] isTextEditActive failed", error)
+    }
+    return this.nativeTextEditReady === true && this.nativeCursorTargetReady()
+  },
+
+  textSelectionDragReady() {
+    if (!this.hasApiMethod("setTextSelection")) return false
+    if (this.spreadsheetLikeDoc()) return false
+    return this.presentationLikeDoc() ? this.presentationTextSelectionDragReady() : false
+  },
+
+  preparePresentationTextDrag(ds) {
+    if (!this.presentationLikeDoc() || !this.hasApiMethod("setTextSelection")) return false
+    if (this.presentationTextSelectionDragReady()) return true
+    if (!this.api || typeof this.api.resolveRef !== "function" || !ds || !ds.startLoc) return false
+    let pick = null
+    ds.textTarget = false
+    try {
+      pick = this.officeResolveAt(ds.startLoc, true)
+      ds.visualProbe = pick
+    } catch (error) {
+      console.error("[office-wasm] resolveRef(commit) before text drag failed", error)
+      return false
+    }
+    if (this.presentationTextSelectionDragReady()) return true
+
+    const activationLoc = this.presentationTextActivationLoc(pick)
+    if (activationLoc) ds.textTarget = true
+    if (!activationLoc || !this.hasApiMethod("doubleClick")) return false
+
+    try {
+      this.callApi("doubleClick", activationLoc.pageIndex + 1, activationLoc.x, activationLoc.y)
+    } catch (error) {
+      console.error("[office-wasm] doubleClick before text drag failed", error)
+      return false
+    }
+
+    ds.textActivationStarted = true
+    return this.presentationTextSelectionDragReady()
+  },
+
+  presentationTextActivationLoc(pick) {
+    if (!pick || !String(pick.text || "").trim()) return null
+    const rect = Array.isArray(pick.rects) ? pick.rects[0] : null
+    if (!rect) return null
+    const x = Number(rect.x) + Number(rect.width) / 2
+    const y = Number(rect.y) + Number(rect.height) / 2
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    const pageIndex = Number.isFinite(Number(rect.pageIndex)) ? Number(rect.pageIndex) : 0
+    return { pageIndex, x, y }
   },
 
   nativeCursorTargetReady() {
@@ -1327,6 +1518,42 @@ const WasmOfficeEditor = {
       }
     } catch (_) {}
     return false
+  },
+
+  queuePresentationTextSelection(ds, loc) {
+    if (!ds) return
+    if (loc) ds.pendingTextSelectionLoc = loc
+    if (ds.textSelectionFrame) return
+    const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16))
+    ds.textSelectionFrame = raf(() => this.drainPresentationTextSelection(ds))
+  },
+
+  drainPresentationTextSelection(ds) {
+    ds.textSelectionFrame = null
+    if (!ds || !this.api || !ds.startLoc) return
+    if (!this.presentationTextSelectionDragReady()) {
+      ds.textSelectionAttempts = (ds.textSelectionAttempts || 0) + 1
+      if (ds.textSelectionAttempts < 12) {
+        this.queuePresentationTextSelection(ds, ds.pendingTextSelectionLoc || ds.lastLoc)
+      }
+      return
+    }
+
+    const loc = ds.pendingTextSelectionLoc || ds.lastLoc
+    if (!loc) return
+
+    try {
+      ds.mode = "text"
+      this.postTextSelection(this.LOK_SETTEXTSELECTION_RESET, ds.startLoc)
+      this.postTextSelection(this.LOK_SETTEXTSELECTION_END, loc)
+      ds.selectionStarted = true
+      this.hasActiveSelection = true
+      this.requestDragRenderPage(ds.page)
+      if (loc.pageIndex !== ds.page) this.requestDragRenderPage(loc.pageIndex)
+      if (ds.released) this.settleAfterMouseSelection(ds.page)
+    } catch (error) {
+      console.error("[office-wasm] deferred setTextSelection failed", error)
+    }
   },
 
   readNativeInteractionState() {
@@ -1394,8 +1621,10 @@ const WasmOfficeEditor = {
 
   onCanvasMouseDown(event) {
     if (event.button !== 0 || !this.api || !this.parts.length) return
+    if (this.spreadsheetLikeDoc()) this.flushSpreadsheetTextInput()
     const loc = this.eventToPageLocal(event)
     if (!loc) return
+    this.activateKeyboardShortcuts()
 
     if (this.elementPickerEnabled) {
       event.preventDefault()
@@ -1412,6 +1641,7 @@ const WasmOfficeEditor = {
     // Impress table-cell selection that desktop LibreOffice creates on double
     // click.
     if (event.detail > 1) {
+      if (this.suppressPresentationTableDoubleClick(event, loc)) return
       this.activateDoubleClick(loc)
       if (event.cancelable) event.preventDefault()
       if (this.imeProxy) this.imeProxy.focus({ preventScroll: true })
@@ -1419,24 +1649,42 @@ const WasmOfficeEditor = {
     }
 
     const modifier = this.lokModifierMask(event)
+    const dragMode = this.textSelectionDragReady()
+      ? "text"
+      : this.presentationLikeDoc()
+        ? "pending"
+        : "native"
+    const visualProbe = null
     try {
-      this.postNativeMouseEvent(
-        this.LOK_MOUSEEVENT_MOUSEBUTTONDOWN,
-        loc,
-        1,
-        this.LOK_MOUSE_LEFT,
-        modifier
-      )
+      if (dragMode === "text") {
+        this.postTextSelection(this.LOK_SETTEXTSELECTION_RESET, loc)
+      } else if (dragMode === "native") {
+        this.postNativeMouseEvent(
+          this.LOK_MOUSEEVENT_MOUSEBUTTONDOWN,
+          loc,
+          1,
+          this.LOK_MOUSE_LEFT,
+          modifier
+        )
+      }
     } catch (error) {
-      console.error("[office-wasm] postMouseEvent(DOWN) failed", error)
+      console.error(
+        dragMode === "text"
+          ? "[office-wasm] setTextSelection(RESET) failed"
+          : "[office-wasm] postMouseEvent(DOWN) failed",
+        error
+      )
       return
     }
 
     this.dragSelect = {
+      mode: dragMode,
       page: loc.pageIndex,
       startX: loc.x,
       startY: loc.y,
+      startLoc: loc,
       lastLoc: loc,
+      visualProbe,
       moved: false,
       selectionStarted: false,
       modifier
@@ -1475,24 +1723,61 @@ const WasmOfficeEditor = {
     ds.lastLoc = loc
     if (!ds.moved) return
     try {
-      this.postNativeMouseEvent(
-        this.LOK_MOUSEEVENT_MOUSEMOVE,
-        loc,
-        1,
-        this.LOK_MOUSE_LEFT,
-        ds.modifier
-      )
+      if (ds.mode === "pending") {
+        if (this.preparePresentationTextDrag(ds)) {
+          ds.mode = "text"
+          this.postTextSelection(this.LOK_SETTEXTSELECTION_RESET, ds.startLoc)
+          this.postTextSelection(this.LOK_SETTEXTSELECTION_END, loc)
+        } else if (ds.textActivationStarted) {
+          ds.mode = "text-activating"
+          this.queuePresentationTextSelection(ds, loc)
+        } else if (ds.textTarget) {
+          ds.mode = "text-blocked"
+        } else {
+          ds.mode = "native"
+          this.postNativeMouseEvent(
+            this.LOK_MOUSEEVENT_MOUSEBUTTONDOWN,
+            ds.startLoc,
+            1,
+            this.LOK_MOUSE_LEFT,
+            ds.modifier
+          )
+          this.postNativeMouseEvent(
+            this.LOK_MOUSEEVENT_MOUSEMOVE,
+            loc,
+            1,
+            this.LOK_MOUSE_LEFT,
+            ds.modifier
+          )
+      }
+      } else if (ds.mode === "text") {
+        this.postTextSelection(this.LOK_SETTEXTSELECTION_END, loc)
+      } else if (ds.mode === "text-activating") {
+        this.queuePresentationTextSelection(ds, loc)
+      } else if (ds.mode === "text-blocked") {
+        // Strict text-target drag: no object-drag substitution.
+      } else {
+        this.postNativeMouseEvent(
+          this.LOK_MOUSEEVENT_MOUSEMOVE,
+          loc,
+          1,
+          this.LOK_MOUSE_LEFT,
+          ds.modifier
+        )
+      }
       ds.selectionStarted = true
+      this.updateSelectionVisual(ds, loc, true)
     } catch (error) {
-      console.error("[office-wasm] postMouseEvent(MOVE) failed", error)
+      console.error(
+        ds.mode === "text"
+          ? "[office-wasm] setTextSelection(END) failed"
+          : "[office-wasm] postMouseEvent(MOVE) failed",
+        error
+      )
     }
     this.hasActiveSelection = true
-    // LOK paints the selection highlight INTO the tile, so re-paint the affected
-    // page(s) to reveal it, then refresh + redraw the caret on top.
-    this.renderPage(ds.page, { force: true })
-    if (loc.pageIndex !== ds.page) this.renderPage(loc.pageIndex, { force: true })
-    this.refreshCaret()
-    this.anchorProxy()
+    this.requestDragRenderPage(ds.page)
+    if (loc.pageIndex !== ds.page) this.requestDragRenderPage(loc.pageIndex)
     if (event.cancelable) event.preventDefault()
   },
 
@@ -1503,15 +1788,57 @@ const WasmOfficeEditor = {
     const loc = this.eventToPageLocal(event, ds.page) || ds.lastLoc
     if (loc) {
       try {
-        this.postNativeMouseEvent(
-          this.LOK_MOUSEEVENT_MOUSEBUTTONUP,
-          loc,
-          1,
-          this.LOK_MOUSE_LEFT,
-          ds.modifier
-        )
+        if (ds.mode === "pending") {
+          if (ds.moved && this.preparePresentationTextDrag(ds)) {
+            ds.mode = "text"
+            this.postTextSelection(this.LOK_SETTEXTSELECTION_RESET, ds.startLoc)
+            this.postTextSelection(this.LOK_SETTEXTSELECTION_END, loc)
+          } else if (ds.textActivationStarted) {
+            ds.mode = "text-activating"
+            ds.released = true
+            this.queuePresentationTextSelection(ds, loc)
+          } else if (ds.textTarget) {
+            ds.mode = "text-blocked"
+          } else {
+            ds.mode = "native"
+            this.postNativeMouseEvent(
+              this.LOK_MOUSEEVENT_MOUSEBUTTONDOWN,
+              ds.startLoc,
+              1,
+              this.LOK_MOUSE_LEFT,
+              ds.modifier
+            )
+            this.postNativeMouseEvent(
+              this.LOK_MOUSEEVENT_MOUSEBUTTONUP,
+              loc,
+              1,
+              this.LOK_MOUSE_LEFT,
+              ds.modifier
+            )
+          }
+        } else if (ds.mode === "text" && ds.moved) {
+          this.postTextSelection(this.LOK_SETTEXTSELECTION_END, loc)
+        } else if (ds.mode === "text-activating") {
+          ds.released = true
+          this.queuePresentationTextSelection(ds, loc)
+        } else if (ds.mode === "text-blocked") {
+          // Strict text-target drag: no object-drag substitution.
+        } else if (ds.mode !== "text") {
+          this.postNativeMouseEvent(
+            this.LOK_MOUSEEVENT_MOUSEBUTTONUP,
+            loc,
+            1,
+            this.LOK_MOUSE_LEFT,
+            ds.modifier
+          )
+        }
       } catch (error) {
-        console.error("[office-wasm] postMouseEvent(UP) failed", error)
+        console.error(
+          ds.mode === "text"
+            ? "[office-wasm] setTextSelection(END on mouseup) failed"
+            : "[office-wasm] postMouseEvent(UP) failed",
+          error
+        )
       }
     }
     if (!ds.moved) {
@@ -1522,6 +1849,7 @@ const WasmOfficeEditor = {
       this.hasActiveSelection = true
       this.renderPage(ds.page, { force: true })
       if (loc && loc.pageIndex !== ds.page) this.renderPage(loc.pageIndex, { force: true })
+      this.updateSelectionVisual(ds, loc, false)
       this.settleAfterMouseSelection(ds.page)
     }
     if (this.imeProxy) {
@@ -1531,10 +1859,30 @@ const WasmOfficeEditor = {
     if (event.cancelable) event.preventDefault()
   },
 
+  requestDragRenderPage(index) {
+    if (!this.api || typeof index !== "number") return
+    if (!this.dragRenderPages) this.dragRenderPages = new Set()
+    this.dragRenderPages.add(index)
+    if (this.dragRenderFrame) return
+    const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16))
+    this.dragRenderFrame = raf(() => this.drainDragRenderPages())
+  },
+
+  drainDragRenderPages() {
+    this.dragRenderFrame = null
+    if (!this.dragRenderPages || !this.dragRenderPages.size) return
+    const pages = Array.from(this.dragRenderPages)
+    this.dragRenderPages.clear()
+    for (const page of pages) this.renderPage(page, { force: true })
+  },
+
   onCanvasDoubleClick(event) {
     if (!this.api || !this.parts.length) return
     const loc = this.eventToPageLocal(event)
     if (!loc) return
+    this.activateKeyboardShortcuts()
+
+    if (this.suppressPresentationTableDoubleClick(event, loc)) return
 
     if (this.recentDoubleActivation(loc)) {
       if (event.cancelable) event.preventDefault()
@@ -1543,6 +1891,26 @@ const WasmOfficeEditor = {
 
     this.activateDoubleClick(loc)
     if (event.cancelable) event.preventDefault()
+  },
+
+  suppressPresentationTableDoubleClick(event, loc) {
+    if (!this.presentationLikeDoc() || !this.presentationTableAtPoint(loc)) return false
+    if (event.cancelable) event.preventDefault()
+    event.stopPropagation()
+    if (this.imeProxy) this.imeProxy.focus({ preventScroll: true })
+    return true
+  },
+
+  presentationTableAtPoint(loc) {
+    let pick = null
+    try {
+      pick = this.officeResolveAt(loc, false)
+    } catch (_) {
+      return false
+    }
+    const ref = String(pick && pick.ref || "")
+    const type = String(pick && pick.type || "")
+    return /table/i.test(type) || /shape\[table/i.test(ref)
   },
 
   recentDoubleActivation(loc) {
@@ -1795,7 +2163,13 @@ const WasmOfficeEditor = {
       this.refreshCaret()
       try {
         const selected = this.callApi("getTextSelection", "text/plain;charset=utf-8")
-        this.hasActiveSelection = this.hasActiveSelection || !!selected
+        const hasSelection = !!String(selected || "").replace(/\0/g, "")
+        this.hasActiveSelection = this.hasActiveSelection || hasSelection
+        if (hasSelection) {
+          this.confirmSelectionVisual()
+        } else if (tries > 1) {
+          this.clearSelectionVisual()
+        }
       } catch (_) {}
       if (++tries < 6) this._caretSettle = setTimeout(tick, 40)
     }
@@ -1844,6 +2218,20 @@ const WasmOfficeEditor = {
     }
   },
 
+  paintCaretOnPage(pageIndex) {
+    const c = this.caret
+    if (!c || c.page - 1 !== pageIndex || !this.caretBlinkOn) return
+    const overlay = this.caretOverlay(pageIndex)
+    if (!overlay) return
+    const ctx = overlay.getContext("2d")
+    if (!ctx) return
+    const logical = this.pageLogicalSize(pageIndex)
+    const sx = overlay.width / logical.width
+    const sy = overlay.height / logical.height
+    ctx.fillStyle = "#1d4ed8"
+    ctx.fillRect(c.x * sx, c.y * sy, 1.5 * sx, Math.max(8, c.height || 16) * sy)
+  },
+
   // Draw the blinking caret on its page's overlay (page-local px scaled to the
   // overlay backing store == page canvas size). Clears every overlay first so a
   // caret that moved to a new page never leaves a stale one behind.
@@ -1854,31 +2242,166 @@ const WasmOfficeEditor = {
     // The caret blink clears EVERY overlay — restore the element-picker
     // highlights before the caret so picks survive the blink cycle.
     this.paintAllAdornments()
-    const overlay = this.caretOverlay(c.page - 1)
-    if (!overlay) return
-    const ctx = overlay.getContext("2d")
-    if (!ctx) return
-    const logical = this.pageLogicalSize(c.page - 1)
-    const sx = overlay.width / logical.width
-    const sy = overlay.height / logical.height
-    if (!this.caretBlinkOn) return
-    ctx.fillStyle = "#1d4ed8"
-    ctx.fillRect(c.x * sx, c.y * sy, 1.5 * sx, Math.max(8, c.height || 16) * sy)
+    this.paintCaretOnPage(c.page - 1)
+  },
+
+  selectionVisualProbe(loc) {
+    if (!loc || !this.api || typeof this.api.resolveRef !== "function") return null
+    try {
+      const pick = this.officeResolveAt(loc, false)
+      if (!pick || !Array.isArray(pick.rects) || !pick.rects.length) return null
+      return pick
+    } catch (_) {
+      return null
+    }
+  },
+
+  selectionLineRectForLoc(loc, probe) {
+    if (!loc || !probe || !Array.isArray(probe.rects) || !probe.rects.length) return null
+    let best = null
+    let bestDistance = Infinity
+    for (const rect of probe.rects) {
+      if ((rect.pageIndex ?? 0) !== loc.pageIndex) continue
+      const top = Number(rect.y)
+      const height = Number(rect.height)
+      const bottom = top + height
+      const distance = loc.y >= top && loc.y <= bottom
+        ? 0
+        : Math.min(Math.abs(loc.y - top), Math.abs(loc.y - bottom))
+      if (distance < bestDistance) {
+        best = rect
+        bestDistance = distance
+      }
+    }
+    return best
+  },
+
+  selectionVisualRects(ds, loc) {
+    if (!ds || !ds.startLoc || !loc) return []
+    if (ds.startLoc.pageIndex !== loc.pageIndex) return []
+
+    const startProbe = ds.visualProbe || null
+    const endProbe = startProbe
+    const startLine = this.selectionLineRectForLoc(ds.startLoc, startProbe)
+    const endLine = this.selectionLineRectForLoc(loc, endProbe)
+
+    const pageIndex = loc.pageIndex
+    if (startLine && endLine) {
+      const sameLine = Math.abs(Number(startLine.y) - Number(endLine.y)) <=
+        Math.max(Number(startLine.height) || 16, Number(endLine.height) || 16)
+      if (sameLine) {
+        const left = Math.max(Number(startLine.x), Math.min(ds.startLoc.x, loc.x))
+        const right = Math.min(
+          Number(startLine.x) + Number(startLine.width),
+          Math.max(ds.startLoc.x, loc.x)
+        )
+        if (right > left) {
+          return [{
+            pageIndex,
+            x: left,
+            y: Number(startLine.y),
+            width: right - left,
+            height: Number(startLine.height) || 16
+          }]
+        }
+      }
+
+      const first = Number(startLine.y) <= Number(endLine.y) ? startLine : endLine
+      const last = first === startLine ? endLine : startLine
+      const startLoc = first === startLine ? ds.startLoc : loc
+      const endLoc = first === startLine ? loc : ds.startLoc
+      const rects = []
+      const firstRight = Number(first.x) + Number(first.width)
+      const firstLeft = Math.max(Number(first.x), Math.min(firstRight, startLoc.x))
+      if (firstRight > firstLeft) {
+        rects.push({
+          pageIndex,
+          x: firstLeft,
+          y: Number(first.y),
+          width: firstRight - firstLeft,
+          height: Number(first.height) || 16
+        })
+      }
+      const lastLeft = Number(last.x)
+      const lastRight = Math.min(Number(last.x) + Number(last.width), Math.max(lastLeft, endLoc.x))
+      if (lastRight > lastLeft) {
+        rects.push({
+          pageIndex,
+          x: lastLeft,
+          y: Number(last.y),
+          width: lastRight - lastLeft,
+          height: Number(last.height) || 16
+        })
+      }
+      return rects
+    }
+
+    const height = Math.max(12, Math.abs(loc.y - ds.startLoc.y) || 16)
+    return [{
+      pageIndex,
+      x: Math.min(ds.startLoc.x, loc.x),
+      y: Math.min(ds.startLoc.y, loc.y) - height / 2,
+      width: Math.abs(loc.x - ds.startLoc.x),
+      height
+    }].filter(rect => rect.width > 0)
+  },
+
+  setSelectionVisual(rects, confirmed = false) {
+    if (!rects || !rects.length) {
+      this.clearSelectionVisual()
+      return
+    }
+    const pages = new Set(rects.map(rect => rect.pageIndex ?? 0))
+    this.selectionVisual = { rects, pages, confirmed }
+    window.__officeWasmSelectionVisual = {
+      rects,
+      pages: Array.from(pages),
+      confirmed
+    }
+    this.paintPickedHighlights()
+  },
+
+  updateSelectionVisual(ds, loc, provisional) {
+    const rects = this.selectionVisualRects(ds, loc)
+    if (!rects.length) return
+    this.setSelectionVisual(rects, !provisional)
+  },
+
+  confirmSelectionVisual() {
+    if (!this.selectionVisual) return
+    this.selectionVisual.confirmed = true
+    window.__officeWasmSelectionVisual = {
+      rects: this.selectionVisual.rects,
+      pages: Array.from(this.selectionVisual.pages || []),
+      confirmed: true
+    }
+    this.paintPickedHighlights()
+  },
+
+  clearSelectionVisual() {
+    if (!this.selectionVisual) {
+      window.__officeWasmSelectionVisual = null
+      return
+    }
+    this.selectionVisual = null
+    window.__officeWasmSelectionVisual = null
+    this.paintPickedHighlights()
   },
 
   // ─── Element picker (docx/pptx in the browser) ────────────────────────────
 
-  // Resolve the clicked element via the wasm `hitRef` export: a real LOK click
-  // (caret/selection placement) followed by UNO view-state resolution to the
-  // SAME ref grammar the doc.* tools address (p<idx>, tbl[..]/cell[..],
-  // img[..], page[..]/shape[..]). getElements() carries no layout geometry, so
-  // hitRef is the only reliable pixel->ref mapping; on an older wasm build
-  // (no export) picking is disabled instead of guessing a wrong element.
+  // Resolve the clicked element through the same read-only probe used by hover.
+  // The picker must not post a native LOK click: Impress table clicks enter table
+  // edit state asynchronously after the resolver returns, which can wedge the
+  // browser tab while the picker keeps probing. getElements() carries no layout
+  // geometry, so resolveRef/hitRef is still the pixel->ref mapping; on an older
+  // wasm build (no export) picking is disabled instead of guessing a wrong element.
   officePickAtPoint(loc) {
-    return this.officeResolveAt(loc, true)
+    return this.officeResolveAt(loc, false)
   },
 
-  // commit=true: a click-pick (caret lands at the click, like a user click).
+  // commit=true: native-click compatibility for direct callers (caret lands at
+  // the click, like a user click). The picker intentionally uses commit=false.
   // commit=false: a hover probe — resolveRef restores the previous
   // caret/selection so sweeping the pointer never steals the editing state.
   officeResolveAt(loc, commit) {
@@ -1929,7 +2452,7 @@ const WasmOfficeEditor = {
         width: Number(hit.bounds.width),
         height: Number(hit.bounds.height)
       })
-    } else if (hit.caret && Number.isFinite(Number(hit.caret.x))) {
+    } else if (hit.caret && hit.caret.ok !== false && Number.isFinite(Number(hit.caret.x))) {
       const h = Number(hit.caret.height) || 14
       const page = Number.isFinite(Number(hit.caret.page))
         ? Number(hit.caret.page) - 1
@@ -1960,43 +2483,35 @@ const WasmOfficeEditor = {
   },
 
   // ─── Picker hover preview (DOM-inspector style) ───────────────────────────
-  // With the resolveRef export the probe restores the user's caret/selection
-  // itself, so hover can TRACK the pointer (throttled ~90 ms — each probe is a
-  // synchronous click+resolve+restore on the LO main thread; 60 Hz would be
-  // wasteful). The legacy hitRef fallback has no restore (a probe steals the
-  // caret like a click), so it keeps the conservative ~140 ms dwell gate.
+  // Hover is intentionally dwell-based. resolveRef is synchronous on the
+  // LibreOffice main thread, and running it while the pointer is moving makes
+  // the picker feel stuck on larger decks. Click-pick remains immediate and
+  // precise; hover is a preview only.
   queuePickerHover(event) {
-    this.pickerHoverEvent = event
+    const loc = this.eventToPageLocal(event)
+    this.pickerHoverLoc = loc
 
     // Off every page canvas: clear immediately rather than after the delay.
-    if (!this.eventToPageLocal(event)) {
+    if (!loc) {
       if (this.pickerHoverTimer) clearTimeout(this.pickerHoverTimer)
       this.pickerHoverTimer = null
       this.setPickerHover(null)
       return
     }
 
-    const tracking = this.api && typeof this.api.resolveRef === "function"
-    if (tracking) {
-      // Throttle, leading-edge-ish: a probe is already due — let it sample the
-      // latest pickerHoverEvent when it fires.
-      if (this.pickerHoverTimer) return
-      const since = performance.now() - (this.pickerHoverAt || 0)
-      const wait = Math.max(0, 90 - since)
-      this.pickerHoverTimer = setTimeout(() => {
-        this.pickerHoverTimer = null
-        this.pickerHoverAt = performance.now()
-        this.updatePickerHover(this.pickerHoverEvent)
-      }, wait)
+    const cached = this.cachedPickerHover(loc)
+    if (cached !== undefined) {
+      if (this.pickerHoverTimer) clearTimeout(this.pickerHoverTimer)
+      this.pickerHoverTimer = null
+      this.applyPickerHoverProbe(cached)
       return
     }
 
-    // Legacy dwell: re-arm on every move so the probe fires only on a pause.
     if (this.pickerHoverTimer) clearTimeout(this.pickerHoverTimer)
     this.pickerHoverTimer = setTimeout(() => {
       this.pickerHoverTimer = null
-      this.updatePickerHover(this.pickerHoverEvent)
-    }, 140)
+      this.updatePickerHoverAt(this.pickerHoverLoc)
+    }, this.pickerHoverDelay())
   },
 
   updatePickerHover(event) {
@@ -2009,7 +2524,20 @@ const WasmOfficeEditor = {
       this.setPickerHover(null)
       return
     }
+    this.updatePickerHoverAt(loc)
+  },
+
+  updatePickerHoverAt(loc) {
+    if (!this.elementPickerEnabled || !this.api || !loc) {
+      this.setPickerHover(null)
+      return
+    }
     const probe = this.officeResolveAt(loc, false)
+    this.rememberPickerHover(loc, probe)
+    this.applyPickerHoverProbe(probe)
+  },
+
+  applyPickerHoverProbe(probe) {
     if (!probe || !(probe.rects || []).length) {
       this.setPickerHover(null)
       return
@@ -2018,27 +2546,52 @@ const WasmOfficeEditor = {
     this.setPickerHover({ key: probe.ref, rects: probe.rects })
   },
 
+  pickerHoverDelay() {
+    return this.api && typeof this.api.resolveRef === "function" ? 180 : 240
+  },
+
+  pickerHoverKey(loc) {
+    return `${loc.pageIndex}:${Math.floor(loc.x / 8)}:${Math.floor(loc.y / 8)}`
+  },
+
+  cachedPickerHover(loc) {
+    if (!this.pickerHoverCache) return undefined
+    const key = this.pickerHoverKey(loc)
+    return this.pickerHoverCache.has(key) ? this.pickerHoverCache.get(key) : undefined
+  },
+
+  rememberPickerHover(loc, probe) {
+    if (!this.pickerHoverCache) this.pickerHoverCache = new Map()
+    const key = this.pickerHoverKey(loc)
+    this.pickerHoverCache.set(key, probe || null)
+    if (this.pickerHoverCache.size > 300) {
+      const first = this.pickerHoverCache.keys().next().value
+      if (first !== undefined) this.pickerHoverCache.delete(first)
+    }
+  },
+
   setPickerHover(hover) {
     if (!hover && !this.pickerHover) return
     this.pickerHover = hover
     this.paintPickedHighlights()
   },
 
-  // bindElementPickerTarget calls this on mode flips: leaving picker mode must
-  // erase the hover preview and cancel a pending dwell probe.
+  // bindElementPickerTarget calls this on mode flips: every transition starts
+  // with a blank hover preview and no pending dwell probe.
   onElementPickerState(enabled) {
-    if (enabled) return
     if (this.pickerHoverTimer) {
       clearTimeout(this.pickerHoverTimer)
       this.pickerHoverTimer = null
     }
+    this.pickerHoverLoc = null
+    if (enabled) this.pickerHoverCache = new Map()
     this.setPickerHover(null)
   },
 
   currentDocumentPicks() {
     const picker = window.EcritsDocumentElementPicker
     const picks = (picker && picker.picks) || []
-    const docPath = this.el.dataset.documentPath || ""
+    const docPath = this.el && this.el.dataset ? this.el.dataset.documentPath || "" : ""
     return picks.filter(p => p.document === docPath)
   },
 
@@ -2055,6 +2608,9 @@ const WasmOfficeEditor = {
 
   paintAllAdornments() {
     const pages = new Set()
+    if (this.selectionVisual) {
+      for (const rect of this.selectionVisual.rects || []) pages.add(rect.pageIndex ?? 0)
+    }
     for (const pick of this.currentDocumentPicks()) {
       for (const rect of pick.rects || []) pages.add(rect.pageIndex ?? 0)
     }
@@ -2075,6 +2631,18 @@ const WasmOfficeEditor = {
     const sx = overlay.width / logical.width
     const sy = overlay.height / logical.height
 
+    if (this.selectionVisual) {
+      for (const rect of this.selectionVisual.rects || []) {
+        if ((rect.pageIndex ?? 0) !== pageIndex) continue
+        ctx.save()
+        ctx.fillStyle = this.selectionVisual.confirmed
+          ? "rgba(37, 99, 235, 0.30)"
+          : "rgba(37, 99, 235, 0.22)"
+        ctx.fillRect(rect.x * sx, rect.y * sy, rect.width * sx, rect.height * sy)
+        ctx.restore()
+      }
+    }
+
     for (const pick of this.currentDocumentPicks()) {
       for (const rect of pick.rects || []) {
         if ((rect.pageIndex ?? 0) !== pageIndex) continue
@@ -2088,16 +2656,17 @@ const WasmOfficeEditor = {
       }
     }
 
-    // Hover preview: dashed outline (no fill), solid boxes stay for picks —
-    // same DOM-inspector split as the HWP arm.
+    // Hover preview: filled box + dashed outline, matching the HWP picker.
     const hover = this.elementPickerEnabled ? this.pickerHover : null
     if (hover) {
       for (const rect of hover.rects || []) {
         if ((rect.pageIndex ?? 0) !== pageIndex) continue
         ctx.save()
+        ctx.fillStyle = "rgba(99, 102, 241, 0.13)"
         ctx.strokeStyle = "rgba(79, 70, 229, 0.9)"
-        ctx.lineWidth = Math.max(1.5, this.scale || 1)
+        ctx.lineWidth = Math.max(2, 1.5 * (this.scale || 1))
         ctx.setLineDash([5, 3])
+        ctx.fillRect(rect.x * sx, rect.y * sy, rect.width * sx, rect.height * sy)
         ctx.strokeRect(rect.x * sx, rect.y * sy, rect.width * sx, rect.height * sy)
         ctx.restore()
       }
@@ -2127,6 +2696,7 @@ const WasmOfficeEditor = {
 
   clearSelectionState() {
     this.hasActiveSelection = false
+    this.clearSelectionVisual()
   },
 
   // Re-paint the caret's page tile (+ any other visible page, for reflow) so a
@@ -2155,12 +2725,18 @@ const WasmOfficeEditor = {
     this.onCompositionUpdate = e => this.handleCompositionUpdate(e)
     this.onCompositionEnd = e => this.handleCompositionEnd(e)
     this.onKeyDown = e => this.handleKeyDown(e)
+    this.onCopy = e => this.handleCopy(e)
+    this.onPaste = e => this.handlePaste(e)
+    this.onProxyFocus = () => this.activateKeyboardShortcuts()
 
     this.imeProxy.addEventListener("input", this.onInput)
     this.imeProxy.addEventListener("compositionstart", this.onCompositionStart)
     this.imeProxy.addEventListener("compositionupdate", this.onCompositionUpdate)
     this.imeProxy.addEventListener("compositionend", this.onCompositionEnd)
     this.imeProxy.addEventListener("keydown", this.onKeyDown)
+    this.imeProxy.addEventListener("copy", this.onCopy)
+    this.imeProxy.addEventListener("paste", this.onPaste)
+    this.imeProxy.addEventListener("focus", this.onProxyFocus)
   },
 
   unbindEditing() {
@@ -2170,6 +2746,44 @@ const WasmOfficeEditor = {
     this.imeProxy.removeEventListener("compositionupdate", this.onCompositionUpdate)
     this.imeProxy.removeEventListener("compositionend", this.onCompositionEnd)
     this.imeProxy.removeEventListener("keydown", this.onKeyDown)
+    this.imeProxy.removeEventListener("copy", this.onCopy)
+    this.imeProxy.removeEventListener("paste", this.onPaste)
+    this.imeProxy.removeEventListener("focus", this.onProxyFocus)
+  },
+
+  activateKeyboardShortcuts() {
+    activeOfficeShortcutEditor = this
+  },
+
+  handleDocumentPointerDown(event) {
+    if (activeOfficeShortcutEditor !== this) return
+    const target = event.target
+    if (target && this.el && this.el.contains && this.el.contains(target)) return
+    if (target === this.imeProxy) return
+    activeOfficeShortcutEditor = null
+  },
+
+  handleDocumentKeyDown(event) {
+    if (event.defaultPrevented || !this.documentShortcutTarget(event)) return
+    this.handleEditShortcut(event)
+  },
+
+  documentShortcutTarget(event) {
+    if (activeOfficeShortcutEditor !== this) return false
+    if (!this.api || !this.parts.length) return false
+    const target = event.target
+    if (target === this.imeProxy) return false
+    if (this.eventTargetIsEditable(target)) return false
+    if (target && this.el && this.el.contains && this.el.contains(target)) return true
+
+    const active = document.activeElement
+    if (active && this.el && this.el.contains && this.el.contains(active)) return true
+    return !active || active === document.body || active === document.documentElement
+  },
+
+  eventTargetIsEditable(target) {
+    if (!target || target === this.imeProxy || !target.closest) return false
+    return !!target.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']")
   },
 
   // keydown — non-composing keys only. Printable chars and special keys both go
@@ -2180,21 +2794,55 @@ const WasmOfficeEditor = {
     if (this.saveShortcut(event)) {
       event.preventDefault()
       event.stopPropagation()
+      if (this.spreadsheetLikeDoc()) this.flushSpreadsheetTextInput()
       this.saveLocalDocument({})
       return
     }
     if (!this.api || !this.parts.length) return
     if (event.isComposing || this.composing) return // IME owns the keystroke
     if (this.koreanImeKey(event)) return
-    if (event.metaKey || event.ctrlKey || event.altKey) return // shortcuts pass through
+    if (this.handleEditShortcut(event)) return
+    if (event.metaKey || event.ctrlKey || event.altKey) return // unhandled shortcuts pass through
 
     const k = event.key
     if (k === "Tab") {
+      if (this.spreadsheetLikeDoc()) this.flushSpreadsheetTextInput()
       event.preventDefault()
       event.stopPropagation()
       if (this.imeProxy) this.imeProxy.focus({ preventScroll: true })
       this.anchorProxy()
       return
+    }
+
+    if (this.spreadsheetLikeDoc()) {
+      if (k === "Enter" && this.spreadsheetEditBuffer) {
+        event.preventDefault()
+        event.stopPropagation()
+        this.flushSpreadsheetTextInput({ commit: true })
+        return
+      }
+
+      if (k === "Escape" && this.spreadsheetEditBuffer) {
+        event.preventDefault()
+        event.stopPropagation()
+        this.clearSpreadsheetTextInput()
+        return
+      }
+
+      if (k === "Backspace" && this.spreadsheetEditBuffer) {
+        event.preventDefault()
+        event.stopPropagation()
+        this.spreadsheetEditBuffer = Array.from(this.spreadsheetEditBuffer).slice(0, -1).join("")
+        this.scheduleSpreadsheetTextInputFlush()
+        return
+      }
+
+      if (k && k.length === 1) {
+        event.preventDefault()
+        event.stopPropagation()
+        this.queueSpreadsheetTextInput(k)
+        return
+      }
     }
 
     const special = this.specialKeyCode(k)
@@ -2223,6 +2871,168 @@ const WasmOfficeEditor = {
       this.settleCaretAfterInput(previous, true)
       if (posted) this.markViewerMutated()
     }
+  },
+
+  queueSpreadsheetTextInput(text) {
+    const value = String(text || "")
+    if (!value) return
+    this.spreadsheetEditBuffer = (this.spreadsheetEditBuffer || "") + value
+    this.scheduleSpreadsheetTextInputFlush()
+    if (this.imeProxy) this.imeProxy.value = ""
+  },
+
+  scheduleSpreadsheetTextInputFlush() {
+    if (this.spreadsheetEditTimer) clearTimeout(this.spreadsheetEditTimer)
+    this.spreadsheetEditTimer = setTimeout(() => {
+      this.spreadsheetEditTimer = null
+      this.flushSpreadsheetTextInput()
+    }, 1200)
+  },
+
+  clearSpreadsheetTextInput() {
+    if (this.spreadsheetEditTimer) {
+      clearTimeout(this.spreadsheetEditTimer)
+      this.spreadsheetEditTimer = null
+    }
+    if (this.spreadsheetKeyPostTimer) {
+      clearTimeout(this.spreadsheetKeyPostTimer)
+      this.spreadsheetKeyPostTimer = null
+    }
+    this.spreadsheetEditBuffer = ""
+    if (this.imeProxy) this.imeProxy.value = ""
+  },
+
+  flushSpreadsheetTextInput({ commit = false } = {}) {
+    if (this.spreadsheetEditTimer) {
+      clearTimeout(this.spreadsheetEditTimer)
+      this.spreadsheetEditTimer = null
+    }
+    if (this.spreadsheetKeyPostTimer) {
+      clearTimeout(this.spreadsheetKeyPostTimer)
+      this.spreadsheetKeyPostTimer = null
+    }
+
+    const text = this.spreadsheetEditBuffer || ""
+    this.spreadsheetEditBuffer = ""
+    const keys = Array.from(text).map(ch => [ch.codePointAt(0), 0])
+    if (commit) keys.push([13, this.AWT_KEY.RETURN])
+    if (!keys.length) return false
+    const previous = this.caret
+    let posted = false
+
+    const finish = () => {
+      this.spreadsheetKeyPostTimer = null
+      if (this.imeProxy) this.imeProxy.value = ""
+      if (!posted) return
+      this.renderAfterInput()
+      this.refreshCaret()
+      this.settleCaretAfterInput(previous, true)
+      this.markViewerMutated()
+    }
+
+    const send = (index) => {
+      const [charCode, keyCode] = keys[index]
+      posted = this.postKey(charCode, keyCode, false) || posted
+      if (index >= keys.length - 1) {
+        finish()
+        return
+      }
+      this.spreadsheetKeyPostTimer = setTimeout(() => send(index + 1), 32)
+    }
+
+    send(0)
+    return true
+  },
+
+  handleEditShortcut(event) {
+    if (event.altKey || !(event.metaKey || event.ctrlKey)) return false
+    const key = String(event.key || "").toLowerCase()
+    const undo = key === "z" && !event.shiftKey
+    const redo = (key === "z" && event.shiftKey) || (key === "y" && event.ctrlKey && !event.metaKey)
+    if (!undo && !redo) return false
+
+    event.preventDefault()
+    event.stopPropagation()
+    const keyCode = undo
+      ? this.AWT_KEY.Z | this.LOK_KEY_MOD1
+      : key === "z"
+        ? this.AWT_KEY.Z | this.LOK_KEY_MOD1 | this.LOK_KEY_SHIFT
+        : this.AWT_KEY.Y | this.LOK_KEY_MOD1
+    this.runOfficeUndoCommand(keyCode)
+    return true
+  },
+
+  runOfficeUndoCommand(keyCode) {
+    if (!this.hasApiMethod("postKeyEvent")) return false
+    const previous = this.caret
+    try {
+      this.callApi("postKeyEvent", this.LOK_KEYEVENT_KEYINPUT, 0, keyCode)
+      this.callApi("postKeyEvent", this.LOK_KEYEVENT_KEYUP, 0, keyCode)
+      this.clearSelectionState()
+      this.renderAfterInput()
+      this.refreshCaret()
+      this.settleCaretAfterInput(previous, true)
+      this.markViewerMutated()
+      return true
+    } catch (error) {
+      console.error("[office-wasm] undo shortcut postKeyEvent failed", keyCode, error)
+      return false
+    } finally {
+      if (this.imeProxy) this.imeProxy.value = ""
+    }
+  },
+
+  handleCopy(event) {
+    const selected = this.currentTextSelection()
+    if (!selected || !event.clipboardData) return
+    event.preventDefault()
+    event.clipboardData.setData("text/plain", selected)
+    if (this.imeProxy) this.imeProxy.value = ""
+  },
+
+  handlePaste(event) {
+    const text = event.clipboardData && event.clipboardData.getData("text/plain")
+    if (!text) return
+    event.preventDefault()
+    this.insertPlainTextAtCaret(text)
+  },
+
+  currentTextSelection() {
+    if (!this.hasApiMethod("getTextSelection")) return ""
+    try {
+      const selected = this.callApi("getTextSelection", "text/plain;charset=utf-8")
+      return typeof selected === "string" ? selected.replace(/\0/g, "") : ""
+    } catch (error) {
+      console.error("[office-wasm] getTextSelection failed", error)
+      return ""
+    }
+  },
+
+  insertPlainTextAtCaret(text) {
+    const value = String(text || "").replace(/\r\n?/g, "\n")
+    if (!value || !this.api) return false
+    const previous = this.caret
+    let posted = false
+    for (const ch of value) {
+      if (ch === "\n") {
+        posted = this.postKey(13, this.AWT_KEY.RETURN, false) || posted
+      } else {
+        posted = this.postKey(ch.codePointAt(0), 0, false) || posted
+      }
+    }
+    if (this.imeProxy) this.imeProxy.value = ""
+    if (!posted) return false
+    this.renderAfterInput()
+    this.refreshCaret()
+    this.settleCaretAfterInput(previous, true)
+    this.markViewerMutated()
+    return true
+  },
+
+  hasApiMethod(name) {
+    if (!this.api) return false
+    if (this.api.shape === "embind-class" && this.handle && typeof this.handle[name] === "function") return true
+    return typeof this.api[name] === "function"
   },
 
   // Map a KeyboardEvent.key to {charCode,keyCode,repaint} for the special keys we
@@ -2263,7 +3073,7 @@ const WasmOfficeEditor = {
     try {
       this.callApi("postKeyEvent", this.LOK_KEYEVENT_KEYINPUT, charCode, keyCode)
       this.callApi("postKeyEvent", this.LOK_KEYEVENT_KEYUP, charCode, keyCode)
-      this.hasActiveSelection = false
+      this.clearSelectionState()
       return true
     } catch (error) {
       console.error("[office-wasm] postKeyEvent failed", error)
@@ -2285,11 +3095,11 @@ const WasmOfficeEditor = {
   // composition* path and skipped here.
   handleInput(event) {
     if (!this.api) return
-    if (event.isComposing || this.composing) return
-    if (this.swallowTrailingCompositionInput(event)) {
+    if (this.handleTrailingCompositionInput(event)) {
       if (this.imeProxy) this.imeProxy.value = ""
       return
     }
+    if (event.isComposing || this.composing) return
     const type = event.inputType || ""
     if (type.startsWith("insert")) {
       const data = event.data != null ? event.data : this.imeProxy.value
@@ -2361,11 +3171,12 @@ const WasmOfficeEditor = {
       return
     }
     if (this.presentationLikeDoc()) {
-      const str = event.data || (this.imeProxy && this.imeProxy.value) || ""
+      const eventText = event.data || (this.imeProxy && this.imeProxy.value) || ""
+      const str = eventText
       const ready = this.presentationTextTargetReady()
       this.composing = false
-      this.hasActiveSelection = false
-      this.armTrailingCompositionInputGuard(str)
+      this.clearSelectionState()
+      this.armTrailingCompositionInputGuard(str, { provisional: !eventText && !!this._compositionCommittedText })
       if (this.imeProxy) this.imeProxy.value = ""
       if (!ready) return
 
@@ -2376,30 +3187,54 @@ const WasmOfficeEditor = {
       this._compositionCommittedText = ""
       return
     }
-    const str = event.data || (this.imeProxy && this.imeProxy.value) || this._compositionCommittedText || ""
+    const eventText = event.data || (this.imeProxy && this.imeProxy.value) || ""
+    const str = eventText || this._compositionCommittedText || ""
     const posted = this.replaceCommittedComposition(str)
     this.composing = false
-    this.hasActiveSelection = false
-    this.armTrailingCompositionInputGuard(str)
+    this.clearSelectionState()
+    this.armTrailingCompositionInputGuard(str, { provisional: !eventText && !!this._compositionCommittedText })
     if (this.imeProxy) this.imeProxy.value = ""
     if (posted || str) this.markViewerMutated()
     this._compositionCommittedText = ""
   },
 
-  armTrailingCompositionInputGuard(text) {
+  armTrailingCompositionInputGuard(text, options = {}) {
     const value = String(text || "")
-    this.skipNextCompositionInput = value ? { value, at: performance.now() } : null
+    this.skipNextCompositionInput = value
+      ? { value, at: performance.now(), provisional: !!options.provisional }
+      : null
   },
 
-  swallowTrailingCompositionInput(event) {
+  handleTrailingCompositionInput(event) {
     const pending = this.skipNextCompositionInput
     if (!pending) return false
 
     const type = event.inputType || ""
     const data = String(event.data != null ? event.data : (this.imeProxy && this.imeProxy.value) || "")
     const age = performance.now() - pending.at
+    const immediate = age >= 0 && age < 500
+    const delayedProvisional = pending.provisional && age >= 0 && age < 2500
     const compositionInput = type === "insertCompositionText" || type === "insertReplacementText"
-    const sameImmediateText = data === pending.value && age >= 0 && age < 500
+    const hangulReplacementInput =
+      (immediate || delayedProvisional) &&
+      type.startsWith("insert") &&
+      data &&
+      data !== pending.value &&
+      this.hangulCompositionText(data) &&
+      this.hangulCompositionText(pending.value)
+    const sameImmediateText = data === pending.value && immediate
+
+    if (compositionInput && data && data !== pending.value && (immediate || delayedProvisional)) {
+      this.replaceTrailingCompositionInput(pending.value, data)
+      this.skipNextCompositionInput = null
+      return true
+    }
+
+    if (hangulReplacementInput) {
+      this.replaceTrailingCompositionInput(pending.value, data)
+      this.skipNextCompositionInput = null
+      return true
+    }
 
     if (compositionInput || sameImmediateText) {
       this.skipNextCompositionInput = null
@@ -2408,6 +3243,281 @@ const WasmOfficeEditor = {
 
     this.skipNextCompositionInput = null
     return false
+  },
+
+  replaceTrailingCompositionInput(previousText, nextText) {
+    if (!nextText || nextText === previousText) return false
+    const saved = this._compositionCommittedText
+    this._compositionCommittedText = String(previousText || "")
+    const posted = this.replaceCommittedComposition(nextText)
+    this._compositionCommittedText = ""
+    if (posted) this.markViewerMutated()
+    if (saved && saved !== previousText && !posted) this._compositionCommittedText = saved
+    return posted
+  },
+
+  hangulCompositionText(text) {
+    return /[\u3130-\u318F\uAC00-\uD7AF]/u.test(String(text || ""))
+  },
+
+  handleToolbarCommand(detail) {
+    if (!this.activeToolbarTarget() || !this.toolbarCommandMatchesDocument(detail)) return
+
+    switch (detail.command) {
+      case "bold":
+        this.officeToolbarToggleProp("Bold", "CharWeight").catch(error => {
+          console.warn("[office-wasm] toolbar bold failed", error)
+        })
+        break
+      case "italic":
+        this.officeToolbarToggleProp("Italic", "CharPosture").catch(error => {
+          console.warn("[office-wasm] toolbar italic failed", error)
+        })
+        break
+      case "image":
+        this.officeToolbarImage(detail).catch(error => {
+          console.warn("[office-wasm] toolbar image failed", error)
+        })
+        break
+      default:
+        break
+    }
+  },
+
+  activeToolbarTarget() {
+    return !!(
+      this.el &&
+      this.el.isConnected &&
+      this.api &&
+      this.handle &&
+      !/^(hwp|hwpx|md|markdown)$/i.test(this.format || "")
+    )
+  },
+
+  toolbarCommandMatchesDocument(detail) {
+    const commandDocumentId = detail && (detail.document_id || detail.documentId)
+    if (!commandDocumentId) return true
+    return !!(this.documentId && String(commandDocumentId) === String(this.documentId))
+  },
+
+  async officeToolbarApplyProps(props) {
+    const ref = this.officeToolbarTextRef()
+    if (!ref) return
+
+    const result = await this.officeApplySetOne(ref, props)
+    if (result && result.error) {
+      console.warn("[office-wasm] toolbar format failed", result.error)
+      return
+    }
+    this.finishAgentEdit({})
+  },
+
+  async officeToolbarToggleProp(prop, unoKey) {
+    const ref = this.officeToolbarTextRef()
+    if (!ref) return
+
+    const enabled = this.officeToolbarCharPropEnabled(ref, unoKey)
+    const result = await this.officeApplySetOne(ref, { [prop]: !enabled })
+    if (result && result.error) {
+      console.warn("[office-wasm] toolbar format failed", result.error)
+      return
+    }
+    this.finishAgentEdit({})
+  },
+
+  officeToolbarCharPropEnabled(ref, unoKey) {
+    const value = this.officeToolbarCharPropValue(ref, unoKey)
+    switch (unoKey) {
+      case "CharWeight":
+        return value === true || value === "bold" || Number(value) >= 150
+      case "CharPosture":
+        return value === true || value === "italic" || Number(value) > 0
+      default:
+        return !!value
+    }
+  },
+
+  officeToolbarCharPropValue(ref, unoKey) {
+    const elements = this.officeElements()
+    const targetRef = String(ref)
+    const candidates = [
+      ...elements.filter((el) => el.ref === targetRef),
+      ...elements.filter((el) => String(el.ref || "").startsWith(`${targetRef}/`)),
+    ]
+
+    for (const el of candidates) {
+      const raw = (el && el.raw) || el || {}
+      const props = raw.props && typeof raw.props === "object" ? raw.props
+        : raw.properties && typeof raw.properties === "object" ? raw.properties
+          : {}
+      if (props[unoKey] != null) return props[unoKey]
+    }
+
+    return null
+  },
+
+  async officeToolbarImage(detail) {
+    if (!detail || !detail.bytes) return
+    const src = this.officeToolbarWriteImage(detail)
+    const name = this.officeToolbarImageName(detail)
+    const size = this.officeToolbarImageSize(detail, 5000)
+    let op
+
+    if (this.presentationLikeDoc()) {
+      const loc = this.officeToolbarLoc()
+      const pick = loc ? this.officeResolveAt(loc, false) : null
+      const page = this.officeToolbarPageName(loc, pick)
+      const position = this.officeToolbarSlidePosition(loc, size)
+      op = { op: "insert_picture", page, name, src, ...position, ...size }
+    } else {
+      op = {
+        op: "insert_picture",
+        ref: this.officeToolbarTextRef() || "end",
+        name,
+        src,
+        w: size.w,
+        h: size.h
+      }
+    }
+
+    const result = await this.officeApplyOneOp(op)
+    if (result && result.error) {
+      console.warn("[office-wasm] toolbar image failed", result.error)
+      return
+    }
+    this.finishAgentEdit(result && result.extra ? result.extra : {})
+  },
+
+  officeToolbarTextRef() {
+    const pick = this.officeToolbarPick()
+    if (pick && pick.ref && !/^page\[[^\]]+\]$/.test(String(pick.ref))) {
+      return String(pick.ref)
+    }
+
+    try {
+      const el = this.officeElements().find((item) =>
+        ["paragraph", "cell", "shape", "text_frame", "run"].includes(String(item.type || ""))
+      )
+      if (el && el.ref) return String(el.ref)
+    } catch (_) {}
+
+    return null
+  },
+
+  officeToolbarPick() {
+    const loc = this.officeToolbarLoc()
+    return loc ? this.officeResolveAt(loc, false) : null
+  },
+
+  officeToolbarLoc() {
+    if (this.caret && Number.isFinite(Number(this.caret.page))) {
+      return {
+        pageIndex: Math.max(0, Number(this.caret.page) - 1),
+        x: Math.max(1, Number(this.caret.x) || 1),
+        y: Math.max(1, Number(this.caret.y) || 1)
+      }
+    }
+
+    const visible = Array.from(this.visible || [])
+    const pageIndex = visible.length ? visible[0] : 0
+    const logical = this.pageLogicalSize(pageIndex)
+    return {
+      pageIndex,
+      x: Math.max(1, Math.round((logical.width || 794) * 0.12)),
+      y: Math.max(1, Math.round((logical.height || 1123) * 0.12))
+    }
+  },
+
+  officeToolbarWriteImage(detail) {
+    const Module = window.__officeWasmModule
+    if (!Module) throw new Error("office WASM module is not ready")
+
+    const bytes = detail.bytes instanceof Uint8Array
+      ? detail.bytes
+      : this.base64ToBytes(detail.image_base64)
+    const dir = "/tmp/ecrits-toolbar"
+    const file = `${Date.now()}-${this.officeToolbarSafeFileName(detail.file_name || "image")}`
+    const path = `${dir}/${file}`
+
+    if (typeof Module.FS_createPath === "function") {
+      try { Module.FS_createPath("/", "tmp", true, true) } catch (_) {}
+      try { Module.FS_createPath("/tmp", "ecrits-toolbar", true, true) } catch (_) {}
+    }
+
+    if (typeof Module.FS_writeFile === "function") {
+      Module.FS_writeFile(path, bytes)
+      return path
+    }
+
+    if (typeof Module.FS_createDataFile === "function") {
+      try {
+        if (typeof Module.FS_unlink === "function") Module.FS_unlink(path)
+      } catch (_) {}
+      Module.FS_createDataFile(dir, file, bytes, true, true, true)
+      return path
+    }
+
+    throw new Error("office WASM filesystem writer is unavailable")
+  },
+
+  base64ToBytes(b64) {
+    const binary = atob(String(b64 || ""))
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  },
+
+  officeToolbarSafeFileName(name) {
+    const cleaned = String(name || "image")
+      .replace(/[^a-zA-Z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+    return cleaned || "image"
+  },
+
+  officeToolbarImageName(detail) {
+    return `toolbar-${Date.now()}-${this.officeToolbarSafeFileName(detail.file_name || "image").replace(/\.[^.]+$/, "")}`
+  },
+
+  officeToolbarImageSize(detail, max) {
+    const widthPx = Math.max(1, Number(detail.natural_width_px || 1))
+    const heightPx = Math.max(1, Number(detail.natural_height_px || 1))
+    const aspect = widthPx / heightPx
+
+    if (aspect >= 1) {
+      return { w: max, h: Math.max(1, Math.round(max / aspect)) }
+    }
+
+    return { w: Math.max(1, Math.round(max * aspect)), h: max }
+  },
+
+  officeToolbarSlidePosition(loc, size) {
+    const pageIndex = loc ? loc.pageIndex : 0
+    const logical = this.pageLogicalSize(pageIndex)
+    const unit = 25.4 * 100 / 96
+    const pageW = Math.max(1, Math.round((logical.width || 794) * unit))
+    const pageH = Math.max(1, Math.round((logical.height || 1123) * unit))
+    const margin = 800
+    const rawX = Math.round(((loc && loc.x) || (logical.width || 794) * 0.12) * unit)
+    const rawY = Math.round(((loc && loc.y) || (logical.height || 1123) * 0.12) * unit)
+    const x = Math.min(Math.max(margin, rawX), Math.max(margin, pageW - size.w - margin))
+    const y = Math.min(Math.max(margin, rawY), Math.max(margin, pageH - size.h - margin))
+
+    return { x, y }
+  },
+
+  officeToolbarPageName(loc, pick) {
+    const picked = String((pick && pick.ref) || "")
+    const match = picked.match(/^page\[([^\]]+)\]/)
+    if (match) return match[1]
+
+    try {
+      const pages = this.officeElements().filter((el) => /^page\[[^\]]+\]$/.test(String(el.ref || "")))
+      const page = pages[(loc && loc.pageIndex) || 0] || pages[0]
+      const pageMatch = page && String(page.ref || "").match(/^page\[([^\]]+)\]$/)
+      if (pageMatch) return pageMatch[1]
+    } catch (_) {}
+
+    return String(((loc && loc.pageIndex) || 0) + 1)
   },
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -2547,6 +3657,9 @@ const WasmOfficeEditor = {
     if (el.pageIndex != null) out.pageIndex = el.pageIndex
     if (el.slide != null) out.slide = el.slide
     if (el.part != null) out.part = el.part
+    for (const key of OFFICE_ELEMENT_METADATA_FIELDS) {
+      if (el[key] != null) out[key] = el[key]
+    }
     return out
   },
 
@@ -2571,47 +3684,136 @@ const WasmOfficeEditor = {
   // ─── doc.find -> getElements + filter ──────────────────────────────────────
   // Mirrors the HWP arm: literal substring search by default; `all`/`regex`/`type`
   // flips to discovery mode (enumerate every element, filter by `type`, and treat
-  // `pattern` as a regex). Returns { matches: [{ref,text,type,…}] }.
+  // `pattern` as a regex). Returns compact discovery matches
+  // ({ref,type,text-snippet,...}); use doc.read/doc.get for full text/IR.
   officeFind({ pattern, patterns, case_sensitive, all, regex, type, limit }) {
+    const elements = this.officeFindElements(type)
+    const opts = { case_sensitive, all, regex, type, limit }
+
     if (Array.isArray(patterns)) {
-      return {
-        results: patterns.map((p) =>
-          this.officeFind({ pattern: p, case_sensitive, all, regex, type, limit })
-        )
-      }
+      return { results: this.officeFindPatterns(elements, patterns, opts) }
     }
+
+    return this.officeFindPatterns(elements, [pattern], opts)[0]
+  },
+
+  officeFindElements(type) {
     const elements = this.officeElements()
-    const cs = !!case_sensitive
+    return type ? this.filterByType(elements, String(type)) : elements
+  },
 
-    let matches = elements
-    if (type) matches = this.filterByType(matches, String(type))
+  officeFindPatterns(elements, patterns, opts) {
+    const specs = patterns.map((pattern) => this.officeFindSpec(pattern, opts))
+    const limit = this.officeFindLimit(opts.limit)
+    const unlimited = limit === Infinity
+    const done = () => specs.every((spec) => !unlimited && spec.matches.length >= limit)
 
-    const pat = pattern != null ? String(pattern) : ""
-    if (all || regex || type) {
-      // discovery mode: pattern optional, regex when present.
-      if (pat) {
-        let re
-        try { re = new RegExp(pat, cs ? "" : "i") } catch (_) { re = null }
-        matches = re ? matches.filter((el) => re.test(el.text)) : matches
+    for (const el of elements) {
+      const text = this.officeFindText(el)
+      const lowerText = opts.case_sensitive ? text : text.toLowerCase()
+
+      for (const spec of specs) {
+        if (!unlimited && spec.matches.length >= limit) continue
+        if (spec.matchesElement(el, text, lowerText)) {
+          spec.matches.push(this.officeFindMatch(el, spec, opts, text))
+        }
       }
-    } else {
-      // literal substring search (pattern required by the server schema).
-      const needle = cs ? pat : pat.toLowerCase()
-      matches = matches.filter((el) => {
-        const hay = cs ? el.text : el.text.toLowerCase()
-        return hay.includes(needle)
-      })
+
+      if (done()) break
     }
+
+    return specs.map((spec) => ({
+      pattern: spec.pattern,
+      type: opts.type || null,
+      matches: spec.matches
+    }))
+  },
+
+  officeFindSpec(pattern, opts) {
+    const pat = pattern != null ? String(pattern) : ""
+    const cs = !!opts.case_sensitive
+    const discovery = !!(opts.all || opts.regex || opts.type)
+
+    if (discovery) {
+      if (!pat) return { pattern: pat, matches: [], matchesElement: () => true }
+
+      let re
+      try { re = new RegExp(pat, cs ? "" : "i") } catch (_) { re = null }
+
+      return {
+        pattern: pat,
+        matches: [],
+        matchesElement: re ? ((_el, text) => re.test(text)) : (() => true)
+      }
+    }
+
+    const needle = cs ? pat : pat.toLowerCase()
+
     return {
       pattern: pat,
-      type: type || null,
-      matches: this.limitOfficeMatches(matches.map((el) => {
-        const match = { ...el }
-        const fillableKind = this.fillableKind(match)
-        if (fillableKind) match.fillable_kind = fillableKind
-        return match
-      }), limit)
+      matches: [],
+      matchesElement: (_el, text, lowerText) => (cs ? text : lowerText).includes(needle)
     }
+  },
+
+  officeFindMatch(el, spec, opts, text) {
+    const fullText = text != null ? String(text) : this.officeFindText(el)
+    const snippet = this.officeFindSnippet(fullText, spec && spec.pattern, opts)
+    const match = { ref: el.ref, text: snippet, type: el.type }
+    const compactLength = this.officeFindCompactText(fullText).length
+
+    if (compactLength > snippet.length) {
+      match.text_truncated = true
+    }
+
+    for (const key of ["row", "col", "context", "page", "pageIndex", "slide", "part"]) {
+      if (el[key] != null) match[key] = el[key]
+    }
+    for (const key of OFFICE_ELEMENT_METADATA_FIELDS) {
+      if (el[key] != null) match[key] = el[key]
+    }
+
+    const fillableKind = this.fillableKind(match)
+    if (fillableKind) match.fillable_kind = fillableKind
+    return match
+  },
+
+  officeFindSnippet(text, pattern, opts) {
+    const compact = this.officeFindCompactText(text)
+    if (compact.length <= OFFICE_FIND_TEXT_LIMIT) return compact
+
+    const index = this.officeFindSnippetIndex(compact, pattern, opts)
+    const radius = Math.floor(OFFICE_FIND_TEXT_LIMIT / 2)
+    let start = Math.max(0, index - radius)
+    start = Math.min(start, Math.max(0, compact.length - OFFICE_FIND_TEXT_LIMIT))
+    const end = Math.min(compact.length, start + OFFICE_FIND_TEXT_LIMIT)
+    return (start > 0 ? "..." : "") + compact.slice(start, end) + (end < compact.length ? "..." : "")
+  },
+
+  officeFindCompactText(text) {
+    return String(text || "").replace(/\s+/g, " ").trim()
+  },
+
+  officeFindSnippetIndex(text, pattern, opts) {
+    const pat = pattern != null ? String(pattern) : ""
+    if (!pat) return 0
+
+    if (opts && (opts.regex || opts.all)) {
+      try {
+        const match = text.match(new RegExp(pat, opts.case_sensitive ? "" : "i"))
+        if (match && Number.isInteger(match.index)) return match.index
+      } catch (_) {}
+    }
+
+    const hay = opts && opts.case_sensitive ? text : text.toLowerCase()
+    const needle = opts && opts.case_sensitive ? pat : pat.toLowerCase()
+    const index = hay.indexOf(needle)
+    return index >= 0 ? index : 0
+  },
+
+  officeFindLimit(limit) {
+    const n = Number(limit || 0)
+    return n > 0 ? Math.min(2000, n) : Infinity
   },
 
   // The server's element-type taxonomy, mapped onto office IR types. Cell-state
@@ -2622,11 +3824,34 @@ const WasmOfficeEditor = {
       case "empty": return elements.filter((el) => this.blankText(el))
       case "fillable": return elements.filter((el) => this.fillableElement(el))
       case "cell": return elements.filter((el) => el.type === "cell")
+      case "formula_cell": return elements.filter((el) => el.type === "cell" && this.officeCellHasFormula(el))
       case "empty_cell": return elements.filter((el) => el.type === "cell" && this.blankText(el))
       case "filled_cell": return elements.filter((el) => el.type === "cell" && !this.blankText(el))
       case "paragraph": return elements.filter((el) => el.type === "paragraph")
       default: return elements.filter((el) => el.type === type)
     }
+  },
+
+  officeFindText(el) {
+    const formula = this.officeFormulaText(el)
+    return formula ? String(el.text || "") + "\n" + formula : String(el.text || "")
+  },
+
+  officeFormulaText(el) {
+    if (!el) return ""
+    if (el.formula != null) return String(el.formula)
+    const raw = el.raw || {}
+    if (raw.formula != null) return String(raw.formula)
+    const props = raw.props && typeof raw.props === "object" ? raw.props
+      : raw.properties && typeof raw.properties === "object" ? raw.properties
+        : {}
+    if (props.formula != null) return String(props.formula)
+    if (props.Formula != null) return String(props.Formula)
+    return ""
+  },
+
+  officeCellHasFormula(el) {
+    return this.officeFormulaText(el) !== ""
   },
 
   fillableElement(el) {
@@ -2824,6 +4049,11 @@ const WasmOfficeEditor = {
     if (el.pageIndex != null) values.pageIndex = el.pageIndex
     if (el.slide != null) values.slide = el.slide
     if (el.part != null) values.part = el.part
+    for (const key of OFFICE_ELEMENT_METADATA_FIELDS) {
+      if (el[key] != null && values[key] == null) values[key] = el[key]
+    }
+    const formula = this.officeFormulaText(el)
+    if (formula && values.formula == null) values.formula = formula
 
     if (!Array.isArray(props) || props.length === 0) return values
     const wanted = new Set(props.map((p) => String(p)))

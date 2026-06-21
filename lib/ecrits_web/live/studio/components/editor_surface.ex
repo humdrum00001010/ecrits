@@ -69,7 +69,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                   aria-selected={to_string(tab.id == @active_document_id)}
                   title={tab.path}
                   class={[
-                    "group flex min-w-0 shrink items-center gap-1 border-r border-base-300 px-3 max-w-[15rem] text-[13px] leading-none transition-colors border-b-2",
+                    "group flex min-w-0 shrink items-stretch border-r border-base-300 max-w-[15rem] text-[13px] leading-none transition-colors border-b-2",
                     if(tab.id == @active_document_id,
                       do: "bg-base-100 text-base-content font-medium border-b-primary",
                       else:
@@ -77,24 +77,24 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                     )
                   ]}
                 >
-                  <span
-                    :if={@dirty_document_ids && MapSet.member?(@dirty_document_ids, tab.id)}
-                    data-role="document-dirty-icon"
-                    class="inline-flex size-4 shrink-0 items-center justify-center text-amber-500"
-                    title="Unsaved changes"
-                    aria-label="Unsaved changes"
-                  >
-                    <.icon name="hero-pencil" class="size-3" />
-                  </span>
                   <button
                     type="button"
                     phx-click="tab_switch"
                     phx-value-id={tab.id}
                     data-role="document-tab-switch"
-                    class="min-w-0 flex-1 truncate text-left outline-none"
+                    class="inline-flex h-full min-w-0 flex-1 items-center gap-1 px-3 text-left outline-none"
                     title={tab.path}
                   >
-                    {tab.name}
+                    <span
+                      :if={@dirty_document_ids && MapSet.member?(@dirty_document_ids, tab.id)}
+                      data-role="document-dirty-icon"
+                      class="inline-flex size-4 shrink-0 items-center justify-center text-amber-500"
+                      title="Unsaved changes"
+                      aria-label="Unsaved changes"
+                    >
+                      <.icon name="hero-pencil" class="size-3" />
+                    </span>
+                    <span class="min-w-0 truncate">{tab.name}</span>
                   </button>
                   <button
                     type="button"
@@ -102,7 +102,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                     phx-value-id={tab.id}
                     data-role="document-tab-close"
                     aria-label={"Close #{tab.name}"}
-                    class="inline-flex size-4 shrink-0 items-center justify-center rounded text-base-content/45 transition-colors hover:bg-base-200 hover:text-base-content"
+                    class="my-auto mr-2 inline-flex size-4 shrink-0 items-center justify-center rounded text-base-content/45 transition-colors hover:bg-base-200 hover:text-base-content"
                   >
                     <.icon name="hero-x-mark" class="size-3" />
                   </button>
@@ -166,6 +166,71 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 </button>
               </div>
             </header>
+            <div
+              :if={@document}
+              id="local-document-quick-toolbar"
+              phx-hook="LocalEditorToolbar"
+              data-role="local-editor-toolbar"
+              data-local-document-id={@document.id}
+              data-local-document-format={@document.format}
+              class="flex h-9 items-center gap-0.5 overflow-x-auto border-b border-base-300 bg-base-100 px-2"
+            >
+              <button
+                type="button"
+                data-command="bold"
+                aria-label="Bold"
+                title="Bold"
+                class={quick_toolbar_button_class()}
+              >
+                <.quick_toolbar_bold_icon />
+              </button>
+              <button
+                type="button"
+                data-command="italic"
+                aria-label="Italic"
+                title="Italic"
+                class={quick_toolbar_button_class()}
+              >
+                <.quick_toolbar_italic_icon />
+              </button>
+              <button
+                type="button"
+                data-command="image"
+                aria-label="Insert image"
+                title="Insert image"
+                class={quick_toolbar_button_class()}
+              >
+                <span class="flex size-4 items-center justify-center">
+                  <.icon name="hero-photo" class="size-4" />
+                </span>
+              </button>
+              <input
+                id="local-document-toolbar-image-input"
+                type="file"
+                accept="image/*"
+                data-role="local-editor-toolbar-image-input"
+                class="hidden"
+              />
+              <%!-- Markdown PREVIEW <-> SOURCE toggle, folded in from the old
+                   markdown-editor header. Drives the panes in the markdown
+                   canvas (id = @canvas_id) via the shared JS toggle. --%>
+              <button
+                :if={markdown_format?(@document.format)}
+                type="button"
+                data-role="markdown-editor-toggle"
+                phx-click={LocalMarkdownEditor.toggle_markdown_view(@canvas_id)}
+                aria-label="Toggle source and preview"
+                title="Toggle source / preview"
+                class={["ml-auto", quick_toolbar_button_class()]}
+              >
+                <span data-toggle-label="preview" title="Edit source">
+                  <.icon name="hero-code-bracket" class="size-4" />
+                </span>
+                <span data-toggle-label="source" class="hidden" title="Show preview">
+                  <.icon name="hero-eye" class="size-4" />
+                </span>
+              </button>
+            </div>
           </div>
 
           <article class="relative m-0 flex min-h-0 flex-1 overflow-hidden border-0 bg-transparent p-0 font-sans text-[15px] leading-[1.78] text-base-content shadow-none">
@@ -233,6 +298,39 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   defp markdown_format?(format), do: format in ~w(md markdown)
   defp document_path(%{relative_path: relative_path}), do: relative_path
   defp document_path(_document), do: nil
+
+  defp quick_toolbar_button_class do
+    [
+      "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent",
+      "text-base-content/65 transition-colors duration-150",
+      "hover:border-base-content/15 hover:bg-base-200 hover:text-base-content",
+      "focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cs-blue)]"
+    ]
+  end
+
+  defp quick_toolbar_bold_icon(assigns) do
+    ~H"""
+    <svg viewBox="0 0 16 16" class="size-4" aria-hidden="true">
+      <path
+        fill="currentColor"
+        transform="translate(-0.35 -0.55)"
+        d="M4.75 3.15h4.05c1.78 0 2.88.92 2.88 2.34 0 .95-.51 1.66-1.42 2.02 1.13.33 1.8 1.15 1.8 2.36 0 1.82-1.3 2.98-3.35 2.98H4.75V3.15Zm2.1 1.78v1.86h1.66c.65 0 1.04-.35 1.04-.93 0-.58-.4-.93-1.07-.93H6.85Zm0 3.56v2.56h1.86c.77 0 1.21-.47 1.21-1.29 0-.81-.46-1.27-1.28-1.27H6.85Z"
+      />
+    </svg>
+    """
+  end
+
+  defp quick_toolbar_italic_icon(assigns) do
+    ~H"""
+    <svg viewBox="0 0 16 16" class="size-4" aria-hidden="true">
+      <path
+        fill="currentColor"
+        transform="translate(-1.1 -0.55)"
+        d="M7.25 3.1h5.15l-.34 1.85h-1.45L9.42 11.05h1.45l-.35 1.85H5.36l.35-1.85h1.46l1.18-6.1H6.9l.35-1.85Z"
+      />
+    </svg>
+    """
+  end
 
   defp toggle_local_fullscreen(js \\ %JS{}) do
     js
