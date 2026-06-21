@@ -5,6 +5,27 @@ defmodule EcritsWeb.Components.LocalFileTreeTest do
 
   alias EcritsWeb.Components.LocalFileTree
 
+  test "renders openable file rows as plain href fallbacks" do
+    html =
+      render_component(&LocalFileTree.tree/1,
+        id: "local-file-tree",
+        nodes: [
+          %{type: :file, name: "template.hwp", path: "template.hwp"}
+        ],
+        expanded_paths: MapSet.new(),
+        selected_path: nil,
+        open_paths: %{"template.hwp" => "/workspace?path=/tmp/ecrits&document=template.hwp"}
+      )
+
+    fragment = LazyHTML.from_fragment(html)
+    rows = fragment |> LazyHTML.query(~s([data-role="repo-browser-row"])) |> Enum.to_list()
+
+    assert [row] = rows
+    assert row |> LazyHTML.attribute("href") |> List.first() =~ "/workspace?"
+    refute row |> LazyHTML.attribute("data-phx-link") |> Enum.any?()
+    refute row |> LazyHTML.attribute("phx-click") |> Enum.any?()
+  end
+
   test "renders unique Korean document rows with document icons" do
     html =
       render_component(&LocalFileTree.tree/1,

@@ -31,7 +31,8 @@ defmodule EcritsWeb.LocalWorkspaceAdapterStub do
         path: "drafts",
         children: [
           %{type: :file, name: "service.hwpx", path: "drafts/service.hwpx"},
-          %{type: :file, name: "reference.docx", path: "drafts/reference.docx"}
+          %{type: :file, name: "reference.docx", path: "drafts/reference.docx"},
+          %{type: :file, name: "ledger.xlsx", path: "drafts/ledger.xlsx"}
         ]
       },
       %{

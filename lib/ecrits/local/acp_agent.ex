@@ -25,7 +25,10 @@ defmodule Ecrits.Local.AcpAgent do
       icon: "local-agent-provider-codex",
       favicon_src: "/images/icons/openai-blossom.svg",
       exmcp_adapter: ExMCPCodex,
-      executables: ["codex"]
+      executables: ["codex"],
+      login_command: "codex login",
+      install_command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+      check_command: "codex login status"
     },
     %{
       id: "claude",
@@ -33,7 +36,10 @@ defmodule Ecrits.Local.AcpAgent do
       icon: "local-agent-provider-claude",
       favicon_src: "/images/icons/claude-favicon.ico",
       exmcp_adapter: ExMCPClaude,
-      executables: ["claude"]
+      executables: ["claude"],
+      login_command: "claude auth login",
+      install_command: "curl -fsSL https://claude.ai/install.sh | bash",
+      check_command: "claude auth status"
     }
   ]
 
@@ -75,18 +81,41 @@ defmodule Ecrits.Local.AcpAgent do
   resolves each provider's CLI binary so the workspace UI can show ready/missing.
   """
   def integration_options do
-    Enum.map(@providers, &integration_option/1)
+    case configured_integration_options() do
+      options when is_list(options) -> options
+      _ -> Enum.map(@providers, &integration_option/1)
+    end
   end
 
-  defp integration_option(%{id: id, label: label, executables: executables}) do
+  def provider_setup(id) do
+    with {:ok, provider} <- fetch_provider(id) do
+      {:ok,
+       provider
+       |> public_provider_metadata()
+       |> Map.merge(Map.take(provider, [:login_command, :install_command, :check_command]))}
+    end
+  end
+
+  defp integration_option(%{id: id, label: label, executables: executables} = provider) do
     case resolve_executable(executables) do
       {:ok, %{command: command, path: path}} ->
-        %{
-          id: id,
-          label: provider_integration_label(label),
-          status: :ready,
-          detail: "#{command} at #{path}"
-        }
+        case provider_auth_status(provider, command) do
+          :ready ->
+            %{
+              id: id,
+              label: provider_integration_label(label),
+              status: :ready,
+              detail: "#{command} at #{path}"
+            }
+
+          :login_required ->
+            %{
+              id: id,
+              label: provider_integration_label(label),
+              status: :login_required,
+              detail: "Run #{provider.login_command}"
+            }
+        end
 
       {:error, {:executable_missing, candidates}} ->
         %{
@@ -95,6 +124,13 @@ defmodule Ecrits.Local.AcpAgent do
           status: :missing,
           detail: "Install #{Enum.join(candidates, " or ")}"
         }
+    end
+  end
+
+  defp configured_integration_options do
+    case Application.get_env(:ecrits, :local_agent_ui, []) do
+      config when is_list(config) -> Keyword.get(config, :integration_options)
+      _ -> nil
     end
   end
 
@@ -107,6 +143,82 @@ defmodule Ecrits.Local.AcpAgent do
         path -> {:ok, %{command: candidate, path: path}}
       end
     end)
+  end
+
+  defp provider_auth_status(%{id: "codex"}, command) do
+    case run_status_command(command, ["login", "status"]) do
+      {output, 0} ->
+        if login_required_output?(output) do
+          :login_required
+        else
+          :ready
+        end
+
+      _ ->
+        :login_required
+    end
+  end
+
+  defp provider_auth_status(%{id: "claude"}, command) do
+    case run_status_command(command, ["auth", "status"]) do
+      {output, 0} ->
+        cond do
+          login_required_output?(output) ->
+            :login_required
+
+          true ->
+            case Jason.decode(output) do
+              {:ok, %{"loggedIn" => true} = status} -> claude_json_auth_status(status)
+              _ -> :login_required
+            end
+        end
+
+      _ ->
+        :login_required
+    end
+  end
+
+  defp provider_auth_status(_provider, _command), do: :ready
+
+  defp claude_json_auth_status(status) do
+    if Enum.any?(["expired", "needsLogin", "loginRequired"], &(Map.get(status, &1) == true)) do
+      :login_required
+    else
+      :ready
+    end
+  end
+
+  defp login_required_output?(output) when is_binary(output) do
+    normalized = String.downcase(output)
+
+    Enum.any?(
+      [
+        "expired",
+        "not logged",
+        "not authenticated",
+        "login required",
+        "please log in",
+        "please login",
+        "no credentials",
+        "unauthorized",
+        "invalid api key",
+        "invalid token",
+        "forbidden",
+        "401",
+        "403"
+      ],
+      &String.contains?(normalized, &1)
+    )
+  end
+
+  defp login_required_output?(_output), do: false
+
+  defp run_status_command(command, args) do
+    System.cmd(command, args, stderr_to_stdout: true)
+  rescue
+    _ -> {"", 1}
+  catch
+    :exit, _ -> {"", 1}
   end
 
   # ── session lifecycle ──────────────────────────────────────────────
@@ -176,9 +288,9 @@ defmodule Ecrits.Local.AcpAgent do
   via the `{:already_started, pid}` path.
   """
   def close(session_id) when is_binary(session_id) do
-    case Session.whereis(session_id) do
+    case safe_whereis(session_id) do
       nil -> :ok
-      pid -> DynamicSupervisor.terminate_child(SessionSupervisor, pid)
+      pid when is_pid(pid) -> DynamicSupervisor.terminate_child(SessionSupervisor, pid)
     end
   end
 
@@ -205,7 +317,7 @@ defmodule Ecrits.Local.AcpAgent do
 
   @doc "Display-only `%{transcript, status, title}` for a refresh-time repaint."
   def agent_snapshot(session_id) when is_binary(session_id) do
-    case Session.whereis(session_id) do
+    case safe_whereis(session_id) do
       pid when is_pid(pid) -> Session.agent_snapshot(pid)
       nil -> %{transcript: [], status: :offline, title: nil}
     end
@@ -213,7 +325,7 @@ defmodule Ecrits.Local.AcpAgent do
 
   @doc "The session's current chat title (nil when not yet derived)."
   def title(session_id) when is_binary(session_id) do
-    case Session.whereis(session_id) do
+    case safe_whereis(session_id) do
       pid when is_pid(pid) -> Session.title(pid)
       nil -> nil
     end
@@ -221,7 +333,7 @@ defmodule Ecrits.Local.AcpAgent do
 
   @doc "Rename a session's chat thread (user edit)."
   def rename(session_id, title) when is_binary(session_id) and is_binary(title) do
-    case Session.whereis(session_id) do
+    case safe_whereis(session_id) do
       pid when is_pid(pid) -> Session.rename(pid, title)
       nil -> {:error, :not_found}
     end
@@ -232,7 +344,15 @@ defmodule Ecrits.Local.AcpAgent do
   end
 
   def topic(session_id), do: Session.topic(session_id)
-  def whereis(session_id), do: Session.whereis(session_id)
+  def whereis(session_id), do: safe_whereis(session_id)
+
+  defp safe_whereis(session_id) when is_binary(session_id) do
+    Session.whereis(session_id)
+  rescue
+    UndefinedFunctionError -> nil
+  end
+
+  defp safe_whereis(_session_id), do: nil
 
   # ── doc.* MCP server descriptor ────────────────────────────────────
 

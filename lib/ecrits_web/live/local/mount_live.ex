@@ -14,17 +14,20 @@ defmodule EcritsWeb.Local.MountLive do
      socket
      |> assign(:page_title, "Mount workspace")
      |> assign(:mount_error, nil)
+     |> assign(:picker_busy?, false)
      |> assign(:path_form, path_form())}
   end
 
   @impl true
   def handle_event("choose_mount_directory", _params, socket) do
-    case DirectoryPicker.choose_folder() do
-      {:ok, path} ->
-        mount_workspace(socket, path)
-
-      {:error, reason} ->
-        {:noreply, assign(socket, :mount_error, error_message(reason))}
+    if socket.assigns.picker_busy? do
+      {:noreply, socket}
+    else
+      {:noreply,
+       socket
+       |> assign(:mount_error, nil)
+       |> assign(:picker_busy?, true)
+       |> start_async(:choose_mount_directory, fn -> DirectoryPicker.choose_folder() end)}
     end
   end
 
@@ -41,6 +44,27 @@ defmodule EcritsWeb.Local.MountLive do
      socket
      |> assign(:mount_error, "Choose a workspace folder.")
      |> assign(:path_form, path_form())}
+  end
+
+  @impl true
+  def handle_async(:choose_mount_directory, {:ok, {:ok, path}}, socket) do
+    socket
+    |> assign(:picker_busy?, false)
+    |> mount_workspace(path)
+  end
+
+  def handle_async(:choose_mount_directory, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:picker_busy?, false)
+     |> assign(:mount_error, error_message(reason))}
+  end
+
+  def handle_async(:choose_mount_directory, {:exit, _reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(:picker_busy?, false)
+     |> assign(:mount_error, "Native folder picker failed to open.")}
   end
 
   defp mount_workspace(socket, path) do
@@ -122,10 +146,18 @@ defmodule EcritsWeb.Local.MountLive do
                 type="button"
                 phx-click="choose_mount_directory"
                 phx-disable-with="Opening picker…"
+                disabled={@picker_busy?}
+                aria-busy={to_string(@picker_busy?)}
+                data-busy={to_string(@picker_busy?)}
                 class="mount-open"
               >
-                <.icon name="hero-folder-open-micro" class="mount-open__icon" />
-                <span>Open folder…</span>
+                <%= if @picker_busy? do %>
+                  <.icon name="hero-arrow-path-micro" class="mount-open__icon animate-spin" />
+                  <span>Opening picker…</span>
+                <% else %>
+                  <.icon name="hero-folder-open-micro" class="mount-open__icon" />
+                  <span>Open folder…</span>
+                <% end %>
               </button>
 
               <%!-- Secondary: type or paste a path, Enter to mount. --%>
@@ -180,15 +212,6 @@ defmodule EcritsWeb.Local.MountLive do
               <.icon name="hero-exclamation-triangle-micro" class="mount-error__icon" />
               <span>{@mount_error}</span>
             </p>
-
-            <footer class="mount-foot">
-              <span class="mount-foot__item">
-                <.icon name="hero-lock-closed-micro" class="mount-foot__icon" />
-                <span>Local-first</span>
-              </span>
-              <span class="mount-foot__sep" aria-hidden="true">&middot;</span>
-              <span class="mount-foot__item">Nothing leaves this device</span>
-            </footer>
           </div>
         </section>
       </div>

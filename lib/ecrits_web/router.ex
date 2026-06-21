@@ -4,6 +4,7 @@ defmodule EcritsWeb.Router do
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
+    plug :put_local_live_session_id
     plug :fetch_live_flash
     plug :put_root_layout, html: {EcritsWeb.Layouts, :root}
     plug :protect_from_forgery
@@ -24,7 +25,7 @@ defmodule EcritsWeb.Router do
     post "/commands", EcritsWeb.NotImplementedPlug, label: "/slack/commands"
   end
 
-  # Enable LiveDashboard, Swoosh mailbox preview, and the theme swatch in dev.
+  # Enable LiveDashboard and Swoosh mailbox preview in dev.
   if Application.compile_env(:ecrits, :dev_routes) do
     # If you want to use the LiveDashboard in production, you should put
     # it behind authentication and allow only admins to access it.
@@ -32,15 +33,6 @@ defmodule EcritsWeb.Router do
     # you can use Plug.BasicAuth to set up some basic authentication
     # as long as you are also using SSL (which you should anyway).
     import Phoenix.LiveDashboard.Router
-
-    scope "/dev", EcritsWeb do
-      pipe_through :browser
-
-      live_session :dev_only,
-        on_mount: [EcritsWeb.Locale] do
-        live "/theme", Dev.ThemePreviewLive
-      end
-    end
 
     scope "/dev" do
       pipe_through :browser
@@ -82,6 +74,7 @@ defmodule EcritsWeb.Router do
     live_session :local,
       on_mount: [EcritsWeb.Locale] do
       live "/", Local.MountLive, :index
+      live "/local/agent-providers/:provider/setup", Local.AgentProviderSetupLive, :show
       live "/workspace", Local.WorkspaceLive, :show
     end
 
@@ -93,5 +86,15 @@ defmodule EcritsWeb.Router do
     # Inline previews for doc.render outputs (PNG files in the render scratch
     # dir) — the chat rail swaps the render tool-call chip body for the image.
     get "/local/render-preview", LocalRenderPreviewController, :show
+  end
+
+  defp put_local_live_session_id(conn, _opts) do
+    case get_session(conn, :local_live_session_id) do
+      id when is_binary(id) and id != "" ->
+        conn
+
+      _ ->
+        put_session(conn, :local_live_session_id, Ecto.UUID.generate())
+    end
   end
 end

@@ -53,7 +53,14 @@ defmodule Ecrits.Local.AcpAgent.SessionQueueTest do
     # A second send while turn 1 is in flight ENQUEUES (status :queued) — turn 1
     # is NOT cancelled.
     {:ok, %{id: turn2, status: :queued}} = Session.send_turn(pid, nil, "second")
-    assert_receive {:local_agent_event, %{type: :turn_queued, pending: 1}}, 2_000
+
+    assert_receive {:local_agent_event,
+                    %{type: :turn_queued, pending: 1, input: "second", picks: []}},
+                   2_000
+
+    assert %{pending: 1, queued: [%{turn_id: ^turn2, input: "second", picks: []}]} =
+             Session.agent_snapshot(pid)
+
     refute_received {:local_agent_event, %{type: :turn_cancelled}}
 
     # Release turn 1 → it completes → the queue head (turn 2) drains and starts.
@@ -143,6 +150,61 @@ defmodule Ecrits.Local.AcpAgent.SessionQueueTest do
     send(task2, :go)
   end
 
+  test "live option updates do not retarget document context" do
+    id = "queue-doc-update-" <> Ecto.UUID.generate()
+
+    start_supervised!(
+      {Session,
+       [
+         id: id,
+         ctx: nil,
+         provider: %{id: "codex"},
+         exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+         adapter_opts: [
+           exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+           script: [{:text_delta, "ok"}]
+         ],
+         workspace_root: File.cwd!(),
+         document_path: "seed.hwp",
+         pool_document_id: "d_hwp_seed",
+         mcp_servers: []
+       ]}
+    )
+
+    :ok = Ecrits.Local.AcpAgent.subscribe(id)
+    pid = Session.whereis(id)
+
+    assert %{
+             active_doc: "d_hwp_seed",
+             document_path: "seed.hwp"
+           } = Session.tool_context(pid)
+
+    :ok =
+      Session.update_options(pid,
+        model: "changed-model",
+        document_path: "other.hwp",
+        pool_document_id: "d_hwp_other"
+      )
+
+    assert %{
+             active_doc: "d_hwp_seed",
+             document_path: "seed.hwp"
+           } = Session.tool_context(pid)
+
+    {:ok, %{id: turn_id, status: :running}} =
+      Session.send_turn(pid, nil, "read turn doc",
+        document_path: "turn.hwp",
+        pool_document_id: "d_hwp_turn"
+      )
+
+    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+
+    assert %{
+             active_doc: "d_hwp_turn",
+             document_path: "turn.hwp"
+           } = Session.tool_context(pid)
+  end
+
   test "re-Enter flushes the queue head NOW (cancel current + run head)" do
     {_id, pid} = start_blocking_session()
 
@@ -160,6 +222,32 @@ defmodule Ecrits.Local.AcpAgent.SessionQueueTest do
 
     # The cancelled task winds down; release the flushed head.
     send(task1, :go)
+    send(task2, :go)
+  end
+
+  test "cancel stops only the current turn and leaves queued follow-ups idle" do
+    {_id, pid} = start_blocking_session()
+
+    {:ok, %{id: turn1, status: :running}} = Session.send_turn(pid, nil, "first")
+    assert_receive {:local_agent_adapter_waiting, task1}, 2_000
+
+    {:ok, %{id: turn2, status: :queued}} = Session.send_turn(pid, nil, "second")
+    assert_receive {:local_agent_event, %{type: :turn_queued, turn_id: ^turn2}}, 2_000
+
+    assert {:ok, %{id: ^turn1, status: :cancelled}} = Session.cancel(pid, nil, turn1)
+    assert_receive {:local_agent_event, %{type: :turn_cancelled, turn_id: ^turn1}}, 2_000
+
+    assert {:ok, %{current_turn: nil}} = Session.snapshot(pid)
+
+    assert %{status: :idle, pending: 1, queued: [%{turn_id: ^turn2, input: "second"}]} =
+             Session.agent_snapshot(pid)
+
+    send(task1, :go)
+
+    assert {:ok, %{id: ^turn2, status: :running}} = Session.flush_queue(pid, nil)
+    assert_receive {:local_agent_adapter_waiting, task2}, 2_000
+    assert_receive {:local_agent_event, %{type: :turn_started, turn_id: ^turn2}}, 2_000
+
     send(task2, :go)
   end
 
@@ -207,11 +295,94 @@ defmodule Ecrits.Local.AcpAgent.SessionQueueTest do
     assert Session.title(pid) == "describe this image"
   end
 
+  test "a prompt with no first ACP activity fails before the long idle window" do
+    id = "queue-initial-stall-" <> Ecto.UUID.generate()
+
+    start_supervised!(
+      {Session,
+       [
+         id: id,
+         ctx: nil,
+         provider: %{id: "codex"},
+         exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+         adapter_opts: [
+           exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+           test_pid: self(),
+           wait_for: :never_released,
+           initial_activity_timeout: 25,
+           script: [{:text_delta, "too late"}]
+         ],
+         workspace_root: File.cwd!(),
+         mcp_servers: []
+       ]}
+    )
+
+    :ok = Ecrits.Local.AcpAgent.subscribe(id)
+    pid = Session.whereis(id)
+
+    {:ok, %{id: turn_id, status: :running}} = Session.send_turn(pid, nil, "stall")
+    assert_receive {:local_agent_adapter_waiting, _task_pid}, 2_000
+
+    assert_receive {:local_agent_event, %{type: :turn_failed, turn_id: ^turn_id, reason: reason}},
+                   1_000
+
+    assert reason =~ "no activity for 25ms"
+  end
+
+  test "session-routed ACP updates keep the stream task from false-stalling" do
+    id = "queue-session-update-heartbeat-" <> Ecto.UUID.generate()
+
+    start_supervised!(
+      {Session,
+       [
+         id: id,
+         ctx: nil,
+         provider: %{id: "codex"},
+         exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+         adapter_opts: [
+           exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+           test_pid: self(),
+           wait_for: :release_prompt,
+           initial_activity_timeout: 50,
+           script: [{:text_delta, "done"}]
+         ],
+         workspace_root: File.cwd!(),
+         mcp_servers: []
+       ]}
+    )
+
+    :ok = Ecrits.Local.AcpAgent.subscribe(id)
+    pid = Session.whereis(id)
+
+    {:ok, %{id: turn_id, status: :running}} = Session.send_turn(pid, nil, "tool heartbeat")
+    assert_receive {:local_agent_adapter_waiting, task_pid}, 2_000
+
+    send(pid, {:acp_session_update, "fake-session", fake_tool_update("doc.render")})
+
+    assert_receive {:local_agent_event,
+                    %{type: :tool_call_started, turn_id: ^turn_id, name: "doc.render"}},
+                   2_000
+
+    refute_receive {:local_agent_event, %{type: :turn_failed, turn_id: ^turn_id}}, 150
+
+    send(task_pid, :release_prompt)
+    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+  end
+
   test "an invalid multi-modal input fails fast at the boundary" do
     {_id, pid} = start_blocking_session()
     assert {:error, {:invalid_input, :empty_input}} = Session.send_turn(pid, nil, [])
 
     assert {:error, {:invalid_input, {:unknown_block_type, "bogus"}}} =
              Session.send_turn(pid, nil, [%{"type" => "bogus"}])
+  end
+
+  defp fake_tool_update(name) do
+    %{
+      "sessionUpdate" => "tool_call",
+      "toolCallId" => "tool-heartbeat",
+      "toolName" => name,
+      "rawInput" => %{"document" => "d_pptx_test"}
+    }
   end
 end

@@ -22,6 +22,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   alias EcritsWeb.Local.WorkspaceAdapter
 
   @local_document_upload_max_size 50_000_000
+  @local_document_upload_accept ~w(.hwp .hwpx .doc .docx .xls .xlsx .ppt .pptx .rtf .md .markdown)
+  @local_document_open_async :open_local_document
   # Debounce interval for re-rendering the streaming agent message body as
   # formatted markdown (raw client-side appends give instant sub-debounce
   # feedback; the tick re-renders the accumulated buffer through MDEx).
@@ -107,12 +109,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   @local_agent_access_ids ~w(read-only ask full-workspace)
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(_params, session, socket) do
     {:ok,
      socket
+     |> assign(:local_live_session_id, local_live_session_id(session))
      # The durable per-workspace `Ecrits.Workspace.Session` (keyed by canonical
-     # path, cookieless) owns the foreground agent and survives this LiveView; a
-     # refresh re-attaches in handle_params. `nil` until the first attach.
+     # path) owns document routing, while the foreground chat agent is scoped by
+     # the Phoenix session id above. A refresh from the same browser session
+     # re-attaches in handle_params. `nil` until the first attach.
      |> assign(:workspace_session, nil)
      # NAMED captures (not anon closures): a stream `dom_id` resolver is stored on
      # the long-lived LiveView at mount. An anonymous `& &1.dom_id` is compiled
@@ -184,6 +188,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      # queue). Drives the "N 대기" pending indicator; decremented as each queued
      # turn drains.
      |> assign(:local_agent_pending, 0)
+     |> assign(:local_agent_queue, [])
+     |> assign(:local_agent_queue_index, 0)
+     |> assign(:local_agent_rail_key, nil)
+     |> assign(:local_agent_rails, [])
+     |> assign(:local_agent_rail_drawer_open?, false)
      |> assign(:local_agent_text, "")
      |> assign(:local_agent_text_segment, 0)
      |> assign(:local_agent_text_flush_ref, nil)
@@ -208,7 +217,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:local_agent_model_modal_open, false)
      |> assign(:local_agent_options_form, local_agent_options_form())
      |> allow_upload(:local_document_import,
-       accept: ~w(.hwp .hwpx .doc .docx),
+       accept: @local_document_upload_accept,
        max_entries: 1,
        max_file_size: @local_document_upload_max_size,
        auto_upload: true,
@@ -337,7 +346,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   def handle_event("open_file", %{"path" => path}, socket) do
     {:noreply,
      socket
-     |> prepare_local_document_loading(path)
+     |> schedule_local_document_open(path)
      |> push_patch(to: workspace_document_path(socket, path))}
   end
 
@@ -349,7 +358,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       %{path: path} ->
         {:noreply,
          socket
-         |> prepare_local_document_loading(path)
+         |> schedule_local_document_open(path)
          |> push_patch(to: workspace_document_path(socket, path))}
     end
   end
@@ -622,12 +631,45 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     {:noreply,
      socket
      |> assign(:local_agent_title_user_edited?, true)
-     |> assign_local_agent_title(title)}
+     |> assign_local_agent_title(title)
+     |> refresh_local_agent_rails()}
   end
 
   def handle_event("refresh_local_agent", _params, socket) do
     {:noreply, restart_local_agent_session(socket)}
   end
+
+  def handle_event("open_local_agent_rails", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:local_agent_rail_drawer_open?, true)
+     |> refresh_local_agent_rails()}
+  end
+
+  def handle_event("close_local_agent_rails", _params, socket) do
+    {:noreply, assign(socket, :local_agent_rail_drawer_open?, false)}
+  end
+
+  def handle_event("select_local_agent_rail", %{"rail-key" => rail_key}, socket)
+      when is_binary(rail_key) and rail_key != "" do
+    path = socket.assigns.workspace_path
+
+    case safe_select_foreground(path, rail_key, local_agent_attach_settings(socket)) do
+      {:ok, %{agent_id: agent_id} = ws} when is_binary(agent_id) ->
+        :ok = WorkspaceSession.subscribe(ws)
+
+        {:noreply,
+         socket
+         |> snapshot_local_agent(ws, agent_id)
+         |> assign(:local_agent_rail_drawer_open?, false)
+         |> refresh_local_agent_rails()}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
+    end
+  end
+
+  def handle_event("select_local_agent_rail", _params, socket), do: {:noreply, socket}
 
   # The composer is a native form (phx-submit) so `agent[message]` is the nested
   # param shape; the colocated `.ChatInput` hook also pushEvents the same handler
@@ -665,6 +707,19 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     else
       {:noreply, socket}
     end
+  end
+
+  def handle_event("local_agent_queue.prev", _params, socket) do
+    {:noreply, update(socket, :local_agent_queue_index, &max((&1 || 0) - 1, 0))}
+  end
+
+  def handle_event("local_agent_queue.next", _params, socket) do
+    max_index = max(length(socket.assigns.local_agent_queue) - 1, 0)
+    {:noreply, update(socket, :local_agent_queue_index, &min((&1 || 0) + 1, max_index))}
+  end
+
+  def handle_event("flush_local_agent_queue", _params, socket) do
+    flush_local_agent_queue(socket)
   end
 
   @impl true
@@ -746,13 +801,26 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
+  @impl true
   def handle_info({:open_local_document, ref, path}, socket) do
     if socket.assigns.pending_document_open_ref == ref and
          socket.assigns.pending_document_path == path do
-      {:noreply, do_open_local_document(socket, path)}
+      {:noreply, start_local_document_open(socket, ref, path)}
     else
       {:noreply, socket}
     end
+  end
+
+  def handle_info({:doc_viewer_state_request, from, ref, document_id}, socket) do
+    result =
+      if socket.assigns[:pool_document_id] == document_id do
+        {:ok, %{dirty: viewer_document_dirty?(socket, document_id)}}
+      else
+        {:error, :document_mismatch}
+      end
+
+    send(from, {:doc_viewer_state_reply, ref, result})
+    {:noreply, socket}
   end
 
   # Agent edit/read/find for the OPEN HWP, routed from `Ecrits.Doc.Tools` because
@@ -839,6 +907,30 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   @impl true
+  def handle_async(@local_document_open_async, {:ok, {ref, path, result}}, socket) do
+    if socket.assigns.pending_document_open_ref == ref and
+         socket.assigns.pending_document_path == path do
+      {:noreply, apply_local_document_open_result(socket, path, result)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_async(@local_document_open_async, {:exit, {:shutdown, :cancel}}, socket) do
+    {:noreply, socket}
+  end
+
+  def handle_async(@local_document_open_async, {:exit, reason}, socket) do
+    case socket.assigns.pending_document_path do
+      path when is_binary(path) and path != "" ->
+        {:noreply, apply_local_document_open_result(socket, path, {:error, reason})}
+
+      _other ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
   def terminate(_reason, socket) do
     _ = unsubscribe_local_hwp_stream(socket)
     _ = unregister_local_rhwp_materializer_editor(active_document_id(socket))
@@ -848,6 +940,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   @impl true
   def render(assigns) do
+    assigns = assign(assigns, :local_file_tree_open_paths, local_file_tree_open_paths(assigns))
+
     ~H"""
     <Layouts.app flash={@flash} variant="split">
       <main
@@ -927,6 +1021,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                   nodes={@tree}
                   expanded_paths={@expanded_paths}
                   selected_path={@selected_path}
+                  open_paths={@local_file_tree_open_paths}
                 />
               </div>
             </div>
@@ -1000,23 +1095,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                   )
               }
             />
-
-            <div :if={!@active_document && @open_documents == []} class="px-5 py-6">
-              <div class="rounded-md border border-base-300 bg-base-100 p-4">
-                <%= if @selected_path do %>
-                  <p id="local-selected-file" class="text-sm font-medium text-base-content">
-                    {@selected_path}
-                  </p>
-                  <p class="mt-2 text-sm text-base-content/60">
-                    {selected_file_state(@selected_path, @active_document_path)}
-                  </p>
-                <% else %>
-                  <p id="local-no-file-selected" class="text-sm text-base-content/60">
-                    Select a local document from the file tree.
-                  </p>
-                <% end %>
-              </div>
-            </div>
           </section>
 
           <aside
@@ -1068,7 +1146,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                 id="local-agent-title"
                 data-role="chat-thread-title"
                 title={@local_agent_title}
-                class="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-semibold leading-5 text-base-content"
+                phx-click-away={close_local_agent_rails_js() |> JS.push("close_local_agent_rails")}
+                class="relative flex min-w-0 flex-1 items-center gap-1.5 text-sm font-semibold leading-5 text-base-content"
               >
                 <.form
                   for={@local_agent_title_form}
@@ -1090,6 +1169,117 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                     class="block h-6 w-full min-w-0 truncate rounded-sm border border-transparent bg-transparent px-1 py-0 text-sm font-semibold leading-6 text-base-content outline-none transition-colors placeholder:text-transparent hover:border-base-content/15 focus:border-base-content/35 focus:bg-base-100 focus:outline-none"
                   />
                 </.form>
+
+                <button
+                  id="local-agent-rail-picker"
+                  type="button"
+                  phx-click={
+                    if(@local_agent_rail_drawer_open?,
+                      do: close_local_agent_rails_js() |> JS.push("close_local_agent_rails"),
+                      else: open_local_agent_rails_js() |> JS.push("open_local_agent_rails")
+                    )
+                  }
+                  data-role="chat-rail-picker"
+                  data-open={@local_agent_rail_drawer_open?}
+                  data-state={if(@local_agent_rail_drawer_open?, do: "open", else: "closed")}
+                  data-count={length(@local_agent_rails)}
+                  aria-label="Select chat rail"
+                  aria-expanded={@local_agent_rail_drawer_open?}
+                  aria-controls="local-agent-rail-drawer"
+                  class={[
+                    "inline-flex h-7 shrink-0 items-center gap-1 rounded px-1.5 text-xs transition-colors",
+                    @local_agent_rail_drawer_open? &&
+                      "bg-base-100 text-base-content",
+                    not @local_agent_rail_drawer_open? &&
+                      "text-base-content/55 hover:bg-base-100 hover:text-base-content"
+                  ]}
+                >
+                  <.icon name="hero-chat-bubble-left-right" class="size-4" />
+                  <span
+                    :if={length(@local_agent_rails) > 1}
+                    data-role="chat-rail-count"
+                    class="tabular-nums"
+                  >
+                    {length(@local_agent_rails)}
+                  </span>
+                </button>
+
+                <div
+                  id="local-agent-rail-drawer"
+                  data-role="chat-rail-dropdown"
+                  data-open={@local_agent_rail_drawer_open?}
+                  data-state={if(@local_agent_rail_drawer_open?, do: "open", else: "closed")}
+                  class={[
+                    "absolute left-0 right-0 top-8 z-30 origin-top rounded border border-base-300 bg-base-100 p-1.5 shadow-sm",
+                    "transition-opacity duration-75 ease-out",
+                    @local_agent_rail_drawer_open? &&
+                      "visible opacity-100",
+                    not @local_agent_rail_drawer_open? &&
+                      "invisible pointer-events-none opacity-0"
+                  ]}
+                >
+                  <div class="flex items-center justify-between px-1.5 pb-1">
+                    <p class="text-[11px] font-medium leading-4 text-base-content/70">
+                      Recent chats
+                    </p>
+                    <p
+                      :if={length(@local_agent_rails) > 1}
+                      data-role="chat-rail-dropdown-count"
+                      class="text-[10px] leading-4 text-base-content/45"
+                    >
+                      {length(@local_agent_rails)} rails
+                    </p>
+                  </div>
+
+                  <div class="flex max-h-64 flex-col gap-0.5 overflow-y-auto">
+                    <button
+                      :for={rail <- @local_agent_rails}
+                      id={"local-agent-rail-option-#{rail.agent_id}"}
+                      type="button"
+                      phx-click={close_local_agent_rails_js() |> JS.push("select_local_agent_rail")}
+                      phx-value-rail-key={rail.rail_key}
+                      data-role="chat-rail-option"
+                      data-agent-id={rail.agent_id}
+                      data-active={rail.active?}
+                      class={[
+                        "flex min-w-0 items-start gap-2 rounded px-2 py-2 text-left transition-colors",
+                        rail.active? && "bg-base-200 text-base-content",
+                        not rail.active? &&
+                          "text-base-content/75 hover:bg-base-200 hover:text-base-content"
+                      ]}
+                    >
+                      <span class="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center text-base-content/45">
+                        <.icon name="hero-chat-bubble-left" class="size-3.5" />
+                      </span>
+                      <span class="min-w-0 flex-1">
+                        <span
+                          data-role="chat-rail-option-title"
+                          class="block truncate text-[13px] font-medium leading-4"
+                        >
+                          {local_agent_rail_title(rail)}
+                        </span>
+                        <span
+                          data-role="chat-rail-option-meta"
+                          class="mt-0.5 block truncate text-[11px] leading-4 text-base-content/50"
+                        >
+                          {local_agent_rail_meta(rail)}
+                        </span>
+                      </span>
+                      <.icon
+                        :if={rail.active?}
+                        name="hero-check"
+                        class="mt-0.5 size-3.5 shrink-0 text-base-content/60"
+                      />
+                    </button>
+                    <p
+                      :if={@local_agent_rails == []}
+                      id="local-agent-rail-empty"
+                      class="px-2 py-2 text-xs text-base-content/45"
+                    >
+                      No recent chats
+                    </p>
+                  </div>
+                </div>
               </div>
               <span
                 id="local-agent-status"
@@ -1126,7 +1316,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                 type="button"
                 phx-click="refresh_local_agent"
                 class="inline-flex size-7 shrink-0 items-center justify-center rounded text-base-content/55 hover:bg-base-100 hover:text-base-content disabled:pointer-events-none disabled:opacity-45"
-                aria-label="Reset agent chat"
+                aria-label="New agent chat"
                 disabled={@local_agent_status == :starting}
               >
                 <.icon name="hero-arrow-path" class="size-4" />
@@ -1341,8 +1531,89 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                 {@local_agent_error}
               </p>
 
-              <div class="shrink-0 border-t border-base-300 bg-base-200 px-3 py-2">
-                <%!-- The composer box: the textarea + send/stop row AND the
+              <% queued_item =
+                local_agent_queued_item(@local_agent_queue, @local_agent_queue_index) %>
+              <div
+                :if={queued_item}
+                id="local-agent-queued-panel"
+                data-role="queued-messages"
+                data-queued-count={length(@local_agent_queue)}
+                data-queued-index={@local_agent_queue_index + 1}
+                class="mb-1.5 shrink-0 flex min-h-11 min-w-0 items-center gap-1.5 rounded border border-base-300 bg-base-100 px-1.5 py-1 text-xs text-base-content/70"
+              >
+                <button
+                  id="local-agent-queued-prev"
+                  type="button"
+                  phx-click="local_agent_queue.prev"
+                  disabled={@local_agent_queue_index <= 0}
+                  aria-label="Previous queued message"
+                  class="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-base-content/40 transition-colors hover:bg-base-200 hover:text-base-content disabled:pointer-events-none disabled:opacity-25"
+                >
+                  <.icon name="hero-chevron-left" class="size-3.5" />
+                </button>
+                <button
+                  id="local-agent-queued-next"
+                  type="button"
+                  phx-click="local_agent_queue.next"
+                  disabled={@local_agent_queue_index >= length(@local_agent_queue) - 1}
+                  aria-label="Next queued message"
+                  class="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-base-content/40 transition-colors hover:bg-base-200 hover:text-base-content disabled:pointer-events-none disabled:opacity-25"
+                >
+                  <.icon name="hero-chevron-right" class="size-3.5" />
+                </button>
+                <div
+                  id="local-agent-queued-body"
+                  data-role="queued-body"
+                  class="min-w-0 flex-1"
+                >
+                  <p
+                    id="local-agent-queued-title"
+                    data-role="queued-count"
+                    aria-label={"Queued message #{@local_agent_queue_index + 1} of #{length(@local_agent_queue)}"}
+                    class="flex h-3 items-center gap-1 text-[10px] font-medium leading-3 text-base-content/45"
+                  >
+                    <span>Queue</span>
+                    <span class="tabular-nums text-base-content/80">
+                      {@local_agent_queue_index + 1}/{length(@local_agent_queue)}
+                    </span>
+                  </p>
+                  <div
+                    id="local-agent-queued-message"
+                    data-role="queued-message"
+                    data-turn-id={queued_item.turn_id}
+                    class="min-w-0 truncate text-[13px] font-medium leading-4 text-base-content/90"
+                    title={queued_item.body}
+                  >
+                    <% picks = queued_item.picks || [] %>
+                    <span
+                      :if={picks != []}
+                      data-role="queued-picks-count"
+                      class="mr-1 text-[11px] font-normal text-base-content/45"
+                    >
+                      +{length(picks)}
+                    </span>
+                    <span :if={queued_item.body != ""}>
+                      {queued_item.body}
+                    </span>
+                    <span :if={queued_item.body == ""} class="text-base-content/55">
+                      Selected elements
+                    </span>
+                  </div>
+                </div>
+                <button
+                  id="local-agent-queued-flush"
+                  type="button"
+                  phx-click="flush_local_agent_queue"
+                  title="Send queued"
+                  aria-label="Send queued message"
+                  class="inline-flex h-6 shrink-0 items-center gap-1 rounded-sm bg-base-content px-2 text-xs font-medium text-base-100 transition-colors hover:bg-base-content/85"
+                >
+                  <.icon name="hero-arrow-turn-down-left" class="size-3.5" />
+                  <span>Send</span>
+                </button>
+              </div>
+
+              <%!-- The composer box: the textarea + send/stop row AND the
                      embedded options row (model / 📎 attach / reasoning / access)
                      live in ONE bordered box, ChatGPT-style. The composer is a
                      native `phx-submit` form; the colocated `.ChatInput` hook adds
@@ -1351,304 +1622,339 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                      grid hook's submit guard. The options stay a SEPARATE sibling
                      form (`local-agent-provider-options`) so they never submit a
                      chat turn. --%>
-                <div class="rounded border border-base-300 bg-base-100 transition-colors focus-within:border-base-content/40">
-                  <%!-- Picked-element chips: the document_element_picker JS owns
+              <div class="shrink-0 rounded border border-base-300 bg-base-100 transition-colors focus-within:border-base-content/40">
+                <%!-- Picked-element chips: the document_element_picker JS owns
                        this container's children (phx-update="ignore"), rendering
                        one removable chip per pick. Picks ride the ChatInput
                        pushEvent as structured data — never the textarea text. --%>
-                  <div id="local-agent-picks" phx-update="ignore" data-role="composer-picks"></div>
-                  <.form
-                    for={@local_agent_form}
-                    id="local-agent-form"
-                    phx-submit="send_local_agent"
-                    phx-hook=".ChatInput"
-                    data-role="chat-form"
-                  >
-                    <.input
-                      field={@local_agent_form[:message]}
-                      id="local-agent-input"
-                      type="textarea"
-                      rows="1"
-                      autocomplete="off"
-                      data-role="chat-textarea"
-                      disabled={@local_agent_status in [:offline, :starting]}
-                      placeholder={agent_input_placeholder(@local_agent_status)}
-                      class="block max-h-40 min-h-8 w-full resize-none overflow-y-auto border-0 bg-transparent px-3 py-1 text-[13px] leading-snug text-base-content outline-none placeholder:text-base-content/35 focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:text-base-content/40"
-                    />
-                    <div class="flex items-center justify-end gap-1 px-2 pb-1.5 pt-0.5">
-                      <%!-- 📎 attach sits next to Send; its hidden file input stays
+                <div id="local-agent-picks" phx-update="ignore" data-role="composer-picks"></div>
+                <.form
+                  for={@local_agent_form}
+                  id="local-agent-form"
+                  phx-submit="send_local_agent"
+                  phx-hook=".ChatInput"
+                  data-role="chat-form"
+                >
+                  <.input
+                    field={@local_agent_form[:message]}
+                    id="local-agent-input"
+                    type="textarea"
+                    rows="1"
+                    autocomplete="off"
+                    data-role="chat-textarea"
+                    disabled={@local_agent_status in [:offline, :starting]}
+                    placeholder={agent_input_placeholder(@local_agent_status)}
+                    class="block max-h-40 min-h-7 w-full resize-none overflow-y-auto border-0 bg-transparent px-3 pt-1.5 pb-0.5 text-[13px] leading-snug text-base-content outline-none placeholder:text-base-content/35 focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:text-base-content/40"
+                  />
+                  <div class="flex items-center justify-end gap-1 px-2 pb-1.5 pt-0">
+                    <%!-- 📎 attach sits next to Send; its hidden file input stays
                            in the options form below (upload phx-change binding). --%>
-                      <label
-                        id="local-agent-upload"
-                        data-role="chat-upload"
-                        for={@uploads.local_document_import.ref}
-                        class="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content"
-                        aria-label="Open local document"
-                      >
-                        <.icon name="hero-paper-clip" class="size-3.5" />
-                      </label>
-                      <button
-                        :if={@local_agent_status == :running}
-                        id="local-agent-submit"
-                        type="button"
-                        phx-click="cancel_local_agent"
-                        data-role="chat-stop"
-                        data-action="stop"
-                        class="inline-flex size-6 items-center justify-center rounded bg-base-content text-base-100 transition-colors hover:bg-base-content/80"
-                        aria-label="Stop agent turn"
-                      >
-                        <.icon name="hero-stop" class="size-3.5" />
-                        <span class="sr-only">Stop</span>
-                      </button>
-                      <button
-                        :if={@local_agent_status != :running}
-                        id="local-agent-submit"
-                        type="button"
-                        data-role="chat-send"
-                        data-action="send"
-                        disabled={@local_agent_status in [:offline, :starting]}
-                        class="inline-flex size-6 items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content disabled:cursor-not-allowed disabled:opacity-35"
-                        aria-label="Send"
-                      >
-                        <.icon name="hero-paper-airplane" class="size-3.5" />
-                        <span class="sr-only">Send</span>
-                      </button>
-                    </div>
-                  </.form>
-
-                  <.form
-                    for={@local_agent_options_form}
-                    id="local-agent-provider-options"
-                    phx-change="validate_local_document_upload"
-                    data-role="provider-options"
-                    data-selected-provider={@local_agent.provider.key}
-                    data-selected-model={@local_agent.model}
-                    data-selected-reasoning={@local_agent.reasoning_effort}
-                    data-selected-access={@local_agent.access.id}
-                    class="flex min-w-0 flex-wrap items-center gap-1 border-t border-base-300 px-2 py-1.5 text-[11px] leading-5 text-base-content/60"
-                  >
-                    <div class="block min-w-0 shrink-0">
-                      <span class="sr-only">Model</span>
-                      <details
-                        id="local-agent-model-select"
-                        data-role="agent-model-select"
-                        data-selected-provider={@local_agent.provider.key}
-                        data-selected-model={@local_agent.model}
-                        class="group relative inline-block min-w-0 max-w-32 align-top"
-                      >
-                        <summary class="inline-flex h-7 max-w-32 min-w-0 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-left text-[11px] text-base-content transition-colors hover:border-base-content/25 marker:hidden">
-                          <img
-                            src={@local_agent.provider.favicon_src}
-                            data-role="agent-model-provider-favicon"
-                            aria-hidden="true"
-                            alt=""
-                            class="size-3.5 shrink-0 opacity-85 [[data-theme=studio-dark]_&]:invert"
-                          />
-                          <span class="min-w-0 truncate">
-                            {local_agent_selected_model_label(@local_agent.model)}
-                          </span>
-                          <.icon
-                            name="hero-chevron-down"
-                            class="size-3 shrink-0 text-base-content/50"
-                          />
-                        </summary>
-                        <div
-                          data-role="agent-model-menu"
-                          class="absolute bottom-8 left-0 z-40 max-h-[min(24rem,calc(100vh-8rem))] w-[min(17rem,calc(100vw-2rem))] max-w-[calc(var(--local-chat-rail-width,340px)-2rem)] overflow-y-auto rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm"
-                        >
-                          <button
-                            :for={model <- local_agent_models_for_provider(@local_agent.provider.key)}
-                            id={"local-agent-inline-model-#{model.id}"}
-                            type="button"
-                            phx-click="select_local_agent_model"
-                            phx-value-model={model.id}
-                            data-role="agent-model-option"
-                            data-model={model.id}
-                            data-provider={model.provider}
-                            data-selected={to_string(@local_agent.model == model.id)}
-                            title={model.description}
-                            class={[
-                              "flex w-full items-start justify-between gap-2 px-2 py-1.5 text-left transition-colors hover:bg-base-200/70",
-                              if(@local_agent.model == model.id,
-                                do: "text-base-content",
-                                else: "text-base-content/70"
-                              )
-                            ]}
-                          >
-                            <span class="min-w-0 flex-1">
-                              <span
-                                data-role="agent-model-option-label"
-                                class="block whitespace-normal break-words font-medium leading-snug"
-                              >
-                                {model.label}
-                              </span>
-                              <span
-                                data-role="agent-model-option-description"
-                                class="mt-0.5 block whitespace-normal break-words text-[11px] leading-snug text-base-content/50"
-                              >
-                                {model.description}
-                              </span>
-                            </span>
-                            <.icon
-                              :if={@local_agent.model == model.id}
-                              name="hero-check"
-                              class="size-3.5 shrink-0 text-base-content/65"
-                            />
-                          </button>
-                          <div class="my-1 border-t border-base-300" />
-                          <button
-                            id="local-agent-go-to-provider"
-                            type="button"
-                            phx-click="local_agent_model_modal.open"
-                            data-role="agent-provider-config-open"
-                            class="flex h-8 w-full items-center justify-between gap-2 px-2 text-left text-base-content/70 transition-colors hover:bg-base-200/70 hover:text-base-content"
-                          >
-                            <span class="whitespace-nowrap">Go to provider</span>
-                            <.icon
-                              name="hero-arrow-up-right"
-                              class="size-3.5 shrink-0 text-base-content/45"
-                            />
-                          </button>
-                        </div>
-                      </details>
-                    </div>
-                    <%!-- Hidden file input for the 📎 upload. The visible label was
-                         moved up next to Send, but this input must stay inside this
-                         options form (it carries the upload's phx-change binding). --%>
-                    <.live_file_input
-                      upload={@uploads.local_document_import}
-                      class="sr-only"
-                      data-role="local-document-upload-file-input"
-                    />
-                    <details
-                      id="local-agent-reasoning-select"
-                      data-role="provider-reasoning-select"
-                      data-selected-reasoning={@local_agent.reasoning_effort}
-                      class="group relative min-w-0 max-w-28"
+                    <label
+                      id="local-agent-upload"
+                      data-role="chat-upload"
+                      for={@uploads.local_document_import.ref}
+                      class="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content"
+                      aria-label="Open local document"
                     >
-                      <summary class="inline-flex h-6 min-w-0 max-w-28 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-[11px] text-base-content transition-colors hover:border-base-content/25 marker:hidden">
+                      <.icon name="hero-paper-clip" class="size-3.5" />
+                    </label>
+                    <button
+                      :if={@local_agent_status == :running}
+                      id="local-agent-submit"
+                      type="button"
+                      phx-click="cancel_local_agent"
+                      data-role="chat-stop"
+                      data-action="stop"
+                      class="inline-flex size-6 items-center justify-center rounded bg-base-content text-base-100 transition-colors hover:bg-base-content/80"
+                      aria-label="Stop agent turn"
+                    >
+                      <.icon name="hero-stop" class="size-3.5" />
+                      <span class="sr-only">Stop</span>
+                    </button>
+                    <button
+                      :if={@local_agent_status != :running}
+                      id="local-agent-submit"
+                      type="button"
+                      data-role="chat-send"
+                      data-action="send"
+                      disabled={@local_agent_status in [:offline, :starting]}
+                      class="inline-flex size-6 items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content disabled:cursor-not-allowed disabled:opacity-35"
+                      aria-label="Send"
+                    >
+                      <.icon name="hero-paper-airplane" class="size-3.5" />
+                      <span class="sr-only">Send</span>
+                    </button>
+                  </div>
+                </.form>
+
+                <.form
+                  for={@local_agent_options_form}
+                  id="local-agent-provider-options"
+                  phx-change="validate_local_document_upload"
+                  data-role="provider-options"
+                  data-selected-provider={@local_agent.provider.key}
+                  data-selected-model={@local_agent.model}
+                  data-selected-reasoning={@local_agent.reasoning_effort}
+                  data-selected-access={@local_agent.access.id}
+                  class="flex min-w-0 flex-wrap items-center gap-1 border-t border-base-300 px-2 py-1.5 text-[11px] leading-5 text-base-content/60"
+                >
+                  <div class="block min-w-0 shrink-0">
+                    <span class="sr-only">Model</span>
+                    <details
+                      id="local-agent-model-select"
+                      data-role="agent-model-select"
+                      data-selected-provider={@local_agent.provider.key}
+                      data-selected-model={@local_agent.model}
+                      class="group relative inline-block min-w-0 max-w-32 align-top"
+                    >
+                      <summary class="inline-flex h-7 max-w-32 min-w-0 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-left text-[11px] text-base-content transition-colors hover:border-base-content/25 marker:hidden">
+                        <img
+                          src={@local_agent.provider.favicon_src}
+                          data-role="agent-model-provider-favicon"
+                          aria-hidden="true"
+                          alt=""
+                          class="size-3.5 shrink-0 opacity-85"
+                        />
                         <span class="min-w-0 truncate">
-                          {local_agent_reasoning_short_label(@local_agent.reasoning_effort)}
+                          {local_agent_selected_model_label(@local_agent.model)}
                         </span>
                         <.icon
                           name="hero-chevron-down"
-                          class="size-2.5 shrink-0 text-base-content/45"
+                          class="size-3 shrink-0 text-base-content/50"
                         />
                       </summary>
-                      <div class="absolute bottom-7 right-0 z-40 w-52 rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm">
+                      <div
+                        data-role="agent-model-menu"
+                        class="absolute bottom-8 left-0 z-40 max-h-[min(24rem,calc(100vh-8rem))] w-[min(17rem,calc(100vw-2rem))] max-w-[calc(var(--local-chat-rail-width,340px)-2rem)] overflow-y-auto rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm"
+                      >
                         <button
-                          :for={effort <- local_agent_reasoning_efforts(@local_agent.provider.key)}
-                          id={"local-agent-inline-reasoning-#{effort}"}
+                          :for={model <- local_agent_models_for_provider(@local_agent.provider.key)}
+                          id={"local-agent-inline-model-#{model.id}"}
                           type="button"
-                          phx-click="select_local_agent_reasoning"
-                          phx-value-reasoning={effort}
-                          data-role="provider-reasoning-option"
-                          data-value={effort}
-                          data-selected={to_string(@local_agent.reasoning_effort == effort)}
-                          title={local_agent_reasoning_title(effort)}
+                          phx-click="select_local_agent_model"
+                          phx-value-model={model.id}
+                          data-role="agent-model-option"
+                          data-model={model.id}
+                          data-provider={model.provider}
+                          data-selected={to_string(@local_agent.model == model.id)}
+                          title={model.description}
                           class={[
-                            "flex h-8 w-full items-center justify-between gap-2 px-2 text-left transition-colors hover:bg-base-200/70",
-                            if(@local_agent.reasoning_effort == effort,
+                            "flex w-full items-start justify-between gap-2 px-2 py-1.5 text-left transition-colors hover:bg-base-200/70",
+                            if(@local_agent.model == model.id,
                               do: "text-base-content",
                               else: "text-base-content/70"
                             )
                           ]}
                         >
-                          <span class="min-w-0 flex-1 truncate">
-                            {local_agent_reasoning_label(effort)}
+                          <span class="min-w-0 flex-1">
+                            <span
+                              data-role="agent-model-option-label"
+                              class="block whitespace-normal break-words font-medium leading-snug"
+                            >
+                              {model.label}
+                            </span>
+                            <span
+                              data-role="agent-model-option-description"
+                              class="mt-0.5 block whitespace-normal break-words text-[11px] leading-snug text-base-content/50"
+                            >
+                              {model.description}
+                            </span>
                           </span>
                           <.icon
-                            :if={@local_agent.reasoning_effort == effort}
+                            :if={@local_agent.model == model.id}
                             name="hero-check"
                             class="size-3.5 shrink-0 text-base-content/65"
                           />
                         </button>
-                      </div>
-                    </details>
-                    <details
-                      id="local-agent-access-select"
-                      data-role="agent-access-control"
-                      data-selected-access={@local_agent.access.id}
-                      class="group relative min-w-0 max-w-36"
-                    >
-                      <summary class="inline-flex h-7 min-w-0 max-w-36 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-xs text-base-content transition-colors hover:border-base-content/25 marker:hidden">
-                        <span class="min-w-0 truncate">
-                          {local_agent_access_control(@local_agent.access.id).label}
-                        </span>
-                        <.icon name="hero-chevron-down" class="size-3 shrink-0 text-base-content/45" />
-                      </summary>
-                      <div class="absolute bottom-8 right-0 z-20 w-40 rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm">
+                        <div class="my-1 border-t border-base-300" />
                         <button
-                          :for={access <- local_agent_access_controls()}
-                          id={"local-agent-inline-access-#{access.id}"}
+                          id="local-agent-go-to-provider"
                           type="button"
-                          phx-click="select_local_agent_access"
-                          phx-value-access={access.id}
-                          data-role="agent-access-option"
-                          data-access={access.id}
-                          data-selected={to_string(@local_agent.access.id == access.id)}
-                          title={access.title}
-                          class={[
-                            "flex h-8 w-full items-center justify-between gap-2 px-2 text-left transition-colors hover:bg-base-200/70",
-                            if(@local_agent.access.id == access.id,
-                              do: "text-base-content",
-                              else: "text-base-content/70"
-                            )
-                          ]}
+                          phx-click="local_agent_model_modal.open"
+                          data-role="agent-provider-config-open"
+                          class="flex h-8 w-full items-center justify-between gap-2 px-2 text-left text-base-content/70 transition-colors hover:bg-base-200/70 hover:text-base-content"
                         >
-                          <span class="whitespace-nowrap">{access.label}</span>
+                          <span class="whitespace-nowrap">Go to provider</span>
                           <.icon
-                            :if={@local_agent.access.id == access.id}
-                            name="hero-check"
-                            class="size-3.5 shrink-0 text-base-content/65"
+                            name="hero-arrow-up-right"
+                            class="size-3.5 shrink-0 text-base-content/45"
                           />
                         </button>
                       </div>
                     </details>
-                  </.form>
-                </div>
+                  </div>
+                  <%!-- Hidden file input for the 📎 upload. The visible label was
+                         moved up next to Send, but this input must stay inside this
+                         options form (it carries the upload's phx-change binding). --%>
+                  <.live_file_input
+                    upload={@uploads.local_document_import}
+                    class="sr-only"
+                    data-role="local-document-upload-file-input"
+                  />
+                  <details
+                    id="local-agent-reasoning-select"
+                    data-role="provider-reasoning-select"
+                    data-selected-reasoning={@local_agent.reasoning_effort}
+                    class="group relative min-w-0 max-w-28"
+                  >
+                    <summary class="inline-flex h-6 min-w-0 max-w-28 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-[11px] text-base-content transition-colors hover:border-base-content/25 marker:hidden">
+                      <span class="min-w-0 truncate">
+                        {local_agent_reasoning_short_label(@local_agent.reasoning_effort)}
+                      </span>
+                      <.icon
+                        name="hero-chevron-down"
+                        class="size-2.5 shrink-0 text-base-content/45"
+                      />
+                    </summary>
+                    <div class="absolute bottom-7 right-0 z-40 w-52 rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm">
+                      <button
+                        :for={effort <- local_agent_reasoning_efforts(@local_agent.provider.key)}
+                        id={"local-agent-inline-reasoning-#{effort}"}
+                        type="button"
+                        phx-click="select_local_agent_reasoning"
+                        phx-value-reasoning={effort}
+                        data-role="provider-reasoning-option"
+                        data-value={effort}
+                        data-selected={to_string(@local_agent.reasoning_effort == effort)}
+                        title={local_agent_reasoning_title(effort)}
+                        class={[
+                          "flex h-8 w-full items-center justify-between gap-2 px-2 text-left transition-colors hover:bg-base-200/70",
+                          if(@local_agent.reasoning_effort == effort,
+                            do: "text-base-content",
+                            else: "text-base-content/70"
+                          )
+                        ]}
+                      >
+                        <span class="min-w-0 flex-1 truncate">
+                          {local_agent_reasoning_label(effort)}
+                        </span>
+                        <.icon
+                          :if={@local_agent.reasoning_effort == effort}
+                          name="hero-check"
+                          class="size-3.5 shrink-0 text-base-content/65"
+                        />
+                      </button>
+                    </div>
+                  </details>
+                  <details
+                    id="local-agent-access-select"
+                    data-role="agent-access-control"
+                    data-selected-access={@local_agent.access.id}
+                    class="group relative min-w-0 max-w-36"
+                  >
+                    <summary class="inline-flex h-7 min-w-0 max-w-36 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-xs text-base-content transition-colors hover:border-base-content/25 marker:hidden">
+                      <span class="min-w-0 truncate">
+                        {local_agent_access_control(@local_agent.access.id).label}
+                      </span>
+                      <.icon name="hero-chevron-down" class="size-3 shrink-0 text-base-content/45" />
+                    </summary>
+                    <div class="absolute bottom-8 right-0 z-20 w-40 rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm">
+                      <button
+                        :for={access <- local_agent_access_controls()}
+                        id={"local-agent-inline-access-#{access.id}"}
+                        type="button"
+                        phx-click="select_local_agent_access"
+                        phx-value-access={access.id}
+                        data-role="agent-access-option"
+                        data-access={access.id}
+                        data-selected={to_string(@local_agent.access.id == access.id)}
+                        title={access.title}
+                        class={[
+                          "flex h-8 w-full items-center justify-between gap-2 px-2 text-left transition-colors hover:bg-base-200/70",
+                          if(@local_agent.access.id == access.id,
+                            do: "text-base-content",
+                            else: "text-base-content/70"
+                          )
+                        ]}
+                      >
+                        <span class="whitespace-nowrap">{access.label}</span>
+                        <.icon
+                          :if={@local_agent.access.id == access.id}
+                          name="hero-check"
+                          class="size-3.5 shrink-0 text-base-content/65"
+                        />
+                      </button>
+                    </div>
+                  </details>
+                </.form>
               </div>
+            </div>
 
+            <div
+              :if={@local_agent_model_modal_open}
+              id="local-agent-model-modal"
+              class="fixed inset-0 z-50"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="local-agent-model-modal-title"
+              phx-window-keydown="close_local_agent_model_modal"
+              phx-key="Escape"
+            >
               <div
-                :if={@local_agent_model_modal_open}
-                id="local-agent-model-modal"
-                class="fixed inset-0 z-50"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="local-agent-model-modal-title"
-                phx-window-keydown="close_local_agent_model_modal"
-                phx-key="Escape"
-              >
-                <div
-                  id="local-agent-model-modal-backdrop"
-                  class="absolute inset-0 bg-base-content/20"
-                  phx-click="close_local_agent_model_modal"
-                />
-                <div class="relative mx-3 mt-20 max-w-[420px] rounded-md border border-base-300 bg-base-100 shadow-sm sm:mx-auto">
-                  <header class="flex h-10 items-center justify-between border-b border-base-300 px-3">
-                    <h3
-                      id="local-agent-model-modal-title"
-                      class="text-sm font-semibold text-base-content"
+                id="local-agent-model-modal-backdrop"
+                class="absolute inset-0 bg-base-content/20"
+                phx-click="close_local_agent_model_modal"
+              />
+              <div class="relative mx-3 mt-20 max-w-[420px] rounded-md border border-base-300 bg-base-100 shadow-sm sm:mx-auto">
+                <header class="flex h-10 items-center justify-between border-b border-base-300 px-3">
+                  <h3
+                    id="local-agent-model-modal-title"
+                    class="text-sm font-semibold text-base-content"
+                  >
+                    Provider config
+                  </h3>
+                  <button
+                    id="local-agent-model-modal-close"
+                    type="button"
+                    phx-click="close_local_agent_model_modal"
+                    aria-label="Close provider config"
+                    class="inline-flex size-7 items-center justify-center rounded text-base-content/55 transition-colors hover:bg-base-200 hover:text-base-content focus:outline-none focus-visible:ring-2 focus-visible:ring-base-content/35"
+                  >
+                    <.icon name="hero-x-mark" class="size-4" />
+                  </button>
+                </header>
+                <div class="divide-y divide-base-300 px-3 py-1">
+                  <%= for provider <- local_agent_provider_details(@local_agent.integrations) do %>
+                    <.link
+                      :if={provider_setup_required?(provider)}
+                      id={"local-agent-model-detail-#{provider.id}"}
+                      href={local_agent_provider_setup_href(assigns, provider.id)}
+                      target="_blank"
+                      rel="noopener"
+                      data-role="agent-provider-setup"
+                      data-provider={provider.id}
+                      data-selected={to_string(provider.id == @local_agent.provider.key)}
+                      data-status={to_string(provider.status)}
+                      aria-current={to_string(provider.id == @local_agent.provider.key)}
+                      class={[
+                        "flex w-full items-center justify-between gap-3 py-2 text-left text-sm transition-colors hover:bg-base-200/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-base-content/25",
+                        provider.id == @local_agent.provider.key && "text-base-content",
+                        provider.id != @local_agent.provider.key && "text-base-content/75"
+                      ]}
                     >
-                      Provider config
-                    </h3>
+                      <div class="flex min-w-0 items-center gap-2">
+                        <img
+                          src={provider.favicon_src}
+                          alt=""
+                          class="size-4 shrink-0 opacity-85"
+                        />
+                        <div class="min-w-0">
+                          <p class="truncate font-medium text-base-content">{provider.label}</p>
+                          <p class="truncate text-xs text-base-content/55">{provider.runtime}</p>
+                        </div>
+                      </div>
+                      <span class="flex shrink-0 items-center gap-1 text-xs text-base-content/60">
+                        <span title={provider.detail}>{provider.status_label}</span>
+                        <.icon name="hero-arrow-up-right" class="size-3 text-base-content/45" />
+                      </span>
+                    </.link>
                     <button
-                      id="local-agent-model-modal-close"
-                      type="button"
-                      phx-click="close_local_agent_model_modal"
-                      aria-label="Close provider config"
-                      class="inline-flex size-7 items-center justify-center rounded text-base-content/55 transition-colors hover:bg-base-200 hover:text-base-content focus:outline-none focus-visible:ring-2 focus-visible:ring-base-content/35"
-                    >
-                      <.icon name="hero-x-mark" class="size-4" />
-                    </button>
-                  </header>
-                  <div class="divide-y divide-base-300 px-3 py-1">
-                    <button
-                      :for={provider <- local_agent_provider_details(@local_agent.integrations)}
+                      :if={!provider_setup_required?(provider)}
                       id={"local-agent-model-detail-#{provider.id}"}
                       type="button"
                       phx-click="select_local_agent_provider"
                       phx-value-provider={provider.id}
+                      data-role="agent-provider-select"
                       data-provider={provider.id}
                       data-selected={to_string(provider.id == @local_agent.provider.key)}
                       data-status={to_string(provider.status)}
@@ -1663,7 +1969,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                         <img
                           src={provider.favicon_src}
                           alt=""
-                          class="size-4 shrink-0 opacity-85 [[data-theme=studio-dark]_&]:invert"
+                          class="size-4 shrink-0 opacity-85"
                         />
                         <div class="min-w-0">
                           <p class="truncate font-medium text-base-content">{provider.label}</p>
@@ -1674,7 +1980,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                         {provider.status_label}
                       </p>
                     </button>
-                  </div>
+                  <% end %>
                 </div>
               </div>
             </div>
@@ -1757,14 +2063,18 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                   // Swallow the native submit (the hook is the single source of
                   // truth for sending); without this a real submit would also fire
                   // the form's phx-submit and double the user bubble.
-                  this.onFormSubmit = (e) => this.send(e)
+                  this.onFormSubmit = (e) => {
+                    e.preventDefault()
+                    e.stopImmediatePropagation()
+                    this.send(e)
+                  }
 
                   this.form.addEventListener("keydown", this.onFormKeydown)
                   this.form.addEventListener("input", this.onFormInput)
                   this.form.addEventListener("pointerdown", this.onFormPointerDown)
                   this.form.addEventListener("mousedown", this.onFormPointerDown)
                   this.form.addEventListener("click", this.onFormClick)
-                  this.form.addEventListener("submit", this.onFormSubmit)
+                  this.form.addEventListener("submit", this.onFormSubmit, true)
                   this.resizeInput()
                 },
                 destroyed() {
@@ -1775,7 +2085,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                   this.form.removeEventListener("pointerdown", this.onFormPointerDown)
                   this.form.removeEventListener("mousedown", this.onFormPointerDown)
                   this.form.removeEventListener("click", this.onFormClick)
-                  this.form.removeEventListener("submit", this.onFormSubmit)
+                  this.form.removeEventListener("submit", this.onFormSubmit, true)
                 }
               }
             </script>
@@ -1900,6 +2210,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     _ = unregister_local_rhwp_materializer_editor(previous_document_id)
 
     socket
+    |> cancel_local_document_open()
     |> unsubscribe_local_hwp_stream()
     |> clear_pool_document()
     |> assign(:active_document_path, nil)
@@ -1916,15 +2227,21 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp schedule_local_document_open(socket, path) do
     ref = make_ref()
-    Process.send_after(self(), {:open_local_document, ref, path}, 0)
 
     socket
     |> prepare_local_document_loading(path)
     |> assign(:pending_document_open_ref, ref)
     |> assign(:pending_document_path, path)
+    |> start_local_document_open(ref, path)
   end
 
-  defp prepare_local_document_loading(%{assigns: %{workspace: nil}} = socket, _path), do: socket
+  defp start_local_document_open(socket, ref, path) do
+    root = workspace_root_path(socket.assigns.workspace)
+
+    start_async(socket, @local_document_open_async, fn ->
+      {ref, path, Document.open(root, path)}
+    end)
+  end
 
   defp prepare_local_document_loading(socket, path) do
     previous_document_id = active_document_id(socket)
@@ -1990,6 +2307,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           # but an explicit close must let go of it.
           |> release_office_twin_on_close(closed_tab)
 
+        socket =
+          if active? do
+            cancel_local_document_open(socket)
+          else
+            socket
+          end
+
         cond do
           not active? ->
             socket
@@ -2012,7 +2336,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  # Closing an OFFICE (docx/pptx) tab must dispose its server Pool twin — else the
+  # Closing an OFFICE (docx/pptx/xlsx) tab must dispose its server Pool twin — else the
   # libreofficex UNO session lingers and its `.~lock.<file>#` is never released
   # (the user-reported "close of libre never works"; the twin then survives until
   # an LRU eviction that never comes with few docs open). A VIEWED office twin is
@@ -2022,7 +2346,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp release_office_twin_on_close(socket, %{path: rel_path}) when is_binary(rel_path) do
     ext = rel_path |> Path.extname() |> String.downcase()
 
-    if connected?(socket) and ext in [".docx", ".pptx", ".ppt"] do
+    if connected?(socket) and ext in [".docx", ".pptx", ".ppt", ".xlsx"] do
       root = workspace_root_path(socket.assigns.workspace)
 
       with {:ok, rel} <- LocalPath.normalize(rel_path),
@@ -2053,11 +2377,17 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> clear_local_hwp_pages()
   end
 
-  defp do_open_local_document(socket, path) do
-    root = workspace_root_path(socket.assigns.workspace)
+  defp cancel_local_document_open(socket) do
+    socket
+    |> cancel_async(@local_document_open_async)
+    |> assign(:pending_document_open_ref, nil)
+    |> assign(:pending_document_path, nil)
+  end
+
+  defp apply_local_document_open_result(socket, path, result) do
     previous_document_id = active_document_id(socket)
 
-    case Document.open(root, path) do
+    case result do
       {:ok, %Document{} = document} ->
         if connected?(socket) do
           :ok = Document.subscribe(document.id)
@@ -2129,32 +2459,25 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  # Office formats (docx/pptx) — a VIEWED office doc has a browser-WASM authority
-  # arm too (the `WasmOfficeEditor` hook's LibreOffice->WASM model, O5b), exactly
-  # like the HWP clause above. Register THIS connected LiveView as the viewer so
-  # the agent's doc.* edits route to the WASM model the user is viewing (the hook
-  # applies them via getElements/uno_apply/uno_set/saveToBytes) instead of the
-  # divergent server NIF copy. On the dead static render we register no viewer, so
-  # a doc opened headlessly (no viewer) still falls back to the Ecrits.Doc.Office
-  # libreofficex NIF arm — that COLD path is unchanged.
+  # Office formats (docx/pptx/xlsx) are viewed through the browser-WASM office model.
+  # Do NOT cold-open the server LibreOffice/UNO twin while rendering that viewer:
+  # the hook will claim browser authority via `local_document.viewer_ready`, and
+  # headless `doc.open` still opens the server twin through DocPool directly.
   defp register_pool_document(socket, %Document{path: path, format: format})
-       when format in ["docx", "pptx"] do
-    kind = String.to_existing_atom(format)
+       when format in ["docx", "pptx", "xlsx"] do
+    kind = office_document_kind(format)
+    doc_id = DocPool.document_id_for(path, kind)
 
-    case DocPool.open(path, kind: kind) do
-      {:ok, doc_id} ->
-        # Viewer attach happens on `local_document.viewer_ready` (see the hwp
-        # clause above) — never at tab-open.
-        socket
-        |> assign(:pool_document_id, doc_id)
-        |> assign(:doc_browser_pending, %{})
-
-      {:error, _reason} ->
-        clear_pool_document(socket)
-    end
+    socket
+    |> assign(:pool_document_id, doc_id)
+    |> assign(:doc_browser_pending, %{})
   end
 
   defp register_pool_document(socket, %Document{}), do: clear_pool_document(socket)
+
+  defp office_document_kind("docx"), do: :docx
+  defp office_document_kind("pptx"), do: :pptx
+  defp office_document_kind("xlsx"), do: :xlsx
 
   # Register this connected LiveView as the Session viewer for `doc_id`, keyed by
   # the workspace path (the Session is the home of `viewers`). Best-effort: a
@@ -2268,6 +2591,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           socket
           |> assign(:workspace_session, ws)
           |> assign(:local_agent_session_id, agent_id)
+          |> assign(:local_agent_rail_key, Map.get(ws, :rail_key))
+          |> refresh_local_agent_rails()
         end
 
       {:error, _reason, _ws} ->
@@ -2287,21 +2612,36 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     stored_opts = Map.get(snapshot, :adapter_opts, [])
 
     socket
+    |> cancel_local_agent_text_flush()
     |> assign(:workspace_session, ws)
     |> assign(:local_agent_session_id, agent_id)
+    |> assign(:local_agent_rail_key, Map.get(ws, :rail_key))
     |> assign(:local_agent_error, nil)
     |> assign(:local_agent_status, snapshot.status)
+    |> assign(:local_agent_turn_id, snapshot_current_turn_id(snapshot))
+    |> assign(:local_agent_text, "")
+    |> assign(:local_agent_text_segment, 0)
+    |> assign(:local_agent_reasoning_text, "")
+    |> assign(:local_agent_reasoning_open?, false)
+    |> assign(:local_agent_active_tools, %{})
     # Restore the pending-queue count after a refresh (Phase 5). A snapshot from a
     # pre-Phase-5 agent has no `:pending` key → default 0.
     |> assign(:local_agent_pending, Map.get(snapshot, :pending, 0))
-    |> maybe_restore_agent_title(snapshot.title)
+    |> assign(:local_agent_queue, queued_items_from_snapshot(Map.get(snapshot, :queued, [])))
+    |> assign(:local_agent_queue_index, 0)
+    |> restore_agent_title(snapshot.title)
     # Hydrate reasoning/access from the session's stored adapter_opts so that a
     # browser refresh shows the SAME setting the user last selected — not the URL
     # param (which is no longer written for these settings).
     |> hydrate_agent_options_from_session(stored_opts)
     |> stream(:local_agent_items, [], reset: true)
     |> replay_local_agent_transcript(snapshot.transcript)
+    |> refresh_local_agent_rails()
   end
+
+  defp snapshot_current_turn_id(%{current_turn: %{id: id}}) when is_binary(id), do: id
+  defp snapshot_current_turn_id(%{current_turn: %{"id" => id}}) when is_binary(id), do: id
+  defp snapshot_current_turn_id(_snapshot), do: nil
 
   # Settings the durable session OWNS and we hydrate back into the assigns on
   # attach. Each is resolved optimistically as `session_value || default` — read
@@ -2370,14 +2710,86 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp safe_restart_foreground(_path, _settings), do: {:error, :no_path}
 
+  defp safe_new_foreground(path, settings) when is_binary(path) and path != "" do
+    WorkspaceSession.new_foreground(path, settings)
+  rescue
+    e -> {:error, {:session_unavailable, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:session_unavailable, reason}}
+  end
+
+  defp safe_new_foreground(_path, _settings), do: {:error, :no_path}
+
+  defp safe_select_foreground(path, rail_key, settings)
+       when is_binary(path) and path != "" and is_binary(rail_key) and rail_key != "" do
+    WorkspaceSession.select_foreground(path, rail_key, settings)
+  rescue
+    e -> {:error, {:session_unavailable, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:session_unavailable, reason}}
+  end
+
+  defp safe_select_foreground(_path, _rail_key, _settings), do: {:error, :not_found}
+
+  defp refresh_local_agent_rails(%{assigns: %{workspace_session: %{} = ws}} = socket) do
+    assign(socket, :local_agent_rails, safe_recent_foregrounds(ws))
+  end
+
+  defp refresh_local_agent_rails(socket), do: assign(socket, :local_agent_rails, [])
+
+  defp safe_recent_foregrounds(ws) do
+    WorkspaceSession.recent_foregrounds(ws)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp open_local_agent_rails_js(js \\ %JS{}) do
+    js
+    |> JS.set_attribute({"data-open", "true"}, to: "#local-agent-rail-picker")
+    |> JS.set_attribute({"data-state", "open"}, to: "#local-agent-rail-picker")
+    |> JS.set_attribute({"aria-expanded", "true"}, to: "#local-agent-rail-picker")
+    |> JS.remove_class("text-base-content/55 hover:bg-base-100 hover:text-base-content",
+      to: "#local-agent-rail-picker"
+    )
+    |> JS.add_class("bg-base-100 text-base-content", to: "#local-agent-rail-picker")
+    |> JS.set_attribute({"data-open", "true"}, to: "#local-agent-rail-drawer")
+    |> JS.set_attribute({"data-state", "open"}, to: "#local-agent-rail-drawer")
+    |> JS.remove_class("invisible pointer-events-none opacity-0",
+      to: "#local-agent-rail-drawer"
+    )
+    |> JS.add_class("visible opacity-100", to: "#local-agent-rail-drawer")
+  end
+
+  defp close_local_agent_rails_js(js \\ %JS{}) do
+    js
+    |> JS.set_attribute({"data-open", "false"}, to: "#local-agent-rail-picker")
+    |> JS.set_attribute({"data-state", "closed"}, to: "#local-agent-rail-picker")
+    |> JS.set_attribute({"aria-expanded", "false"}, to: "#local-agent-rail-picker")
+    |> JS.remove_class("bg-base-100 text-base-content", to: "#local-agent-rail-picker")
+    |> JS.add_class("text-base-content/55 hover:bg-base-100 hover:text-base-content",
+      to: "#local-agent-rail-picker"
+    )
+    |> JS.set_attribute({"data-open", "false"}, to: "#local-agent-rail-drawer")
+    |> JS.set_attribute({"data-state", "closed"}, to: "#local-agent-rail-drawer")
+    |> JS.remove_class("visible opacity-100", to: "#local-agent-rail-drawer")
+    |> JS.add_class("invisible pointer-events-none opacity-0",
+      to: "#local-agent-rail-drawer"
+    )
+  end
+
   defp bind_fresh_local_agent_session(socket, ws, agent_id) do
     socket
     |> cancel_local_agent_text_flush()
     |> assign(:workspace_session, ws)
     |> assign(:local_agent_session_id, agent_id)
+    |> assign(:local_agent_rail_key, Map.get(ws, :rail_key))
     |> assign(:local_agent_error, nil)
     |> assign(:local_agent_status, :idle)
     |> assign(:local_agent_pending, 0)
+    |> assign(:local_agent_queue, [])
+    |> assign(:local_agent_queue_index, 0)
     |> assign(:local_agent_turn_id, nil)
     |> assign(:local_agent_text, "")
     |> assign(:local_agent_text_segment, 0)
@@ -2388,6 +2800,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign_local_agent_title(default_local_agent_title())
     |> assign(:local_agent_form, local_agent_form())
     |> stream(:local_agent_items, [], reset: true)
+    |> refresh_local_agent_rails()
     |> push_event("local_agent_title_reset", %{title: default_local_agent_title()})
   end
 
@@ -2408,8 +2821,18 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp local_agent_attach_settings(socket) do
     socket
     |> local_agent_session_opts()
+    |> Keyword.put(:live_session_id, socket.assigns.local_live_session_id)
     |> Keyword.delete(:id)
   end
+
+  defp local_live_session_id(session) when is_map(session) do
+    case session["local_live_session_id"] || session[:local_live_session_id] do
+      id when is_binary(id) and id != "" -> id
+      _ -> Ecto.UUID.generate()
+    end
+  end
+
+  defp local_live_session_id(_session), do: Ecto.UUID.generate()
 
   # Apply per-turn option changes (access/reasoning/model/provider) to the LIVE
   # foreground agent without recreating it, preserving the conversation. No agent
@@ -2874,8 +3297,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp workspace_root_path(nil), do: ""
   defp workspace_root_path(workspace), do: Map.get(workspace, :root_path) || ""
 
-  defp workspace_document_path(socket, relative_path) do
-    ~p"/workspace?#{workspace_query(socket, document: relative_path, provider: socket.assigns.local_agent.provider.key)}"
+  defp workspace_document_path(%{assigns: assigns}, relative_path) do
+    workspace_document_path(assigns, relative_path)
+  end
+
+  defp workspace_document_path(assigns, relative_path) do
+    ~p"/workspace?#{workspace_query(assigns, document: relative_path, provider: assigns.local_agent.provider.key)}"
   end
 
   defp workspace_no_document_path(socket) do
@@ -2897,21 +3324,34 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  defp workspace_query(socket, overrides) do
+  defp workspace_query(%{assigns: assigns}, overrides), do: workspace_query(assigns, overrides)
+
+  defp workspace_query(assigns, overrides) do
     [
-      path: workspace_root_path(socket.assigns.workspace),
-      provider: socket.assigns.local_agent.provider.key,
-      model: socket.assigns.local_agent.model
+      path: workspace_root_path(assigns.workspace),
+      provider: assigns.local_agent.provider.key,
+      model: assigns.local_agent.model
     ]
     |> Keyword.merge(overrides)
   end
 
-  defp selected_file_state(path, active_document_path) do
-    if path == active_document_path do
-      "Document open affordance selected."
-    else
-      "Preview state only."
-    end
+  defp local_file_tree_open_paths(assigns) do
+    assigns.tree
+    |> local_file_tree_paths()
+    |> Map.new(&{&1, workspace_document_path(assigns, &1)})
+  end
+
+  defp local_file_tree_paths(nodes) do
+    Enum.flat_map(nodes, fn
+      %{type: :file, path: path} when is_binary(path) ->
+        [path]
+
+      %{type: :directory, children: children} when is_list(children) ->
+        local_file_tree_paths(children)
+
+      _node ->
+        []
+    end)
   end
 
   defp error_message({:invalid_path, message}) when is_binary(message), do: message
@@ -3042,6 +3482,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp active_document_id(%{assigns: %{active_document: %{id: id}}}) when is_binary(id), do: id
   defp active_document_id(_socket), do: nil
+
+  defp viewer_document_dirty?(socket, pool_document_id) do
+    dirty_ids = socket.assigns[:dirty_document_ids] || MapSet.new()
+    active_id = active_document_id(socket)
+
+    MapSet.member?(dirty_ids, active_id) or MapSet.member?(dirty_ids, pool_document_id)
+  end
 
   # --- Unsaved-changes (dirty) tracking + debounced auto-save ----------------
   # `:dirty_document_ids` (a MapSet) is the single source of truth for which
@@ -3660,6 +4107,18 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end)
   end
 
+  defp provider_setup_required?(%{status: :ready}), do: false
+  defp provider_setup_required?(_provider), do: true
+
+  defp local_agent_provider_setup_href(assigns, provider_id) do
+    return_to =
+      workspace_provider_path(%{assigns: assigns}, provider_id,
+        model: default_agent_model_id(provider_id)
+      )
+
+    ~p"/local/agent-providers/#{provider_id}/setup?#{[return_to: return_to]}"
+  end
+
   defp provider_param_invalid?(nil), do: false
   defp provider_param_invalid?(provider), do: is_nil(normalize_allowed_provider_id(provider))
 
@@ -3744,6 +4203,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp local_agent_integrations, do: ACP.integration_options()
 
   defp provider_integration_status_label(:ready), do: "ready"
+  defp provider_integration_status_label(:login_required), do: "login"
+  defp provider_integration_status_label(:missing), do: "install"
   defp provider_integration_status_label(_status), do: "setup"
 
   # Merge fields into the bound `%LocalAgentConfig{}` (the `:local_agent` assign) —
@@ -3971,10 +4432,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       # It renders only when the queue drains to this turn (the :turn_started
       # context switch), so the transcript shows what the agent is ACTUALLY
       # processing, not what is merely waiting in line.
-      {:ok, %{id: _queued_id}} ->
+      {:ok, %{id: queued_id}} ->
         {:noreply,
          socket
-         |> assign(:local_agent_pending, socket.assigns.local_agent_pending + 1)
+         |> update_local_agent_queue(queue_display_item(queued_id, message, picks))
+         |> sync_local_agent_pending()
          |> assign(:local_agent_error, nil)
          |> assign(:local_agent_form, local_agent_form())}
 
@@ -3989,12 +4451,103 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         {:noreply, assign(socket, :local_agent_form, local_agent_form())}
 
       {:error, :empty_queue} ->
-        {:noreply, assign(socket, :local_agent_pending, 0)}
+        {:noreply,
+         socket
+         |> assign(:local_agent_pending, 0)
+         |> assign(:local_agent_queue, [])
+         |> assign(:local_agent_queue_index, 0)}
 
       {:error, reason} ->
         {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
     end
   end
+
+  defp queued_items_from_snapshot(items) when is_list(items) do
+    items
+    |> Enum.map(&queue_display_item_from_map/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp queued_items_from_snapshot(_items), do: []
+
+  defp queue_display_item_from_map(item) when is_map(item) do
+    turn_id = item_field(item, :turn_id)
+    body = item_field(item, :input) || item_field(item, :body) || ""
+    picks = sanitize_picks(item_field(item, :picks))
+
+    if is_binary(turn_id) and turn_id != "" do
+      queue_display_item(turn_id, body, picks)
+    end
+  end
+
+  defp queue_display_item_from_map(_item), do: nil
+
+  defp queue_display_item(turn_id, body, picks) do
+    %{
+      turn_id: turn_id,
+      body: if(is_binary(body), do: body, else: ""),
+      picks: sanitize_picks(picks)
+    }
+  end
+
+  defp maybe_update_local_agent_queue_from_event(socket, %{turn_id: turn_id} = event)
+       when is_binary(turn_id) do
+    update_local_agent_queue(
+      socket,
+      queue_display_item(turn_id, Map.get(event, :input, ""), Map.get(event, :picks, []))
+    )
+  end
+
+  defp maybe_update_local_agent_queue_from_event(socket, _event), do: socket
+
+  defp update_local_agent_queue(socket, %{turn_id: turn_id} = item) do
+    queue = socket.assigns.local_agent_queue || []
+
+    queue =
+      if Enum.any?(queue, &(&1.turn_id == turn_id)) do
+        Enum.map(queue, fn
+          %{turn_id: ^turn_id} -> item
+          other -> other
+        end)
+      else
+        queue ++ [item]
+      end
+
+    socket
+    |> assign(:local_agent_queue, queue)
+    |> clamp_local_agent_queue_index()
+  end
+
+  defp remove_local_agent_queue_item(socket, turn_id) when is_binary(turn_id) do
+    queue =
+      socket.assigns.local_agent_queue
+      |> List.wrap()
+      |> Enum.reject(&(&1.turn_id == turn_id))
+
+    socket
+    |> assign(:local_agent_queue, queue)
+    |> clamp_local_agent_queue_index()
+  end
+
+  defp clamp_local_agent_queue_index(socket) do
+    max_index = max(length(socket.assigns.local_agent_queue) - 1, 0)
+    index = socket.assigns.local_agent_queue_index || 0
+    assign(socket, :local_agent_queue_index, min(index, max_index))
+  end
+
+  defp sync_local_agent_pending(socket, min_pending \\ 0) do
+    assign(
+      socket,
+      :local_agent_pending,
+      max(min_pending, length(socket.assigns.local_agent_queue || []))
+    )
+  end
+
+  defp local_agent_queued_item(queue, index) when is_list(queue) do
+    Enum.at(queue, index || 0) || List.first(queue)
+  end
+
+  defp local_agent_queued_item(_queue, _index), do: nil
 
   # The composer's CURRENT options ride on every send: the turn runs with
   # exactly what the UI shows at send time, instead of trusting that an earlier
@@ -4036,18 +4589,25 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  # Reset the durable foreground agent while preserving the workspace binding.
-  # Browser reloads still re-attach to the same agent in `attach_workspace_session/1`;
-  # this explicit button is different: it kills the path-keyed agent and starts a
-  # fresh empty conversation with the current provider/model/access settings.
+  # Start a fresh foreground rail while preserving the older rail in the recent
+  # drawer. Browser reloads re-attach to the active rail recorded by the
+  # path-keyed Workspace.Session.
   defp restart_local_agent_session(socket) do
     _ = maybe_cancel_active_local_agent(socket)
 
-    case safe_restart_foreground(
+    case safe_new_foreground(
            socket.assigns.workspace_path,
            local_agent_attach_settings(socket)
          ) do
       {:ok, %{agent_id: agent_id} = ws} when is_binary(agent_id) ->
+        socket =
+          if socket.assigns.local_agent_session_id != agent_id do
+            :ok = WorkspaceSession.subscribe(ws)
+            socket
+          else
+            socket
+          end
+
         bind_fresh_local_agent_session(socket, ws, agent_id)
 
       {:error, reason} ->
@@ -4070,9 +4630,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # A mid-turn send was enqueued behind the running turn (Phase 5). The agent is
   # the source of truth for the pending count; sync it from the event so a flush /
   # drain elsewhere never drifts the indicator.
-  defp apply_local_agent_event(socket, %{type: :turn_queued, pending: pending})
+  defp apply_local_agent_event(socket, %{type: :turn_queued, pending: pending} = event)
        when is_integer(pending) do
-    assign(socket, :local_agent_pending, pending)
+    socket
+    |> maybe_update_local_agent_queue_from_event(event)
+    |> sync_local_agent_pending(pending)
   end
 
   # `send_local_agent_turn/2` already set `local_agent_turn_id` (and :running)
@@ -4105,7 +4667,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_text, "")
     |> assign(:local_agent_text_segment, 0)
     |> assign(:local_agent_reasoning_text, "")
-    |> assign(:local_agent_pending, max(socket.assigns.local_agent_pending - 1, 0))
+    |> remove_local_agent_queue_item(turn_id)
+    |> sync_local_agent_pending()
     |> stream_insert(
       :local_agent_items,
       agent_user_item(turn_id, Map.get(event, :input, ""), Map.get(event, :picks, []))
@@ -4119,7 +4682,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     if socket.assigns.local_agent_title_user_edited? do
       socket
     else
-      assign_local_agent_title(socket, title)
+      socket
+      |> assign_local_agent_title(title)
+      |> refresh_local_agent_rails()
     end
   end
 
@@ -4294,15 +4859,20 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   # ── inline chat: transcript repaint (refresh-survival) ─────────────
 
-  # Restore the chat header from the durable agent's retained title (after a
-  # refresh). A brand-new agent has no title yet (keep the "New Chat" default).
-  defp maybe_restore_agent_title(socket, title) when is_binary(title) and title != "" do
+  # Restore the chat header from the durable agent's retained title. A brand-new
+  # or empty rail resets to the default title so switching rails cannot leak the
+  # previous rail's title.
+  defp restore_agent_title(socket, title) when is_binary(title) and title != "" do
     socket
     |> assign(:local_agent_title_user_edited?, true)
     |> assign_local_agent_title(title)
   end
 
-  defp maybe_restore_agent_title(socket, _title), do: socket
+  defp restore_agent_title(socket, _title) do
+    socket
+    |> assign(:local_agent_title_user_edited?, false)
+    |> assign_local_agent_title(default_local_agent_title())
+  end
 
   # Repaint the chat pane from the durable agent's display-only transcript (used
   # after a browser refresh re-binds the foreground agent). New transcript entries
@@ -4743,6 +5313,27 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp agent_status_label(:cancelled), do: "Cancelled"
   defp agent_status_label(:failed), do: "Failed"
   defp agent_status_label(_status), do: "Idle"
+
+  defp local_agent_rail_title(%{title: title}) when is_binary(title) and title != "" do
+    title
+  end
+
+  defp local_agent_rail_title(_rail), do: default_local_agent_title()
+
+  defp local_agent_rail_meta(%{provider: provider, status: status}) do
+    [provider_label(provider), agent_status_label(status)]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" / ")
+  end
+
+  defp local_agent_rail_meta(%{status: status}), do: agent_status_label(status)
+  defp local_agent_rail_meta(_rail), do: agent_status_label(:idle)
+
+  defp provider_label(provider) when is_binary(provider) and provider != "" do
+    provider
+  end
+
+  defp provider_label(_provider), do: ""
 
   defp agent_input_placeholder(:offline), do: "Agent unavailable"
   defp agent_input_placeholder(:starting), do: "Starting agent"

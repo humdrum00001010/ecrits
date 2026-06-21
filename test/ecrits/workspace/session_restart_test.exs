@@ -142,7 +142,140 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert AcpAgent.agent_snapshot(agent_id).transcript != []
   end
 
-  test "attach and same-provider re-attach carry the current document path",
+  test "same workspace path isolates foreground agents by Phoenix session id", %{path: path} do
+    {:ok, ws_a} =
+      Session.attach(path,
+        live_session_id: "phx-session-a",
+        provider: "codex",
+        adapter_opts: [
+          exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+          script: [{:text_delta, "reply a"}]
+        ],
+        workspace_root: path
+      )
+
+    {:ok, ws_b} =
+      Session.attach(path,
+        live_session_id: "phx-session-b",
+        provider: "codex",
+        adapter_opts: [
+          exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+          script: [{:text_delta, "reply b"}]
+        ],
+        workspace_root: path
+      )
+
+    refute ws_a.agent_id == ws_b.agent_id
+
+    pid_a = AcpAgent.whereis(ws_a.agent_id)
+    pid_b = AcpAgent.whereis(ws_b.agent_id)
+    assert is_pid(pid_a)
+    assert is_pid(pid_b)
+    refute pid_a == pid_b
+
+    Session.subscribe_agent(ws_a.agent_id)
+    {:ok, %{id: turn_id}} = AcpAgent.send_turn(nil, ws_a.agent_id, "only session a")
+    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+
+    assert [%{user: "only session a"}] = AcpAgent.agent_snapshot(ws_a.agent_id).transcript
+    assert AcpAgent.agent_snapshot(ws_b.agent_id).transcript == []
+
+    {:ok, ws_a2} =
+      Session.attach(path,
+        live_session_id: "phx-session-a",
+        provider: "codex",
+        adapter_opts: [
+          exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+          script: [{:text_delta, "reply a"}]
+        ],
+        workspace_root: path
+      )
+
+    assert ws_a2.agent_id == ws_a.agent_id
+    assert AcpAgent.whereis(ws_a.agent_id) == pid_a
+    assert AcpAgent.agent_snapshot(ws_a.agent_id).transcript != []
+  end
+
+  test "same browser session can switch between recent foreground rails", %{path: path} do
+    settings = [
+      live_session_id: "phx-session-recents",
+      provider: "codex",
+      adapter_opts: [
+        exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+        script: [{:text_delta, "reply"}]
+      ],
+      workspace_root: path
+    ]
+
+    {:ok, ws1} = Session.attach(path, settings)
+
+    Session.subscribe_agent(ws1.agent_id)
+    {:ok, %{id: turn_id}} = AcpAgent.send_turn(nil, ws1.agent_id, "first rail")
+    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+
+    {:ok, ws2} = Session.new_foreground(path, settings)
+
+    refute ws2.agent_id == ws1.agent_id
+    refute ws2.rail_key == ws1.rail_key
+    assert AcpAgent.whereis(ws1.agent_id)
+    assert AcpAgent.whereis(ws2.agent_id)
+
+    assert [
+             %{agent_id: agent2, active?: true, title: title2},
+             %{agent_id: agent1, active?: false, title: "first rail"}
+           ] = Session.recent_foregrounds(ws2)
+
+    assert agent2 == ws2.agent_id
+    assert agent1 == ws1.agent_id
+    assert title2 in [nil, ""]
+
+    {:ok, selected_ws} = Session.select_foreground(path, ws1.rail_key, settings)
+    assert selected_ws.agent_id == ws1.agent_id
+
+    assert [
+             %{agent_id: ^agent1, active?: true},
+             %{agent_id: ^agent2, active?: false}
+           ] = Session.recent_foregrounds(selected_ws)
+
+    {:ok, reattached_ws} = Session.attach(path, settings)
+    assert reattached_ws.agent_id == ws1.agent_id
+    assert AcpAgent.agent_snapshot(reattached_ws.agent_id).transcript != []
+  end
+
+  test "new foreground restarts the active empty rail in place instead of accumulating blanks",
+       %{path: path, ws: ws} do
+    settings = [
+      provider: "codex",
+      adapter_opts: [
+        exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+        script: [{:text_delta, "reply"}]
+      ],
+      workspace_root: path
+    ]
+
+    old_pid = AcpAgent.whereis(ws.agent_id)
+    assert is_pid(old_pid)
+    assert AcpAgent.agent_snapshot(ws.agent_id).transcript == []
+
+    {:ok, refreshed_ws} = Session.new_foreground(path, settings)
+
+    assert refreshed_ws.agent_id == ws.agent_id
+    assert refreshed_ws.rail_key == ws.rail_key
+
+    new_pid = AcpAgent.whereis(refreshed_ws.agent_id)
+    assert is_pid(new_pid)
+    refute new_pid == old_pid
+    refute Process.alive?(old_pid)
+
+    assert [
+             %{agent_id: agent_id, active?: true, title: title}
+           ] = Session.recent_foregrounds(refreshed_ws)
+
+    assert agent_id == refreshed_ws.agent_id
+    assert title in [nil, ""]
+  end
+
+  test "first attach seeds document path but same-provider re-attach does not retarget it",
        %{path: path} do
     fresh_path = Path.join(path, "doc-seed")
     File.mkdir_p!(fresh_path)
@@ -178,6 +311,6 @@ defmodule Ecrits.Workspace.SessionRestartTest do
 
     assert reattached_ws.agent_id == agent_id
     assert AcpAgent.whereis(agent_id) == old_pid
-    assert {:ok, %{document_path: "second.hwp"}} = AcpAgent.status(nil, agent_id)
+    assert {:ok, %{document_path: "first.hwp"}} = AcpAgent.status(nil, agent_id)
   end
 end

@@ -23,7 +23,8 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
   Cancellation kills the streaming task; the Session also cancels and drops the
   durable client so the next turn resumes from the last provider session id on a
-  fresh app-server process.
+  fresh app-server process. Queued follow-ups are left queued on a normal cancel;
+  only `flush_queue/2` promotes a queued turn immediately.
 
   ## AgentLive boundary (Phase 5)
 
@@ -267,29 +268,14 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
   def handle_call({:update_options, new_opts}, _from, state) do
     # Access/reasoning/model changes are live defaults for future turns. Document
-    # context may be seeded here on attach/re-attach, but an actual send freezes
-    # document_path/pool_document_id onto that turn so later UI events cannot
-    # retarget in-flight doc.* calls.
-    #
-    # Map.get (not state.document_path): a session spawned before this field
-    # existed hot-reloads with the old state map and must not crash here.
-    {document_path, new_opts} =
-      Keyword.pop(new_opts, :document_path, Map.get(state, :document_path))
-
-    {pool_document_id, adapter_opts} =
-      Keyword.pop(new_opts, :pool_document_id, state.pool_document_id)
+    # context is turn-scoped: each send carries document_path/pool_document_id
+    # from the composer, so document switches cannot retarget an idle or running
+    # agent through this live settings path.
+    adapter_opts = Keyword.drop(new_opts, [:document_path, :pool_document_id])
 
     merged = Keyword.merge(state.adapter_opts, adapter_opts)
 
-    {:reply, :ok,
-     state
-     |> Map.merge(%{
-       adapter_opts: merged,
-       pool_document_id: pool_document_id
-     })
-     # Map.put (not %{state | ...}): pre-field state maps on hot-reloaded
-     # sessions lack the key and the update syntax would raise.
-     |> Map.put(:document_path, document_path)}
+    {:reply, :ok, %{state | adapter_opts: merged}}
   end
 
   def handle_call({:send_turn, ctx, raw_input, opts}, _from, state) do
@@ -346,7 +332,6 @@ defmodule Ecrits.Local.AcpAgent.Session do
           |> record_transcript_turn(cancelled_current)
           |> emit(%{type: :turn_cancelled, turn_id: cancelled_turn_id})
           |> Map.put(:current, nil)
-          |> drain_queue()
 
         {:reply, {:ok, %{id: cancelled_turn_id, session_id: state.id, status: :cancelled}}, state}
     end
@@ -420,6 +405,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
   # from a separate JSON-RPC response, so forwarding updates through the turn
   # task can race prompt completion and drop trailing tool/text updates.
   def handle_info({:acp_session_update, _session_id, update}, state) do
+    state = forward_acp_stream_activity(state, update)
     {:noreply, handle_acp_session_update(state, update)}
   end
 
@@ -549,10 +535,10 @@ defmodule Ecrits.Local.AcpAgent.Session do
   end
 
   # Pop the FIFO queue head (if any) and launch it as the next turn. Called on
-  # every turn terminal (done/failed/cancelled/crash) — so a mid-turn send that
-  # was enqueued runs as soon as the running turn finishes, in send order. A
-  # no-op when no turn is in flight is impossible here: callers clear `current`
-  # to nil before draining, so the head always launches into an idle session.
+  # automatic terminal paths (done/failed/crash) and explicit flush, so a normal
+  # user cancel can stop the current chat without sending queued follow-ups.
+  # Callers clear `current` to nil before draining, so the head launches into an
+  # idle session.
   defp drain_queue(%{current: nil, queue: [next | rest]} = state) do
     {:ok, _turn_id, state} =
       launch_turn(
@@ -577,24 +563,11 @@ defmodule Ecrits.Local.AcpAgent.Session do
   defp ensure_queue(state), do: Map.put_new(state, :queue, [])
 
   defp start_turn(input, extras, %{current: current} = state) when current != nil do
-    # A turn is already in flight — ENQUEUE rather than cancel (Phase 5 FIFO
-    # queue). The pending message drains when the running turn reaches a terminal
-    # state. A re-Enter on a queued message flushes it (see `:flush_queue`).
-    queued = %{
-      turn_id: Ecto.UUID.generate(),
-      input: input,
-      display: extras.display,
-      picks: extras.picks,
-      context: extras.context,
-      previous_input: queue_previous_input(state)
-    }
+    enqueue_turn(state, input, extras)
+  end
 
-    state = %{state | queue: state.queue ++ [queued]}
-
-    state =
-      emit(state, %{type: :turn_queued, turn_id: queued.turn_id, pending: length(state.queue)})
-
-    {:reply, {:ok, %{id: queued.turn_id, session_id: state.id, status: :queued}}, state}
+  defp start_turn(input, extras, %{current: nil, queue: [_ | _]} = state) do
+    enqueue_turn(state, input, extras)
   end
 
   defp start_turn(input, extras, state) do
@@ -609,6 +582,31 @@ defmodule Ecrits.Local.AcpAgent.Session do
       )
 
     {:reply, {:ok, %{id: turn_id, session_id: state.id, status: :running}}, state}
+  end
+
+  defp enqueue_turn(state, input, extras) do
+    # A turn is already in flight — ENQUEUE rather than cancel (Phase 5 FIFO
+    # queue). If the active turn was stopped, preserve order by appending behind
+    # the still-pending queue instead of launching ahead of it.
+    queued = %{
+      turn_id: Ecto.UUID.generate(),
+      input: input,
+      display: extras.display,
+      picks: extras.picks,
+      context: extras.context,
+      previous_input: queue_previous_input(state)
+    }
+
+    state = %{state | queue: state.queue ++ [queued]}
+
+    state =
+      emit(
+        state,
+        queued_turn_payload(queued)
+        |> Map.merge(%{type: :turn_queued, pending: length(state.queue)})
+      )
+
+    {:reply, {:ok, %{id: queued.turn_id, session_id: state.id, status: :queued}}, state}
   end
 
   # Spawn the per-turn streaming task and record it as the current turn. Shared by
@@ -704,6 +702,14 @@ defmodule Ecrits.Local.AcpAgent.Session do
   end
 
   defp handle_acp_session_update(state, _update), do: state
+
+  defp forward_acp_stream_activity(%{current: %{task_pid: task_pid}} = state, update)
+       when is_pid(task_pid) do
+    send(task_pid, {:acp_stream_activity, update})
+    state
+  end
+
+  defp forward_acp_stream_activity(state, _update), do: state
 
   defp put_current_acp_update_state(%{current: current} = state, acp_update_state)
        when is_map(current) do
@@ -1189,6 +1195,8 @@ defmodule Ecrits.Local.AcpAgent.Session do
       # Number of mid-turn sends still queued (Phase 5), so a refresh can repaint
       # the "N 대기" pending state.
       pending: length(state.queue),
+      queued: Enum.map(state.queue, &queued_turn_payload/1),
+      current_turn: state.current && %{id: state.current.turn_id, status: :running},
       # Stored adapter_opts so the LiveView can hydrate reasoning/access from
       # session on re-attach (instead of reading stale URL params).
       adapter_opts: state.adapter_opts
@@ -1197,6 +1205,18 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
   defp status(%{current: nil}), do: :idle
   defp status(_state), do: :running
+
+  defp queued_turn_payload(queued) do
+    %{
+      turn_id: queued.turn_id,
+      input: queued_display_input(queued),
+      picks: Map.get(queued, :picks, [])
+    }
+  end
+
+  defp queued_display_input(%{display: display}) when is_binary(display), do: display
+
+  defp queued_display_input(%{input: input}), do: Prompt.display_text(input)
 
   defp emit(state, event) do
     event =

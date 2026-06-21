@@ -36,6 +36,10 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # long tool call (e.g. a whole-slide ops batch when designing a pptx) is
   # silent-but-active the entire generation; 5 min killed real turns.
   @idle_timeout 600_000
+  # The long idle window is only appropriate after ACP has proven the prompt is
+  # alive. Before the first session/update, a wedged provider can otherwise leave
+  # the rail spinning for the full idle window with no visible progress.
+  @initial_activity_timeout 90_000
 
   @doc """
   Returns a `Stream` of normalized chat-rail events for one turn.
@@ -215,8 +219,9 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       prompt_input: input,
       prompt_timeout: timeout,
       prompt_task: nil,
-      idle: min(timeout, @idle_timeout),
-      deadline: deadline(min(timeout, @idle_timeout)),
+      idle: initial_activity_timeout(timeout, opts),
+      active_idle: min(timeout, @idle_timeout),
+      deadline: deadline(initial_activity_timeout(timeout, opts)),
       prompt_started_at: nil,
       first_activity_logged?: false,
       saw_text?: false,
@@ -323,7 +328,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       {:acp_session_update, ^session_id, update} ->
         # Activity — the turn is progressing; push the idle deadline forward so a
         # long-but-active turn (many doc.* edits) is never killed mid-stream.
-        state = maybe_log_first_activity(%{state | deadline: deadline(state.idle)}, update)
+        state = mark_activity(state, update)
 
         case map_update(update, state) do
           {:event, event, state} -> {[event], state}
@@ -332,6 +337,13 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
         end
 
       {:acp_session_update, _other, _update} ->
+        next_event(state)
+
+      {:acp_stream_activity, update} ->
+        # Durable Session processes ACP updates in its own GenServer so UI tool
+        # rows cannot race prompt completion. It forwards a lightweight heartbeat
+        # here so the stream task's stall detector observes the same progress.
+        state = mark_activity(state, update)
         next_event(state)
 
       {ref, prompt_result} when ref == task.ref ->
@@ -394,6 +406,21 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     )
 
     %{state | first_activity_logged?: true}
+  end
+
+  defp mark_activity(state, update) do
+    state = maybe_log_first_activity(state, update)
+    idle = Map.get(state, :active_idle, state.idle)
+
+    %{state | idle: idle, deadline: deadline(idle)}
+  end
+
+  defp initial_activity_timeout(timeout, opts) do
+    configured = Keyword.get(opts, :initial_activity_timeout, @initial_activity_timeout)
+
+    timeout
+    |> min(@idle_timeout)
+    |> min(configured)
   end
 
   defp log_acp_timing(_event, nil, _fields), do: :ok

@@ -41,7 +41,7 @@ defmodule EcritsWeb.Local.DirectoryPicker.Native do
   end
 
   defp script do
-    ~S[POSIX path of (choose folder with prompt "Choose workspace folder")]
+    ~S[POSIX path of (choose folder with prompt "Choose workspace folder" default location (path to home folder))]
   end
 
   defp selected_path(output) do
