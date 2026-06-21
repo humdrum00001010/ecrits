@@ -57,7 +57,7 @@ defmodule Ecrits.Doc.Office.Instance do
   @type doc_token :: reference()
 
   @typedoc "The backend handle: a stable token + the doc's kind/path (NOT the raw NIF session)."
-  @type handle :: %{doc: doc_token(), kind: :docx | :pptx, path: String.t() | nil}
+  @type handle :: %{doc: doc_token(), kind: :docx | :pptx | :xlsx, path: String.t() | nil}
 
   # ── public API ────────────────────────────────────────────────────
 
@@ -78,7 +78,7 @@ defmodule Ecrits.Doc.Office.Instance do
   def budget, do: @budget
 
   @doc """
-  Open `path` (a docx/pptx) under the governor. Returns a stable backend
+  Open `path` (a docx/pptx/xlsx) under the governor. Returns a stable backend
   `handle` (`%{doc, kind, path}`) the Editor holds for the document's life — its
   `doc` token survives LRU eviction/rematerialisation. Opening over `@budget`
   evicts the LRU doc (save-then-close) first.

@@ -86,6 +86,21 @@ defmodule Ecrits.Local.DocumentTest do
     assert :ok = Document.close(document)
   end
 
+  test "opens a local xlsx document without metadata persistence", %{root: root} do
+    source = "xlsx fixture"
+    path = Path.join(root, "ledger.xlsx")
+    File.write!(path, source)
+
+    assert {:ok, %Document{} = document} = Document.open(root, "ledger.xlsx")
+    assert document.format == "xlsx"
+    assert document.byte_size == byte_size(source)
+    assert document.metadata_dir == nil
+    assert Document.metadata_paths(document) == %{}
+    refute File.exists?(Path.join(root, ".ecrits"))
+
+    assert :ok = Document.close(document)
+  end
+
   test "checkpoint writes local snapshot without replacing canonical file", %{root: root} do
     path = Path.join(root, "contract.hwp")
     original = hwp_fixture()

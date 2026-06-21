@@ -71,6 +71,44 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
     end)
   end
 
+  defp render_viewer_lv(parent, dirty?) when is_boolean(dirty?) do
+    spawn(fn -> render_viewer_loop(parent, dirty?) end)
+  end
+
+  defp render_viewer_loop(parent, dirty?) do
+    receive do
+      {:doc_viewer_state_request, from, ref, document_id} ->
+        send(parent, {:viewer_state_request, document_id})
+        send(from, {:doc_viewer_state_reply, ref, {:ok, %{dirty: dirty?}}})
+        render_viewer_loop(parent, dirty?)
+
+      {:doc_browser_request, from, ref, verb, payload} ->
+        send(parent, {:browser_request, verb, payload})
+        send(from, {:doc_browser_reply, ref, {:error, "forced browser snapshot"}})
+        render_viewer_loop(parent, dirty?)
+
+      :stop ->
+        :ok
+    end
+  end
+
+  defp fake_render_editor(parent) do
+    spawn(fn -> fake_render_editor_loop(parent) end)
+  end
+
+  defp fake_render_editor_loop(parent) do
+    receive do
+      {:"$gen_call", from, {:render, page, path, opts}} ->
+        send(parent, {:server_render, page, opts})
+        File.write!(path, "PNG")
+        GenServer.reply(from, :ok)
+        fake_render_editor_loop(parent)
+
+      :stop ->
+        :ok
+    end
+  end
+
   defp put_pool_doc(pool, id, path, kind, editor) do
     :sys.replace_state(pool, fn state ->
       doc = %{kind: kind, backend: Ecrits.Doc.backend_for(kind), path: path, editor: editor}
@@ -211,6 +249,187 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
 
       send(lv, :stop)
       send(editor, :stop)
+    end
+
+    test "doc.save accepts the current browser document id before a pool info row exists", %{
+      pool: pool,
+      path: path
+    } do
+      doc = "d_pptx_browser_save"
+      doc_path = Path.join(path, "browser-save.pptx")
+      bytes = "PPTX-BROWSER-BYTES"
+      File.mkdir_p!(path)
+
+      lv = browser_reply_lv(self(), %{"bytes_base64" => Base.encode64(bytes)})
+      :ok = Session.attach_viewer(path, doc, lv)
+
+      tool_ctx =
+        ctx(pool, path)
+        |> Map.put(:active_doc, doc)
+        |> Map.put(:document_path, doc_path)
+
+      assert {:ok, %{"current_document" => current}} = Tools.call(tool_ctx, "doc.context", %{})
+      assert current["document"] == doc
+      assert current["path"] == doc_path
+      assert current["backing"] == "browser"
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(tool_ctx, "doc.save", %{"document" => current["document"]})
+
+      assert_receive {:browser_request, :save, %{}}
+      assert File.read!(doc_path) == bytes
+
+      send(lv, :stop)
+    end
+
+    test "doc.render on a clean viewed office document uses the server twin without browser save",
+         %{pool: pool, path: path} do
+      doc = "d_pptx_clean_render"
+      doc_path = Path.join(path, "clean-render.pptx")
+      editor = fake_render_editor(self())
+      put_pool_doc(pool, doc, doc_path, :pptx, editor)
+
+      lv = render_viewer_lv(self(), false)
+      :ok = Session.attach_viewer(path, doc, lv)
+
+      assert {:ok, %{"ok" => true, "rendered" => ["Slide1"], "files" => [_file]}} =
+               Tools.call(ctx(pool, path), "doc.render", %{
+                 "document" => doc,
+                 "page" => "Slide1",
+                 "width" => 640
+               })
+
+      assert_receive {:viewer_state_request, ^doc}
+      assert_receive {:server_render, "Slide1", [width: 640]}
+      refute_receive {:browser_request, :save, %{}}, 50
+
+      send(lv, :stop)
+      send(editor, :stop)
+    end
+
+    test "doc.render on a dirty viewed office document still snapshots the browser",
+         %{pool: pool, path: path} do
+      doc = "d_pptx_dirty_render"
+      doc_path = Path.join(path, "dirty-render.pptx")
+      editor = fake_render_editor(self())
+      put_pool_doc(pool, doc, doc_path, :pptx, editor)
+
+      lv = render_viewer_lv(self(), true)
+      :ok = Session.attach_viewer(path, doc, lv)
+
+      assert {:error, %{"error" => error}} =
+               Tools.call(ctx(pool, path), "doc.render", %{
+                 "document" => doc,
+                 "page" => "Slide1",
+                 "width" => 640
+               })
+
+      assert error =~ "forced browser snapshot"
+
+      assert_receive {:viewer_state_request, ^doc}
+      assert_receive {:browser_request, :save, %{}}
+      refute_receive {:server_render, _page, _opts}, 50
+
+      send(lv, :stop)
+      send(editor, :stop)
+    end
+
+    test "viewed xlsx is a browser-backed current doc without a server pool twin", %{
+      pool: pool,
+      path: path
+    } do
+      workbook_path = Path.join(path, "sample.xlsx")
+      doc = Pool.document_id_for(workbook_path, :xlsx)
+
+      live_result = %{
+        "pattern" => "Revenue",
+        "type" => nil,
+        "matches" => [
+          %{
+            "ref" => "sheet[Sheet1]/cell[B2]",
+            "type" => "cell",
+            "text" => "Revenue",
+            "sheet" => "Sheet1",
+            "row" => 2,
+            "col" => 2
+          }
+        ]
+      }
+
+      lv = browser_reply_lv(self(), live_result)
+      :ok = Session.attach_viewer(path, doc, lv)
+
+      agent_ctx =
+        ctx(pool, path)
+        |> Map.put(:active_doc, doc)
+        |> Map.put(:document_path, "sample.xlsx")
+
+      assert {:ok, %{"current_document" => current}} =
+               Tools.call(agent_ctx, "doc.context", %{})
+
+      assert current["document"] == doc
+      assert current["kind"] == "xlsx"
+      assert current["path"] == "sample.xlsx"
+      assert current["backing"] == "browser"
+
+      assert {:ok, ^live_result} =
+               Tools.call(agent_ctx, "doc.find", %{
+                 "document" => doc,
+                 "pattern" => "Revenue"
+               })
+
+      assert_receive {:browser_request, :find, %{pattern: "Revenue"}}
+
+      send(lv, :stop)
+    end
+
+    test "browser-backed doc.find compacts long match text before returning", %{
+      pool: pool,
+      path: path
+    } do
+      deck_path = Path.join(path, "long-find.pptx")
+      doc = Pool.document_id_for(deck_path, :pptx)
+
+      text =
+        String.duplicate("Intro ", 40) <>
+          "Private Timer Clock" <>
+          String.duplicate(" tail", 40)
+
+      live_result = %{
+        "pattern" => "Private Timer Clock",
+        "type" => nil,
+        "matches" => [
+          %{
+            "ref" => "page[1]/shape[long]",
+            "type" => "text_frame",
+            "text" => text
+          }
+        ]
+      }
+
+      lv = browser_reply_lv(self(), live_result)
+      :ok = Session.attach_viewer(path, doc, lv)
+
+      agent_ctx =
+        ctx(pool, path)
+        |> Map.put(:active_doc, doc)
+        |> Map.put(:document_path, "long-find.pptx")
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(agent_ctx, "doc.find", %{
+                 "document" => doc,
+                 "pattern" => "Private Timer Clock"
+               })
+
+      assert_receive {:browser_request, :find, %{pattern: "Private Timer Clock"}}
+      assert match["ref"] == "page[1]/shape[long]"
+      assert match["text"] =~ "Private Timer Clock"
+      assert match["text_truncated"] == true
+      refute Map.has_key?(match, "text_length")
+      assert String.length(match["text"]) <= 54
+      refute match["text"] == text
+
+      send(lv, :stop)
     end
 
     test "doc.save accepts the viewed document path and routes to the browser model", %{

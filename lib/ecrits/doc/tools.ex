@@ -7,7 +7,7 @@ defmodule Ecrits.Doc.Tools do
 
   | tool             | risk  | maps to |
   |------------------|-------|---------|
-  | `doc.context`    | read  | active document + cursor/selection ref |
+  | `doc.context`    | read  | current document metadata |
   | `doc.list`       | read  | `Pool.list/1` |
   | `doc.open`       | read  | `Pool.open/3` |
   | `doc.create`     | write | `Pool.create/3` (blank template) |
@@ -42,8 +42,9 @@ defmodule Ecrits.Doc.Tools do
   its `/mcp/doc-tools/<agent_id>` url) and `:active_doc` (THAT agent's own active
   document id). In an agent context:
 
-    * `doc.context` returns the agent's OWN `active_doc`, never the global
-      `Pool.active`, so two agents never see each other's doc;
+    * `doc.context` returns only the agent's OWN current document, never the
+      global `Pool.active` or the full open-document list, so two agents never
+      see each other's doc;
     * `doc.open` FAILS with `already_open` for an already-open doc (invariant 1)
       and records per-agent ownership;
     * `doc.edit` is `:forbidden` when another agent owns the doc (invariant 2),
@@ -75,20 +76,24 @@ defmodule Ecrits.Doc.Tools do
   @spec workspace_files_topic() :: String.t()
   def workspace_files_topic, do: @workspace_files_topic
 
-  # How long to wait for the viewing LiveView (browser WASM model) to apply an
-  # agent op and report back. The browser apply is a single push_event round-trip
-  # plus a WASM `replaceAll`/`insertText`, so this is generous.
-  @browser_timeout_ms 15_000
+  # How long to wait for the viewing LiveView (browser WASM model) to reply. Keep
+  # this below ExMCP's 10s GenServer.call boundary so slow viewer replies surface
+  # as structured tool errors instead of HTTP 500s.
+  @browser_timeout_ms 8_000
+  @viewer_state_timeout_ms 500
+  @find_text_limit 48
+  @office_element_metadata_fields ~w(sheet address display value value_type valueType
+                                     cached_value cachedValue formula_error formulaError
+                                     number_format numberFormat)
 
   @tools [
     %{
       "namespace" => @namespace,
       "name" => "context",
       "description" =>
-        "Current/active document metadata (current_document has document, name, path, " <>
-          "kind, backing) + cursor/selection ref. Reads whatever active-doc and cursor " <>
-          "state is currently available server-side. (Browser->server cursor reporting " <>
-          "that populates the live cursor is wired by the editors; see TODO.)",
+        "Current document metadata only. current_document is null or has document, " <>
+          "name, path, kind, backing, and active. Use doc.list when you need the " <>
+          "open-document catalog.",
       "risk" => "read",
       "inputSchema" => %{"type" => "object", "additionalProperties" => false, "properties" => %{}},
       "annotations" => %{"readOnlyHint" => true}
@@ -110,7 +115,7 @@ defmodule Ecrits.Doc.Tools do
         "type" => "object",
         "properties" => %{
           "path" => %{"type" => "string", "minLength" => 1},
-          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx", "docx", "pptx"]}
+          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx", "docx", "pptx", "xlsx"]}
         },
         "required" => ["path"]
       },
@@ -131,7 +136,7 @@ defmodule Ecrits.Doc.Tools do
         "type" => "object",
         "properties" => %{
           "path" => %{"type" => "string", "minLength" => 1},
-          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx", "docx", "pptx"]},
+          "kind" => %{"type" => "string", "enum" => ["hwp", "hwpx", "docx", "pptx", "xlsx"]},
           "from" => %{
             "type" => "string",
             "minLength" => 1,
@@ -231,7 +236,9 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "find",
       "description" =>
-        "Find text or elements. Use type:\"fillable\" for writable blanks/cells/inline gaps. Batch with patterns:[].",
+        "Find text or elements. Use type:\"fillable\" for writable blanks/cells/inline gaps; " <>
+          "type:\"formula_cell\" for spreadsheet formula cells when the engine exposes formula metadata. " <>
+          "Returns compact text snippets; use doc.read/doc.get for full context. Batch with patterns:[].",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
@@ -264,13 +271,14 @@ defmodule Ecrits.Doc.Tools do
           },
           "type" => %{
             "type" => "string",
-            "enum" => ~w(fillable empty_cell cell filled_cell paragraph empty
+            "enum" => ~w(fillable empty_cell cell filled_cell formula_cell paragraph empty
                  table picture shape equation field form
                  header footer footnote endnote bookmark hyperlink
                  ruby auto_number new_number section_def column_def
                  page_number_pos page_hide hidden_comment char_overlap unknown),
             "description" =>
-              "Element filter. `fillable` = writable blank/form/placeholder targets only."
+              "Element filter. `fillable` = writable blank/form/placeholder targets only; " <>
+                "`formula_cell` = spreadsheet cells with formula metadata."
           },
           "limit" => %{
             "type" => "integer",
@@ -710,6 +718,7 @@ defmodule Ecrits.Doc.Tools do
             end,
             server: fn editor -> server_find_many(editor, patterns, type, args) end
           )
+          |> compact_find_response(args)
         end
 
       _ ->
@@ -728,6 +737,7 @@ defmodule Ecrits.Doc.Tools do
             end,
             server: fn editor -> server_find(editor, pattern, type, args) end
           )
+          |> compact_find_response(args)
         end
     end
   end
@@ -868,6 +878,31 @@ defmodule Ecrits.Doc.Tools do
   # never touches the Pool/Editor registry (no doc.list pollution, no
   # ownership questions) — it lives for exactly one render call.
   defp render_viewed_pages(ctx, lv, document, args) do
+    case maybe_render_clean_viewed_office(ctx, lv, document, args) do
+      {:ok, _result} = ok -> ok
+      :browser_snapshot -> render_viewed_snapshot(ctx, lv, document, args)
+    end
+  end
+
+  defp maybe_render_clean_viewed_office(ctx, lv, document, args) do
+    with {:ok, %{kind: kind, path: path}} <- viewed_office_info(ctx, document),
+         {:ok, false} <- viewer_document_dirty?(lv, document),
+         {:ok, editor} <- ensure_viewed_office_server_editor(ctx, document, path, kind) do
+      Logger.debug(fn ->
+        "[doc_tools] doc.render viewed_office fast_path=server_twin kind=#{kind} dirty=false"
+      end)
+
+      render_pages(editor, args)
+    else
+      {:ok, true} ->
+        :browser_snapshot
+
+      _ ->
+        :browser_snapshot
+    end
+  end
+
+  defp render_viewed_snapshot(ctx, lv, document, args) do
     case browser_call(lv, args, :save, %{}) do
       {:ok, %{} = saved} ->
         b64 = saved["bytes_base64"] || saved[:bytes_base64]
@@ -885,9 +920,70 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
+  defp viewed_office_info(ctx, document) do
+    case Pool.info(pool(ctx), document) do
+      {:ok, %{kind: kind} = info} when kind in [:docx, :pptx, :xlsx] ->
+        {:ok, info}
+
+      {:ok, _info} ->
+        :browser_snapshot
+
+      {:error, :not_found} ->
+        active_viewed_office_info(ctx, document)
+    end
+  end
+
+  defp active_viewed_office_info(ctx, document) do
+    with true <- Map.get(ctx, :active_doc) == document,
+         lv when is_pid(lv) <- session_viewer(ctx, document),
+         path when is_binary(path) and path != "" <- Map.get(ctx, :document_path),
+         kind when kind in [:docx, :pptx, :xlsx] <- kind_from_path(path),
+         {:ok, confined_path} <- confine_path(ctx, path) do
+      {:ok, %{id: document, kind: kind, path: confined_path, backing: :browser, viewer: lv}}
+    else
+      _ -> :browser_snapshot
+    end
+  end
+
+  defp ensure_viewed_office_server_editor(ctx, document, path, kind) do
+    case Pool.route(pool(ctx), document) do
+      {:server, editor} ->
+        {:ok, editor}
+
+      {:error, :not_found} ->
+        with {:ok, ^document} <- Pool.open(pool(ctx), path, kind: kind, document_id: document),
+             {:server, editor} <- Pool.route(pool(ctx), document) do
+          {:ok, editor}
+        else
+          {:ok, opened} -> Pool.route(pool(ctx), opened)
+          {:error, reason} -> {:error, reason}
+          other -> other
+        end
+    end
+  end
+
+  defp viewer_document_dirty?(lv, document) when is_pid(lv) do
+    ref = make_ref()
+    send(lv, {:doc_viewer_state_request, self(), ref, document})
+
+    receive do
+      {:doc_viewer_state_reply, ^ref, {:ok, %{dirty: dirty?}}} when is_boolean(dirty?) ->
+        {:ok, dirty?}
+
+      {:doc_viewer_state_reply, ^ref, {:ok, %{"dirty" => dirty?}}} when is_boolean(dirty?) ->
+        {:ok, dirty?}
+
+      {:doc_viewer_state_reply, ^ref, {:error, reason}} ->
+        {:error, reason}
+    after
+      @viewer_state_timeout_ms ->
+        {:error, :viewer_state_timeout}
+    end
+  end
+
   defp viewed_kind(ctx, document, saved) do
     case Pool.info(pool(ctx), document) do
-      {:ok, %{kind: kind}} when kind in [:hwp, :hwpx, :docx, :pptx] ->
+      {:ok, %{kind: kind}} when kind in [:hwp, :hwpx, :docx, :pptx, :xlsx] ->
         kind
 
       _ ->
@@ -895,6 +991,7 @@ defmodule Ecrits.Doc.Tools do
           "hwpx" -> :hwpx
           "docx" -> :docx
           "pptx" -> :pptx
+          "xlsx" -> :xlsx
           _ -> :hwp
         end
     end
@@ -916,7 +1013,7 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
-  defp render_viewed_bytes(bytes, kind, args) when kind in [:docx, :pptx] do
+  defp render_viewed_bytes(bytes, kind, args) when kind in [:docx, :pptx, :xlsx] do
     tmp =
       Path.join(
         System.tmp_dir!(),
@@ -1194,6 +1291,8 @@ defmodule Ecrits.Doc.Tools do
 
   defp resolve_save_document(ctx, document) do
     # Aliases (basename / relative path / "active") resolve first; the
+    # browser-viewer fallback accepts the exact handle doc.context returns for
+    # viewed Office docs that are not materialised in the Pool; the
     # confine+info_by_path fallback keeps the legacy absolute-path form working.
     document =
       case canonical_document(ctx, document) do
@@ -1206,12 +1305,44 @@ defmodule Ecrits.Doc.Tools do
         {:ok, document, info}
 
       {:error, :not_found} ->
-        with {:ok, path} <- confine_path(ctx, document),
-             {:ok, %{id: document_id} = info} <- Pool.info_by_path(pool(ctx), path) do
-          {:ok, document_id, info}
+        case active_browser_save_document(ctx, document) do
+          {:ok, document_id, info} ->
+            {:ok, document_id, info}
+
+          :error ->
+            with {:ok, path} <- confine_path(ctx, document),
+                 {:ok, %{id: document_id} = info} <- Pool.info_by_path(pool(ctx), path) do
+              {:ok, document_id, info}
+            end
         end
     end
   end
+
+  defp active_browser_save_document(ctx, document) do
+    active_doc = Map.get(ctx, :active_doc)
+    path = Map.get(ctx, :document_path)
+
+    with true <- is_binary(active_doc) and active_doc != "",
+         true <- session_viewer(ctx, active_doc) != nil,
+         true <- document == active_doc or document_matches_path?(document, path),
+         path when is_binary(path) and path != "" <- path,
+         {:ok, path} <- confine_path(ctx, path),
+         kind when not is_nil(kind) <- kind_from_path(path) do
+      {:ok, active_doc, %{id: active_doc, kind: kind, path: path, backing: :browser}}
+    else
+      _ -> :error
+    end
+  end
+
+  defp document_matches_path?(document, path) when is_binary(document) and is_binary(path) do
+    normalized = String.trim_leading(document, "./")
+
+    document == path or
+      String.ends_with?(path, "/" <> normalized) or
+      Path.basename(path) == normalized
+  end
+
+  defp document_matches_path?(_document, _path), do: false
 
   # --- doc.edit dispatch (after the ownership gate) ------------------------
 
@@ -1582,15 +1713,159 @@ defmodule Ecrits.Doc.Tools do
   end
 
   defp server_find_many(editor, patterns, type, args) do
-    results =
-      Enum.map(patterns, fn pattern ->
-        case server_find(editor, pattern, type, args) do
-          {:ok, result} -> result
-          {:error, error} -> %{"pattern" => pattern, "error" => error}
-        end
-      end)
+    case maybe_elements(editor, type) do
+      {:ok, nodes} ->
+        typed_nodes = filter_by_type(nodes, type)
+        case_sensitive? = find_case_sensitive?(args)
+        regex? = find_regex?(args)
+        limit = find_limit(args)
 
-    {:ok, %{"results" => results}}
+        results =
+          Enum.map(patterns, fn pattern ->
+            matches =
+              typed_nodes
+              |> filter_by_pattern(pattern, case_sensitive?, regex?)
+              |> Enum.map(&element_to_match/1)
+              |> limit_matches(limit)
+
+            %{"pattern" => pattern, "type" => type, "matches" => matches}
+          end)
+
+        {:ok, %{"results" => results}}
+
+      :fallback ->
+        results =
+          Enum.map(patterns, fn pattern ->
+            case literal_find(editor, pattern, args) do
+              {:ok, result} -> result
+              {:error, error} -> %{"pattern" => pattern, "error" => error}
+            end
+          end)
+
+        {:ok, %{"results" => results}}
+    end
+  end
+
+  defp compact_find_response({:ok, %{} = result}, args),
+    do: {:ok, compact_find_result(result, args)}
+
+  defp compact_find_response(other, _args), do: other
+
+  defp compact_find_result(%{} = result, args) do
+    case map_field(result, ["results", :results]) do
+      results when is_list(results) ->
+        result
+        |> delete_map_keys(["results", :results])
+        |> Map.put("results", Enum.map(results, &compact_find_entry(&1, args)))
+
+      _ ->
+        compact_find_entry(result, args)
+    end
+  end
+
+  defp compact_find_entry(%{} = entry, args) do
+    matches = map_field(entry, ["matches", :matches])
+
+    if is_list(matches) do
+      pattern = map_field(entry, ["pattern", :pattern]) || get(args, ["pattern"]) || ""
+
+      entry
+      |> delete_map_keys(["matches", :matches])
+      |> Map.put("matches", Enum.map(matches, &compact_find_match(&1, pattern, args)))
+    else
+      entry
+    end
+  end
+
+  defp compact_find_entry(entry, _args), do: entry
+
+  defp compact_find_match(%{} = match, pattern, args) do
+    if map_field(match, ["text_truncated", :text_truncated]) == true do
+      match
+    else
+      full_text =
+        match
+        |> map_field(["text", :text])
+        |> compact_find_normalize_text()
+
+      text = compact_find_text(full_text, pattern, args)
+
+      match =
+        match
+        |> delete_map_keys(["text", :text])
+        |> Map.put("text", text)
+
+      if String.length(full_text) > String.length(text) do
+        Map.put(match, "text_truncated", true)
+      else
+        match
+      end
+    end
+  end
+
+  defp compact_find_match(match, _pattern, _args), do: match
+
+  defp compact_find_text(text, pattern, args) do
+    if String.length(text) <= @find_text_limit do
+      text
+    else
+      index = compact_find_snippet_index(text, pattern, args)
+      radius = div(@find_text_limit, 2)
+      max_start = max(String.length(text) - @find_text_limit, 0)
+      start = min(max(index - radius, 0), max_start)
+      finish = min(start + @find_text_limit, String.length(text))
+      prefix = if start > 0, do: "...", else: ""
+      suffix = if finish < String.length(text), do: "...", else: ""
+
+      prefix <> String.slice(text, start, finish - start) <> suffix
+    end
+  end
+
+  defp compact_find_snippet_index(_text, pattern, _args) when pattern in [nil, ""], do: 0
+
+  defp compact_find_snippet_index(text, pattern, args) do
+    pattern = to_string(pattern)
+
+    if find_regex?(args) do
+      with {:ok, regex} <-
+             Regex.compile(pattern, if(find_case_sensitive?(args), do: "", else: "i")),
+           [{byte_index, _length} | _] <- Regex.run(regex, text, return: :index) do
+        byte_index_to_grapheme_index(text, byte_index)
+      else
+        _ -> literal_find_snippet_index(text, pattern, args)
+      end
+    else
+      literal_find_snippet_index(text, pattern, args)
+    end
+  end
+
+  defp literal_find_snippet_index(text, pattern, args) do
+    haystack = if find_case_sensitive?(args), do: text, else: String.downcase(text)
+    needle = if find_case_sensitive?(args), do: pattern, else: String.downcase(pattern)
+
+    case :binary.match(haystack, needle) do
+      {byte_index, _length} -> byte_index_to_grapheme_index(text, byte_index)
+      :nomatch -> 0
+    end
+  end
+
+  defp byte_index_to_grapheme_index(text, byte_index) do
+    text
+    |> binary_part(0, byte_index)
+    |> String.length()
+  rescue
+    ArgumentError -> 0
+  end
+
+  defp compact_find_normalize_text(text) do
+    text
+    |> to_string()
+    |> String.replace(~r/\s+/u, " ")
+    |> String.trim()
+  end
+
+  defp delete_map_keys(map, keys) do
+    Enum.reduce(keys, map, fn key, acc -> Map.delete(acc, key) end)
   end
 
   defp server_read_nearby(editor, args) do
@@ -2099,6 +2374,9 @@ defmodule Ecrits.Doc.Tools do
   defp filter_by_type(nodes, "filled_cell"),
     do: Enum.filter(nodes, &(node_type(&1) == "cell" and not blank_node_text?(&1)))
 
+  defp filter_by_type(nodes, "formula_cell"),
+    do: Enum.filter(nodes, &(node_type(&1) == "cell" and formula_node?(&1)))
+
   defp filter_by_type(nodes, type) when is_binary(type),
     do: Enum.filter(nodes, &(node_type(&1) == type))
 
@@ -2134,6 +2412,8 @@ defmodule Ecrits.Doc.Tools do
       |> maybe_put("row", node_field(node, "row"))
       |> maybe_put("col", node_field(node, "col"))
       |> maybe_put("context", node_field(node, "context"))
+      |> maybe_put("formula", node_formula(node))
+      |> maybe_put_office_metadata(node)
 
     maybe_put(match, "fillable_kind", fillable_kind(match))
   end
@@ -2141,6 +2421,23 @@ defmodule Ecrits.Doc.Tools do
   defp node_type(node), do: node_field(node, "type")
   defp node_text(node), do: node_field(node, "text") || ""
   defp blank_node_text?(node), do: String.trim(node_text(node)) == ""
+  defp formula_node?(node), do: String.trim(to_string(node_formula(node) || "")) != ""
+
+  defp node_formula(node) do
+    props = node_field(node, "props") || node_field(node, "properties") || %{}
+
+    node_field(node, "formula") ||
+      node_field(node, "Formula") ||
+      node_field(props, "formula") ||
+      node_field(props, "Formula")
+  end
+
+  defp maybe_put_office_metadata(match, node) do
+    Enum.reduce(@office_element_metadata_fields, match, fn field, acc ->
+      maybe_put(acc, field, node_field(node, field))
+    end)
+  end
+
   defp fillable_node?(node), do: fillable_match?(element_to_match(node))
 
   defp fillable_match?(match) do
@@ -2605,9 +2902,18 @@ defmodule Ecrits.Doc.Tools do
 
   defp office_document?(ctx, document) do
     case Pool.info(pool(ctx), document) do
-      {:ok, %{kind: kind}} -> kind in [:docx, :pptx]
-      _ -> false
+      {:ok, %{kind: kind}} ->
+        kind in [:docx, :pptx, :xlsx]
+
+      _ ->
+        active_browser_office_document?(ctx, document)
     end
+  end
+
+  defp active_browser_office_document?(ctx, document) do
+    Map.get(ctx, :active_doc) == document and
+      session_viewer(ctx, document) != nil and
+      path_kind(Map.get(ctx, :document_path)) in ["docx", "pptx", "xlsx"]
   end
 
   defp browser_get(lv, args, payload) do
@@ -2681,6 +2987,7 @@ defmodule Ecrits.Doc.Tools do
   defp save_format(:hwpx), do: :hwpx
   defp save_format(:docx), do: :docx
   defp save_format(:pptx), do: :pptx
+  defp save_format(:xlsx), do: :xlsx
   defp save_format(_kind), do: :hwp
 
   # Synchronous request/reply against the viewing LiveView. The LiveView's
@@ -2699,7 +3006,7 @@ defmodule Ecrits.Doc.Tools do
         {:doc_browser_reply, ^ref, {:error, reason}} -> {:error, error_json(reason)}
       after
         @browser_timeout_ms ->
-          {:error, error_json({:browser_timeout, "viewer did not apply the edit in time"})}
+          {:error, error_json({:browser_timeout, "viewer did not reply in time"})}
       end
 
     log_browser_timing(verb, result, started_at)
@@ -2850,34 +3157,37 @@ defmodule Ecrits.Doc.Tools do
     }
   end
 
-  # Current document + cursor/selection. The active document is per-CALLER
-  # (design invariant 3 / Phase 3): the agent's OWN active doc, read from the
-  # AgentLive (`ctx.active_doc`) — there is no global active anymore. `WorkspaceLive`
-  # follows the user's open doc onto the foreground agent live (`update_options`),
-  # so `doc.context` returns the doc this agent is bound to.
+  # Current document only. The active document is per-CALLER (design invariant 3 /
+  # Phase 3): the agent's OWN active doc, read from the AgentLive
+  # (`ctx.active_doc`) — there is no global active anymore. `WorkspaceLive` follows
+  # the user's open doc onto the foreground agent live (`update_options`), so
+  # `doc.context` returns the doc this agent is bound to.
   #
   # We resolve ONLY the explicitly-set active doc — no "first" or "sole doc"
-  # guessing. When nothing is active, `active_document` is nil. If the workspace
+  # guessing and no full `documents` catalog in the response. If the workspace
   # still knows a selected `document_path`, `current_document.document` uses that
   # path handle so the agent can explicitly open/read the viewed document through
   # MCP, not through prompt text.
-  #
-  # The `cursor`/`selection` refs still require browser->server caret reporting
-  # (editors, owned separately) and remain null for now.
   defp context_json(ctx) do
-    pool = pool(ctx)
-    docs = Pool.list(pool)
-    active_id = active_doc_id(ctx, pool)
-    active = active_id && Enum.find(docs, &(&1.id == active_id))
+    %{"current_document" => current_document_json(ctx, current_document_entry(ctx))}
+  end
 
-    %{
-      "active_document" => active && active.id,
-      "current_document" => current_document_json(ctx, active),
-      "cursor" => nil,
-      "selection" => nil,
-      "cursor_reporting" => "todo:browser_wiring",
-      "documents" => Enum.map(docs, &entry_json/1)
-    }
+  defp current_document_entry(ctx) do
+    pool = pool(ctx)
+
+    case active_doc_id(ctx, pool) do
+      active_id when is_binary(active_id) and active_id != "" ->
+        case Pool.info(pool, active_id) do
+          {:ok, active} ->
+            active
+
+          {:error, _} ->
+            active_browser_document_entry(ctx, active_id)
+        end
+
+      _ ->
+        nil
+    end
   end
 
   # The active doc for THIS call is ALWAYS the per-caller `ctx.active_doc`: in an
@@ -2886,6 +3196,16 @@ defmodule Ecrits.Doc.Tools do
   # `Pool.active` is GONE (design Phase 3): a bare pool-only context (legacy mount
   # / test) that sets no `:active_doc` simply reports no active document.
   defp active_doc_id(ctx, _pool), do: Map.get(ctx, :active_doc)
+
+  defp active_browser_document_entry(ctx, active_id) do
+    with lv when is_pid(lv) <- session_viewer(ctx, active_id),
+         path when is_binary(path) and path != "" <- Map.get(ctx, :document_path),
+         kind when kind in ["docx", "pptx", "xlsx"] <- path_kind(path) do
+      %{id: active_id, path: path, kind: String.to_atom(kind), backing: :browser}
+    else
+      _ -> nil
+    end
+  end
 
   # Already-structured error maps (e.g. `enforce_ownership` -> forbidden) pass
   # through unchanged so the uniform `else error_json/1` wrapping never re-wraps a
@@ -3076,9 +3396,11 @@ defmodule Ecrits.Doc.Tools do
   defp normalize_kind("hwp"), do: :hwp
   defp normalize_kind("docx"), do: :docx
   defp normalize_kind("pptx"), do: :pptx
+  defp normalize_kind("xlsx"), do: :xlsx
   defp normalize_kind(:hwpx), do: :hwpx
   defp normalize_kind(:docx), do: :docx
   defp normalize_kind(:pptx), do: :pptx
+  defp normalize_kind(:xlsx), do: :xlsx
   defp normalize_kind(_other), do: :hwp
 
   defp kind_from_path(path) when is_binary(path) do
@@ -3087,6 +3409,7 @@ defmodule Ecrits.Doc.Tools do
       ".hwpx" -> :hwpx
       ".docx" -> :docx
       ".pptx" -> :pptx
+      ".xlsx" -> :xlsx
       _ -> nil
     end
   end

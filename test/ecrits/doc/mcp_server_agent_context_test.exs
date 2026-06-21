@@ -68,8 +68,8 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
     assert {:ok, %{content: [content1]} = response1, _} =
              call_tool("doc.context", %{"_agent_id" => id1})
 
-    assert %{"active_document" => ^a, "current_document" => current1} =
-             Jason.decode!(content1.text)
+    assert %{"current_document" => current1} = decoded1 = Jason.decode!(content1.text)
+    assert Map.keys(decoded1) == ["current_document"]
 
     assert current1["document"] == a
     assert current1["name"] == "ctx_a.hwp"
@@ -81,8 +81,8 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
 
     assert {:ok, %{content: [content2]}, _} = call_tool("doc.context", %{"_agent_id" => id2})
 
-    assert %{"active_document" => ^b, "current_document" => current2} =
-             Jason.decode!(content2.text)
+    assert %{"current_document" => current2} = decoded2 = Jason.decode!(content2.text)
+    assert Map.keys(decoded2) == ["current_document"]
 
     assert current2["document"] == b
     assert current2["name"] == "ctx_b.hwp"
@@ -94,8 +94,8 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
 
     assert {:ok, %{content: [content]}, _} = call_tool("doc.context", %{"_agent_id" => id})
 
-    assert %{"active_document" => nil, "current_document" => current} =
-             Jason.decode!(content.text)
+    assert %{"current_document" => current} = decoded = Jason.decode!(content.text)
+    assert Map.keys(decoded) == ["current_document"]
 
     assert current == %{
              "document" => "drafts/current.hwpx",
@@ -111,12 +111,15 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
     {:ok, doc} = Pool.open("ctx_legacy.hwp", kind: :hwp, open_opts: [__text__: "L"])
     on_exit(fn -> Pool.close(doc) end)
 
-    # A bare (agent-less) context has no active doc — the global active is gone —
-    # but the open doc is still listed in `documents`, so the legacy mount keeps
-    # working without a per-agent context.
+    # A bare (agent-less) context has no active doc — the global active is gone.
+    # The open-doc catalog belongs to doc.list, not doc.context.
     assert {:ok, %{content: [content]}, _} = call_tool("doc.context", %{})
 
-    assert %{"active_document" => nil, "documents" => docs} = Jason.decode!(content.text)
+    assert %{"current_document" => nil} = decoded = Jason.decode!(content.text)
+    assert Map.keys(decoded) == ["current_document"]
+
+    assert {:ok, %{content: [list_content]}, _} = call_tool("doc.list", %{})
+    assert %{"documents" => docs} = Jason.decode!(list_content.text)
     assert Enum.any?(docs, &(&1["document"] == doc))
   end
 

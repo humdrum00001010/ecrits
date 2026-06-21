@@ -34,7 +34,7 @@ defmodule Ecrits.Doc do
   @type handle :: term()
 
   @typedoc "Document kind."
-  @type kind :: :hwp | :hwpx | :office | :docx | :pptx
+  @type kind :: :hwp | :hwpx | :office | :docx | :pptx | :xlsx
 
   @typedoc """
   Engine-level result of a mutation.
@@ -128,6 +128,7 @@ defmodule Ecrits.Doc do
   def backend_for(:hwpx), do: Ecrits.Doc.Rhwp
   def backend_for(:docx), do: Ecrits.Doc.Office
   def backend_for(:pptx), do: Ecrits.Doc.Office
+  def backend_for(:xlsx), do: Ecrits.Doc.Office
   def backend_for(:office), do: Ecrits.Doc.Office
   def backend_for(_other), do: nil
 end

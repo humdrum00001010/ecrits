@@ -1,6 +1,6 @@
 defmodule Ecrits.Doc.Office do
   @moduledoc """
-  docx/pptx backend for `Ecrits.Doc`, served by the headless LibreOffice UNO NIF.
+  docx/pptx/xlsx backend for `Ecrits.Doc`, served by the headless LibreOffice UNO NIF.
 
   This is the **Office server arm** of the design (§2.1, §3) — the docx/pptx
   analogue of `Ecrits.Doc.Rhwp`. It makes Word/PowerPoint documents answer the
@@ -73,11 +73,12 @@ defmodule Ecrits.Doc.Office do
   through `Instance.run/3`, which resolves the token to a live session, serialises
   the call, and transparently rematerialises an evicted doc first.
   """
-  @type handle :: %{doc: reference(), kind: :docx | :pptx, path: String.t() | nil}
+  @type handle :: %{doc: reference(), kind: :docx | :pptx | :xlsx, path: String.t() | nil}
 
   # Export filter names the UNO arm needs for storeToURL (M2/M3 verified).
   @docx_filter "MS Word 2007 XML"
   @pptx_filter "Impress MS PowerPoint 2007 XML"
+  @xlsx_filter "Calc MS Excel 2007 XML"
 
   # Parity with the HWP backend: a single doc.read never returns more than this
   # many paragraphs (design §4.4, the user's hard limit). Office has no native
@@ -913,6 +914,7 @@ defmodule Ecrits.Doc.Office do
 
   defp filter_for(:pptx), do: @pptx_filter
   defp filter_for(:docx), do: @docx_filter
+  defp filter_for(:xlsx), do: @xlsx_filter
   defp filter_for(_other), do: @docx_filter
 
   # --- json helpers --------------------------------------------------------

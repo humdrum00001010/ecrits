@@ -86,9 +86,10 @@ defmodule Ecrits.Test.FakeEhwpRuntime do
   # Property read/query surface (`get_properties`, etc.). The fake holds only
   # plain text — it has no property model — so report an honest unsupported
   # error, mirroring the headless NIF's current capability gap.
-  def query(%{agent: agent}, query) when is_map(query) do
+  def query(%{agent: agent} = handle, query) when is_map(query) do
     case Map.get(query, :q) || Map.get(query, "q") do
       "elements" ->
+        if is_pid(Map.get(handle, :owner)), do: send(handle.owner, {:fake_ehwp_query, "elements"})
         {:ok, Jason.encode!(fake_elements(text(agent)))}
 
       _ ->

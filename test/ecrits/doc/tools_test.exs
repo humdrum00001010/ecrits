@@ -58,6 +58,9 @@ defmodule Ecrits.Doc.ToolsTest do
       assert "doc.apply_style" not in names
       assert length(names) == 11
 
+      find_schema = Enum.find(Tools.tools(), &(&1["name"] == "find"))["inputSchema"]
+      assert "formula_cell" in get_in(find_schema, ["properties", "type", "enum"])
+
       for tool <- Tools.tools() do
         assert is_map(tool["inputSchema"])
         assert tool["risk"] in ["read", "write"]
@@ -124,7 +127,7 @@ defmodule Ecrits.Doc.ToolsTest do
       assert File.read!(clone) == bytes
       # And it is opened as an editable doc whose save target is `clone` (it shows
       # up in the open-documents list — there is no global active to set anymore).
-      assert {:ok, %{"documents" => docs}} = Tools.call(ctx(pool), "doc.context", %{})
+      assert {:ok, %{"documents" => docs}} = Tools.call(ctx(pool), "doc.list", %{})
       assert Enum.any?(docs, &(&1["document"] == doc_id))
 
       assert {:ok, info} = Pool.info(pool, doc_id)
@@ -171,7 +174,7 @@ defmodule Ecrits.Doc.ToolsTest do
 
       case result do
         {:ok, %{"document" => doc_id}} ->
-          assert {:ok, %{"documents" => docs}} = Tools.call(ctx(pool), "doc.context", %{})
+          assert {:ok, %{"documents" => docs}} = Tools.call(ctx(pool), "doc.list", %{})
           assert Enum.any?(docs, &(&1["document"] == doc_id))
 
         {:error, %{"error" => err}} ->
@@ -266,6 +269,31 @@ defmodule Ecrits.Doc.ToolsTest do
       assert is_binary(m["ref"])
     end
 
+    test "doc.find returns bounded snippets for long matches", %{pool: pool} do
+      text =
+        String.duplicate("Intro ", 40) <>
+          "Private Timer Clock" <>
+          String.duplicate(" tail", 40)
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "long-find.hwp",
+          "open_opts" => [__text__: text]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => "Private Timer Clock"
+               })
+
+      assert match["text"] =~ "Private Timer Clock"
+      assert match["text_truncated"] == true
+      refute Map.has_key?(match, "text_length")
+      assert String.length(match["text"]) <= 54
+      refute match["text"] == text
+    end
+
     test "doc.find supports batched patterns", %{pool: pool, doc_id: doc_id} do
       assert {:ok, %{"results" => [first, second]}} =
                Tools.call(ctx(pool), "doc.find", %{
@@ -275,6 +303,27 @@ defmodule Ecrits.Doc.ToolsTest do
 
       assert [%{} | _] = first["matches"]
       assert [%{} | _] = second["matches"]
+    end
+
+    test "doc.find batched patterns walk structural elements once", %{pool: pool} do
+      {:ok, doc_id} =
+        Pool.open(pool, "batched.hwp",
+          kind: :hwp,
+          open_opts: [__text__: "alpha\nbeta\ngamma alpha", owner: self()]
+        )
+
+      assert {:ok, %{"results" => [first, second, third]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "patterns" => ["alpha", "beta", "missing"],
+                 "limit" => 10
+               })
+
+      assert length(first["matches"]) == 2
+      assert length(second["matches"]) == 1
+      assert third["matches"] == []
+      assert_receive {:fake_ehwp_query, "elements"}
+      refute_receive {:fake_ehwp_query, "elements"}, 50
     end
 
     test "doc.find type fillable includes party underline paragraphs", %{pool: pool} do
@@ -745,7 +794,7 @@ defmodule Ecrits.Doc.ToolsTest do
     end
   end
 
-  describe "doc.context — active document + cursor" do
+  describe "doc.context — current document" do
     test "reports the calling context's active doc (per-caller, not a global active)", %{
       pool: pool
     } do
@@ -756,19 +805,19 @@ defmodule Ecrits.Doc.ToolsTest do
         })
 
       # The active doc is per-CALLER (`ctx.active_doc`) since Phase 3 — there is no
-      # global active. A ctx that names its active doc surfaces it; the cursor
-      # wiring is still a server-side TODO.
+      # global active. A ctx that names its active doc surfaces it as current_document.
       ctx = %{pool: pool, agent_id: "fg", active_doc: doc_id}
       assert {:ok, ctx_result} = Tools.call(ctx, "doc.context", %{})
-      assert ctx_result["active_document"] == doc_id
-      assert ctx_result["current_document"]["document"] == doc_id
-      assert ctx_result["current_document"]["name"] == "c.hwp"
-      assert ctx_result["current_document"]["path"] == "c.hwp"
-      assert ctx_result["current_document"]["kind"] == "hwp"
-      assert ctx_result["current_document"]["backing"] == "server"
-      assert ctx_result["cursor"] == nil
-      assert ctx_result["selection"] == nil
-      assert ctx_result["cursor_reporting"] == "todo:browser_wiring"
+      assert Map.keys(ctx_result) == ["current_document"]
+
+      assert ctx_result["current_document"] == %{
+               "document" => doc_id,
+               "name" => "c.hwp",
+               "path" => "c.hwp",
+               "kind" => "hwp",
+               "backing" => "server",
+               "active" => true
+             }
     end
 
     test "each caller sees its OWN active doc, independent of what is open", %{pool: pool} do
@@ -779,19 +828,23 @@ defmodule Ecrits.Doc.ToolsTest do
         Tools.call(ctx(pool), "doc.open", %{"path" => "b.hwp", "open_opts" => [__text__: "y"]})
 
       # A bare ctx names no active doc → none reported (no global active to infer).
-      assert {:ok, %{"active_document" => nil, "current_document" => nil}} =
+      assert {:ok, %{"current_document" => nil} = bare_context} =
                Tools.call(ctx(pool), "doc.context", %{})
 
+      assert Map.keys(bare_context) == ["current_document"]
+
       # Each caller's own `active_doc` wins.
-      assert {:ok, %{"active_document" => ^b, "current_document" => current_b}} =
+      assert {:ok, %{"current_document" => current_b} = context_b} =
                Tools.call(%{pool: pool, agent_id: "x", active_doc: b}, "doc.context", %{})
 
+      assert Map.keys(context_b) == ["current_document"]
       assert current_b["document"] == b
       assert current_b["name"] == "b.hwp"
 
-      assert {:ok, %{"active_document" => ^a, "current_document" => current_a}} =
+      assert {:ok, %{"current_document" => current_a} = context_a} =
                Tools.call(%{pool: pool, agent_id: "y", active_doc: a}, "doc.context", %{})
 
+      assert Map.keys(context_a) == ["current_document"]
       assert current_a["document"] == a
       assert current_a["name"] == "a.hwp"
     end
@@ -809,7 +862,7 @@ defmodule Ecrits.Doc.ToolsTest do
                  %{}
                )
 
-      assert ctx_result["active_document"] == nil
+      assert Map.keys(ctx_result) == ["current_document"]
 
       assert ctx_result["current_document"] == %{
                "document" => "drafts/current.hwpx",
@@ -847,20 +900,22 @@ defmodule Ecrits.Doc.ToolsTest do
         Tools.call(ctx(pool), "doc.open", %{"path" => "b.hwp", "open_opts" => [__text__: "y"]})
 
       # Each agent sees ONLY its own bound doc — there is no global active to leak.
-      assert {:ok, %{"active_document" => ^a, "current_document" => current_a}} =
+      assert {:ok, %{"current_document" => current_a} = context_a} =
                Tools.call(agent_ctx(pool, path, "agent-1", a), "doc.context", %{})
 
+      assert Map.keys(context_a) == ["current_document"]
       assert current_a["document"] == a
       assert current_a["name"] == "a.hwp"
 
-      assert {:ok, %{"active_document" => ^b, "current_document" => current_b}} =
+      assert {:ok, %{"current_document" => current_b} = context_b} =
                Tools.call(agent_ctx(pool, path, "agent-2", b), "doc.context", %{})
 
+      assert Map.keys(context_b) == ["current_document"]
       assert current_b["document"] == b
       assert current_b["name"] == "b.hwp"
 
       # An agent with no bound doc sees none.
-      assert {:ok, %{"active_document" => nil, "current_document" => nil}} =
+      assert {:ok, %{"current_document" => nil}} =
                Tools.call(agent_ctx(pool, path, "agent-3", nil), "doc.context", %{})
     end
 
@@ -945,8 +1000,8 @@ defmodule Ecrits.Doc.ToolsTest do
       assert {:ok, %{"document" => ^doc_id}} =
                Tools.call(ctx(pool), "doc.open", %{"path" => "legacy.hwp"})
 
-      # A bare ctx sets no active doc, so doc.context reports none (no global active).
-      assert {:ok, %{"active_document" => nil}} = Tools.call(ctx(pool), "doc.context", %{})
+      # A bare ctx sets no active doc, so doc.context reports no current doc.
+      assert {:ok, %{"current_document" => nil}} = Tools.call(ctx(pool), "doc.context", %{})
     end
   end
 

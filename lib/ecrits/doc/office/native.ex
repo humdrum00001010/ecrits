@@ -17,11 +17,12 @@ defmodule Ecrits.Doc.Office.Native do
 
   @docx_filter "MS Word 2007 XML"
   @pptx_filter "Impress MS PowerPoint 2007 XML"
+  @xlsx_filter "Calc MS Excel 2007 XML"
 
   @typedoc "An opened UNO session plus the args needed to reopen it after eviction."
   @type opened :: %{
           session: term(),
-          kind: :docx | :pptx,
+          kind: :docx | :pptx | :xlsx,
           path: String.t(),
           install_dir: String.t(),
           profile: String.t()
@@ -87,7 +88,7 @@ defmodule Ecrits.Doc.Office.Native do
   end
 
   @doc "Persist a live session to `path` using the kind's export filter (eviction save)."
-  @spec save_session(term(), String.t(), :docx | :pptx) :: :ok | {:error, term()}
+  @spec save_session(term(), String.t(), :docx | :pptx | :xlsx) :: :ok | {:error, term()}
   def save_session(session, path, kind) do
     case Native.uno_save(session, path, filter_for(kind)) do
       :ok -> :ok
@@ -207,6 +208,7 @@ defmodule Ecrits.Doc.Office.Native do
     case Keyword.get(opts, :kind) do
       :pptx -> :pptx
       :docx -> :docx
+      :xlsx -> :xlsx
       _ -> from_extension(path)
     end
   end
@@ -215,11 +217,13 @@ defmodule Ecrits.Doc.Office.Native do
     case path |> Path.extname() |> String.downcase() do
       ".pptx" -> :pptx
       ".ppt" -> :pptx
+      ".xlsx" -> :xlsx
       _ -> :docx
     end
   end
 
   defp filter_for(:pptx), do: @pptx_filter
   defp filter_for(:docx), do: @docx_filter
+  defp filter_for(:xlsx), do: @xlsx_filter
   defp filter_for(_other), do: @docx_filter
 end
