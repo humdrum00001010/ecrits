@@ -91,6 +91,28 @@ defmodule Ecrits.Doc.ToolsTest do
       assert by_name["doc.edit"] == "write"
       assert by_name["doc.save"] == "write"
     end
+
+    test "doc.edit insert_picture schema exposes image source and sizing fields" do
+      edit = Enum.find(Tools.tools(), &(&1["namespace"] <> "." <> &1["name"] == "doc.edit"))
+      props = get_in(edit, ["inputSchema", "properties", "op", "properties"])
+
+      assert props["src"]["type"] == "string"
+      assert props["src"]["description"] =~ "insert_picture"
+      assert props["ref"]["description"] =~ "sheet[Sheet1]/cell[A1]"
+      assert props["width"]["description"] =~ "insert_picture"
+      assert props["height"]["description"] =~ "insert_picture"
+      assert props["w"]["description"] =~ "insert_picture"
+      assert props["h"]["description"] =~ "insert_picture"
+      assert props["name"]["description"] =~ "XLSX"
+    end
+
+    test "instructions include native xlsx picture guidance" do
+      instructions = Tools.instructions()
+
+      assert instructions =~ "XLSX guide"
+      assert instructions =~ "sheet[Sheet1]/cell[A1]"
+      assert instructions =~ "insert_picture {ref, src"
+    end
   end
 
   describe "doc.open + doc.list" do

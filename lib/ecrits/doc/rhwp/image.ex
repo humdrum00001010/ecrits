@@ -9,7 +9,8 @@ defmodule Ecrits.Doc.Rhwp.Image do
       (fit-to-width capped to the paragraph's real placeable width); a
       caller-supplied `width`/`height` is honored verbatim (#46).
     * `for_browser/1` — the BROWSER (WASM) arm, which can't read the server
-      filesystem, so it gets the bytes inline as `:image_base64`.
+      filesystem, so it gets the bytes inline as `:image_base64` plus concrete
+      placed dimensions when the agent supplied only `src`.
 
   Both read the file, derive the `extension`, and sniff the natural pixel dims
   from the image header (PNG IHDR / JPEG SOF / GIF). Ops without a `src` (or that
@@ -83,31 +84,29 @@ defmodule Ecrits.Doc.Rhwp.Image do
 
   @doc """
   BROWSER arm producer. Emits `:image_base64` instead of the NIF `:bins` slice, so
-  the WASM handler (`wasm_hwp_editor.applyOneOp` insert_picture) can decode and
-  call `insertPicture`. Only fires for the INLINE form (`src`, no `page`); the
-  pptx slide form (`page` set) is left for the office arm. Non-picture / no-`src`
-  ops pass through.
+  the browser editor can materialize the image in its WASM filesystem. If the
+  agent supplied a bare inline `src`, fill `width`/`height` from the natural aspect
+  ratio so browser HWP accepts the same minimal op the server arm accepts. Slide
+  picture ops keep their `page`/`x`/`y`/`w`/`h` fields and only swap `src` for
+  bytes. Non-picture / no-`src` ops pass through.
   """
   @spec for_browser(map()) :: {:ok, map()} | {:error, map()}
   def for_browser(%{op: "insert_picture", src: src} = op)
       when is_binary(src) and src != "" do
-    if Map.has_key?(op, :page) do
+    with {:ok, bytes} <- read_file(src) do
+      ext = extension(src)
+      {nw, nh} = pixel_dims(bytes, ext)
+
+      op =
+        op
+        |> Map.delete(:src)
+        |> Map.put(:image_base64, Base.encode64(bytes))
+        |> Map.put(:extension, present_string(op[:extension]) || ext)
+        |> Map.put(:natural_width_px, op[:natural_width_px] || nw)
+        |> Map.put(:natural_height_px, op[:natural_height_px] || nh)
+        |> maybe_put_inline_browser_size(nw, nh)
+
       {:ok, op}
-    else
-      with {:ok, bytes} <- read_file(src) do
-        ext = extension(src)
-        {nw, nh} = pixel_dims(bytes, ext)
-
-        op =
-          op
-          |> Map.delete(:src)
-          |> Map.put(:image_base64, Base.encode64(bytes))
-          |> Map.put(:extension, present_string(op[:extension]) || ext)
-          |> Map.put(:natural_width_px, op[:natural_width_px] || nw)
-          |> Map.put(:natural_height_px, op[:natural_height_px] || nh)
-
-        {:ok, op}
-      end
     end
   end
 
@@ -115,10 +114,20 @@ defmodule Ecrits.Doc.Rhwp.Image do
 
   # ── internals ──────────────────────────────────────────────────────────────
 
-  defp extension(src), do: src |> Path.extname() |> String.trim_leading(".") |> String.downcase()
+  @browser_default_max_unit 8504
+
+  defp extension(src) do
+    src
+    |> file_source_path()
+    |> Path.extname()
+    |> String.trim_leading(".")
+    |> String.downcase()
+  end
 
   defp read_file(src) do
-    case File.read(src) do
+    path = file_source_path(src)
+
+    case File.read(path) do
       {:ok, bytes} when byte_size(bytes) > 0 ->
         {:ok, bytes}
 
@@ -136,6 +145,76 @@ defmodule Ecrits.Doc.Rhwp.Image do
 
   defp present_string(s) when is_binary(s) and s != "", do: s
   defp present_string(_), do: nil
+
+  defp maybe_put_inline_browser_size(%{page: page} = op, _nw, _nh) when is_binary(page),
+    do: op
+
+  defp maybe_put_inline_browser_size(op, nw, nh) do
+    {width, height} = browser_size(op, nw, nh)
+
+    op
+    |> Map.put(:width, width)
+    |> Map.put(:height, height)
+  end
+
+  defp file_source_path("file://" <> _ = url) do
+    case URI.parse(url) do
+      %URI{scheme: "file", host: host, path: path} when host in [nil, "", "localhost"] ->
+        path |> to_string() |> URI.decode()
+
+      _ ->
+        url
+    end
+  end
+
+  defp file_source_path(src), do: src
+
+  defp browser_size(op, natural_width, natural_height) do
+    width = positive_int(op[:width])
+    height = positive_int(op[:height])
+
+    cond do
+      width && height ->
+        {width, height}
+
+      width ->
+        {width, scaled_height(width, natural_width, natural_height)}
+
+      height ->
+        {scaled_width(height, natural_width, natural_height), height}
+
+      true ->
+        fit_size(natural_width, natural_height, @browser_default_max_unit)
+    end
+  end
+
+  defp positive_int(value) when is_integer(value) and value > 0, do: value
+  defp positive_int(_value), do: nil
+
+  defp scaled_height(width, natural_width, natural_height)
+       when natural_width > 0 and natural_height > 0 do
+    max(1, round(width * natural_height / natural_width))
+  end
+
+  defp scaled_height(_width, _natural_width, _natural_height), do: @browser_default_max_unit
+
+  defp scaled_width(height, natural_width, natural_height)
+       when natural_width > 0 and natural_height > 0 do
+    max(1, round(height * natural_width / natural_height))
+  end
+
+  defp scaled_width(_height, _natural_width, _natural_height), do: @browser_default_max_unit
+
+  defp fit_size(natural_width, natural_height, max_unit)
+       when natural_width > 0 and natural_height > 0 do
+    if natural_width >= natural_height do
+      {max_unit, max(1, round(max_unit * natural_height / natural_width))}
+    else
+      {max(1, round(max_unit * natural_width / natural_height)), max_unit}
+    end
+  end
+
+  defp fit_size(_natural_width, _natural_height, max_unit), do: {max_unit, max_unit}
 
   # Sniff the natural pixel size from the image header. PNG: IHDR width/height are
   # the two big-endian u32s right after the 8-byte signature + "IHDR" length/type.

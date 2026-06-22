@@ -430,7 +430,12 @@ defmodule Ecrits.Doc.Tools do
               "ref" => %{
                 "type" => "string",
                 "description" =>
-                  "Target element ref (from doc.find). Scopes the edit to that element/paragraph."
+                  "Target element ref (from doc.find). Scopes the edit to that element/paragraph. XLSX insert_picture uses a cell ref like sheet[Sheet1]/cell[A1]."
+              },
+              "src" => %{
+                "type" => "string",
+                "description" =>
+                  "insert_picture: local image file path to embed. For HWP/browser documents use a plain local path or file:// URL; the server reads it and sends inline image bytes to the editor."
               },
               "all" => %{
                 "type" => "boolean",
@@ -474,37 +479,37 @@ defmodule Ecrits.Doc.Tools do
               "width" => %{
                 "type" => "integer",
                 "description" =>
-                  "insert_shape: shape width in HWPUNIT (e.g. 8504 ≈ 3cm). REQUIRED for insert_shape."
+                  "insert_shape: shape width in HWPUNIT (e.g. 8504 ≈ 3cm). HWP insert_picture: optional placed width in HWPUNIT; omit with height to use the image's natural aspect at the default size."
               },
               "height" => %{
                 "type" => "integer",
                 "description" =>
-                  "insert_shape: shape height in HWPUNIT. REQUIRED for insert_shape."
+                  "insert_shape: shape height in HWPUNIT. HWP insert_picture: optional placed height in HWPUNIT; omit with width to use the image's natural aspect at the default size."
               },
               "x" => %{
                 "type" => "integer",
                 "description" =>
-                  "insert_shape: horizontal position. Slide form (with `page`): 1/100 mm. HWP form (with `ref`): HWPUNIT offset (default 0)."
+                  "insert_shape / insert_picture: horizontal position. Slide form (with `page`): 1/100 mm. HWP shape form (with `ref`): HWPUNIT offset (default 0)."
               },
               "y" => %{
                 "type" => "integer",
                 "description" =>
-                  "insert_shape: vertical position. Slide form (with `page`): 1/100 mm. HWP form (with `ref`): HWPUNIT offset (default 0)."
+                  "insert_shape / insert_picture: vertical position. Slide form (with `page`): 1/100 mm. HWP shape form (with `ref`): HWPUNIT offset (default 0)."
               },
               "w" => %{
                 "type" => "integer",
                 "description" =>
-                  "insert_shape (slide form): shape width in 1/100 mm, relative to the deck's actual slide size. REQUIRED with `page`."
+                  "insert_shape / insert_picture (Office form): width in 1/100 mm, relative to the deck/page or spreadsheet cell anchor. REQUIRED for slide pictures with `page`; optional for DOCX inline and XLSX cell pictures."
               },
               "h" => %{
                 "type" => "integer",
                 "description" =>
-                  "insert_shape (slide form): shape height in 1/100 mm, relative to the deck's actual slide size. REQUIRED with `page`."
+                  "insert_shape / insert_picture (Office form): height in 1/100 mm, relative to the deck/page or spreadsheet cell anchor. REQUIRED for slide pictures with `page`; optional for DOCX inline and XLSX cell pictures."
               },
               "page" => %{
                 "type" => "string",
                 "description" =>
-                  "insert_shape (slide form): target slide name (from insert_slide or doc.find refs page[<name>]). Selecting the slide form: raw UNO properties (FillColor, CharHeight, CharColor, CharWeight, CharFontName, ...) may be passed as additional keys and apply verbatim."
+                  "insert_shape / insert_picture (slide form): target slide name (from insert_slide or doc.find refs page[<name>]). Selecting the slide form: raw UNO properties (FillColor, CharHeight, CharColor, CharWeight, CharFontName, ...) may be passed as additional keys and apply verbatim."
               },
               "service" => %{
                 "type" => "string",
@@ -514,7 +519,7 @@ defmodule Ecrits.Doc.Tools do
               "name" => %{
                 "type" => "string",
                 "description" =>
-                  "insert_slide / insert_shape (slide form): REQUIRED name; the new ref becomes page[<name>] / page[<page>]/shape[<name>]."
+                  "insert_slide / insert_shape / insert_picture (Office form): REQUIRED name for slides and slide objects; the new ref becomes page[<name>] / page[<page>]/shape[<name>], img[<name>] for DOCX inline pictures, or sheet[<sheet>]/shape[<name>] for XLSX pictures."
               },
               "index" => %{
                 "type" => "integer",
@@ -1602,7 +1607,11 @@ defmodule Ecrits.Doc.Tools do
   @spec instructions() :: String.t()
   def instructions do
     "Authoring guides (apply when inserting slides/shapes/paragraphs/tables):\n\n" <>
-      authoring_guide(:pptx) <> "\n\n" <> authoring_guide(:docx)
+      authoring_guide(:pptx) <>
+      "\n\n" <>
+      authoring_guide(:docx) <>
+      "\n\n" <>
+      authoring_guide(:xlsx)
   end
 
   defp authoring_guide(:pptx) do
@@ -1638,6 +1647,15 @@ defmodule Ecrits.Doc.Tools do
       "OUTSIDE the range (engine refuses). Structure: delete_paragraph/merge/split, " <>
       "insert_endnote, insert_equation {ref, script} (StarMath). After each section " <>
       "doc.render {page:\"1\"} (PDF-backed) and LOOK at the result before moving on."
+  end
+
+  defp authoring_guide(:xlsx) do
+    "XLSX guide. Use doc.find {all:true} to discover sheet cells; refs look like " <>
+      "sheet[Sheet1]/cell[A1]. set_cell {ref, text} writes a cell. insert_picture " <>
+      "{ref, src, w?, h?, name?} anchors a native image to that cell; w/h are " <>
+      "1/100 mm and the new shape is named for later set_geometry/delete_node. " <>
+      "For a quick top-left image, use ref \"sheet[Sheet1]/cell[A1]\" when that " <>
+      "sheet exists."
   end
 
   defp create_from(ctx, path, kind, from) do
@@ -2681,8 +2699,19 @@ defmodule Ecrits.Doc.Tools do
   end
 
   defp known_document_id?(ctx, document) do
-    session_viewer(ctx, document) != nil or
+    active_office_document_id?(ctx, document) or
+      session_viewer(ctx, document) != nil or
       match?({:ok, _}, Pool.info(pool(ctx), document))
+  end
+
+  defp active_office_document_id?(ctx, document) do
+    case Map.get(ctx, :document_path) do
+      path when is_binary(path) ->
+        Map.get(ctx, :active_doc) == document and path_kind(path) in ["docx", "pptx", "xlsx"]
+
+      _ ->
+        false
+    end
   end
 
   # Match a path-ish alias against the pool entries: exact path, path suffix
@@ -3198,8 +3227,7 @@ defmodule Ecrits.Doc.Tools do
   defp active_doc_id(ctx, _pool), do: Map.get(ctx, :active_doc)
 
   defp active_browser_document_entry(ctx, active_id) do
-    with lv when is_pid(lv) <- session_viewer(ctx, active_id),
-         path when is_binary(path) and path != "" <- Map.get(ctx, :document_path),
+    with path when is_binary(path) and path != "" <- Map.get(ctx, :document_path),
          kind when kind in ["docx", "pptx", "xlsx"] <- path_kind(path) do
       %{id: active_id, path: path, kind: String.to_atom(kind), backing: :browser}
     else
