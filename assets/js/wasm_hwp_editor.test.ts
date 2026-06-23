@@ -18,8 +18,8 @@ const documentStub: any = {
   }),
 }
 
-;(globalThis as any).document = documentStub
-;(globalThis as any).window = {}
+;(globalThis as any).document = (globalThis as any).document || documentStub
+;(globalThis as any).window = (globalThis as any).window || {}
 
 const { WasmHwpEditor } = await import("./wasm_hwp_editor.ts")
 
