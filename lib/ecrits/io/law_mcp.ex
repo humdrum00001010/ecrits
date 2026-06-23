@@ -1,16 +1,21 @@
 defmodule Ecrits.IO.LawMCP do
   @moduledoc """
-  Direct JSON-RPC client for the Korean Law MCP server.
+  Direct JSON-RPC client for the legal-rag MCP server.
 
   This is used by background jobs and server-side callers (e.g.
   citation verification batches) that don't go through the agent's
   OpenAI MCP-tool pipe.
 
-  Endpoint: `https://korean-law-mcp.fly.dev/mcp?oc=<LAW_OC>`. Transport
-  is Streamable HTTP (the server accepts both
-  `application/json` and `text/event-stream`).
+  legal-rag is the structured-RAG layer (review_clause / search_rules /
+  review_document) that also proxies `search_law`, `verify_citations`,
+  `get_law_text`, and `search_decisions` through to korean-law-mcp, so the
+  JSON-RPC contract this client speaks is unchanged from the direct
+  korean-law-mcp integration.
 
-  See `/tmp/wave1-research.md` §5 for the 17 verified tools.
+  Endpoint: configured via `:law_mcp` (`LAW_MCP_URL`, defaults to
+  `http://localhost:4001/mcp`) with `?oc=<LAW_OC>` appended. Transport is
+  Streamable HTTP (the server accepts both `application/json` and
+  `text/event-stream`).
   """
 
   @default_timeout 30_000

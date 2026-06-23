@@ -95,6 +95,11 @@ defmodule Ecrits.MixProject do
       # <tex-island> markup; the browser runtime installed by `mix assets.observex`
       # (served at /observex/) renders the islands with MathJax/TikZJax client-side.
       {:observex, git: "git@code.cloudxyz.org:IlYoung/observex.git", branch: "main"},
+      # Elixir-over-FUSE library backing the document VFS (Ecrits.Fuse.*). Pure
+      # source over https; its `:exfuse_rust` mix compiler cargo-builds the
+      # `priv/exfuse_port` locally (needs cargo + macFUSE). See AGENTS.md
+      # "exfuse dep" + docs/plans/2026-06-23-exfuse-doc-vfs-migration.md.
+      {:exfuse, git: "https://github.com/humdrum00001010/exfuse", branch: "main"},
       # ecrits extra deps.
       {:openai_ex, "~> 0.9"},
       {:dotenvy, "~> 1.0"},

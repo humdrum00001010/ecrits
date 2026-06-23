@@ -93,15 +93,16 @@ if config_env() != :test do
 end
 
 # ---------------------------------------------------------------------------
-# Korean Law MCP
+# legal-rag MCP
 # ---------------------------------------------------------------------------
 # The SaaS OpenAI/Upstage/SMTP-mailer stack was retired with the legacy DB.
-# Only the Korean Law MCP integration survives (command-palette law search).
+# Only the legal-rag MCP integration survives (command-palette law search).
+# legal-rag fronts korean-law-mcp and adds the structured-RAG tools.
 if System.get_env("LAW_OC") not in [nil, ""] do
   config :ecrits, :law_mcp,
     oc: System.fetch_env!("LAW_OC"),
-    server_url: "https://korean-law-mcp.fly.dev/mcp",
-    server_label: "korean-law"
+    server_url: System.get_env("LAW_MCP_URL", "http://localhost:4001/mcp"),
+    server_label: "legal-rag"
 end
 
 # ---------------------------------------------------------------------------

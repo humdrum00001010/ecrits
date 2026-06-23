@@ -34,16 +34,31 @@ config :ecrits,
 
 config :ecrits, :local_agent, provider: "codex"
 
+# Document VFS (Ecrits.Fuse.*): mount the workspace's documents as grep-able/
+# editable text files under <workspace>/.ecrits/mount via exfuse. Default ON; the
+# header "FUSE" toggle flips it per-workspace at runtime. Also gated on macFUSE +
+# the exfuse port (Ecrits.Fuse.DocMount.enabled?/0), and DocMount.ensure/1 verifies
+# the kernel mount actually took, rolling back cleanly otherwise.
+#
+# CAVEAT (macOS TCC): mounting inside ~/Downloads, ~/Desktop, ~/Documents is denied
+# unless the host process has Full Disk Access — there the mount rolls back and the
+# toggle reads OFF. Non-protected roots (project dirs, /tmp, …) mount fine.
+config :ecrits, :doc_vfs, enabled: true
+
 # Default UI locale. Korean-primary for the public-facing surface
 # (landing, storage, auth, settings). Tests override this back to
 # "en" in `config/test.exs` so gen.auth's generated LiveViewTests
 # continue to match English `msgid` strings (= source-of-truth).
 config :ecrits, :ui_locale, "ko"
 
-# Korean Law MCP — the surviving provider integration (used by the command
-# palette law search). Reads env vars at runtime via `Application.fetch_env!/2`.
+# legal-rag MCP — the surviving provider integration (used by the command
+# palette law search). legal-rag is the structured-RAG layer that also proxies
+# search_law / verify_citations / get_law_text through to korean-law-mcp, so the
+# existing JSON-RPC contract is unchanged. Run it locally with
+# `LAW_MCP_PORT=4001 python -m legal_rag.api.mcp_server` (port 4001 avoids the
+# Phoenix server on 4000). Reads env vars at runtime via `Application.fetch_env!/2`.
 config :ecrits, :law_mcp,
-  endpoint: System.get_env("LAW_MCP_URL", "https://korean-law-mcp.fly.dev/mcp"),
+  endpoint: System.get_env("LAW_MCP_URL", "http://localhost:4001/mcp"),
   oc: System.get_env("LAW_OC", "openapi")
 
 # Configure the endpoint

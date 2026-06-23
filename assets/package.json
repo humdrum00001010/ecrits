@@ -1,7 +1,7 @@
 {
   "type": "module",
   "scripts": {
-    "test": "node --test 'js/**/*.test.ts'"
+    "test": "bun test js/*.test.ts"
   },
   "dependencies": {
     "daisyui": "5.5.20",
