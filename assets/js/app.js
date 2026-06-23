@@ -633,7 +633,6 @@ const LocalChatRailResizer = {
 // read earlier messages, new content no longer yanks them back down (the
 // `stick` flag, recomputed on every manual scroll, gates the follow).
 const liveSocket = new LiveSocket("/live", Socket, {
-  longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
   hooks: {...colocatedHooks, DirectR2Upload, LocalEditorToolbar, WasmHwpEditor, WasmOfficeEditor, MarkdownEditor, ObservexPreview, LocalChatRailResizer},
 })
@@ -644,7 +643,7 @@ window.addEventListener("wheel", event => {
   if (!content) return
 
   event.preventDefault()
-  const current = Number.parseFloat(content.dataset.editorZoom || content.style.zoom || "1") || 1
+  const current = Number.parseFloat(content.dataset.editorZoom || "1") || 1
   const step = Math.min(0.12, Math.abs(event.deltaY) * 0.0015)
   const factor = 1 + step
   const next = Math.min(4, Math.max(0.5, event.deltaY < 0 ? current * factor : current / factor))
@@ -655,7 +654,9 @@ window.addEventListener("wheel", event => {
   const ratio = next / current
   const zoom = String(Number(next.toFixed(4)))
   content.dataset.editorZoom = zoom
-  content.style.zoom = zoom
+  content.style.zoom = ""
+  content.style.transformOrigin = "0 0"
+  content.style.transform = `scale(${zoom})`
   scroller.scrollLeft = anchorX * ratio - (event.clientX - rect.left)
   scroller.scrollTop = anchorY * ratio - (event.clientY - rect.top)
   content.dispatchEvent(new Event("scroll"))

@@ -85,6 +85,12 @@ let activeOfficeShortcutEditor = null
 let engineLoadChain = Promise.resolve()
 let latestRequestedUrl = null
 const RUNTIME_INIT_MAX_MS = 300000
+const PAINT_EMPTY_RETRY_MAX = 6
+const PAINT_EMPTY_RETRY_BASE_MS = 80
+const MAX_RENDER_PX = 33554432
+const SPREADSHEET_INTERACTIVE_RENDER_MAX_PX = 2000000
+const SPREADSHEET_INTERACTIVE_RENDER_WINDOW_MS = 250
+const SPREADSHEET_IDLE_FULL_RENDER_DELAY_MS = 1500
 
 function runtimeReadyFor(assetVersion = "") {
   return !!runtimePromise && !!runtimeModule && runtimeAssetVersion === assetVersion
@@ -544,6 +550,7 @@ function resolveApi(Module) {
       postUnoCommand: direct("postUnoCommand"),
       postWindowExtTextInputEvent: direct("postWindowExtTextInputEvent"),
       getCursor: direct("getCursor"),
+      takeInvalidatedTiles: direct("takeInvalidatedTiles"),
       isTextEditActive: direct("isTextEditActive"),
       getInteractionState: direct("getInteractionState"),
       closeDocument: direct("closeDocument"),
@@ -582,6 +589,7 @@ function resolveApi(Module) {
 
 const WasmOfficeEditor = {
   mounted() {
+    this.officeHookAlive = true
     this.api = null
     this.handle = null // document handle (embind-class shape) or null
     this.loaded = false
@@ -597,6 +605,14 @@ const WasmOfficeEditor = {
     this.visible = new Set()
     this.renderQueue = new Map()
     this.renderQueueTimer = null
+    this.paintEmptyRetries = new Map()
+    this.paintRetryTimers = new Map()
+    this.spreadsheetInteractiveRenderUntil = 0
+    this.spreadsheetIdleRenderTimer = null
+    this.spreadsheetPatchRenderTimer = null
+    this.lastSpreadsheetInputLoc = null
+    this.lastSpreadsheetInvalidations = []
+    this.lastSpreadsheetPatch = null
     this.dragRenderPages = new Set()
     this.dragRenderFrame = null
     this.scale = window.devicePixelRatio || 1
@@ -631,9 +647,7 @@ const WasmOfficeEditor = {
     this.composing = false
     this.skipNextCompositionInput = null
     this._compositionCommittedText = ""
-    this.spreadsheetEditBuffer = ""
-    this.spreadsheetEditTimer = null
-    this.spreadsheetKeyPostTimer = null
+    this.nativeCompositionOpen = false
 
     this.pageStack = this.el.querySelector("[data-role='office-wasm-pages']")
     this.statusEl = this.el.querySelector("[data-role='office-wasm-status']")
@@ -642,13 +656,22 @@ const WasmOfficeEditor = {
     this.documentId = this.el.dataset.documentId
     this.format = this.el.dataset.localDocumentFormat || "docx"
     this.officeAssetVersion = this.el.dataset.officeAssetVersion || ""
+    this.mirror = this.el.dataset.editorMirror === "true"
+    this.previewPatchText = ""
+    this.previewPatchTarget = this.el.dataset.previewText || ""
+    this.previewPatchRef = null
+    this.previewPatchCount = Number(this.el.dataset.previewDeltaCount || "0") || 0
+    this.previewPatchPendingPayload = null
+    this.previewPatchInFlight = null
 
     const bytesUrl = this.el.dataset.bytesUrl
     this.setInitialStatus(bytesUrl)
 
     // Pre-warm + load on mount. The host element carries the bytes URL; the
     // server also pushes `office_wasm_load` on re-open.
-    this.handleEvent("office_wasm_load", (payload) => this.loadDocument(payload))
+    this.handleEvent("office_wasm_load", (payload) => {
+      if (this.eventMatchesDocument(payload)) this.loadDocument(payload)
+    })
 
     // Agent edit/read/find/set/save routed from the server because THIS office
     // document is `:browser`-backed (a human viewer is registered, so its WASM
@@ -659,10 +682,18 @@ const WasmOfficeEditor = {
     // the server side (Ecrits.Doc.Tools.browser_call + WorkspaceLive relay) is
     // engine-agnostic, so the only office-specific part is THIS handler mapping
     // verbs onto getElements/uno_apply/uno_set/saveToBytes.
-    this.handleEvent("doc.apply_edit", (payload) => this.handleAgentOp(payload))
-    this.handleEvent("local_document.save.request", (payload) => this.saveLocalDocument(payload))
+    this.handleEvent("doc.apply_edit", (payload) => {
+      if (!this.mirror && this.eventMatchesDocument(payload)) this.handleAgentOp(payload)
+    })
+    this.handleEvent("local_document.save.request", (payload) => {
+      if (!this.mirror && this.eventMatchesDocument(payload)) this.saveLocalDocument(payload)
+    })
+    this.handleEvent("editor.preview_delta", (payload) => {
+      if (this.eventMatchesDocument(payload)) this.handlePreviewDelta(payload)
+    })
 
-    if (bytesUrl) this.loadDocument({ url: bytesUrl })
+    if (this.mirror) this.patchPreviewToMountedDoc(this.el.dataset.previewText || "")
+    if (bytesUrl) this.loadDocument({ url: bytesUrl, document_id: this.documentId })
 
     this.onResize = () => this.renderVisiblePages()
     window.addEventListener("resize", this.onResize)
@@ -718,16 +749,27 @@ const WasmOfficeEditor = {
       if (this.caret) this.drawCaret()
     }, 530)
 
-    this.unbindElementPicker = bindElementPickerTarget(this)
+    if (!this.mirror) {
+      window.__officeWasmEditor = this
+      this.unbindElementPicker = bindElementPickerTarget(this)
+    }
   },
 
   destroyed() {
+    this.officeHookAlive = false
     if (this.io) this.io.disconnect()
     if (this.blink) clearInterval(this.blink)
     if (this._caretSettle) { clearTimeout(this._caretSettle); this._caretSettle = null }
     if (this.renderQueueTimer) { clearTimeout(this.renderQueueTimer); this.renderQueueTimer = null }
-    if (this.spreadsheetEditTimer) { clearTimeout(this.spreadsheetEditTimer); this.spreadsheetEditTimer = null }
-    if (this.spreadsheetKeyPostTimer) { clearTimeout(this.spreadsheetKeyPostTimer); this.spreadsheetKeyPostTimer = null }
+    if (this.spreadsheetIdleRenderTimer) {
+      clearTimeout(this.spreadsheetIdleRenderTimer)
+      this.spreadsheetIdleRenderTimer = null
+    }
+    if (this.spreadsheetPatchRenderTimer) {
+      clearTimeout(this.spreadsheetPatchRenderTimer)
+      this.spreadsheetPatchRenderTimer = null
+    }
+    this.clearPaintRetryTimers()
     if (this.dragRenderFrame) {
       const caf = window.cancelAnimationFrame || clearTimeout
       caf(this.dragRenderFrame)
@@ -747,9 +789,26 @@ const WasmOfficeEditor = {
     if (this.unbindElementPicker) this.unbindElementPicker()
     this.unbindEditing()
     if (activeOfficeShortcutEditor === this) activeOfficeShortcutEditor = null
+    if (window.__officeWasmEditor === this) window.__officeWasmEditor = null
     // Keep the loaded Office document attached to the module-level runtime cache.
     // LiveView remounts this hook while switching/reopening tabs; closing here
     // would force the next mount to fetch and import the same document again.
+  },
+
+  updated() {
+    if (this.mirror) {
+      this.patchPreviewToMountedDoc(this.el.dataset.previewText || "", {
+        delta_count: Number(this.el.dataset.previewDeltaCount || "0")
+      })
+    }
+  },
+
+  officeHookActive() {
+    return this.officeHookAlive !== false &&
+      !!this.el &&
+      this.el.isConnected !== false &&
+      this.el.getAttribute("data-role") === "office-wasm-viewer" &&
+      this.el.getAttribute("phx-hook") === "WasmOfficeEditor"
   },
 
   setInitialStatus(bytesUrl) {
@@ -765,10 +824,146 @@ const WasmOfficeEditor = {
   },
 
   setStatus(text) {
+    if (!this.officeHookActive()) return
     if (this.statusEl) this.statusEl.textContent = text || ""
   },
 
+  eventMatchesDocument(payload = {}) {
+    const id = payload.document_id || payload.documentId
+    if (this.mirror) return !!id && !!this.documentId && String(id) === String(this.documentId)
+    return !id || !this.documentId || String(id) === String(this.documentId)
+  },
+
+  handlePreviewDelta(payload = {}) {
+    if (!this.mirror) return
+    const delta = payload.delta == null ? "" : String(payload.delta)
+    const current = this.previewPatchTarget || this.el.dataset.previewText || ""
+    const text = typeof payload.text === "string" ? payload.text : current + delta
+    this.patchPreviewToMountedDoc(text, payload)
+  },
+
+  patchPreviewToMountedDoc(target, payload = {}) {
+    if (!this.mirror) return
+    const text = typeof target === "string" ? target : ""
+    this.previewPatchTarget = text
+    this.el.dataset.previewText = text
+    const count = payload.delta_count != null
+      ? Number(payload.delta_count)
+      : Number(this.el.dataset.previewDeltaCount || this.previewPatchCount || 0)
+    if (Number.isFinite(count) && count > 0) this.previewPatchCount = count
+    this.el.dataset.previewDeltaCount = String(this.previewPatchCount || 0)
+    this.queuePreviewPatch(payload)
+  },
+
+  queuePreviewPatch(payload = {}) {
+    if (!this.mirror) return null
+    this.previewPatchPendingPayload = payload
+    if (this.previewPatchInFlight) return this.previewPatchInFlight
+
+    this.previewPatchInFlight = (async () => {
+      while (this.previewPatchPendingPayload) {
+        const nextPayload = this.previewPatchPendingPayload
+        this.previewPatchPendingPayload = null
+        await this.applyPreviewPatchToMountedDoc(nextPayload)
+      }
+    })().finally(() => {
+      this.previewPatchInFlight = null
+    })
+
+    return this.previewPatchInFlight
+  },
+
+  async applyPreviewPatchToMountedDoc(payload = {}) {
+    if (!this.mirror) return
+    if (this._loadInFlight) {
+      try { await this._loadInFlight } catch (_) {}
+    }
+    if (!this.api || !this.handle || !this.loaded) {
+      this.el.dataset.previewPatchPending = "true"
+      return
+    }
+
+    const text = this.previewPatchTarget || ""
+    const ref = this.ensurePreviewPatchRef()
+    if (!ref) {
+      this.el.dataset.previewPatchPending = "true"
+      this.el.dataset.previewPatchError = "no_text_target"
+      return
+    }
+
+    this.el.dataset.previewPatchPending = "false"
+    delete this.el.dataset.previewPatchError
+
+    if (text !== this.previewPatchText) {
+      let result
+      try {
+        result = await this.officeApplyEdit({ op: { op: "set_text", ref, text } })
+      } catch (error) {
+        this.el.dataset.previewPatchError = String((error && error.message) || error)
+        return
+      }
+      if (result && result.error) {
+        this.el.dataset.previewPatchError = result.error
+        return
+      }
+      this.previewPatchText = text
+    }
+
+    this.el.dataset.previewPatchMode = "direct-doc"
+    this.el.dataset.previewPatchRef = ref
+    this.el.dataset.previewPatchCount = String(this.previewPatchCount || 0)
+    this.updatePreviewPatchInspection(payload)
+  },
+
+  ensurePreviewPatchRef() {
+    if (this.previewPatchRef) return this.previewPatchRef
+    let elements = []
+    try {
+      elements = this.officeElements()
+    } catch (_) {
+      return null
+    }
+    const target = elements.find((el) => {
+      const ref = el && el.ref ? this.setTextRefFor(String(el.ref)) : ""
+      return ref && this.isSetTextTarget(ref)
+    })
+    if (!target || !target.ref) return null
+    const ref = this.setTextRefFor(String(target.ref))
+    const current = this.officeElementForEdit(elements, ref)
+    this.previewPatchRef = ref
+    this.previewPatchOriginalText = current ? current.text : String(target.text || "")
+    return ref
+  },
+
+  updatePreviewPatchInspection(payload = {}) {
+    let modelText = ""
+    try {
+      const current = this.previewPatchRef
+        ? this.officeElementForEdit(this.officeElements(), this.previewPatchRef)
+        : null
+      modelText = current ? String(current.text || "") : ""
+    } catch (_) {
+      modelText = ""
+    }
+    const matches = modelText === this.previewPatchText
+    this.el.dataset.previewModelLength = String(modelText.length)
+    this.el.dataset.previewModelTail = modelText.slice(-80)
+    this.el.dataset.previewModelMatches = String(matches)
+    this.el.dispatchEvent(new CustomEvent("ecrits:editor-preview-delta", {
+      bubbles: true,
+      detail: {
+        document_id: this.documentId,
+        turn_id: payload.turn_id,
+        patch_mode: "direct-doc",
+        delta_count: this.previewPatchCount || 0,
+        model_matches: matches
+      }
+    }))
+  },
+
   async loadDocument({ url, asset_version }) {
+    if (!this.officeHookActive()) return
+    if (!url) return
     this.officeAssetVersion = asset_version || this.el.dataset.officeAssetVersion || this.officeAssetVersion || ""
     if (this.loadedUrl === url && this.parts.length) return
     // Record the most-recent load intent SYNCHRONOUSLY: the global serializer
@@ -790,6 +985,7 @@ const WasmOfficeEditor = {
     this._loadInFlight = (async () => {
     try {
       const Module = await ensureRuntime(this.officeAssetVersion)
+      if (!this.officeHookActive()) return
       if (!this.api) {
         this.api = resolveApi(Module)
         console.log("[office-wasm] API shape:", this.api.shape, this.api)
@@ -809,10 +1005,12 @@ const WasmOfficeEditor = {
       // loadFromBytes runs at a time across all hook instances, and a superseded
       // url is dropped so rapid tab switching can't pile up redundant re-imports.
       const result = await serializeEngineLoad(url, this.officeAssetVersion, this.format, async () => {
+        if (!this.officeHookActive()) return
         this.setStatus("Fetching document…")
         const response = await fetch(url, { credentials: "same-origin" })
         if (!response.ok) throw new Error(`document bytes HTTP ${response.status}`)
         const bytes = new Uint8Array(await response.arrayBuffer())
+        if (!this.officeHookActive()) return
 
         this.setStatus("Opening document…")
         closeCachedOfficeDocument()
@@ -828,6 +1026,7 @@ const WasmOfficeEditor = {
         console.log("[office-wasm] parts/geometry:", this.parts, "pageRects:", this.pageRects)
         this.rememberActiveDocument(url)
       })
+      if (!this.officeHookActive()) return
 
       // After the (possibly long) serialized import the module cache holds `url`
       // iff this load — or a concurrent one for the same doc — actually loaded
@@ -876,6 +1075,7 @@ const WasmOfficeEditor = {
   },
 
   attachCachedDocument(url) {
+    if (!this.officeHookActive()) return false
     if (!cachedDocumentMatches(url, this.officeAssetVersion, this.format)) return false
     this.api = activeOfficeDocument.api || this.api
     this.handle = activeOfficeDocument.handle || null
@@ -890,14 +1090,16 @@ const WasmOfficeEditor = {
     this.nativeTextEditReady = false
     this.nativeInteractionState = null
     this.composing = false
-    this.spreadsheetEditBuffer = ""
-    if (this.spreadsheetEditTimer) { clearTimeout(this.spreadsheetEditTimer); this.spreadsheetEditTimer = null }
-    if (this.spreadsheetKeyPostTimer) { clearTimeout(this.spreadsheetKeyPostTimer); this.spreadsheetKeyPostTimer = null }
     this.loaded = true
     this.notifyViewerState(true)
     this.setStatus("")
     this.buildPageStack()
     this.renderVisiblePages()
+    if (this.mirror) {
+      this.patchPreviewToMountedDoc(this.previewPatchTarget || this.el.dataset.previewText || "", {
+        delta_count: Number(this.el.dataset.previewDeltaCount || "0")
+      })
+    }
     return true
   },
 
@@ -906,6 +1108,8 @@ const WasmOfficeEditor = {
   // authority); ready=false -> it detaches, so the agent's tools fall back to
   // the server arm instead of a viewer that has nothing loaded.
   notifyViewerState(ready) {
+    if (this.mirror) return
+    if (!this.officeHookActive()) return
     if (!this.documentId) return
     try {
       this.pushEvent(
@@ -1122,7 +1326,9 @@ const WasmOfficeEditor = {
   },
 
   buildPageStack() {
+    if (!this.officeHookActive()) return
     if (!this.pageStack) return
+    this.clearPaintRetryTimers()
     this.rendered.clear()
     this.visible.clear()
     this.pageStack.replaceChildren()
@@ -1176,11 +1382,13 @@ const WasmOfficeEditor = {
   },
 
   renderVisiblePages({ force = false } = {}) {
+    if (!this.officeHookActive()) return
     for (const idx of this.visible) this.requestRenderPage(idx, { force })
     if (this.visible.size === 0 && this.parts.length > 0) this.requestRenderPage(0, { force })
   },
 
   requestRenderPage(index, { force = false } = {}) {
+    if (!this.officeHookActive()) return
     if (!this.api) return
     if (!force && this.rendered.has(index)) return
     const queuedForce = this.renderQueue.get(index) || false
@@ -1191,6 +1399,7 @@ const WasmOfficeEditor = {
 
   drainRenderQueue() {
     this.renderQueueTimer = null
+    if (!this.officeHookActive()) return
     if (!this.api || !this.renderQueue.size) return
 
     // Prefer a forced or currently-VISIBLE page over FIFO order, so the page the
@@ -1213,6 +1422,25 @@ const WasmOfficeEditor = {
     if (this.renderQueue.size) {
       this.renderQueueTimer = setTimeout(() => this.drainRenderQueue(), 0)
     }
+  },
+
+  currentDeviceScale() {
+    return window.devicePixelRatio || 1
+  },
+
+  interactiveSpreadsheetRenderActive() {
+    return this.spreadsheetLikeDoc() &&
+      (this.spreadsheetInteractiveRenderUntil || 0) > performance.now()
+  },
+
+  renderScaleFor(logical) {
+    const baseScale = this.currentDeviceScale()
+    const maxPx = this.interactiveSpreadsheetRenderActive()
+      ? SPREADSHEET_INTERACTIVE_RENDER_MAX_PX
+      : MAX_RENDER_PX
+    const wantPx = logical.width * logical.height * baseScale * baseScale
+    if (wantPx <= maxPx) return baseScale
+    return baseScale * Math.sqrt(maxPx / wantPx)
   },
 
   releasePageCanvas(index) {
@@ -1244,6 +1472,7 @@ const WasmOfficeEditor = {
   // (tileX,tileY,tileW,tileH) into canvasW x canvasH device px. We blit the
   // returned bytes straight into the page <canvas> via ImageData.
   renderPage(index, { force = false } = {}) {
+    if (!this.officeHookActive()) return
     if (!this.api) return
     if (!force && this.rendered.has(index)) return
     const section = this.pageSection(index)
@@ -1253,6 +1482,11 @@ const WasmOfficeEditor = {
 
     const part = this.parts[index] || this.parts[0]
     const logical = this.pageLogicalSize(index, canvas)
+    // Memory-budget the backing-store scale. paintTile allocates ONE RGBA buffer
+    // of canvasW*canvasH*4 bytes inside the wasm heap. Normal renders use the
+    // full budget; spreadsheet typing uses a smaller temporary budget because
+    // Calc repaints the whole sheet tile for one edited cell.
+    this.scale = this.renderScaleFor(logical)
     const pxW = Math.max(1, Math.round(logical.width * this.scale))
     const pxH = Math.max(1, Math.round(logical.height * this.scale))
     if (canvas.width !== pxW || canvas.height !== pxH) {
@@ -1276,8 +1510,11 @@ const WasmOfficeEditor = {
 
       const rgba = this.callPaintTile(partArg, tileX, tileY, tileW, tileH, pxW, pxH)
       if (!rgba || !rgba.length) {
+        if (this.scheduleEmptyPaintRetry(index, { force: true })) return
         throw new Error("paintTile returned no pixels (document not loaded?). Engine output:\n" + dumpLog())
       }
+      this.paintEmptyRetries.delete(index)
+      this.clearPaintRetryTimer(index)
       // `rgba` is a Uint8Array view onto the wasm heap (typed_memory_view);
       // copy into a Uint8ClampedArray that backs ImageData.
       const buf = new Uint8ClampedArray(pxW * pxH * 4)
@@ -1295,6 +1532,7 @@ const WasmOfficeEditor = {
         overlay.height = pxH
       }
       this.rendered.set(index, true)
+      if (this.spreadsheetLikeDoc()) this.takeSpreadsheetInvalidations({ record: false })
       if (this.selectionVisual && this.selectionVisual.pages && this.selectionVisual.pages.has(index)) {
         this.paintPickedHighlights()
       }
@@ -1303,6 +1541,57 @@ const WasmOfficeEditor = {
       console.error(`[office-wasm] renderPage(${index}) failed`, error)
       this.setStatus("Render failed on page " + (index + 1) + ": " + (error && error.message))
     }
+  },
+
+  scheduleEmptyPaintRetry(index, { force = true } = {}) {
+    if (!this.officeHookActive()) return false
+    const attempts = this.paintEmptyRetries.get(index) || 0
+    if (attempts >= PAINT_EMPTY_RETRY_MAX) return false
+    const nextAttempt = attempts + 1
+    this.paintEmptyRetries.set(index, nextAttempt)
+
+    let loadStatus = null
+    try {
+      if (this.api && typeof this.api.loadStatus === "function") loadStatus = this.api.loadStatus()
+    } catch (_) {}
+    console.warn("[office-wasm] paintTile returned no pixels; retrying native paint", {
+      page: index + 1,
+      attempt: nextAttempt,
+      loadStatus
+    })
+
+    const delay = PAINT_EMPTY_RETRY_BASE_MS * nextAttempt
+    this.clearPaintRetryTimer(index)
+    const timer = this.setOfficeTimer(() => {
+      if (this.paintRetryTimers) this.paintRetryTimers.delete(index)
+      if (this.officeHookActive()) this.requestRenderPage(index, { force })
+    }, delay)
+    this.paintRetryTimers.set(index, timer)
+    this.setStatus("Rendering page " + (index + 1) + "...")
+    return true
+  },
+
+  setOfficeTimer(callback, delay) {
+    return setTimeout(callback, delay)
+  },
+
+  clearOfficeTimer(timer) {
+    clearTimeout(timer)
+  },
+
+  clearPaintRetryTimer(index) {
+    if (!this.paintRetryTimers) return
+    const timer = this.paintRetryTimers.get(index)
+    if (timer) this.clearOfficeTimer(timer)
+    this.paintRetryTimers.delete(index)
+  },
+
+  clearPaintRetryTimers() {
+    if (this.paintRetryTimers) {
+      for (const timer of this.paintRetryTimers.values()) this.clearOfficeTimer(timer)
+      this.paintRetryTimers.clear()
+    }
+    if (this.paintEmptyRetries) this.paintEmptyRetries.clear()
   },
 
   // Call paintTile with the embind signature
@@ -1422,8 +1711,13 @@ const WasmOfficeEditor = {
     return mask
   },
 
+  // postMouseEvent's part argument is 1-based for EVERY document type (the same
+  // index the `doubleClick` binding takes). An earlier 0-based special-case for
+  // spreadsheets posted Calc clicks to a non-existent part, so single-click cell
+  // selection and drag-range selection silently no-op'd (the click never reached
+  // the sheet view). Always pass pageIndex + 1.
   nativeMousePage(loc) {
-    return this.spreadsheetLikeDoc() ? loc.pageIndex : loc.pageIndex + 1
+    return loc.pageIndex + 1
   },
 
   postNativeMouseEvent(type, loc, count = 1, buttons = this.LOK_MOUSE_LEFT, modifier = 0) {
@@ -1621,9 +1915,9 @@ const WasmOfficeEditor = {
 
   onCanvasMouseDown(event) {
     if (event.button !== 0 || !this.api || !this.parts.length) return
-    if (this.spreadsheetLikeDoc()) this.flushSpreadsheetTextInput()
     const loc = this.eventToPageLocal(event)
     if (!loc) return
+    if (this.spreadsheetLikeDoc()) this.lastSpreadsheetInputLoc = loc
     this.activateKeyboardShortcuts()
 
     if (this.elementPickerEnabled) {
@@ -1786,6 +2080,7 @@ const WasmOfficeEditor = {
     const ds = this.dragSelect
     this.dragSelect = null
     const loc = this.eventToPageLocal(event, ds.page) || ds.lastLoc
+    if (loc && this.spreadsheetLikeDoc()) this.lastSpreadsheetInputLoc = loc
     if (loc) {
       try {
         if (ds.mode === "pending") {
@@ -1843,7 +2138,11 @@ const WasmOfficeEditor = {
     }
     if (!ds.moved) {
       this.hasActiveSelection = false
-      this.renderPage(ds.page, { force: true })
+      if (this.spreadsheetLikeDoc()) {
+        if (!this.renderSpreadsheetInputPatch(ds.page)) this.renderPage(ds.page, { force: true })
+      } else {
+        this.renderPage(ds.page, { force: true })
+      }
       this.settleCaretAfterHit(null)
     } else {
       this.hasActiveSelection = true
@@ -2052,6 +2351,10 @@ const WasmOfficeEditor = {
   // rect, which can still be one character behind the final caret.
   settleCaretAfterHit(immediate) {
     if (this._caretSettle) { clearTimeout(this._caretSettle); this._caretSettle = null }
+    if (this.spreadsheetLikeDoc()) {
+      this._caretSettleSeq++
+      return
+    }
     const startedFor = ++this._caretSettleSeq
     const requireNativeEditState = this.presentationLikeDoc()
     let tries = 0
@@ -2106,6 +2409,10 @@ const WasmOfficeEditor = {
   // until the cursor is stable instead of stopping at the first changed rect.
   settleCaretAfterInput(previous, repaintContent = false) {
     if (this._caretSettle) { clearTimeout(this._caretSettle); this._caretSettle = null }
+    if (this.spreadsheetLikeDoc()) {
+      this._caretSettleSeq++
+      return
+    }
     const startedFor = ++this._caretSettleSeq
     const requireNativeEditState = this.presentationLikeDoc()
     const repaintOnAdopt = repaintContent || requireNativeEditState
@@ -2702,15 +3009,212 @@ const WasmOfficeEditor = {
   // Re-paint the caret's page tile (+ any other visible page, for reflow) so a
   // just-applied edit / selection shows immediately.
   renderCaretWindow() {
+    // Coalesce the post-input re-paint through the deferred render queue. This
+    // fires on EVERY keystroke (renderAfterInput); a direct renderPage() here
+    // force-repainted the caret page + every other visible page SYNCHRONOUSLY
+    // per key — a 300ms+ full-sheet paint per character on a large Calc sheet.
+    // requestRenderPage defers (setTimeout 0) and dedups by index, so a fast
+    // typing burst settles to one repaint; the caret overlay (drawCaret) stays
+    // immediate, so the caret still tracks each key with no lag.
     const idx = this.caret ? this.caret.page - 1 : null
-    if (typeof idx === "number") this.renderPage(idx, { force: true })
-    for (const v of this.visible) if (v !== idx) this.renderPage(v, { force: true })
+    if (typeof idx === "number") this.requestRenderPage(idx, { force: true })
+    for (const v of this.visible) if (v !== idx) this.requestRenderPage(v, { force: true })
   },
 
-  renderAfterInput() {
+  markSpreadsheetInteractiveRender({ idleFullRender = false } = {}) {
+    if (!this.spreadsheetLikeDoc()) return
+    this.spreadsheetInteractiveRenderUntil =
+      performance.now() + SPREADSHEET_INTERACTIVE_RENDER_WINDOW_MS
+
+    if (!idleFullRender) return
+
+    if (this.spreadsheetIdleRenderTimer) clearTimeout(this.spreadsheetIdleRenderTimer)
+    this.spreadsheetIdleRenderTimer = setTimeout(() => {
+      this.spreadsheetIdleRenderTimer = null
+      this.spreadsheetInteractiveRenderUntil = 0
+      if (!this.officeHookActive()) return
+      for (const idx of this.visible) this.rendered.delete(idx)
+      this.renderVisiblePages({ force: true })
+    }, SPREADSHEET_IDLE_FULL_RENDER_DELAY_MS)
+  },
+
+  requestSpreadsheetInputPatch() {
+    if (!this.spreadsheetLikeDoc()) return false
+    const anchor = this.spreadsheetInputPatchAnchor()
+    if (!anchor || typeof anchor.pageIndex !== "number") return false
+    const pageIndex = anchor.pageIndex
+    if (pageIndex < 0 || !this.pageSection(pageIndex)) return false
+    if (this.spreadsheetPatchRenderTimer) return true
+
+    this.spreadsheetPatchRenderTimer = setTimeout(() => {
+      this.spreadsheetPatchRenderTimer = null
+      if (!this.officeHookActive()) return
+      if (!this.renderSpreadsheetInputPatch(pageIndex)) {
+        this.requestRenderPage(pageIndex, { force: true })
+      }
+    }, 0)
+    return true
+  },
+
+  spreadsheetInputPatchAnchor(pageIndex = null) {
+    if (this.caret && typeof this.caret.page === "number") {
+      const caretPage = this.caret.page - 1
+      if (pageIndex == null || pageIndex === caretPage) {
+        return {
+          pageIndex: caretPage,
+          x: Number(this.caret.x) || 0,
+          y: Number(this.caret.y) || 0,
+          height: Math.max(18, Number(this.caret.height) || 24)
+        }
+      }
+    }
+
+    const loc = this.lastSpreadsheetInputLoc
+    if (loc && typeof loc.pageIndex === "number" && (pageIndex == null || pageIndex === loc.pageIndex)) {
+      return {
+        pageIndex: loc.pageIndex,
+        x: Number(loc.x) || 0,
+        y: Number(loc.y) || 0,
+        height: 24
+      }
+    }
+
+    return null
+  },
+
+  takeSpreadsheetInvalidations({ record = true } = {}) {
+    if (!this.spreadsheetLikeDoc() || !this.hasApiMethod("takeInvalidatedTiles")) return []
+    try {
+      const raw = this.callApi("takeInvalidatedTiles")
+      const parsed = typeof raw === "string" && raw ? JSON.parse(raw) : []
+      const rects = Array.isArray(parsed) ? parsed.filter(Boolean) : []
+      if (record) this.lastSpreadsheetInvalidations = rects
+      return rects
+    } catch (error) {
+      console.warn("[office-wasm] takeInvalidatedTiles failed", error)
+      if (record) this.lastSpreadsheetInvalidations = []
+      return []
+    }
+  },
+
+  spreadsheetInvalidationPatch(pageIndex, canvas, logical) {
+    const invalidations = this.takeSpreadsheetInvalidations()
+    if (!invalidations.length) return null
+
+    const twipToPx = (value) => Number(value || 0) * 96 / 1440
+    const patches = []
+    for (const rect of invalidations) {
+      const part = Number(rect.part)
+      if (Number.isFinite(part) && part >= 0 && part !== pageIndex) continue
+
+      const wTwip = Number(rect.w)
+      const hTwip = Number(rect.h)
+      if (!(wTwip > 0) || !(hTwip > 0)) return null
+
+      const pad = 24
+      const x = Math.max(0, Math.floor(twipToPx(rect.x) - pad))
+      const y = Math.max(0, Math.floor(twipToPx(rect.y) - pad))
+      const right = Math.min(logical.width, Math.ceil(twipToPx(Number(rect.x) + wTwip) + pad))
+      const bottom = Math.min(logical.height, Math.ceil(twipToPx(Number(rect.y) + hTwip) + pad))
+      if (right > x && bottom > y) patches.push({ x, y, w: right - x, h: bottom - y })
+    }
+    if (!patches.length) return null
+
+    const merged = patches.reduce((acc, patch) => {
+      if (!acc) return { ...patch }
+      const right = Math.max(acc.x + acc.w, patch.x + patch.w)
+      const bottom = Math.max(acc.y + acc.h, patch.y + patch.h)
+      acc.x = Math.min(acc.x, patch.x)
+      acc.y = Math.min(acc.y, patch.y)
+      acc.w = right - acc.x
+      acc.h = bottom - acc.y
+      return acc
+    }, null)
+
+    const scaleX = canvas.width / logical.width
+    const scaleY = canvas.height / logical.height
+    if (merged.w * scaleX * merged.h * scaleY > SPREADSHEET_INTERACTIVE_RENDER_MAX_PX) return null
+    return { ...merged, source: "native" }
+  },
+
+  spreadsheetFallbackInputPatch(anchor, logical) {
+    if (!anchor) return null
+    const caretX = anchor.x
+    const caretY = anchor.y
+    const caretHeight = anchor.height
+    const x = Math.max(0, Math.round(caretX - 180))
+    const y = Math.max(0, Math.round(caretY - Math.max(60, caretHeight * 2)))
+    return {
+      x,
+      y,
+      w: Math.min(1800, Math.max(1, Math.round(logical.width - x))),
+      h: Math.min(180, Math.max(1, Math.round(logical.height - y))),
+      source: "fallback"
+    }
+  },
+
+  renderSpreadsheetInputPatch(pageIndex) {
+    const section = this.pageSection(pageIndex)
+    const anchor = this.spreadsheetInputPatchAnchor(pageIndex)
+    if (!section || !this.api || !anchor) return false
+    const canvas = section.querySelector("[data-role='office-wasm-canvas']")
+    if (!canvas || !canvas.width || !canvas.height) return false
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return false
+
+    const logical = this.pageLogicalSize(pageIndex, canvas)
+    const scaleX = canvas.width / logical.width
+    const scaleY = canvas.height / logical.height
+    if (!(scaleX > 0) || !(scaleY > 0)) return false
+
+    const patch = this.spreadsheetInvalidationPatch(pageIndex, canvas, logical) ||
+      this.spreadsheetFallbackInputPatch(anchor, logical)
+    if (!patch) return false
+    const patchX = patch.x
+    const patchY = patch.y
+    const patchW = patch.w
+    const patchH = patch.h
+    const pxW = Math.max(1, Math.round(patchW * scaleX))
+    const pxH = Math.max(1, Math.round(patchH * scaleY))
+    if (pxW * pxH > SPREADSHEET_INTERACTIVE_RENDER_MAX_PX) return false
+
+    try {
+      const toTwips = (value) => Math.round(value * 1440 / 96)
+      const rgba = this.callPaintTile(
+        pageIndex,
+        toTwips(patchX),
+        toTwips(patchY),
+        toTwips(patchW),
+        toTwips(patchH),
+        pxW,
+        pxH
+      )
+      if (!rgba || !rgba.length) return false
+
+      const buf = new Uint8ClampedArray(pxW * pxH * 4)
+      buf.set(rgba.subarray(0, buf.length))
+      const destX = Math.max(0, Math.round(patchX * scaleX))
+      const destY = Math.max(0, Math.round(patchY * scaleY))
+      ctx.putImageData(new ImageData(buf, pxW, pxH), destX, destY)
+      this.lastSpreadsheetPatch = { pageIndex, source: patch.source, x: patchX, y: patchY, w: patchW, h: patchH, pxW, pxH }
+      if (this.caret && this.caret.page - 1 === pageIndex) this.drawCaret()
+      return true
+    } catch (error) {
+      console.error("[office-wasm] spreadsheet input patch render failed", error)
+      return false
+    }
+  },
+
+  renderAfterInput(options = {}) {
+    if (this.spreadsheetLikeDoc()) {
+      this.markSpreadsheetInteractiveRender({
+        idleFullRender: options.spreadsheetIdleFullRender === true
+      })
+      if (this.requestSpreadsheetInputPatch()) return
+    }
     if (this.presentationLikeDoc() && this.presentationTextTargetReady()) {
       const idx = this.caret ? this.caret.page - 1 : null
-      if (typeof idx === "number") this.renderPage(idx, { force: true })
+      if (typeof idx === "number") this.requestRenderPage(idx, { force: true })
       return
     }
     this.renderCaretWindow()
@@ -2794,7 +3298,6 @@ const WasmOfficeEditor = {
     if (this.saveShortcut(event)) {
       event.preventDefault()
       event.stopPropagation()
-      if (this.spreadsheetLikeDoc()) this.flushSpreadsheetTextInput()
       this.saveLocalDocument({})
       return
     }
@@ -2806,7 +3309,6 @@ const WasmOfficeEditor = {
 
     const k = event.key
     if (k === "Tab") {
-      if (this.spreadsheetLikeDoc()) this.flushSpreadsheetTextInput()
       event.preventDefault()
       event.stopPropagation()
       if (this.imeProxy) this.imeProxy.focus({ preventScroll: true })
@@ -2815,32 +3317,33 @@ const WasmOfficeEditor = {
     }
 
     if (this.spreadsheetLikeDoc()) {
-      if (k === "Enter" && this.spreadsheetEditBuffer) {
+      // Calc keeps NO JS-side edit buffer. Each keystroke posts straight to the
+      // native cell editor and the deferred, deduped repaint shows it at once
+      // (postKey ~2ms, full-sheet repaint ~17ms). The old buffer only flushed
+      // after a 1.2s idle debounce, so typed text didn't appear until you
+      // paused — that was the "editing is too slow".
+      if (k === "Enter") {
         event.preventDefault()
         event.stopPropagation()
-        this.flushSpreadsheetTextInput({ commit: true })
+        this.typeSpreadsheetKey(13, this.AWT_KEY.RETURN)
         return
       }
-
-      if (k === "Escape" && this.spreadsheetEditBuffer) {
+      if (k === "Escape") {
         event.preventDefault()
         event.stopPropagation()
-        this.clearSpreadsheetTextInput()
+        this.typeSpreadsheetKey(0, this.AWT_KEY.ESCAPE)
         return
       }
-
-      if (k === "Backspace" && this.spreadsheetEditBuffer) {
+      if (k === "Backspace") {
         event.preventDefault()
         event.stopPropagation()
-        this.spreadsheetEditBuffer = Array.from(this.spreadsheetEditBuffer).slice(0, -1).join("")
-        this.scheduleSpreadsheetTextInputFlush()
+        this.typeSpreadsheetKey(8, this.AWT_KEY.BACKSPACE)
         return
       }
-
       if (k && k.length === 1) {
         event.preventDefault()
         event.stopPropagation()
-        this.queueSpreadsheetTextInput(k)
+        this.typeSpreadsheetKey(k.codePointAt(0), 0)
         return
       }
     }
@@ -2873,75 +3376,21 @@ const WasmOfficeEditor = {
     }
   },
 
-  queueSpreadsheetTextInput(text) {
-    const value = String(text || "")
-    if (!value) return
-    this.spreadsheetEditBuffer = (this.spreadsheetEditBuffer || "") + value
-    this.scheduleSpreadsheetTextInputFlush()
-    if (this.imeProxy) this.imeProxy.value = ""
-  },
-
-  scheduleSpreadsheetTextInputFlush() {
-    if (this.spreadsheetEditTimer) clearTimeout(this.spreadsheetEditTimer)
-    this.spreadsheetEditTimer = setTimeout(() => {
-      this.spreadsheetEditTimer = null
-      this.flushSpreadsheetTextInput()
-    }, 1200)
-  },
-
-  clearSpreadsheetTextInput() {
-    if (this.spreadsheetEditTimer) {
-      clearTimeout(this.spreadsheetEditTimer)
-      this.spreadsheetEditTimer = null
-    }
-    if (this.spreadsheetKeyPostTimer) {
-      clearTimeout(this.spreadsheetKeyPostTimer)
-      this.spreadsheetKeyPostTimer = null
-    }
-    this.spreadsheetEditBuffer = ""
-    if (this.imeProxy) this.imeProxy.value = ""
-  },
-
-  flushSpreadsheetTextInput({ commit = false } = {}) {
-    if (this.spreadsheetEditTimer) {
-      clearTimeout(this.spreadsheetEditTimer)
-      this.spreadsheetEditTimer = null
-    }
-    if (this.spreadsheetKeyPostTimer) {
-      clearTimeout(this.spreadsheetKeyPostTimer)
-      this.spreadsheetKeyPostTimer = null
-    }
-
-    const text = this.spreadsheetEditBuffer || ""
-    this.spreadsheetEditBuffer = ""
-    const keys = Array.from(text).map(ch => [ch.codePointAt(0), 0])
-    if (commit) keys.push([13, this.AWT_KEY.RETURN])
-    if (!keys.length) return false
-    const previous = this.caret
-    let posted = false
-
-    const finish = () => {
-      this.spreadsheetKeyPostTimer = null
-      if (this.imeProxy) this.imeProxy.value = ""
-      if (!posted) return
-      this.renderAfterInput()
-      this.refreshCaret()
-      this.settleCaretAfterInput(previous, true)
-      this.markViewerMutated()
-    }
-
-    const send = (index) => {
-      const [charCode, keyCode] = keys[index]
-      posted = this.postKey(charCode, keyCode, false) || posted
-      if (index >= keys.length - 1) {
-        finish()
-        return
-      }
-      this.spreadsheetKeyPostTimer = setTimeout(() => send(index + 1), 32)
-    }
-
-    send(0)
-    return true
+  // Post one key straight to the native Calc cell editor and reflect it
+  // immediately. postKey is ~2ms and renderAfterInput coalesces the repaint
+  // through the deferred/deduped render queue, so a fast typing burst settles
+  // to one paint while each character still shows right away — no buffering,
+  // no idle debounce. Used for printable chars and the edit-control keys
+  // (Enter commit / Escape cancel / Backspace).
+  typeSpreadsheetKey(charCode, keyCode) {
+    const posted = this.postKey(charCode, keyCode)
+    const idleFullRender =
+      keyCode === this.AWT_KEY.RETURN ||
+      keyCode === this.AWT_KEY.ESCAPE ||
+      charCode === 13
+    this.renderAfterInput({ spreadsheetIdleFullRender: idleFullRender })
+    if (posted) this.markViewerMutated()
+    return posted
   },
 
   handleEditShortcut(event) {
@@ -3084,10 +3533,71 @@ const WasmOfficeEditor = {
     }
   },
 
+  postTextInput(text, clearProxy = true, options = {}) {
+    const value = String(text || "")
+    if (!value) {
+      if (clearProxy && this.imeProxy) this.imeProxy.value = ""
+      return false
+    }
+
+    if (this.presentationLikeDoc() && !this.presentationTextTargetReady()) {
+      if (clearProxy && this.imeProxy) this.imeProxy.value = ""
+      return false
+    }
+
+    if (this.hasApiMethod("postWindowExtTextInputEvent")) {
+      try {
+        this.callApi("postWindowExtTextInputEvent", 0, this.LOK_EXT_TEXTINPUT, value)
+        this.nativeCompositionOpen = true
+        if (options.end !== false) this.endTextInput()
+        this.clearSelectionState()
+        return true
+      } catch (error) {
+        console.error("[office-wasm] postWindowExtTextInputEvent failed", error)
+      } finally {
+        if (clearProxy && this.imeProxy) this.imeProxy.value = ""
+      }
+    }
+
+    let posted = false
+    for (const ch of value) {
+      posted = this.postKey(ch.codePointAt(0), 0, false) || posted
+    }
+    if (clearProxy && this.imeProxy) this.imeProxy.value = ""
+    return posted
+  },
+
+  endTextInput(text = "") {
+    if (!this.hasApiMethod("postWindowExtTextInputEvent")) return false
+    try {
+      this.callApi("postWindowExtTextInputEvent", 0, this.LOK_EXT_TEXTINPUT_END, String(text || ""))
+      this.nativeCompositionOpen = false
+      this.clearSelectionState()
+      return true
+    } catch (error) {
+      console.error("[office-wasm] postWindowExtTextInputEvent end failed", error)
+      return false
+    }
+  },
+
   markViewerMutated() {
     this._elementsCache = null
+    if (this.mirror) return
     if (!this.documentId) return
     this.pushEvent("local_document.viewer_mutated", { document_id: this.documentId })
+  },
+
+  imeInputText(event) {
+    const eventText = event && event.data != null ? String(event.data) : ""
+    const proxyText = this.imeProxy ? String(this.imeProxy.value || "") : ""
+    return eventText || proxyText
+  },
+
+  compositionEndText(event) {
+    const eventText = event && event.data != null ? String(event.data) : ""
+    if (eventText) return eventText
+    const proxyText = this.imeProxy ? String(this.imeProxy.value || "") : ""
+    return proxyText && proxyText !== (this._compositionCommittedText || "") ? proxyText : ""
   },
 
   // Plain (non-composing) text input — fires for some IMEs / paste / dictation
@@ -3102,11 +3612,15 @@ const WasmOfficeEditor = {
     if (event.isComposing || this.composing) return
     const type = event.inputType || ""
     if (type.startsWith("insert")) {
-      const data = event.data != null ? event.data : this.imeProxy.value
+      const data = this.imeInputText(event)
       if (data) {
         const previous = this.caret
         let posted = false
-        for (const ch of data) posted = this.postKey(ch.codePointAt(0), 0) || posted
+        if (this.hangulCompositionText(data)) {
+          posted = this.postTextInput(data, false)
+        } else {
+          for (const ch of data) posted = this.postKey(ch.codePointAt(0), 0) || posted
+        }
         this.renderAfterInput()
         this.refreshCaret()
         this.settleCaretAfterInput(previous, true)
@@ -3124,6 +3638,7 @@ const WasmOfficeEditor = {
     this.composing = true
     this.skipNextCompositionInput = null
     this._compositionCommittedText = ""
+    this.nativeCompositionOpen = false
   },
 
   // compositionupdate — update the real document model immediately. We avoid a
@@ -3141,19 +3656,32 @@ const WasmOfficeEditor = {
     this.replaceCommittedComposition(event.data || (this.imeProxy && this.imeProxy.value) || "")
   },
 
-  replaceCommittedComposition(text) {
+  replaceCommittedComposition(text, options = {}) {
     const next = String(text || "")
     const prev = this._compositionCommittedText || ""
-    if (next === prev) return false
     const previousCaret = this.caret
     let posted = false
 
+    if (this.hasApiMethod("postWindowExtTextInputEvent")) {
+      if (next !== prev) {
+        posted = this.postTextInput(next, false, { end: false }) || posted
+        this._compositionCommittedText = next
+      }
+      if (options.commit) {
+        posted = this.endTextInput() || posted
+      }
+      if (!posted && next === prev) return false
+      this.renderAfterInput()
+      this.refreshCaret()
+      this.settleCaretAfterInput(previousCaret, true)
+      return posted
+    }
+
+    if (next === prev) return false
     for (const _ch of [...prev]) {
       posted = this.postKey(8, this.AWT_KEY.BACKSPACE, false) || posted
     }
-    for (const ch of [...next]) {
-      posted = this.postKey(ch.codePointAt(0), 0, false) || posted
-    }
+    posted = this.postTextInput(next, false) || posted
 
     this._compositionCommittedText = next
     this.renderAfterInput()
@@ -3171,7 +3699,7 @@ const WasmOfficeEditor = {
       return
     }
     if (this.presentationLikeDoc()) {
-      const eventText = event.data || (this.imeProxy && this.imeProxy.value) || ""
+      const eventText = this.compositionEndText(event)
       const str = eventText
       const ready = this.presentationTextTargetReady()
       this.composing = false
@@ -3180,22 +3708,24 @@ const WasmOfficeEditor = {
       if (this.imeProxy) this.imeProxy.value = ""
       if (!ready) return
 
-      const posted = this.replaceCommittedComposition(str)
+      const posted = this.replaceCommittedComposition(str, { commit: true })
       if (posted) {
         this.markViewerMutated()
       }
       this._compositionCommittedText = ""
       return
     }
-    const eventText = event.data || (this.imeProxy && this.imeProxy.value) || ""
+    const eventText = this.compositionEndText(event)
     const str = eventText || this._compositionCommittedText || ""
-    const posted = this.replaceCommittedComposition(str)
+    const nativeTextInput = this.hasApiMethod("postWindowExtTextInputEvent")
+    const provisionalNative = nativeTextInput && !eventText && this.provisionalHangulCompositionText(str)
+    const posted = provisionalNative ? false : this.replaceCommittedComposition(str, { commit: nativeTextInput })
     this.composing = false
     this.clearSelectionState()
     this.armTrailingCompositionInputGuard(str, { provisional: !eventText && !!this._compositionCommittedText })
     if (this.imeProxy) this.imeProxy.value = ""
     if (posted || str) this.markViewerMutated()
-    this._compositionCommittedText = ""
+    if (!provisionalNative) this._compositionCommittedText = ""
   },
 
   armTrailingCompositionInputGuard(text, options = {}) {
@@ -3210,7 +3740,7 @@ const WasmOfficeEditor = {
     if (!pending) return false
 
     const type = event.inputType || ""
-    const data = String(event.data != null ? event.data : (this.imeProxy && this.imeProxy.value) || "")
+    const data = this.imeInputText(event)
     const age = performance.now() - pending.at
     const immediate = age >= 0 && age < 500
     const delayedProvisional = pending.provisional && age >= 0 && age < 2500
@@ -3237,6 +3767,11 @@ const WasmOfficeEditor = {
     }
 
     if (compositionInput || sameImmediateText) {
+      if (this.nativeCompositionOpen) {
+        this.endTextInput()
+        this._compositionCommittedText = ""
+        if (pending.value) this.markViewerMutated()
+      }
       this.skipNextCompositionInput = null
       return true
     }
@@ -3247,6 +3782,17 @@ const WasmOfficeEditor = {
 
   replaceTrailingCompositionInput(previousText, nextText) {
     if (!nextText || nextText === previousText) return false
+    if (this.nativeCompositionOpen && this.hasApiMethod("postWindowExtTextInputEvent")) {
+      const previousCaret = this.caret
+      const posted = this.postTextInput(nextText, false, { end: false })
+      const ended = this.endTextInput()
+      this._compositionCommittedText = ""
+      this.renderAfterInput()
+      this.refreshCaret()
+      this.settleCaretAfterInput(previousCaret, true)
+      if (posted || ended) this.markViewerMutated()
+      return posted || ended
+    }
     const saved = this._compositionCommittedText
     this._compositionCommittedText = String(previousText || "")
     const posted = this.replaceCommittedComposition(nextText)
@@ -3258,6 +3804,10 @@ const WasmOfficeEditor = {
 
   hangulCompositionText(text) {
     return /[\u3130-\u318F\uAC00-\uD7AF]/u.test(String(text || ""))
+  },
+
+  provisionalHangulCompositionText(text) {
+    return /[\u3130-\u318F]/u.test(String(text || ""))
   },
 
   handleToolbarCommand(detail) {
@@ -3429,35 +3979,33 @@ const WasmOfficeEditor = {
   },
 
   officeToolbarWriteImage(detail) {
-    const Module = window.__officeWasmModule
-    if (!Module) throw new Error("office WASM module is not ready")
-
     const bytes = detail.bytes instanceof Uint8Array
       ? detail.bytes
       : this.base64ToBytes(detail.image_base64)
-    const dir = "/tmp/ecrits-toolbar"
-    const file = `${Date.now()}-${this.officeToolbarSafeFileName(detail.file_name || "image")}`
+    return this.officeWriteImageBytes(bytes, detail.file_name || "image", "ecrits-toolbar")
+  },
+
+  officeWriteImageBytes(bytes, fileName, bucket) {
+    const Module = window.__officeWasmModule
+    if (!Module) throw new Error("office WASM module is not ready")
+
+    const safeBucket = this.officeToolbarSafeFileName(bucket || "ecrits-images")
+    const dir = `/tmp/${safeBucket}`
+    this._officeImageSeq = (this._officeImageSeq || 0) + 1
+    const file = `${Date.now()}-${this._officeImageSeq}-${this.officeToolbarSafeFileName(fileName || "image")}`
     const path = `${dir}/${file}`
 
     if (typeof Module.FS_createPath === "function") {
       try { Module.FS_createPath("/", "tmp", true, true) } catch (_) {}
-      try { Module.FS_createPath("/tmp", "ecrits-toolbar", true, true) } catch (_) {}
-    }
-
-    if (typeof Module.FS_writeFile === "function") {
-      Module.FS_writeFile(path, bytes)
-      return path
+      try { Module.FS_createPath("/tmp", safeBucket, true, true) } catch (_) {}
     }
 
     if (typeof Module.FS_createDataFile === "function") {
-      try {
-        if (typeof Module.FS_unlink === "function") Module.FS_unlink(path)
-      } catch (_) {}
       Module.FS_createDataFile(dir, file, bytes, true, true, true)
       return path
     }
 
-    throw new Error("office WASM filesystem writer is unavailable")
+    throw new Error("office WASM FS_createDataFile runtime method is unavailable")
   },
 
   base64ToBytes(b64) {
@@ -3488,6 +4036,18 @@ const WasmOfficeEditor = {
     }
 
     return { w: Math.max(1, Math.round(max * aspect)), h: max }
+  },
+
+  prepareOfficePictureOp(op) {
+    if (!op || op.op !== "insert_picture") return op
+    const out = { ...op }
+    if (out.image_base64 == null && out.imageBase64 != null) out.image_base64 = out.imageBase64
+    delete out.imageBase64
+
+    if (out.w == null && out.width != null) out.w = out.width
+    if (out.h == null && out.height != null) out.h = out.height
+
+    return out
   },
 
   officeToolbarSlidePosition(loc, size) {
@@ -3548,6 +4108,7 @@ const WasmOfficeEditor = {
   // still-pending edit (uno_apply dispatches onto the LOK worker — saveToBytes
   // immediately after an edit can otherwise read an inconsistent buffer).
   handleAgentOp({ request_id, verb, payload }) {
+    if (this.mirror) return
     const reply = (body) => this.pushEvent("doc.browser_reply", { request_id, ...body })
     if (!this.api || !this.handle) {
       reply({ error: "document_not_loaded" })
@@ -4172,7 +4733,7 @@ const WasmOfficeEditor = {
     //   delete_range — the binary has no offset granularity; whole-element clear.
     const rewritten = this.rewriteUnsupportedEditOp(op)
     if (rewritten && rewritten.error) return { error: `${verb} failed: ${rewritten.error}` }
-    const finalOp = rewritten && rewritten.op ? rewritten.op : op
+    const finalOp = this.prepareOfficePictureOp(rewritten && rewritten.op ? rewritten.op : op)
     const finalVerb = finalOp.op
 
     let res
@@ -4181,7 +4742,10 @@ const WasmOfficeEditor = {
       // uno_apply dispatches onto the LOK worker; await a possible thenable.
       if (res && typeof res.then === "function") res = await res
     } catch (error) {
-      return { error: `${verb} failed: ${String((error && error.message) || error)}` }
+      const message = String((error && error.message) || error)
+      const context = typeof dumpLog === "function" ? dumpLog() : ""
+      const suffix = context ? `\nLast engine output:\n${context}` : ""
+      return { error: `${verb} failed: ${message}${suffix}` }
     }
     const status = this.parseStatus(res)
     if (status && status.error) return { error: `${finalVerb} failed: ${status.error}` }
@@ -4467,10 +5031,43 @@ const WasmOfficeEditor = {
     if (bytes && typeof bytes.then === "function") bytes = await bytes
     if (!bytes || !bytes.length) throw new Error("saveToBytes returned no bytes")
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
-    return { format: this.format || "docx", bytes_base64: this.bytesToBase64(u8), bytes: u8.length }
+    return { format: this.format || "docx", ...(await this.uploadLocalDocumentBytes(u8)) }
+  },
+
+  async uploadLocalDocumentBytes(bytes) {
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+    const headers = { "content-type": "application/octet-stream" }
+    const csrf = this.localCsrfToken()
+    if (csrf) headers["x-csrf-token"] = csrf
+
+    const response = await fetch("/local/document-bytes", {
+      method: "POST",
+      credentials: "same-origin",
+      headers,
+      body: u8
+    })
+    if (!response.ok) throw new Error(await this.uploadErrorFromResponse(response))
+
+    const body = await response.json()
+    if (!body || !body.bytes_token) throw new Error("document bytes upload returned no token")
+    return { bytes_token: body.bytes_token, bytes: body.bytes || u8.length }
+  },
+
+  localCsrfToken() {
+    return document.querySelector("meta[name='csrf-token']")?.getAttribute("content") || ""
+  },
+
+  async uploadErrorFromResponse(response) {
+    try {
+      const body = await response.json()
+      return body?.error || `document bytes upload failed: HTTP ${response.status}`
+    } catch (_) {
+      return `document bytes upload failed: HTTP ${response.status}`
+    }
   },
 
   async saveLocalDocument(payload = {}) {
+    if (this.mirror) return
     const requestId = payload.request_id || `local-save:${Date.now()}`
     const documentId = payload.document_id || this.documentId
     try {

@@ -104,9 +104,6 @@ const MarkdownEditor = {
       case "italic":
         this.wrapSelection("*", "*", "italic")
         break
-      case "image":
-        if (detail.data_url) this.insertText(`![${this.imageAlt(detail)}](${detail.data_url})`)
-        break
       default:
         break
     }
@@ -153,12 +150,6 @@ const MarkdownEditor = {
     )
   },
 
-  insertText(text) {
-    const start = this.el.selectionStart || 0
-    const end = this.el.selectionEnd || start
-    this.replaceRange(start, end, text, start + text.length)
-  },
-
   replaceRange(start, end, text, selectionStart = null, selectionEnd = null) {
     this.el.value = this.el.value.slice(0, start) + text + this.el.value.slice(end)
     const nextStart = selectionStart == null ? start + text.length : selectionStart
@@ -166,11 +157,6 @@ const MarkdownEditor = {
     this.el.setSelectionRange(nextStart, nextEnd)
     this.userEdited = true
     this.sync()
-  },
-
-  imageAlt(detail) {
-    const name = String(detail.file_name || "image")
-    return name.replace(/\.[^.]+$/, "").replace(/[\[\]\n\r]/g, " ").trim() || "image"
   }
 }
 

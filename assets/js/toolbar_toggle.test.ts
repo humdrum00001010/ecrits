@@ -200,6 +200,97 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     assert.deepEqual(rects, [{ pageIndex: 0, x: 338, y: 188, width: 124, height: 16 }])
   })
 
+  it("retries an empty native Office paint before reporting render failure", () => {
+    const statuses: string[] = []
+    const timers: Array<{ callback: () => void; delay: number }> = []
+    const requests: Array<{ index: number; force: boolean | undefined }> = []
+    const paintCalls: unknown[][] = []
+    const warnings: unknown[][] = []
+    const timerToken = { id: "paint-retry" }
+    const canvas = { width: 1, height: 1 }
+    const section = {
+      querySelector: (selector: string) =>
+        selector === "[data-role='office-wasm-canvas']" ? canvas : null,
+    }
+    const editor = {
+      ...WasmOfficeEditor,
+      officeHookAlive: true,
+      el: {
+        isConnected: true,
+        getAttribute: (name: string) =>
+          name === "data-role" ? "office-wasm-viewer" :
+            name === "phx-hook" ? "WasmOfficeEditor" :
+              null,
+      },
+      api: {
+        shape: "module-functions",
+        loadStatus: () => 2,
+        paintTile: (...args: unknown[]) => {
+          paintCalls.push(args)
+          return new Uint8Array()
+        },
+      },
+      docType: 1,
+      scale: 1,
+      parts: [{ width: 100, height: 80 }],
+      pageRects: [],
+      rendered: new Map(),
+      visible: new Set(),
+      renderQueue: new Map(),
+      paintEmptyRetries: new Map(),
+      paintRetryTimers: new Map(),
+      pageSection: () => section,
+      setStatus: (text: string) => statuses.push(text),
+      setOfficeTimer: (callback: () => void, delay: number) => {
+        timers.push({ callback, delay })
+        return timerToken
+      },
+      clearOfficeTimer: () => {},
+      requestRenderPage: (index: number, opts: { force?: boolean } = {}) => {
+        requests.push({ index, force: opts.force })
+      },
+    } as any
+
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => warnings.push(args)
+    try {
+      editor.renderPage(0)
+    } finally {
+      console.warn = originalWarn
+    }
+
+    assert.equal(paintCalls.length, 1)
+    assert.equal(warnings.length, 1)
+    assert.equal(editor.paintEmptyRetries.get(0), 1)
+    assert.equal(timers.length, 1)
+    assert.equal(timers[0].delay, 80)
+    assert.equal(statuses[statuses.length - 1], "Rendering page 1...")
+    assert.equal(statuses.some(status => status.startsWith("Render failed")), false)
+
+    timers[0].callback()
+    assert.deepEqual(requests, [{ index: 0, force: true }])
+  })
+
+  it("suppresses Office status updates from inactive hooks", () => {
+    const statusEl = { textContent: "" }
+    const editor = {
+      ...WasmOfficeEditor,
+      officeHookAlive: false,
+      el: {
+        isConnected: true,
+        getAttribute: (name: string) =>
+          name === "data-role" ? "office-wasm-viewer" :
+            name === "phx-hook" ? "WasmOfficeEditor" :
+              null,
+      },
+      statusEl,
+    } as any
+
+    editor.setStatus("Render failed on page 1")
+
+    assert.equal(statusEl.textContent, "")
+  })
+
   it("does not build picker rects from invalid Office caret geometry", () => {
     const editor = {
       ...WasmOfficeEditor,
@@ -433,7 +524,7 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     assert.ok(calls.some(call => call.name === "settleAfterMouseSelection"))
   })
 
-  it("uses zero-based native mouse pages for spreadsheets", () => {
+  it("uses one-based native mouse pages for spreadsheets", () => {
     const calls: Array<{ name: string; args?: unknown[] }> = []
     const editor = {
       ...WasmOfficeEditor,
@@ -445,7 +536,7 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     editor.postNativeMouseEvent(0, { pageIndex: 0, x: 96, y: 50 }, 1, 1, 0)
 
     assert.deepEqual(calls, [
-      { name: "callApi:postMouseEvent", args: [0, 0, 96, 50, 1, 1, 0] },
+      { name: "callApi:postMouseEvent", args: [0, 1, 96, 50, 1, 1, 0] },
     ])
   })
 
@@ -998,6 +1089,137 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     assert.equal(editor.skipNextCompositionInput, null)
   })
 
+  it("uses the Office IME proxy text when trailing Hangul input has empty data", () => {
+    let text = ""
+    const editor = {
+      ...WasmOfficeEditor,
+      api: {
+        postKeyEvent: (_type: number, charCode: number, keyCode: number) => {
+          if (_type !== 0) return
+          if (charCode === 8 || keyCode === WasmOfficeEditor.AWT_KEY.BACKSPACE) {
+            text = Array.from(text).slice(0, -1).join("")
+          } else if (charCode) {
+            text += String.fromCodePoint(charCode)
+          }
+        },
+      },
+      parts: [{ width: 100, height: 100 }],
+      AWT_KEY: { ...WasmOfficeEditor.AWT_KEY },
+      LOK_KEYEVENT_KEYINPUT: 0,
+      LOK_KEYEVENT_KEYUP: 1,
+      presentationLikeDoc: () => false,
+      renderAfterInput: () => {},
+      refreshCaret: () => {},
+      settleCaretAfterInput: () => {},
+      markViewerMutated: () => {},
+      selectionVisual: null,
+      imeProxy: { value: "" },
+    } as any
+    const compose = (provisional: string, committed: string) => {
+      editor.handleCompositionStart({} as any)
+      editor.imeProxy.value = provisional
+      editor.handleCompositionUpdate({ data: provisional } as any)
+      editor.handleCompositionEnd({ data: "" } as any)
+      editor.imeProxy.value = committed
+      editor.handleInput({
+        inputType: "insertCompositionText",
+        data: "",
+        isComposing: false,
+      } as any)
+    }
+
+    compose("ㄱ", "김")
+    compose("ㅇ", "일")
+    compose("ㅇ", "영")
+
+    assert.equal(text, "김일영")
+    assert.equal(editor.imeProxy.value, "")
+    assert.equal(editor.skipNextCompositionInput, null)
+  })
+
+  it("commits DOCX Hangul composition through Office extended text input when available", () => {
+    let committed = ""
+    let preedit = ""
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmOfficeEditor,
+      api: {
+        postKeyEvent: (...args: unknown[]) => {
+          calls.push({ name: "postKeyEvent", args })
+          const [_type, charCode, keyCode] = args as [number, number, number]
+          if (_type !== 0) return
+          if (charCode === 8 || keyCode === WasmOfficeEditor.AWT_KEY.BACKSPACE) {
+            if (preedit) preedit = Array.from(preedit).slice(0, -1).join("")
+            else committed = Array.from(committed).slice(0, -1).join("")
+          }
+        },
+        postWindowExtTextInputEvent: (...args: unknown[]) => {
+          calls.push({ name: "postWindowExtTextInputEvent", args })
+          const [windowId, type, value] = args as [number, number, string]
+          if (windowId === 0 && type === WasmOfficeEditor.LOK_EXT_TEXTINPUT) preedit = value
+          if (windowId === 0 && type === WasmOfficeEditor.LOK_EXT_TEXTINPUT_END) {
+            committed += preedit
+            preedit = ""
+          }
+        },
+      },
+      parts: [{ width: 100, height: 100 }],
+      AWT_KEY: { ...WasmOfficeEditor.AWT_KEY },
+      LOK_KEYEVENT_KEYINPUT: 0,
+      LOK_KEYEVENT_KEYUP: 1,
+      LOK_EXT_TEXTINPUT: WasmOfficeEditor.LOK_EXT_TEXTINPUT,
+      LOK_EXT_TEXTINPUT_END: WasmOfficeEditor.LOK_EXT_TEXTINPUT_END,
+      presentationLikeDoc: () => false,
+      renderAfterInput: () => {},
+      refreshCaret: () => {},
+      settleCaretAfterInput: () => {},
+      markViewerMutated: () => {},
+      selectionVisual: null,
+      imeProxy: { value: "" },
+    } as any
+    const compose = (provisional: string, committed: string) => {
+      editor.handleCompositionStart({} as any)
+      editor.imeProxy.value = provisional
+      editor.handleCompositionUpdate({ data: provisional } as any)
+      editor.handleCompositionEnd({ data: "" } as any)
+      editor.imeProxy.value = committed
+      editor.handleInput({
+        inputType: "insertCompositionText",
+        data: "",
+        isComposing: false,
+      } as any)
+    }
+
+    compose("ㄱ", "김")
+    compose("ㅇ", "일")
+    compose("ㅇ", "영")
+
+    assert.equal(committed + preedit, "김일영")
+    assert.deepEqual(
+      calls
+        .filter(call => call.name === "postWindowExtTextInputEvent")
+        .map(call => call.args),
+      [
+        [0, editor.LOK_EXT_TEXTINPUT, "ㄱ"],
+        [0, editor.LOK_EXT_TEXTINPUT, "김"],
+        [0, editor.LOK_EXT_TEXTINPUT_END, ""],
+        [0, editor.LOK_EXT_TEXTINPUT, "ㅇ"],
+        [0, editor.LOK_EXT_TEXTINPUT, "일"],
+        [0, editor.LOK_EXT_TEXTINPUT_END, ""],
+        [0, editor.LOK_EXT_TEXTINPUT, "ㅇ"],
+        [0, editor.LOK_EXT_TEXTINPUT, "영"],
+        [0, editor.LOK_EXT_TEXTINPUT_END, ""],
+      ]
+    )
+    assert.equal(
+      calls.some(call =>
+        call.name === "postKeyEvent" &&
+        ["김", "일", "영"].includes(String.fromCodePoint(Number(call.args?.[1] || 0)))
+      ),
+      false
+    )
+  })
+
   it("replaces delayed multi-syllable Hangul IME finals instead of appending them to provisional jamo", () => {
     let text = ""
     const editor = {
@@ -1047,14 +1269,14 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     assert.equal(text, "안녕")
   })
 
-  it("buffers spreadsheet printable keys until commit", async () => {
+  it("posts spreadsheet printable keys eagerly to the native cell editor", () => {
     const calls: Array<{ name: string; args?: unknown[] }> = []
     const editor = {
       ...WasmOfficeEditor,
       api: { postKeyEvent: (...args: unknown[]) => calls.push({ name: "postKeyEvent", args }) },
       parts: [{ width: 100, height: 100 }],
       docType: 1,
-      AWT_KEY: { RETURN: 1280 },
+      AWT_KEY: { RETURN: 1280, ESCAPE: 1281, BACKSPACE: 1283 },
       LOK_KEYEVENT_KEYINPUT: 1,
       LOK_KEYEVENT_KEYUP: 2,
       saveShortcut: () => false,
@@ -1067,9 +1289,6 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
       markViewerMutated: () => calls.push({ name: "markViewerMutated" }),
       anchorProxy: () => calls.push({ name: "anchorProxy" }),
       imeProxy: { value: "" },
-      spreadsheetEditBuffer: "",
-      spreadsheetEditTimer: null,
-      spreadsheetKeyPostTimer: null,
     } as any
     const keyEvent = (key: string) => ({
       key,
@@ -1080,17 +1299,22 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     editor.handleKeyDown(keyEvent("Z"))
     editor.handleKeyDown(keyEvent("9"))
 
-    assert.equal(editor.spreadsheetEditBuffer, "Z9")
-    assert.equal(calls.some(call => call.name === "postKeyEvent"), false)
+    // No JS-side buffer/debounce: each printable key reaches the engine at once,
+    // so typed text shows immediately instead of after a 1.2s idle flush.
+    assert.deepEqual(
+      calls.filter(call => call.name === "postKeyEvent").map(call => call.args),
+      [
+        [1, 90, 0],
+        [2, 90, 0],
+        [1, 57, 0],
+        [2, 57, 0],
+      ]
+    )
 
     editor.handleKeyDown(keyEvent("Enter"))
-    await new Promise(resolve => setTimeout(resolve, 120))
 
-    assert.equal(editor.spreadsheetEditBuffer, "")
     assert.deepEqual(
-      calls
-        .filter(call => call.name === "postKeyEvent")
-        .map(call => call.args),
+      calls.filter(call => call.name === "postKeyEvent").map(call => call.args),
       [
         [1, 90, 0],
         [2, 90, 0],
@@ -1100,7 +1324,8 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
         [2, 13, 1280],
       ]
     )
-    assert.equal(calls.filter(call => call.name === "markViewerMutated").length, 1)
+    // One mutation notification per posted keystroke (Z, 9, Enter).
+    assert.equal(calls.filter(call => call.name === "markViewerMutated").length, 3)
     assert.equal(editor.imeProxy.value, "")
   })
 

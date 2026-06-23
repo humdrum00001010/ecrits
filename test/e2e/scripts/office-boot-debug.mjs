@@ -28,7 +28,7 @@ const ts = () => String(Date.now() - t0).padStart(6) + "ms";
 const line = (tag, ...a) => console.log(`[${ts()}] ${tag}`, ...a);
 
 const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
-const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: Number(process.env.DPR) || 1 });
 
 page.on("console", (m) => line("console:" + m.type(), m.text()));
 page.on("pageerror", (e) => line("PAGEERROR", e.message));

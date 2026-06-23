@@ -111,4 +111,69 @@ describe("WasmOfficeEditor.officeFind", () => {
     assert.equal(cell.values.formula, "=SUM(B1:B2)")
     assert.equal(cell.ir.formula, "=SUM(B1:B2)")
   })
+
+  it("keeps mirror preview events scoped and non-authoritative", async () => {
+    const editor = Object.create(WasmOfficeEditor)
+    const applied: any[] = []
+    let dispatched: any = null
+    let rendered = 0
+    let modelText = ""
+
+    editor.mirror = true
+    editor.documentId = "doc-1"
+    editor.loaded = true
+    editor.handle = true
+    editor.rendered = new Map()
+    editor.visible = new Set([0])
+    editor.renderVisiblePages = () => {
+      rendered += 1
+    }
+    editor.api = {
+      getElements: () =>
+        JSON.stringify([{ ref: "p0", type: "paragraph", text: modelText }]),
+      unoApply: (json: string) => {
+        const op = JSON.parse(json)
+        applied.push(op)
+        if (op.op === "set_text" && op.ref === "p0") modelText = op.text
+        return JSON.stringify({ ok: true })
+      },
+    }
+    editor.el = {
+      dataset: {},
+      querySelector: () => null,
+      appendChild: () => {
+        throw new Error("mirror preview must not create an overlay")
+      },
+      dispatchEvent: (event: any) => {
+        dispatched = event
+        return true
+      },
+    }
+
+    assert.equal(editor.eventMatchesDocument({ document_id: "doc-1" }), true)
+    assert.equal(editor.eventMatchesDocument({ document_id: "doc-2" }), false)
+    assert.equal(editor.eventMatchesDocument({}), false)
+
+    editor.handlePreviewDelta({
+      document_id: "doc-1",
+      turn_id: "turn-1",
+      delta: "Draft",
+      delta_count: 1,
+    })
+
+    await editor.previewPatchInFlight
+
+    assert.equal(editor.el.dataset.previewText, "Draft")
+    assert.equal(editor.el.dataset.previewDeltaCount, "1")
+    assert.equal(applied.length, 1)
+    assert.deepEqual(applied[0], { op: "set_text", ref: "p0", text: "Draft" })
+    assert.equal(modelText, "Draft")
+    assert.equal(rendered, 1)
+    assert.equal(editor.el.dataset.previewPatchMode, "direct-doc")
+    assert.equal(editor.el.dataset.previewPatchRef, "p0")
+    assert.equal(editor.el.dataset.previewModelMatches, "true")
+    assert.equal(dispatched.detail.document_id, "doc-1")
+    assert.equal(dispatched.detail.patch_mode, "direct-doc")
+    assert.equal(dispatched.detail.model_matches, true)
+  })
 })
