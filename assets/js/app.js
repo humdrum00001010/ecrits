@@ -721,7 +721,10 @@ function applyEditorZoom(content, state, scale) {
 function updateEditorZoomFootprint(content, scale) {
   const height = content.offsetHeight
   const delta = height * (scale - 1)
+  const overviewInset = scale < 1 ? content.offsetWidth * (1 - scale) / 2 : 0
   content.style.marginBottom = Math.abs(delta) > 0.5 ? `${delta}px` : ""
+  content.style.marginLeft = overviewInset > 0.5 ? `${overviewInset}px` : ""
+  content.style.marginRight = overviewInset > 0.5 ? `${-overviewInset}px` : ""
 }
 
 function readEditorZoom(content) {
