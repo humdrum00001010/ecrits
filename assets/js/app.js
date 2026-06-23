@@ -644,7 +644,7 @@ window.addEventListener("wheel", event => {
 
   event.preventDefault()
   const current = Number.parseFloat(content.dataset.editorZoom || "1") || 1
-  const step = Math.min(0.24, Math.abs(event.deltaY) * 0.003)
+  const step = Math.min(0.4, Math.abs(event.deltaY) * 0.005)
   const factor = 1 + step
   const next = Math.min(4, Math.max(0.5, event.deltaY < 0 ? current * factor : current / factor))
   const scroller = findEditorZoomScroller(content)
