@@ -22,6 +22,7 @@ defmodule Ecrits.SupervisionTest do
              Ecrits.RhwpSnapshot.Materializer,
              Ecrits.Doc.Office.Instance,
              Ecrits.Doc.Pool,
+             Ecrits.Fuse.OpenDocs,
              EcritsWeb.Endpoint,
              Ecrits.Local.Document.Registry,
              Ecrits.Local.Document.Supervisor,

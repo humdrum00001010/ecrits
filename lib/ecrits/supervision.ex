@@ -86,7 +86,11 @@ defmodule Ecrits.Supervision do
       Ecrits.Doc.Office.Instance,
       # Multi-document MCP registry: one Editor per open document, browser/server
       # backing. See `Ecrits.Doc.Pool` (doc-editing MCP design §4.3).
-      Ecrits.Doc.Pool
+      Ecrits.Doc.Pool,
+      # Per-workspace open-set registry for the document VFS (Ecrits.Fuse.*): owns
+      # the ETS table that `doc.open_doc`/`doc.close_doc` mutate and `Ecrits.Fuse.DocFs`
+      # projects. See docs/plans/2026-06-23-exfuse-doc-vfs-migration.md.
+      Ecrits.Fuse.OpenDocs
     ]
   end
 
