@@ -638,7 +638,7 @@ const liveSocket = new LiveSocket("/live", Socket, {
 })
 
 const editorZoomAnimations = new WeakMap()
-const editorZoomSmoothingMs = 72
+const editorZoomSmoothingMs = 36
 const editorZoomMin = 0.5
 const editorZoomMax = 4
 const editorZoomMaxStep = 0.8
