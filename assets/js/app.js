@@ -637,34 +637,101 @@ const liveSocket = new LiveSocket("/live", Socket, {
   hooks: {...colocatedHooks, DirectR2Upload, LocalEditorToolbar, WasmHwpEditor, WasmOfficeEditor, MarkdownEditor, ObservexPreview, LocalChatRailResizer},
 })
 
+const editorZoomAnimations = new WeakMap()
+const editorZoomDuration = 120
+const editorZoomMin = 0.5
+const editorZoomMax = 4
+const editorZoomMaxStep = 0.8
+const editorZoomSensitivity = 0.01
+
 window.addEventListener("wheel", event => {
   if (!event.ctrlKey || !event.target || typeof event.target.closest !== "function") return
   const content = event.target.closest("[data-editor-zoomable]")
   if (!content) return
 
   event.preventDefault()
-  const current = Number.parseFloat(content.dataset.editorZoom || "1") || 1
-  const step = Math.min(0.8, Math.abs(event.deltaY) * 0.01)
-  const factor = 1 + step
-  const next = Math.min(4, Math.max(0.5, event.deltaY < 0 ? current * factor : current / factor))
   const scroller = findEditorZoomScroller(content)
   const rect = scroller.getBoundingClientRect()
-  const anchorX = scroller.scrollLeft + event.clientX - rect.left
-  const anchorY = scroller.scrollTop + event.clientY - rect.top
-  const ratio = next / current
-  const zoom = String(Number(next.toFixed(4)))
-  content.dataset.editorZoom = zoom
+  const state = editorZoomAnimations.get(content) || {
+    scale: readEditorZoom(content),
+    target: readEditorZoom(content),
+    frame: null,
+  }
+  const step = Math.min(editorZoomMaxStep, Math.abs(event.deltaY) * editorZoomSensitivity)
+  const factor = 1 + step
+  const next = clampEditorZoom(event.deltaY < 0 ? state.target * factor : state.target / factor)
+
+  state.scroller = scroller
+  state.anchorX = event.clientX - rect.left
+  state.anchorY = event.clientY - rect.top
+  state.startedAt = performance.now()
+  state.from = state.scale
+  state.target = next
+
+  content.dataset.editorZoom = formatEditorZoom(next)
   content.style.zoom = ""
   content.style.transformOrigin = "0 0"
-  content.style.transition = "transform 120ms cubic-bezier(0.22, 1, 0.36, 1)"
+  content.style.transition = ""
   content.style.willChange = "transform"
-  content.style.transform = `scale(${zoom})`
-  scroller.scrollLeft = anchorX * ratio - (event.clientX - rect.left)
-  scroller.scrollTop = anchorY * ratio - (event.clientY - rect.top)
-  content.dispatchEvent(new Event("scroll"))
-  content.parentElement?.dispatchEvent(new Event("scroll"))
-  window.dispatchEvent(new Event("resize"))
+
+  editorZoomAnimations.set(content, state)
+  if (!state.frame) state.frame = requestAnimationFrame(time => animateEditorZoom(content, time))
 }, {passive: false, capture: true})
+
+function animateEditorZoom(content, time) {
+  const state = editorZoomAnimations.get(content)
+  if (!state || !content.isConnected) {
+    editorZoomAnimations.delete(content)
+    return
+  }
+
+  const progress = Math.min(1, Math.max(0, (time - state.startedAt) / editorZoomDuration))
+  const eased = 1 - Math.pow(1 - progress, 3)
+  const scale = state.from + (state.target - state.from) * eased
+  applyEditorZoom(content, state, scale)
+
+  if (progress < 1) {
+    state.frame = requestAnimationFrame(nextTime => animateEditorZoom(content, nextTime))
+  } else {
+    applyEditorZoom(content, state, state.target)
+    state.frame = null
+    content.style.willChange = ""
+  }
+}
+
+function applyEditorZoom(content, state, scale) {
+  const previous = state.scale || scale
+  const ratio = previous > 0 ? scale / previous : 1
+  const scroller = state.scroller?.isConnected ? state.scroller : findEditorZoomScroller(content)
+  content.style.transform = `scale(${formatEditorZoom(scale)})`
+  if (ratio !== 1) {
+    scroller.scrollLeft = (scroller.scrollLeft + state.anchorX) * ratio - state.anchorX
+    scroller.scrollTop = (scroller.scrollTop + state.anchorY) * ratio - state.anchorY
+  }
+  state.scroller = scroller
+  state.scale = scale
+}
+
+function readEditorZoom(content) {
+  const transform = window.getComputedStyle(content).transform
+  if (transform && transform !== "none") {
+    try {
+      const scale = new DOMMatrixReadOnly(transform).a
+      if (Number.isFinite(scale) && scale > 0) return scale
+    } catch (_error) {
+      // Fall back to the stored zoom value below.
+    }
+  }
+  return Number.parseFloat(content.dataset.editorZoom || "1") || 1
+}
+
+function clampEditorZoom(scale) {
+  return Math.min(editorZoomMax, Math.max(editorZoomMin, scale))
+}
+
+function formatEditorZoom(scale) {
+  return String(Number(scale.toFixed(4)))
+}
 
 function findEditorZoomScroller(content) {
   for (let el = content.parentElement; el; el = el.parentElement) {
