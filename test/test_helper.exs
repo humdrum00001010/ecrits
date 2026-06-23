@@ -2,7 +2,7 @@
 # excluded from the default `mix test` run to keep the unit suite fast and
 # Chromium-free. CI / sprite runs `mix test --include browser`.
 #
-# `:live_law_mcp` hits the real Korean Law MCP endpoint; excluded by default.
+# `:live_law_mcp` hits the real legal-rag MCP endpoint; excluded by default.
 ExUnit.start(
   exclude: [
     :live,
