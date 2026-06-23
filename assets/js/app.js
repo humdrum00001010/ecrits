@@ -638,6 +638,21 @@ const liveSocket = new LiveSocket("/live", Socket, {
   hooks: {...colocatedHooks, DirectR2Upload, LocalEditorToolbar, WasmHwpEditor, WasmOfficeEditor, MarkdownEditor, ObservexPreview, LocalChatRailResizer},
 })
 
+window.addEventListener("wheel", event => {
+  if (!event.ctrlKey || !event.target || typeof event.target.closest !== "function") return
+  const content = event.target.closest("[data-editor-zoomable]")
+  if (!content) return
+
+  event.preventDefault()
+  const current = Number.parseFloat(content.dataset.editorZoom || content.style.zoom || "1") || 1
+  const next = Math.min(5, Math.max(0.4, current * Math.exp(-event.deltaY * 0.01)))
+  content.dataset.editorZoom = String(next)
+  content.style.zoom = String(next)
+  content.dispatchEvent(new Event("scroll"))
+  content.parentElement?.dispatchEvent(new Event("scroll"))
+  window.dispatchEvent(new Event("resize"))
+}, {passive: false, capture: true})
+
 // Show progress bar on live navigation and form submits
 topbar.config({barColors: {0: "#29d"}, shadowColor: "rgba(0, 0, 0, .3)"})
 window.addEventListener("phx:page-loading-start", _info => topbar.show(300))
