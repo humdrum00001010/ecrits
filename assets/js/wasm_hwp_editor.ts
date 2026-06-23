@@ -532,7 +532,6 @@ const WasmHwpEditor = {
     this.rendered.clear()
     this.renderVisiblePages()
     this.renderPreviewPatchHighlight()
-    this.scrollPreviewPatchIntoView()
     if (!this.mirror) this.scheduleSnapshot()
   },
 
