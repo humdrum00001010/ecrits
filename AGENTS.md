@@ -43,50 +43,32 @@ custom classes must fully style the input
 - Ensure **clean typography, spacing, and layout balance** for a refined, premium look
 - Focus on **delightful details** like hover effects, loading states, and smooth page transitions
 
+### Runtime latency debugging
+
+- For lag, measure the actual debugger-observed path before explaining or patching; Tidewave/LiveView debug tools, logs, `project_eval`, `:dbg.trace`, browser timings, and temporary JS hooks are all acceptable.
+- Report the measured event/call/process path, timings, and bottleneck, then remove temporary instrumentation unless it belongs as project telemetry.
+
+
+## Bug triage: fix native/engine bugs at the source, not in ecrits
+
+ecrits hosts `rhwp_core` via `ehwp`, LibreOffice via `libreofficex`, `exfuse`, and native builders, but it does not own engine bugs; fix attributed bugs in the source checkout named by the matching env var, never in `deps/<x>` or with host workarounds.
+Prove attribution first: for render bugs, compare server NIF output (`Rhwp.render_page` / `Office.render_page`) with browser canvas backing-store pixels before blaming an engine.
+After source fixes, push the dependency, update ecrits with `mix deps.update <dep>` and needed asset tasks, restart only for changed deps/NIFs/ports, then verify on a live document.
+
 
 ## Browser WASM build & delivery (rhwp + office)
 
-The in-browser editors' WebAssembly is delivered **through the `ehwp` /
-`libreofficex` deps via git-LFS** — do NOT hand-`cp` builds into `assets/vendor/`
-(retired; `assets/vendor/{rhwp,office}` is local scratch the mix aliases populate
-from `deps/`).
+Browser WASM ships through `ehwp` / `libreofficex` `priv/wasm` via git LFS, not `assets/vendor`.
+Build in the source repo (`$RHWP_CORE_DIR` with `wasm-pack build --target web`, or `$LIBREOFFICE_CORE_DIR` / `$LIBREOFFICE_WASM_BUILD_DIR` with `./run-build.sh Executable_soffice_bin -j14`), copy outputs into `$EHWP_DEP_DIR/priv/wasm` or `$LIBREOFFICEX_DEP_DIR/priv/wasm`, push the dep repo, then run `mise exec -- mix deps.update <dep>` and the matching asset task separately.
+Keep mix deps fetched over https and LFS pushes over ssh push-url; stage only relevant `mix.lock` lines and do not run concurrent builds of the same source repo.
+Restart with `deps_changed` only after deps/NIFs/assets moved, then verify the editor on a live document.
 
-Cycle: **build in the source repo → ship the wasm into the dep repo (git-LFS, ssh
-push) → `mix deps.update <dep>` (ecrits; https + LFS smudge) → `mix
-assets.<dep>_wasm` → restart `:4000`.**
 
-Use local environment variables for private checkout locations; do not commit
-machine-local paths:
+## exfuse dep (the doc VFS FUSE layer)
 
-- `RHWP_CORE_DIR`: rhwp source checkout
-- `LIBREOFFICE_CORE_DIR`: LibreOffice source checkout
-- `LIBREOFFICE_WASM_BUILD_DIR`: LibreOffice WASM build directory
-- `EHWP_DEP_DIR`: ehwp dependency checkout
-- `LIBREOFFICEX_DEP_DIR`: libreofficex dependency checkout
-
-| editor | source repo | build → output | shipped in | served at |
-|---|---|---|---|---|
-| HWP (rhwp) | `$RHWP_CORE_DIR` | `wasm-pack build --target web` → `pkg/{rhwp_bg.wasm,rhwp.js,*.d.ts}` | `ehwp` `priv/wasm/` | `/assets/rhwp/rhwp_bg.wasm`; `rhwp.js` esbuild-bundled |
-| Office | `$LIBREOFFICE_CORE_DIR` (build dir `$LIBREOFFICE_WASM_BUILD_DIR`, see its `BUILD-NOTES.md`) | `./run-build.sh Executable_soffice_bin -j14` → `instdir/program/soffice.{wasm,js,data}` | `libreofficex` `priv/wasm/` | `/assets/office/soffice.*` |
-
-Ship: `cp` the build into `$EHWP_DEP_DIR/priv/wasm/` or
-`$LIBREOFFICEX_DEP_DIR/priv/wasm/`, `git add priv/wasm/` (LFS auto-tracks
-`*.wasm`/`*.data` via `.gitattributes`), commit,
-`git push origin HEAD`.
-
-- **mix-deps fetch = https** (`storage.cloudxyz.org`) — NEVER change the `mix.exs` dep URLs to ssh.
-- **LFS push = ssh** (`git@code.cloudxyz.org:IlYoung/<repo>.git`, set as the repo's push-url only) — https push of large LFS objects fails on this gitea server.
-- `git-lfs` must be installed; smudge over https works, so `mix deps.get` delivers the real wasm to newcomers.
-
-Pull into ecrits: `mise exec -- mix deps.update ehwp` (or `libreofficex`) →
-`mise exec -- mix assets.rhwp_wasm` / `assets.office_wasm` (run them as SEPARATE
-invocations — `mix a b` runs task `a` with arg `b`) → `restart_app_server`
-`deps_changed`. Then **verify the editor on the live document — never harness-only.**
-
-Gotchas: the office push is ~246MB (slow — background it); stage only the
-`ehwp`/`libreofficex` lines of `mix.lock` (it carries unrelated pre-existing
-bumps); only ONE build of a given source repo at a time (concurrent builds of the
-same repo stomp each other).
+`exfuse` is a plain source git dep for the doc VFS FUSE layer; it is fetched from public GitHub over https and builds its Rust port locally with cargo and macFUSE.
+For exfuse bugs, work in `$EXFUSE_DIR`, test with `mise exec -- mix test`, push to `github.com/humdrum00001010/exfuse`, then run `mise exec -- mix deps.update exfuse` in ecrits to advance the locked branch and rebuild the port.
+Restart with `deps_changed`, then verify the live mount/workspace path; do not patch `deps/exfuse` or ship prebuilt port artifacts.
 
 <!-- phoenix-gen-auth-start -->
 ## Authentication
