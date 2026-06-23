@@ -122,6 +122,15 @@ defmodule Ecrits.Local.AcpAgent.Session do
   def title(pid) when is_pid(pid), do: GenServer.call(pid, :title)
 
   @doc """
+  Persist an agent/provider-generated chat title without marking it as a user edit.
+
+  The caller already received the title event, so this only updates the durable
+  snapshot used by rail lists and re-attach.
+  """
+  def set_generated_title(pid, title) when is_pid(pid) and is_binary(title),
+    do: GenServer.call(pid, {:set_generated_title, title})
+
+  @doc """
   Set the chat title explicitly (a user rename). Marks the title user-edited so
   the first-prompt auto-title never overrides it afterwards, and broadcasts a
   `:thread_title` event so every attached LiveView updates its header.
@@ -260,6 +269,19 @@ defmodule Ecrits.Local.AcpAgent.Session do
     title = String.trim(title)
     state = %{state | title: title, title_user_edited?: true, title_emitted?: true}
     {:reply, :ok, emit(state, %{type: :thread_title, title: title})}
+  end
+
+  def handle_call({:set_generated_title, title}, _from, state) do
+    title = String.trim(title)
+
+    state =
+      if title == "" or Map.get(state, :title_user_edited?, false) do
+        state
+      else
+        %{state | title: title, title_emitted?: true}
+      end
+
+    {:reply, :ok, state}
   end
 
   def handle_call(:transcript, _from, state) do
@@ -1192,6 +1214,7 @@ defmodule Ecrits.Local.AcpAgent.Session do
       transcript: Enum.reverse(state.transcript),
       status: status(state),
       title: state.title,
+      title_user_edited?: Map.get(state, :title_user_edited?, false),
       # Number of mid-turn sends still queued (Phase 5), so a refresh can repaint
       # the "N 대기" pending state.
       pending: length(state.queue),

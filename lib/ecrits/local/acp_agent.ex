@@ -331,6 +331,14 @@ defmodule Ecrits.Local.AcpAgent do
     end
   end
 
+  @doc "Persist an agent/provider-generated chat title without pinning it as a user edit."
+  def set_generated_title(session_id, title) when is_binary(session_id) and is_binary(title) do
+    case safe_whereis(session_id) do
+      pid when is_pid(pid) -> Session.set_generated_title(pid, title)
+      nil -> {:error, :not_found}
+    end
+  end
+
   @doc "Rename a session's chat thread (user edit)."
   def rename(session_id, title) when is_binary(session_id) and is_binary(title) do
     case safe_whereis(session_id) do

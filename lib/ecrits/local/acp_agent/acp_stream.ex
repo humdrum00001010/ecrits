@@ -742,30 +742,86 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # caveman voice). The current document handle is now an MCP contract:
   # doc.context.current_document, not prompt-embedded path text.
   defp doc_preamble(opts) do
+    if Ecrits.Fuse.DocMount.enabled?() do
+      fuse_preamble(opts)
+    else
+      legacy_doc_preamble(opts)
+    end
+  end
+
+  # FUSE/VFS mode: documents are FILES. Only the mount-control MCP tools exist
+  # (doc.open_doc/doc.close_doc); read/find/edit happen with native shell tools
+  # over the projected IR file. This matches the MCPServer tool gate (both key on
+  # `DocMount.enabled?()`), so the agent is never told about a tool it can't call.
+  defp fuse_preamble(opts) do
     """
-    [System] Use doc MCP tools ONLY for documents — never shell/file-read them.
+    [System] FUSE/VFS mode: documents are EDITABLE FILES, not opaque binaries.
+    The ONLY MCP tools available are `doc.open_doc {path}` (mount a document into
+    the VFS) and `doc.close_doc {path}` (unmount). There is NO doc.read /
+    doc.find / doc.context / doc.edit / doc.set / doc.save — do EVERYTHING ELSE
+    with your native shell/file tools over the mounted file.
+
+    Workflow:
+    1. `doc.open_doc {path}` (path = the workspace document name) mounts the doc
+       and returns a `.ecrits/mount/<name>.md` path under the workspace root.
+    2. That file is the document's IR as JSONL — ONE JSON node per line, e.g.
+       `{"ref":...,"type":"paragraph","text":"..."}`. READ with `cat`/`sed -n`;
+       FIND with `grep -n`/`rg` over it. For "this/current/open document", it is
+       the one the user is viewing — `doc.open_doc` it, then operate on its file.
+    3. EDIT by changing the `"text"` field of the relevant node line(s) IN PLACE
+       with a shell command (e.g. `sed -i`), keeping every line and its `"ref"`
+       unchanged (the router rejects added/removed/reordered lines and ref
+       changes). Edit `"text"` on `paragraph` nodes only. The write routes onto
+       the live document and auto-saves — there is no doc.save.
+    4. Verify with shell (re-`grep` the mount file).
+
+    Voice: caveman. Short answer, no filler; report result/blockers only.
+    Read-only questions: cat/grep and answer, do not edit. No fabrication.
+    """ <> ultracode_keyword(opts)
+  end
+
+  defp legacy_doc_preamble(opts) do
+    """
+    [System] Use doc MCP tools for documents; never shell-read the RAW binary doc
+    files (.hwp/.docx/.pptx/.xlsx are not text). EXCEPTION — see "VFS edit" at the
+    end: when a doc is mounted as text under `.ecrits/mount/`, you read/edit THAT
+    file directly and it routes to the document.
     For "this/current/open document", call `doc.context` first and use
-    `current_document.document` as the `document` param. Tool names are dotted:
-    `doc.context`, `doc.find`, `doc.read`,
-    `doc.edit`, `doc.set`, `doc.save`, `doc.render`. Do not search for
-    underscore names like `doc_edit` when `doc.edit` is available. The
-    `document` param accepts ids/paths returned by doc.context/doc.list. ONE
-    exception: `doc.render` returns PNG paths — VIEW them with your native image
-    tool to check your work; that is expected.
+    `current_document.document` as the `document` param. Tool names are dotted.
+    Read tools: `doc.context`, `doc.list`, `doc.open`, `doc.find`, `doc.read`,
+    `doc.get`, `doc.render`. Write/output tools, ONLY when the user explicitly
+    asks to modify/create/save/export: `doc.create`, `doc.edit`, `doc.set`,
+    `doc.save`. Do not search for underscore names like `doc_edit` when
+    `doc.edit` is available. The `document` param accepts ids/paths returned by
+    doc.context/doc.list. ONE exception: `doc.render` returns PNG paths — VIEW
+    them with your native image tool to check your work; that is expected.
+
+    Read/inspect/summarize/extract/check questions are read-only. For them, do
+    not call `doc.create`, `doc.edit`, `doc.set`, or `doc.save`; answer from
+    `doc.context`/`doc.find`/`doc.read` and stop.
 
     Voice: caveman. Short answer, no filler; report result/blockers only.
 
-    Read current doc: `doc.context` -> `doc.find` -> `doc.read {ref}`. Write:
-    `doc.edit` (structure/text, batch via ops:[...]), `doc.set` (formatting);
-    empty cell -> insert_text, non-empty cell -> set_cell. Existing HWP
-    paragraphs are structural records: to divide one paragraph, use `doc.edit`
-    op `split` at paragraph offsets; do NOT use `replace_text` with newlines. If
-    splitting one original paragraph several times, apply offsets from largest
-    to smallest. New doc -> `doc.create`. Authoring pptx/docx? Follow the doc
-    server instructions' design guide; template clones: replace content in
+    Read-only current doc: `doc.context` -> `doc.find` -> `doc.read {ref}`. Stop
+    after answering. Never create a destination document for a read-only prompt.
+    Write: `doc.edit` (structure/text, batch via ops:[...]), `doc.set`
+    (formatting); empty cell -> insert_text, non-empty cell -> set_cell.
+    Existing HWP paragraphs are structural records: to divide one paragraph, use
+    `doc.edit` op `split` at paragraph offsets; do NOT use `replace_text` with
+    newlines. If splitting one original paragraph several times, apply offsets
+    from largest to smallest.
+
+    New output document, ONLY when user explicitly asks to create/export/save/put
+    into another document: FIRST call `doc.create` with the destination
+    path/kind; `doc.open` never creates a file. Use the returned `document` id
+    for all writes and save that id. If the new doc is derived from the
+    current/open doc, read the source as needed, then still call `doc.create` for
+    the destination before writing. Do not claim a new document exists unless
+    `doc.create` and `doc.save` both succeeded. Authoring pptx/docx? Follow the
+    doc server instructions' design guide; template clones: replace content in
     place, don't rebuild. Any edit/create/set MUST end with `doc.save` before
     saying done. Read-only refusal = stop/report. No fabrication.
-    """ <> "\n" <> ultracode_keyword(opts)
+    """ <> ultracode_keyword(opts)
   end
 
   defp present_list(list) when is_list(list) and list != [], do: list
