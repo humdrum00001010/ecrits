@@ -638,7 +638,7 @@ const liveSocket = new LiveSocket("/live", Socket, {
 })
 
 const editorZoomAnimations = new WeakMap()
-const editorZoomDuration = 120
+const editorZoomSmoothingMs = 72
 const editorZoomMin = 0.5
 const editorZoomMax = 4
 const editorZoomMaxStep = 0.8
@@ -652,10 +652,12 @@ window.addEventListener("wheel", event => {
   event.preventDefault()
   const scroller = findEditorZoomScroller(content)
   const rect = scroller.getBoundingClientRect()
+  const scale = readEditorZoom(content)
   const state = editorZoomAnimations.get(content) || {
-    scale: readEditorZoom(content),
-    target: readEditorZoom(content),
+    scale,
+    target: scale,
     frame: null,
+    lastTime: null,
   }
   const step = Math.min(editorZoomMaxStep, Math.abs(event.deltaY) * editorZoomSensitivity)
   const factor = 1 + step
@@ -664,8 +666,6 @@ window.addEventListener("wheel", event => {
   state.scroller = scroller
   state.anchorX = event.clientX - rect.left
   state.anchorY = event.clientY - rect.top
-  state.startedAt = performance.now()
-  state.from = state.scale
   state.target = next
 
   content.dataset.editorZoom = formatEditorZoom(next)
@@ -675,7 +675,10 @@ window.addEventListener("wheel", event => {
   content.style.willChange = "transform"
 
   editorZoomAnimations.set(content, state)
-  if (!state.frame) state.frame = requestAnimationFrame(time => animateEditorZoom(content, time))
+  if (!state.frame) {
+    state.lastTime = performance.now()
+    state.frame = requestAnimationFrame(time => animateEditorZoom(content, time))
+  }
 }, {passive: false, capture: true})
 
 function animateEditorZoom(content, time) {
@@ -685,16 +688,18 @@ function animateEditorZoom(content, time) {
     return
   }
 
-  const progress = Math.min(1, Math.max(0, (time - state.startedAt) / editorZoomDuration))
-  const eased = 1 - Math.pow(1 - progress, 3)
-  const scale = state.from + (state.target - state.from) * eased
+  const dt = Math.min(40, Math.max(0, time - (state.lastTime || time)))
+  const alpha = 1 - Math.exp(-dt / editorZoomSmoothingMs)
+  const scale = Math.exp(Math.log(state.scale) + (Math.log(state.target) - Math.log(state.scale)) * alpha)
   applyEditorZoom(content, state, scale)
+  state.lastTime = time
 
-  if (progress < 1) {
+  if (Math.abs(state.target - state.scale) > 0.001) {
     state.frame = requestAnimationFrame(nextTime => animateEditorZoom(content, nextTime))
   } else {
     applyEditorZoom(content, state, state.target)
     state.frame = null
+    state.lastTime = null
     content.style.willChange = ""
   }
 }
