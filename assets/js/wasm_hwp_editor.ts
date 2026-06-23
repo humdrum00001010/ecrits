@@ -37,6 +37,7 @@ import { keyboardSubsystem } from "./wasm_hwp_keys.ts"
 const WASM_URL = "/assets/rhwp/rhwp_bg.wasm"
 const RHWP_JS_URL = "/assets/rhwp/rhwp.js"
 const LOCAL_EDITOR_COMMAND_EVENT = "ecrits:local-editor-command"
+const PREVIEW_AUTHORITY_EVENT = "ecrits:editor-preview-authority"
 
 // How long the doc must stay idle (no edits) before we export+snapshot bytes
 // to the server. Each edit is instant locally; persistence is debounced so we
@@ -181,12 +182,27 @@ const WasmHwpEditor = {
     this.pickerHoverRaf = null
     this.agentOpQueue = []
     this.agentOpProcessing = false
+    this.previewPatchText = ""
+    this.previewPatchCursor = null
+    this.previewPatchAnchor = null
+    this.previewPatchTarget = ""
+    this.previewPatchCount = 0
+    this.previewPatchHighlight = null
+    this.previewPatchTurnId = null
+    this.previewHookEventCount = 0
+    this.previewAuthorityPublishCount = 0
+    this.previewAuthorityRequestCount = 0
+    this.previewAuthorityEventCount = 0
+    this.previewAuthorityReloadCount = 0
+    this.previewAuthorityDeferredCount = 0
 
     this.imeProxy = this.el.querySelector("[data-role='local-hwp-ime-proxy']")
     this.pageStack = this.el.querySelector("[data-role='local-hwp-pages']")
 
     this.documentId = this.el.dataset.documentId || this.el.dataset.localDocumentId
     this.format = this.el.dataset.localDocumentFormat || "hwp"
+    this.mirror = this.el.dataset.editorMirror === "true"
+    this.el.__wasmHwpEditor = this
 
     // Pre-warm the wasm module so the first `hwp_wasm_load` doesn't pay the
     // instantiation cost on the critical path.
@@ -194,14 +210,38 @@ const WasmHwpEditor = {
 
     // Server pushes this when an HWP/HWPX document opens: fetch its raw bytes
     // and hand them to the WASM engine.
-    this.handleEvent("hwp_wasm_load", payload => this.loadDocument(payload))
+    this.handleEvent("hwp_wasm_load", payload => {
+      if (this.eventMatchesDocument(payload)) this.loadDocument(payload)
+    })
 
     // Agent edit/read/find routed from the server because THIS document is
     // `:browser`-backed in the Doc Pool (the WASM model here is its authority).
     // Apply against the same WASM doc the user is viewing, re-render, and reply
     // with the result so the agent's doc.* tool returns it.
-    this.handleEvent("doc.apply_edit", payload => this.handleAgentOp(payload))
-    this.handleEvent("local_document.save.request", payload => this.saveLocalDocument(payload))
+    this.handleEvent("doc.apply_edit", payload => {
+      if (!this.mirror && this.eventMatchesDocument(payload)) this.handleAgentOp(payload)
+    })
+    this.handleEvent("local_document.save.request", payload => {
+      if (!this.mirror && this.eventMatchesDocument(payload)) this.saveLocalDocument(payload)
+    })
+    this.handleEvent("editor.preview_delta", payload => {
+      this.previewHookEventCount += 1
+      this.el.dataset.previewHookEventCount = String(this.previewHookEventCount)
+      if (this.eventMatchesDocument(payload)) {
+        if (this.mirror) {
+          this.el.dataset.previewAuthorityState = "waiting"
+          window.setTimeout(() => this.requestAuthoritativePreview(payload), 0)
+        } else {
+          this.handlePreviewDelta(payload)
+        }
+      }
+    })
+    this.onPreviewAuthority = event => {
+      const payload = event && event.detail ? event.detail : {}
+      if (payload.source_editor_id === this.el.id) return
+      if (this.mirror && this.eventMatchesDocument(payload)) this.applyAuthoritativePreviewState(payload)
+    }
+    window.addEventListener(PREVIEW_AUTHORITY_EVENT, this.onPreviewAuthority)
 
     // On a fresh mount the server's `hwp_wasm_load` push may have raced ahead of
     // this hook registering its `handleEvent` above. The host element also
@@ -209,7 +249,7 @@ const WasmHwpEditor = {
     // load is idempotent (a later `hwp_wasm_load` for the same URL just
     // re-renders the same bytes).
     const bytesUrl = this.el.dataset.bytesUrl
-    if (bytesUrl) this.loadDocument({ url: bytesUrl })
+    if (bytesUrl) this.loadDocument({ url: bytesUrl, document_id: this.documentId })
 
     // Re-render visible pages on container resize (zoom/devicePixelRatio shifts).
     this.onResize = () => this.renderVisiblePages()
@@ -275,6 +315,7 @@ const WasmHwpEditor = {
     }
     if (this.pickerHoverRaf) cancelAnimationFrame(this.pickerHoverRaf)
     window.removeEventListener("resize", this.onResize)
+    window.removeEventListener(PREVIEW_AUTHORITY_EVENT, this.onPreviewAuthority)
     this.el.removeEventListener("mousedown", this.onMouseDown)
     this.el.removeEventListener("dblclick", this.onDoubleClick)
     document.removeEventListener("mousemove", this.onMouseMove)
@@ -282,19 +323,371 @@ const WasmHwpEditor = {
     document.removeEventListener(LOCAL_EDITOR_COMMAND_EVENT, this.onToolbarCommand)
     if (this.unbindElementPicker) this.unbindElementPicker()
     this.unbindEditing()
+    if (this.el.__wasmHwpEditor === this) delete this.el.__wasmHwpEditor
     if (this.doc) {
       try { this.doc.free() } catch (_) {}
       this.doc = null
     }
   },
 
-  async loadDocument({ url }) {
+  updated() {
+    if (this.mirror) {
+      const payload = {
+        document_id: this.documentId,
+        turn_id: this.el.dataset.previewTurnId,
+        text: this.el.dataset.previewText || "",
+        delta_count: Number(this.el.dataset.previewDeltaCount || "0")
+      }
+      this.el.dataset.previewAuthorityState = "waiting"
+      this.requestAuthoritativePreview(payload)
+    }
+  },
+
+  eventMatchesDocument(payload = {}) {
+    const id = payload.document_id || payload.documentId
+    if (this.mirror) return !!id && !!this.documentId && String(id) === String(this.documentId)
+    return !id || !this.documentId || String(id) === String(this.documentId)
+  },
+
+  handlePreviewDelta(payload = {}) {
+    this.ensurePreviewPatchTurn(payload)
+    const delta = payload.delta == null ? "" : String(payload.delta)
+    const current = this.previewPatchText || this.el.dataset.previewText || ""
+    const target = typeof payload.text === "string" ? payload.text : current + delta
+    this.patchPreviewToMountedDoc(target, payload)
+  },
+
+  requestAuthoritativePreview(payload = {}) {
+    if (!this.mirror) return
+    this.previewAuthorityRequestCount += 1
+    this.el.dataset.previewAuthorityRequestCount = String(this.previewAuthorityRequestCount)
+    let targetCount = 0
+    let targetHookCount = 0
+    const targetIds = []
+    for (const target of document.querySelectorAll("[data-role='local-hwp-editor'][data-editor-mirror='false']")) {
+      const id = target.dataset.documentId || target.dataset.localDocumentId
+      if (id === this.documentId) {
+        targetCount += 1
+        targetIds.push(target.id)
+        if (target.__wasmHwpEditor && typeof target.__wasmHwpEditor.publishAuthoritativePreview === "function") {
+          targetHookCount += 1
+          target.__wasmHwpEditor.publishAuthoritativePreview(payload)
+        }
+      }
+    }
+    this.el.dataset.previewAuthorityTargetCount = String(targetCount)
+    this.el.dataset.previewAuthorityTargetHookCount = String(targetHookCount)
+    this.el.dataset.previewAuthorityTargetIds = targetIds.join(",")
+    if (targetHookCount === 0) this.el.dataset.previewAuthorityState = targetCount === 0 ? "missing" : "waiting"
+  },
+
+  applyAuthoritativePreviewState(payload = {}) {
+    if (!this.mirror) return
+    this.previewAuthorityEventCount += 1
+    this.el.dataset.previewAuthorityEventCount = String(this.previewAuthorityEventCount)
+    this.el.dataset.previewAuthorityState = "received"
+    this.el.dataset.previewAuthoritySourceId = payload.source_editor_id || ""
+    const text =
+      typeof payload.model_text === "string" ? payload.model_text :
+      typeof payload.text === "string" ? payload.text :
+      ""
+    this.handlePreviewDelta({
+      ...payload,
+      authoritative: true,
+      text,
+      delta_count: payload.delta_count || payload.preview_patch_count
+    })
+    this.el.dataset.previewAuthorityState = "applied"
+  },
+
+  publishAuthoritativePreview(payload = {}) {
+    if (this.mirror) return
+    const expected = Number(payload.delta_count || payload.preview_patch_count || 0)
+    if (Number.isFinite(expected) && expected > 0 && this.previewPatchCount < expected) {
+      this.previewAuthorityDeferredCount += 1
+      this.el.dataset.previewAuthorityDeferredCount = String(this.previewAuthorityDeferredCount)
+      this.el.dataset.previewAuthorityDeferredDeltaCount = String(expected)
+      return
+    }
+    const detail = this.buildAuthoritativePreviewState(payload)
+    if (!detail) return
+    this.previewAuthorityPublishCount += 1
+    this.el.dataset.previewAuthorityPublishCount = String(this.previewAuthorityPublishCount)
+    window.dispatchEvent(new CustomEvent(PREVIEW_AUTHORITY_EVENT, { detail }))
+  },
+
+  buildAuthoritativePreviewState(payload = {}) {
+    if (!this.doc) return null
+    const modelText = this.readPreviewModelText()
+    const text = modelText || this.previewPatchText || ""
+    return {
+      ...payload,
+      authoritative: true,
+      document_id: this.documentId,
+      turn_id: payload.turn_id || payload.turnId || this.previewPatchTurnId,
+      text,
+      model_text: modelText,
+      target_text: this.previewPatchText,
+      delta_count: this.previewPatchCount,
+      preview_patch_count: this.previewPatchCount,
+      model_matches: this.el.dataset.previewModelMatches === "true",
+      source_editor_id: this.el.id,
+      source_editor_mirror: false,
+      anchor: this.previewPatchAnchor,
+      cursor: this.previewPatchCursor
+    }
+  },
+
+  ensurePreviewPatchTurn(payload = {}) {
+    const turnId = payload.turn_id || payload.turnId || null
+    if (!turnId || this.previewPatchTurnId === turnId) return
+    if (!this.previewPatchTurnId) {
+      this.previewPatchTurnId = turnId
+      return
+    }
+    this.resetPreviewPatchState(turnId)
+  },
+
+  resetPreviewPatchState(turnId = null) {
+    this.previewPatchText = ""
+    this.previewPatchCursor = null
+    this.previewPatchAnchor = null
+    this.previewPatchTarget = ""
+    this.previewPatchCount = 0
+    this.previewPatchHighlight = null
+    this.previewPatchTurnId = turnId
+    this.el.dataset.previewText = ""
+    this.el.dataset.previewDeltaCount = "0"
+    this.el.dataset.previewPatchPending = "false"
+    this.el.dataset.previewPatchMismatch = "false"
+    this.el.dataset.previewPatchMode = ""
+    this.el.dataset.previewPatchCount = "0"
+    this.el.dataset.previewModelLength = "0"
+    this.el.dataset.previewModelTail = ""
+    this.el.dataset.previewModelMatches = "false"
+    this.el.dataset.previewHighlightMode = ""
+    this.el.dataset.previewHighlightCount = "0"
+    this.el.dataset.previewHighlightPages = ""
+    this.el.dataset.previewHighlightError = ""
+  },
+
+  patchPreviewToMountedDoc(target, payload = {}) {
+    const text = typeof target === "string" ? target : ""
+    this.previewPatchTarget = text
+    this.el.dataset.previewText = text
+    if (payload.delta_count != null) this.el.dataset.previewDeltaCount = String(payload.delta_count)
+
+    if (!this.doc) {
+      this.el.dataset.previewPatchPending = "true"
+      return
+    }
+
+    this.el.dataset.previewPatchPending = "false"
+    if (!text.startsWith(this.previewPatchText)) {
+      this.el.dataset.previewPatchMismatch = "true"
+      if (payload.authoritative && this.mirror) this.reloadPreviewMirrorFromAuthority(text, payload)
+      return
+    }
+
+    const suffix = text.slice(this.previewPatchText.length)
+    if (suffix) {
+      this.patchPreviewSuffixIntoDoc(suffix)
+      this.previewPatchText = text
+    }
+
+    const count = Number(payload.delta_count || this.el.dataset.previewDeltaCount || this.previewPatchCount || 0)
+    if (Number.isFinite(count) && count > 0) this.previewPatchCount = count
+    this.el.dataset.previewPatchMode = "direct-doc"
+    this.el.dataset.previewPatchCount = String(this.previewPatchCount)
+    this.updatePreviewPatchInspection()
+    this.renderPreviewPatchHighlight()
+    if (!this.mirror) this.publishAuthoritativePreview(payload)
+    this.el.dispatchEvent(new CustomEvent("ecrits:editor-preview-delta", {
+      bubbles: true,
+      detail: {
+        document_id: this.documentId,
+        turn_id: payload.turn_id,
+        patch_mode: "direct-doc",
+        delta_count: this.previewPatchCount,
+        model_matches: this.el.dataset.previewModelMatches === "true"
+      }
+    }))
+  },
+
+  patchPreviewSuffixIntoDoc(text) {
+    const cursor = this.ensurePreviewPatchCursor()
+    if (!cursor) return
+    for (const [index, line] of String(text).split("\n").entries()) {
+      if (index > 0) {
+        this.doc.splitParagraph(cursor.section, cursor.paragraph, cursor.offset)
+        cursor.paragraph += 1
+        cursor.offset = 0
+      }
+      if (line) {
+        this.doc.insertText(cursor.section, cursor.paragraph, cursor.offset, line)
+        cursor.offset += line.length
+      }
+    }
+    this._elementsCache = null
+    this.rendered.clear()
+    this.renderVisiblePages()
+    this.renderPreviewPatchHighlight()
+    this.scrollPreviewPatchIntoView()
+    if (!this.mirror) this.scheduleSnapshot()
+  },
+
+  reloadPreviewMirrorFromAuthority(text, payload = {}) {
+    if (!this.mirror) return
+    const url = this.loadedUrl || this.el.dataset.bytesUrl
+    if (!url) return
+    this.previewAuthorityReloadCount += 1
+    this.el.dataset.previewAuthorityReloadCount = String(this.previewAuthorityReloadCount)
+    this.el.dataset.previewAuthorityState = "reloading"
+    const turnId = payload.turn_id || payload.turnId || this.previewPatchTurnId
+    this.resetPreviewPatchState(turnId)
+    this.previewPatchTarget = text
+    this.el.dataset.previewText = text
+    if (payload.delta_count != null) this.el.dataset.previewDeltaCount = String(payload.delta_count)
+    this.el.dataset.previewPatchPending = "true"
+    this.loadDocument({ url, document_id: this.documentId, force: true })
+  },
+
+  scrollPreviewPatchIntoView() {
+    const cursor = this.previewPatchCursor
+    if (!cursor || !this.doc) return
+    this.caret = { section: cursor.section, paragraph: cursor.paragraph, offset: cursor.offset, cell: null }
+    this.refreshCursorRect()
+    const pageIndex = this.caret && this.caret.cursorRect && this.caret.cursorRect.pageIndex
+    if (!Number.isInteger(pageIndex)) return
+    const section = this.pageSection(pageIndex)
+    if (!section) return
+    this.el.scrollTop = Math.max(0, section.offsetTop - 12)
+    this.renderPage(pageIndex)
+    this.drawCaret(this.caret)
+    this.anchorProxy()
+  },
+
+  ensurePreviewPatchCursor() {
+    if (this.previewPatchCursor) return this.previewPatchCursor
+    let ref = { section: 0, paragraph: 0, offset: 0 }
+    try {
+      const bodyParagraphs = this.collectElements().filter(el => {
+        const r = el && el.ref
+        return el.type === "paragraph" && r &&
+          Number.isInteger(r.section) && Number.isInteger(r.paragraph) &&
+          !r.cell && !r.note
+      })
+      const body = bodyParagraphs.find(el => String(el.text || "").trim() !== "") || bodyParagraphs[0]
+      if (body && body.ref) ref = { section: body.ref.section, paragraph: body.ref.paragraph, offset: 0 }
+    } catch (_) {}
+    this.previewPatchAnchor = { ...ref }
+    this.previewPatchCursor = { ...ref }
+    return this.previewPatchCursor
+  },
+
+  updatePreviewPatchInspection() {
+    const modelText = this.readPreviewModelText()
+    this.el.dataset.previewModelLength = String(modelText.length)
+    this.el.dataset.previewModelTail = modelText.slice(-80)
+    this.el.dataset.previewModelMatches = String(modelText === this.previewPatchText)
+  },
+
+  readPreviewModelText() {
+    const anchor = this.previewPatchAnchor
+    if (!anchor || !this.doc) return ""
+    let modelText = ""
+    try {
+      modelText = this.doc.getTextRange(
+        anchor.section,
+        anchor.paragraph,
+        anchor.offset,
+        this.previewPatchText.length
+      ) || ""
+    } catch (_) {
+      modelText = ""
+    }
+    return modelText
+  },
+
+  renderPreviewPatchHighlight() {
+    if (!this.mirror || !this.doc) return
+    const anchor = this.previewPatchAnchor
+    const cursor = this.previewPatchCursor
+    if (!anchor || !cursor) return
+
+    if (anchor.section !== cursor.section ||
+        (anchor.paragraph === cursor.paragraph && anchor.offset === cursor.offset)) {
+      this.previewPatchHighlight = null
+      this.el.dataset.previewHighlightMode = ""
+      this.el.dataset.previewHighlightCount = "0"
+      this.el.dataset.previewHighlightPages = ""
+      return
+    }
+
+    let raw
+    try {
+      raw = this.doc.getSelectionRects(
+        anchor.section,
+        anchor.paragraph,
+        anchor.offset,
+        cursor.paragraph,
+        cursor.offset
+      )
+    } catch (error) {
+      this.previewPatchHighlight = null
+      this.el.dataset.previewHighlightMode = "agent-edit-range"
+      this.el.dataset.previewHighlightCount = "0"
+      this.el.dataset.previewHighlightPages = ""
+      this.el.dataset.previewHighlightError = String(error && error.message ? error.message : error)
+      return
+    }
+
+    let rects = []
+    try {
+      const parsed = raw ? JSON.parse(raw) : []
+      rects = Array.isArray(parsed) ? parsed : []
+    } catch (_) {
+      rects = []
+    }
+
+    this.previewPatchHighlight = {
+      section: anchor.section,
+      start: { paragraph: anchor.paragraph, offset: anchor.offset },
+      end: { paragraph: cursor.paragraph, offset: cursor.offset },
+      rects
+    }
+    const pages = [...new Set(rects.map(r => r.pageIndex).filter(Number.isInteger))]
+    this.el.dataset.previewHighlightMode = "agent-edit-range"
+    this.el.dataset.previewHighlightCount = String(rects.length)
+    this.el.dataset.previewHighlightPages = pages.join(",")
+    this.el.dataset.previewHighlightError = ""
+
+    for (const page of pages) this.paintPreviewPatchHighlightOnPage(page)
+  },
+
+  paintPreviewPatchHighlightOnPage(pageIndex) {
+    const highlight = this.previewPatchHighlight
+    if (!highlight || !Array.isArray(highlight.rects) || highlight.rects.length === 0) return
+    const overlay = this.pageOverlay(pageIndex)
+    if (!overlay) return
+    const ctx = overlay.getContext("2d")
+    if (!ctx) return
+    const s = this.scale || (window.devicePixelRatio || 1)
+    ctx.fillStyle = "rgba(245, 158, 11, 0.30)"
+    for (const r of highlight.rects) {
+      if (r.pageIndex !== pageIndex) continue
+      ctx.fillRect(r.x * s, r.y * s, Math.max(1, r.width) * s, Math.max(1, r.height) * s)
+    }
+  },
+
+  async loadDocument({ url, force = false }) {
+    if (!url) return
     // Idempotent: a re-pushed `hwp_wasm_load` for the URL we already hold must
     // NOT rebuild the doc — the in-browser doc is the authoritative copy for the
     // viewed document, so reloading the original bytes would discard live edits.
     // (Spurious re-pushes come from tree-refresh / fs-watcher / reconcile cycles.)
     // Reload only on a genuine document switch (a different URL).
-    if (this.doc && this.loadedUrl === url) return
+    if (this.doc && this.loadedUrl === url && !force) return
     try {
       await ensureWasm()
       const response = await fetch(url, { credentials: "same-origin" })
@@ -327,10 +720,16 @@ const WasmHwpEditor = {
       this.composing = null
       this.undoStack = []
       this.redoStack = []
-      window.__rhwpDoc = this.doc
+      this.previewPatchHighlight = null
+      if (!this.mirror) window.__rhwpDoc = this.doc
 
       this.buildPageStack()
       this.renderVisiblePages()
+      if (this.previewPatchTarget || this.el.dataset.previewText) this.patchPreviewToMountedDoc(this.previewPatchTarget || this.el.dataset.previewText || "", {
+        authoritative: this.mirror,
+        turn_id: this.previewPatchTurnId || this.el.dataset.previewTurnId,
+        delta_count: Number(this.el.dataset.previewDeltaCount || "0")
+      })
       // The browser becomes this doc's authority only now that the model is
       // actually loaded — the LiveView attaches the Session viewer on this
       // event (a tab whose editor failed to load must NOT capture doc.* routing).
@@ -342,6 +741,7 @@ const WasmHwpEditor = {
   },
 
   notifyViewerState(ready) {
+    if (this.mirror) return
     const id = this.documentId
     if (!id) return
     try {
@@ -426,6 +826,7 @@ const WasmHwpEditor = {
         overlay.height = canvas.height
       }
       this.rendered.set(index, true)
+      this.paintPreviewPatchHighlightOnPage(index)
       // Redraw the caret if it lives on this page (a re-render clears it).
       if (this.caret && this.caret.cursorRect && this.caret.cursorRect.pageIndex === index) {
         this.drawCaret(this.caret)
@@ -693,9 +1094,13 @@ const WasmHwpEditor = {
     this.clearSelectionOverlays()
 
     const sel = this.selection
-    if (!sel) return
+    if (!sel) {
+      if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
+      return
+    }
     // Collapsed selection => nothing to paint.
     if (sel.anchor.paragraph === sel.focus.paragraph && sel.anchor.offset === sel.focus.offset) {
+      if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
       return
     }
 
@@ -719,10 +1124,14 @@ const WasmHwpEditor = {
       rects = raw ? JSON.parse(raw) : []
     } catch (error) {
       console.error("[wasm-hwp] getSelectionRects failed", error)
+      if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
       return
     }
     window.__rhwpSelectionRects = rects
-    if (!Array.isArray(rects) || rects.length === 0) return
+    if (!Array.isArray(rects) || rects.length === 0) {
+      if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
+      return
+    }
 
     const s = this.scale
     for (const r of rects) {
@@ -733,6 +1142,7 @@ const WasmHwpEditor = {
       ctx.fillStyle = "rgba(29, 78, 216, 0.28)" // matches the caret blue
       ctx.fillRect(r.x * s, r.y * s, Math.max(1, r.width) * s, Math.max(1, r.height) * s)
     }
+    if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
   },
 
   // Clear all overlay canvases (selection highlight + any stale caret) across the
@@ -749,6 +1159,13 @@ const WasmHwpEditor = {
   pageOverlay(index) {
     const section = this.pageSection(index)
     return section ? section.querySelector("[data-role='ehwp-caret-overlay']") : null
+  },
+
+  paintPreviewPatchHighlightPages() {
+    const highlight = this.previewPatchHighlight
+    if (!highlight || !Array.isArray(highlight.rects)) return
+    const pages = [...new Set(highlight.rects.map(r => r.pageIndex).filter(Number.isInteger))]
+    for (const page of pages) this.paintPreviewPatchHighlightOnPage(page)
   },
 
   // Order a selection's anchor/focus into [start, end] in document order.
@@ -852,7 +1269,7 @@ const WasmHwpEditor = {
       this.caret = this.cloneEditorPoint(snapshot.caret)
       this.selection = this.cloneEditorPoint(snapshot.selection)
       this.composing = null
-      window.__rhwpDoc = this.doc
+      if (!this.mirror) window.__rhwpDoc = this.doc
       this.buildPageStack()
       this.renderVisiblePages()
       this.clearSelectionOverlays()
@@ -981,7 +1398,12 @@ const WasmHwpEditor = {
 
   hwpToolbarImage(detail) {
     if (!detail || !detail.image_base64) return
-    const ref = this.hwpToolbarCaretRef() || this.resolveEndRef("end")
+    // Insert where the user can SEE it: the caret if one is set, otherwise the
+    // paragraph at the top of the current viewport, and only as a last resort
+    // (nothing rendered) the document end. Falling straight to "end" dropped the
+    // image off-screen on multi-page docs.
+    const ref =
+      this.hwpToolbarCaretRef() || this.hwpToolbarViewportRef() || this.resolveEndRef("end")
     if (!ref) return
 
     const size = this.hwpToolbarImageSize(detail, 8504)
@@ -1054,6 +1476,34 @@ const WasmHwpEditor = {
     const c = this.caret
     if (!c) return null
     return this.hwpToolbarRef(c.section, c.paragraph, c.offset, c.cell)
+  },
+
+  // The paragraph ref at the top of the current viewport, so a toolbar insert
+  // lands on the screen the user is looking at rather than the document end.
+  // Resolved by the engine hit-test (pickAtPoint, via hwpPick) at the top-centre
+  // of the first page intersecting the scroll viewport. Null if nothing visible.
+  hwpToolbarViewportRef() {
+    if (!this.doc) return null
+    const hostRect = this.el.getBoundingClientRect()
+    for (const node of Array.from(this.el.querySelectorAll("[data-role='local-hwp-page']"))) {
+      const pageEl = node as any
+      const r = pageEl.getBoundingClientRect()
+      if (r.bottom <= hostRect.top + 8 || r.top >= hostRect.bottom) continue
+      const canvas = pageEl.querySelector("[data-role='ehwp-canvas']")
+      if (!canvas) continue
+      const pageIndex = Number(pageEl.dataset.pageIndex)
+      if (!Number.isFinite(pageIndex)) continue
+      const rect = canvas.getBoundingClientRect()
+      if (!rect.width || !rect.height) continue
+      const backingRatio = canvas.width / rect.width
+      const clientX = rect.left + rect.width / 2
+      const clientY = Math.min(Math.max(hostRect.top + 12, rect.top), rect.bottom)
+      const x = ((clientX - rect.left) * backingRatio) / this.scale
+      const y = ((clientY - rect.top) * backingRatio) / this.scale
+      const pick = this.hwpPick({ x, y }, pageIndex)
+      if (pick && pick.ref) return pick.ref
+    }
+    return null
   },
 
   hwpToolbarRef(section, paragraph, offset, cell) {
@@ -1772,6 +2222,7 @@ const WasmHwpEditor = {
     // overlay; clearing it for the caret blink would wipe them, so repaint
     // both before the caret.
     if (this.selection) this.paintSelectionOnPage(rect.pageIndex)
+    this.paintPreviewPatchHighlightOnPage(rect.pageIndex)
     this.paintAdornmentsOnPage(rect.pageIndex)
     if (!this.caretBlinkOn) return
     const s = this.scale
@@ -1951,7 +2402,17 @@ const WasmHwpEditor = {
 
     this.agentOpProcessing = true
     const { request_id, verb, payload } = request
-    const replyNow = body => this.pushEvent("doc.browser_reply", { request_id, ...body })
+    const finishMirrorOp = () => {
+      this.agentOpProcessing = false
+      this.processAgentOpQueue()
+    }
+    if (this.mirror && verb !== "edit" && verb !== "set") {
+      finishMirrorOp()
+      return
+    }
+    const replyNow = body => {
+      if (!this.mirror) this.pushEvent("doc.browser_reply", { request_id, ...body })
+    }
     const reply = (body, waitForPaint = false) => {
       const send = () => {
         replyNow(body)
@@ -1999,7 +2460,12 @@ const WasmHwpEditor = {
         case "save":
           // The viewer's WASM model is authority for an open doc — export its
           // CURRENT edited bytes so doc.save persists what the user sees.
-          reply({ result: this.exportForSave() })
+          this.exportForSave()
+            .then(saved => reply({ result: saved }))
+            .catch(error => {
+              console.error("[wasm-hwp] save export failed", error)
+              reply({ error: String((error && error.message) || error) })
+            })
           break
         default:
           reply({ error: `unsupported_verb:${verb}` })
@@ -2656,7 +3122,7 @@ const WasmHwpEditor = {
     this.rendered.clear()
     this.renderVisiblePages()
     if (this.caret) this.drawCaret(this.caret)
-    this.scheduleSnapshot()
+    if (!this.mirror) this.scheduleSnapshot()
     return { ok: true, result: { ok: true, ...extra } }
   },
 
@@ -3220,6 +3686,7 @@ const WasmHwpEditor = {
   // before the next byte snapshot lands. Body mirrors the rhwp DocumentEvent
   // shape the server's `rhwp.text.mutated` handler expects.
   recordOp(type, fields) {
+    if (this.mirror) return
     if (!this.documentId) return
     this.lamport += 1
     const eventId = `${this.documentId}:${Date.now()}:${this.lamport}`
@@ -3243,6 +3710,7 @@ const WasmHwpEditor = {
   // format and push the bytes so a browser close doesn't lose work. The engine
   // exposes exportHwp/exportHwpx, so this is a real save (not just an op-log).
   scheduleSnapshot() {
+    if (this.mirror) return
     if (this.snapshotTimer) clearTimeout(this.snapshotTimer)
     this.snapshotTimer = setTimeout(() => {
       this.snapshotTimer = null
@@ -3253,12 +3721,17 @@ const WasmHwpEditor = {
   // Export the open doc's current edited bytes for doc.save (the server writes
   // them to disk). Same serializer as the snapshot, but returned synchronously
   // to the doc.save round-trip rather than pushed as a checkpoint.
-  exportForSave() {
-    const bytes = this.format === "hwpx" ? this.doc.exportHwpx() : this.doc.exportHwp()
-    return { format: this.format, bytes_base64: this.bytesToBase64(bytes), bytes: bytes.length }
+  exportDocumentBytes() {
+    return this.format === "hwpx" ? this.doc.exportHwpx() : this.doc.exportHwp()
   },
 
-  saveLocalDocument(payload = {}) {
+  async exportForSave() {
+    const bytes = this.exportDocumentBytes()
+    return { format: this.format, ...(await this.uploadLocalDocumentBytes(bytes)) }
+  },
+
+  async saveLocalDocument(payload = {}) {
+    if (this.mirror) return
     const requestId = payload.request_id || `local-save:${++this.snapshotSeq}`
     const documentId = payload.document_id || this.documentId
     if (!this.doc || !documentId) {
@@ -3270,10 +3743,11 @@ const WasmHwpEditor = {
       return
     }
     try {
+      const saved = await this.exportForSave()
       this.pushEvent("local_document.viewer_save", {
         request_id: requestId,
         document_id: documentId,
-        ...this.exportForSave()
+        ...saved
       })
     } catch (error) {
       console.error("[wasm-hwp] save failed", error)
@@ -3285,22 +3759,65 @@ const WasmHwpEditor = {
     }
   },
 
-  pushSnapshot() {
+  async pushSnapshot() {
+    if (this.mirror) return
     if (!this.doc || !this.documentId) return
     let bytes
     try {
-      bytes = this.format === "hwpx" ? this.doc.exportHwpx() : this.doc.exportHwp()
+      bytes = this.exportDocumentBytes()
     } catch (error) {
       console.error("[wasm-hwp] export failed", error)
       return
     }
     const requestId = `${this.documentId}:snap:${++this.snapshotSeq}`
-    this.pushEvent("rhwp.local.snapshot.checkpoint", {
-      document_id: this.documentId,
-      request_id: requestId,
-      format: this.format,
-      bytes_base64: this.bytesToBase64(bytes)
+    try {
+      const uploaded = await this.uploadLocalDocumentBytes(bytes)
+      this.pushEvent("rhwp.local.snapshot.checkpoint", {
+        document_id: this.documentId,
+        request_id: requestId,
+        format: this.format,
+        ...uploaded
+      })
+    } catch (error) {
+      console.error("[wasm-hwp] snapshot upload failed", error)
+      this.pushEvent("rhwp.local.snapshot.checkpoint", {
+        document_id: this.documentId,
+        request_id: requestId,
+        error: String((error && error.message) || error)
+      })
+    }
+  },
+
+  async uploadLocalDocumentBytes(bytes) {
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+    const headers: Record<string, string> = { "content-type": "application/octet-stream" }
+    const csrf = this.localCsrfToken()
+    if (csrf) headers["x-csrf-token"] = csrf
+
+    const response = await fetch("/local/document-bytes", {
+      method: "POST",
+      credentials: "same-origin",
+      headers,
+      body: u8
     })
+    if (!response.ok) throw new Error(await this.uploadErrorFromResponse(response))
+
+    const body = await response.json()
+    if (!body || !body.bytes_token) throw new Error("document bytes upload returned no token")
+    return { bytes_token: body.bytes_token, bytes: body.bytes || u8.length }
+  },
+
+  localCsrfToken() {
+    return document.querySelector("meta[name='csrf-token']")?.getAttribute("content") || ""
+  },
+
+  async uploadErrorFromResponse(response) {
+    try {
+      const body = await response.json()
+      return body?.error || `document bytes upload failed: HTTP ${response.status}`
+    } catch (_) {
+      return `document bytes upload failed: HTTP ${response.status}`
+    }
   },
 
   bytesToBase64(bytes) {
