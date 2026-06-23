@@ -979,6 +979,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx"]}"
       )
 
+    render_async(lv, 2_000)
+    _ = render_local_hwp_editor_html(lv)
+
     # HWP/HWPX render entirely in the browser now: the server stands up the
     # WasmHwpEditor shell (no server-side SVG stream) and tells the hook where to
     # fetch the document's raw bytes for `new HwpDocument(bytes)`.
@@ -1244,6 +1247,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     {:ok, lv, _html} =
       live(conn, ~p"/workspace?#{[path: root, document: relative_path]}")
 
+    render_async(lv, 2_000)
+    _ = render_local_hwp_editor_html(lv)
+
     document_id = local_rhwp_document_id(lv)
 
     render_hook(lv, "rhwp.local.load", %{"document_id" => document_id})
@@ -1271,6 +1277,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     {:ok, reloaded_lv, _html} =
       live(conn, ~p"/workspace?#{[path: root, document: relative_path]}")
+
+    render_async(reloaded_lv, 2_000)
+    _ = render_local_hwp_editor_html(reloaded_lv)
 
     assert has_element?(
              reloaded_lv,
@@ -1310,7 +1319,6 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
            )
 
     assert {:ok, %Document{id: ^document_id}} = Document.document(document_id)
-    refute File.exists?(Path.join(root, ".ecrits"))
   end
 
   test "agent form reports real provider unavailable without fake response", %{conn: conn} do
@@ -1397,7 +1405,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 2_000
   end
 
-  test "ordinary document prompt uses MCP context instead of embedding selected path",
+  test "ordinary document prompt uses VFS document mount instead of embedding selected path",
        %{conn: conn} do
     use_test_agent_adapter!(
       adapter_opts: [
@@ -1420,9 +1428,18 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     |> render_submit()
 
     assert_receive {:fake_acp_prompt, _sid, prompt}, 1_000
+    assert prompt =~ "FUSE/VFS mode"
+    assert prompt =~ "doc.open_doc"
+    assert prompt =~ "doc.close_doc"
+    assert prompt =~ ".ecrits/mount/<name>.md"
+    assert prompt =~ "READ with `cat`/`sed -n`"
+    assert prompt =~ "FIND with `grep -n`/`rg`"
+    assert prompt =~ "there is no doc.save"
+    assert prompt =~ "Read-only questions: cat/grep and answer, do not edit"
+    assert prompt =~ "No fabrication"
+    assert prompt =~ "There is NO doc.read"
     assert prompt =~ "doc.context"
-    assert prompt =~ "current_document.document"
-    assert prompt =~ "ids/paths returned by doc.context/doc.list"
+    refute prompt =~ "current_document.document"
     refute prompt =~ "template.hwp"
     refute prompt =~ "pass this as `document`"
 
@@ -1515,19 +1532,16 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert is_binary(path) and String.ends_with?(path, "template.hwp")
   end
 
-  test "a browser refresh re-attaches the SAME durable agent (pid/thread/title/transcript)",
+  test "a browser refresh starts a fresh rail and keeps the old chat in recents",
        %{conn: conn} do
-    # The hard one: after a turn, a hard refresh (a fresh LiveView mount at the
-    # same workspace path) must RE-ATTACH the path-keyed workspace Session's
-    # foreground agent — SAME process / provider thread — and recover the chat
-    # title + repaint the prior bubbles. NOT a recreated session.
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "ack reply"}]])
     conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "refresh-session"})
+    root = LocalWorkspaceAdapterStub.valid_path()
 
     {:ok, lv, _html} =
       live(
         conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+        ~p"/workspace?#{[path: root, provider: "codex"]}"
       )
 
     session_id = subscribe_agent(lv)
@@ -1546,25 +1560,62 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert AcpAgent.title(session_id) == "한 단어로 확인만"
     snapshot = AcpAgent.agent_snapshot(session_id)
     assert [%{user: "한 단어로 확인만"} | _] = snapshot.transcript
+    refute snapshot.title_user_edited?
+    assert has_element?(lv, "#local-agent-title-label[value='한 단어로 확인만']")
 
-    # --- the "refresh": a brand-new LiveView mount at the SAME path ---
+    # --- the "refresh": the old LiveView pid dies, then a new one mounts ---
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
     {:ok, lv2, _html2} =
       live(
         conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+        ~p"/workspace?#{[path: root, provider: "codex"]}"
       )
 
     sync_liveview(lv2)
 
-    # Same foreground agent: same id, same pid, still alive (provider thread kept).
-    assert local_agent_session_id(lv2) == session_id
+    # New active rail: refresh survival is intentionally not required.
+    new_session_id = subscribe_agent(lv2)
+    refute new_session_id == session_id
     assert AcpAgent.whereis(session_id) == agent_pid
     assert Process.alive?(agent_pid)
 
-    # Title recovered into the header (NOT the "New Chat" default).
+    assert has_element?(lv2, "#local-agent-title-label[value='New Chat']")
+
+    refute has_element?(
+             lv2,
+             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             "한 단어로 확인만"
+           )
+
+    assert has_element?(lv2, "#local-agent-rail-picker[data-count='2']")
+
+    lv2
+    |> element("#local-agent-rail-picker")
+    |> render_click()
+
+    assert has_element?(lv2, "#local-agent-rail-option-#{session_id}", "한 단어로 확인만")
+
+    lv2
+    |> element("#local-agent-rail-option-#{session_id}")
+    |> render_click()
+
+    sync_liveview(lv2)
+
+    assert local_agent_session_id(lv2) == session_id
     assert has_element?(lv2, "#local-agent-title-label[value='한 단어로 확인만']")
 
-    # Prior user bubble repainted from the durable transcript.
+    send(
+      lv2.pid,
+      {:local_agent_event,
+       %{session_id: session_id, type: :title_generated, title: "Provider refined title"}}
+    )
+
+    sync_liveview(lv2)
+
+    assert has_element?(lv2, "#local-agent-title-label[value='Provider refined title']")
+
     assert has_element?(
              lv2,
              ~s([data-role="local-agent-message"][data-message-role="user"]),
@@ -1573,22 +1624,17 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     # Tear down the durable workspace Session + agent so the shared valid_path()
     # doesn't leak this agent into sibling tests.
-    on_exit(fn -> stop_workspace_session(LocalWorkspaceAdapterStub.valid_path()) end)
+    on_exit(fn -> stop_workspace_session(root) end)
   end
 
-  test "same workspace path has isolated chat rails across Phoenix sessions", %{conn: conn} do
+  test "same workspace path has isolated chat rails across LiveView pids", %{conn: conn} do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "isolated reply"}]])
 
     root = LocalWorkspaceAdapterStub.valid_path()
+    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "same-browser-tabs"})
 
-    conn_a = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "rail-session-a"})
-
-    conn_b =
-      Phoenix.ConnTest.build_conn()
-      |> Phoenix.ConnTest.init_test_session(%{local_live_session_id: "rail-session-b"})
-
-    {:ok, lv_a, _html} = live(conn_a, ~p"/workspace?#{[path: root, provider: "codex"]}")
-    {:ok, lv_b, _html} = live(conn_b, ~p"/workspace?#{[path: root, provider: "codex"]}")
+    {:ok, lv_a, _html} = live(conn, ~p"/workspace?#{[path: root, provider: "codex"]}")
+    {:ok, lv_b, _html} = live(conn, ~p"/workspace?#{[path: root, provider: "codex"]}")
 
     session_id_a = subscribe_agent(lv_a)
     session_id_b = subscribe_agent(lv_b)
@@ -1765,7 +1811,11 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    # Refresh: chips repaint from the durable transcript, not the raw JSON.
+    # Refresh starts a fresh active rail; selecting the prior recent chat repaints
+    # chips from the durable transcript, not the raw JSON.
+    stop_pid(lv.pid)
+    sync_workspace_session(LocalWorkspaceAdapterStub.valid_path())
+
     {:ok, lv2, _html2} =
       live(
         conn,
@@ -1773,6 +1823,20 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       )
 
     sync_liveview(lv2)
+    new_session_id = subscribe_agent(lv2)
+    refute new_session_id == session_id
+
+    lv2
+    |> element("#local-agent-rail-picker")
+    |> render_click()
+
+    lv2
+    |> element("#local-agent-rail-option-#{session_id}")
+    |> render_click()
+
+    sync_liveview(lv2)
+
+    assert local_agent_session_id(lv2) == session_id
     assert has_element?(lv2, ~s([data-role="picked-element-chip"]), "급여 및 수당")
     refute render(lv2) =~ "Selected document elements"
   end
@@ -1881,11 +1945,26 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ])
     end)
 
+    stop_pid(lv.pid)
+    sync_workspace_session(LocalWorkspaceAdapterStub.valid_path())
+
     {:ok, lv2, _html2} =
       live(
         conn,
         ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
       )
+
+    sync_liveview(lv2)
+    new_session_id = subscribe_agent(lv2)
+    refute new_session_id == session_id
+
+    lv2
+    |> element("#local-agent-rail-picker")
+    |> render_click()
+
+    lv2
+    |> element("#local-agent-rail-option-#{session_id}")
+    |> render_click()
 
     sync_liveview(lv2)
 
@@ -1968,6 +2047,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
+    assert AcpAgent.title(session_id) == "Pricing review"
+    assert AcpAgent.agent_snapshot(session_id).title_user_edited?
+
     assert has_element?(
              lv,
              "#local-agent-title-label[value='Pricing review']"
@@ -1991,9 +2073,18 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
+    assert AcpAgent.title(session_id) == "Employment review"
+    refute AcpAgent.agent_snapshot(session_id).title_user_edited?
+
     assert has_element?(
              lv,
              "#local-agent-title-label[value='Employment review']"
+           )
+
+    assert has_element?(
+             lv,
+             "#local-agent-rail-option-#{session_id}",
+             "Employment review"
            )
   end
 
@@ -2562,6 +2653,56 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert has_element?(
              lv,
              ~s([id^="local-agent-assistant-"][data-chat-role="chat-message"][class*="w-full"] [data-role="agent-text"][class*="text-justify"])
+           )
+  end
+
+  test "agent text deltas create an embedded editor preview for the active document", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "draft"}]])
+
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/ledger.xlsx", provider: "codex"]}"
+      )
+
+    assert has_element?(
+             lv,
+             ~s([data-role="office-wasm-viewer"][data-local-document-format="xlsx"])
+           )
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "edit workbook"})
+    |> render_submit()
+
+    assert_push_event(
+      lv,
+      "editor.preview_delta",
+      %{
+        turn_id: turn_id,
+        document_id: document_id,
+        delta: "draft",
+        text: "draft",
+        delta_count: 1
+      },
+      1_000
+    )
+
+    assert is_binary(turn_id)
+    assert is_binary(document_id)
+    assert document_id != ""
+
+    sync_liveview(lv)
+
+    assert has_element?(
+             lv,
+             ~s([data-role="editor-preview"][data-document-id="#{document_id}"][data-preview-delta-count="1"])
+           )
+
+    assert has_element?(
+             lv,
+             ~s([data-component="canvas-local-office-wasm"][data-document-id="#{document_id}"][data-editor-mirror="true"][data-preview-text="draft"])
            )
   end
 
@@ -3259,6 +3400,17 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     :ok
   end
 
+  defp sync_workspace_session(path) do
+    case Ecrits.Workspace.Session.whereis(path) do
+      pid when is_pid(pid) ->
+        _ = :sys.get_state(pid)
+        :ok
+
+      nil ->
+        :ok
+    end
+  end
+
   defp liveview_assign(lv, key) do
     lv.pid
     |> :sys.get_state()
@@ -3269,15 +3421,31 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   defp local_rhwp_document_id(lv) do
     document_id =
       lv
-      |> render()
-      |> LazyHTML.from_fragment()
-      |> LazyHTML.query(~s([data-role="local-hwp-editor"]))
-      |> LazyHTML.attribute("data-local-document-id")
-      |> List.first()
+      |> render_local_hwp_editor_html()
+      |> local_hwp_document_id_from_html()
 
     assert is_binary(document_id)
     assert document_id != ""
     document_id
+  end
+
+  defp render_local_hwp_editor_html(lv) do
+    html = render(lv)
+
+    if local_hwp_document_id_from_html(html) do
+      html
+    else
+      sync_liveview(lv)
+      render(lv)
+    end
+  end
+
+  defp local_hwp_document_id_from_html(html) do
+    html
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query(~s([data-role="local-hwp-editor"]))
+    |> LazyHTML.attribute("data-local-document-id")
+    |> List.first()
   end
 
   defp prepare_local_workspace_fixture do
@@ -3312,6 +3480,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
   defp cleanup_local_workspace_fixture do
     root = LocalWorkspaceAdapterStub.valid_path()
+    _ = Ecrits.Fuse.DocMount.teardown(root)
 
     for relative_path <- [
           "template.hwp",
@@ -3326,6 +3495,23 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       _ = Document.close(document_id)
     end
 
-    File.rm_rf!(root)
+    rm_rf_workspace!(root)
+  end
+
+  defp rm_rf_workspace!(root, attempts \\ 3)
+
+  defp rm_rf_workspace!(root, 0), do: File.rm_rf!(root)
+
+  defp rm_rf_workspace!(root, attempts) do
+    case File.rm_rf(root) do
+      {:ok, _removed} ->
+        :ok
+
+      {:error, _path, _reason} ->
+        _ = Ecrits.Fuse.DocMount.teardown(root)
+        _ = File.rmdir(Ecrits.Fuse.DocMount.mount_point(root))
+        _ = File.rmdir(Path.dirname(Ecrits.Fuse.DocMount.mount_point(root)))
+        rm_rf_workspace!(root, attempts - 1)
+    end
   end
 end

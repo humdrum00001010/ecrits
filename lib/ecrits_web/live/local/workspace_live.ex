@@ -28,6 +28,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # formatted markdown (raw client-side appends give instant sub-debounce
   # feedback; the tick re-renders the accumulated buffer through MDEx).
   @local_agent_text_flush_ms 120
+  @local_agent_editor_preview_max 5_000
   # Idle window before a dirty viewed document is auto-saved. Each user/agent
   # edit (re)arms a per-document timer; when it fires and the doc is still dirty
   # we fire a canonical `doc.save` (the same path Ctrl/Cmd+S uses).
@@ -114,9 +115,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      socket
      |> assign(:local_live_session_id, local_live_session_id(session))
      # The durable per-workspace `Ecrits.Workspace.Session` (keyed by canonical
-     # path) owns document routing, while the foreground chat agent is scoped by
-     # the Phoenix session id above. A refresh from the same browser session
-     # re-attaches in handle_params. `nil` until the first attach.
+     # path) owns document routing. The active foreground chat agent is scoped by
+     # this LiveView pid; the Phoenix session id above only groups recent chats
+     # after a refresh. `nil` until the first attach.
      |> assign(:workspace_session, nil)
      # NAMED captures (not anon closures): a stream `dom_id` resolver is stored on
      # the long-lived LiveView at mount. An anonymous `& &1.dom_id` is compiled
@@ -160,7 +161,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:dirty_document_ids, MapSet.new())
      |> assign(:autosave_timers, %{})
      |> assign(:fs_watcher_pid, nil)
+     # Document VFS (exfuse) toggle state. nil hides the header "FUSE" button on
+     # non-workspace chrome; in the workspace it is always a boolean (shown).
+     |> assign(:fuse_mode, false)
+     # The doc_vfs:<root> PubSub topic this LV is subscribed to (direct-edit cards).
+     |> assign(:doc_vfs_topic, nil)
      |> assign(:fs_refresh_timer, nil)
+     |> assign(:workspace_fs_subscribed_paths, MapSet.new())
      # Subscribed-once flag for the agent-file-write PubSub topic
      # (`Ecrits.Doc.Tools.workspace_files_topic/0`): an agent doc.create-clone /
      # doc.save broadcasts the written path there, and we refresh the tree LIVE
@@ -196,6 +203,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:local_agent_text, "")
      |> assign(:local_agent_text_segment, 0)
      |> assign(:local_agent_text_flush_ref, nil)
+     |> assign(:local_agent_editor_preview, nil)
      |> assign(:local_agent_active_tools, %{})
      |> assign(:local_agent_reasoning_text, "")
      # Tracks whether reasoning text is being appended contiguously (codex glues
@@ -242,11 +250,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         integrations: local_agent_integrations()
       )
       |> mount_workspace(path)
-      # Attach the durable per-path workspace Session and bind its foreground
-      # agent BEFORE opening the document — this is the refresh-survival seam.
-      # `Session.attach` get-or-starts the path-keyed Session (cookieless), which
-      # get-or-starts the foreground agent: on a browser refresh the SAME agent
-      # pid / provider thread / transcript / title are re-attached, NOT recreated.
+      # Attach the durable per-path workspace Session and bind this LiveView pid's
+      # foreground agent BEFORE opening the document. A browser refresh gets a new
+      # LiveView pid and therefore a fresh active rail; prior rails remain in the
+      # same browser session's recent-chat list.
       # reasoning_effort / access_control are NOT read from URL params — they live
       # in the durable session (adapter_opts) and are hydrated in snapshot_local_agent.
       |> attach_workspace_session()
@@ -543,6 +550,27 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   def handle_event("markdown.save", _params, socket), do: {:noreply, socket}
 
+  def handle_event("toggle_fuse", _params, socket) do
+    path = socket.assigns[:workspace_path]
+
+    socket =
+      if is_binary(path) do
+        _ =
+          if socket.assigns.fuse_mode == true,
+            do: Ecrits.Fuse.DocMount.teardown(path),
+            else: Ecrits.Fuse.DocMount.ensure(path)
+
+        # Reflect the real mount state (handles :disabled / mount failure -> false).
+        socket
+        |> assign(:fuse_mode, Ecrits.Fuse.DocMount.mounted?(path))
+        |> apply_vfs_write_policy()
+      else
+        socket
+      end
+
+    {:noreply, socket}
+  end
+
   def handle_event("refresh_tree", _params, socket) do
     {:noreply, refresh_tree(socket, socket.assigns.expanded_paths)}
   end
@@ -698,6 +726,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
            |> assign(:local_agent_status, :cancelled)
            |> assign(:local_agent_turn_id, nil)
            |> assign(:local_agent_text, "")
+           |> finalize_inline_editor_preview(turn_id, :cancelled)
            |> finalize_cancelled_agent_text(turn_id, partial, segment)
            |> finalize_dangling_tools("Turn cancelled.")}
 
@@ -756,6 +785,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   def handle_info({:local_agent_event, _event}, socket), do: {:noreply, socket}
+
+  def handle_info({:editor_preview_delta, payload}, socket) when is_map(payload) do
+    {:noreply, push_event(socket, "editor.preview_delta", payload)}
+  end
 
   # Debounced re-render of the in-flight streaming agent message: re-renders the
   # accumulated buffer through `markdown_body`/MDEx so LiveView pushes formatted
@@ -836,6 +869,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       |> update(:doc_browser_pending, &Map.put(&1, request_id, {from, ref, verb}))
       |> push_event("doc.apply_edit", %{
         request_id: request_id,
+        document_id: active_document_id(socket),
         verb: to_string(verb),
         payload: doc_browser_payload(payload, socket)
       })
@@ -864,22 +898,20 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     {:noreply, apply_local_document_snapshot(socket, :checkpointed, document, snapshot)}
   end
 
-  def handle_info({:file_event, pid, :stop}, %{assigns: %{fs_watcher_pid: pid}} = socket) do
-    {:noreply, assign(socket, :fs_watcher_pid, nil)}
-  end
-
-  def handle_info(
-        {:file_event, pid, {path, _events}},
-        %{assigns: %{fs_watcher_pid: pid}} = socket
-      ) do
-    if fs_relevant_path?(path) do
+  def handle_info({:workspace_fs_event, path}, socket) when is_binary(path) do
+    if workspace_contains_path?(socket, path) and fs_relevant_path?(path) do
       {:noreply, schedule_tree_refresh(socket)}
     else
       {:noreply, socket}
     end
   end
 
-  # Watcher events from a stale/replaced watcher are ignored.
+  def handle_info({:file_event, pid, :stop}, %{assigns: %{fs_watcher_pid: pid}} = socket) do
+    {:noreply, assign(socket, :fs_watcher_pid, nil)}
+  end
+
+  # Stale per-LiveView watcher events from sockets that were hot-reloaded before
+  # watcher ownership moved to `Workspace.Session` are ignored.
   def handle_info({:file_event, _pid, _payload}, socket), do: {:noreply, socket}
 
   def handle_info(:refresh_tree, socket) do
@@ -905,6 +937,71 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       {:noreply, socket}
     end
   end
+
+  # A DIRECT edit of a mounted `.md` was routed onto the document (doc VFS
+  # write-back). Drop a file-viewer card in the chat rail showing where it landed.
+  def handle_info({:vfs_doc_edited, info}, socket) when is_map(info) do
+    socket =
+      socket
+      |> stream_insert(:local_agent_items, vfs_doc_edit_card(info))
+      |> resync_open_editor_after_vfs_edit(info)
+
+    {:noreply, socket}
+  end
+
+  # A VFS write edits the SERVER document model + saves to disk. The open browser
+  # WASM editor holds its own copy, so we LIVE-STREAM the change into it: when the
+  # edited doc IS the one this tab is viewing, push the same `replace_text` ops
+  # through the editor's incremental apply path (`doc.apply_edit` -> patch the
+  # WASM model -> repaint just the affected page) — NOT a full reload. The edit
+  # appears live in the real editor. (Match by PATH: `local_hwp_stream_document_id`
+  # is the Document struct id "local-…", the edit keys the Pool "d_hwpx_…".)
+  defp resync_open_editor_after_vfs_edit(socket, %{path: edited_abs} = info)
+       when is_binary(edited_abs) do
+    workspace_path = socket.assigns[:workspace_path]
+    renderer = socket.assigns[:local_hwp_stream_renderer]
+    open_id = socket.assigns[:local_hwp_stream_document_id]
+    open_rel = socket.assigns[:active_document_path]
+    ops = Map.get(info, :ops, [])
+
+    cond do
+      renderer not in [:rhwp_wasm, :office_wasm] ->
+        socket
+
+      not (is_binary(workspace_path) and is_binary(open_rel)) ->
+        socket
+
+      Path.expand(edited_abs) != Path.expand(Path.join(workspace_path, open_rel)) ->
+        socket
+
+      # HWP: incremental live apply (the browser-arm path). request_id is
+      # synthetic — there is no MCP waiter, so the editor's reply lands on an
+      # unknown id and is harmlessly ignored by `doc.browser_reply`.
+      renderer == :rhwp_wasm and ops != [] ->
+        push_event(socket, "doc.apply_edit", %{
+          request_id: "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic])),
+          document_id: open_id,
+          verb: "edit",
+          payload: %{ops: ops}
+        })
+
+      # Office (no incremental op path here) or no ops: re-fetch saved bytes.
+      true ->
+        case local_document_bytes_url(workspace_path, open_rel) do
+          base when is_binary(base) ->
+            url =
+              base <> "&v=" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
+            event = if renderer == :rhwp_wasm, do: "hwp_wasm_load", else: "office_wasm_load"
+            push_event(socket, event, %{url: url, document_id: open_id})
+
+          _ ->
+            socket
+        end
+    end
+  end
+
+  defp resync_open_editor_after_vfs_edit(socket, _info), do: socket
 
   @impl true
   def handle_async(@local_document_open_async, {:ok, {ref, path, result}}, socket) do
@@ -943,7 +1040,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     assigns = assign(assigns, :local_file_tree_open_paths, local_file_tree_open_paths(assigns))
 
     ~H"""
-    <Layouts.app flash={@flash} variant="split">
+    <Layouts.app flash={@flash} variant="split" fuse_mode={@fuse_mode}>
       <main
         id="local-workspace-root"
         class="h-[calc(100dvh-60px)] min-h-0 min-w-[1024px] overflow-hidden bg-[var(--cs-bg)] text-[var(--cs-ink)]"
@@ -1081,7 +1178,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               }
               open_documents={@open_documents}
               active_document_id={@active_document_id}
-              tab_close_hrefs={local_document_tab_close_hrefs(assigns)}
               dirty_document_ids={@dirty_document_ids}
               hwp_pages={@streams.local_hwp_pages}
               hwp_page_count={@local_hwp_page_count}
@@ -1136,9 +1232,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                  The title / status controls, the streamed transcript, the error
                  banner and the composer (with the provider/model/reasoning/access
                  options EMBEDDED in the composer box, ChatGPT-style) all live
-                 here. A browser refresh re-runs handle_params → re-attaches the
-                 SAME durable agent → snapshot_local_agent repaints the transcript
-                 + title + status + pending count. --%>
+                 here. A browser refresh gets a fresh active rail; older rails
+                 remain selectable from the same browser's recent-chat list. --%>
             <div
               data-role="chat-rail-controls"
               class="flex shrink-0 items-center justify-between gap-1.5 border-b border-base-300 bg-base-200/95 px-1.5 py-0.5"
@@ -1403,6 +1498,61 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                           <pre class="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-base-content/55">{agent_item_body(item)}</pre>
                         </div>
                       </div>
+                    <% "editor_preview" -> %>
+                      <div data-role="editor-preview-card" class="min-w-0 w-full px-3 py-1.5">
+                        <EditorSurface.embedded_document
+                          id={"#{dom_id}-surface"}
+                          document={agent_editor_preview_document(item)}
+                          document_path={agent_editor_preview_path(item)}
+                          document_spec={agent_editor_preview_spec(item)}
+                          canvas_id={agent_editor_preview_canvas_id(item)}
+                          hwp_bytes_url={agent_editor_preview_bytes_url(item)}
+                          href={agent_editor_preview_href(item)}
+                          status={agent_editor_preview_status(item)}
+                          turn_id={Map.get(item, :turn_id)}
+                          preview_text={agent_editor_preview_text(item)}
+                          delta_count={agent_editor_preview_delta_count(item)}
+                          markdown_source={agent_editor_preview_text(item)}
+                          markdown_preview_html=""
+                        />
+                      </div>
+                    <% "doc_edit" -> %>
+                      <div data-role="doc-edit-card" class="min-w-0 w-full px-3 py-1.5">
+                        <div class="overflow-hidden rounded-md border border-primary/30 bg-primary/[0.04]">
+                          <div class="flex items-center gap-1.5 border-b border-primary/15 px-2.5 py-1.5 text-[11px]">
+                            <.icon name="hero-pencil-square" class="size-3.5 shrink-0 text-primary" />
+                            <span class="min-w-0 truncate font-medium text-base-content/80">
+                              {agent_doc_edit_doc(item)}
+                            </span>
+                            <span class="ml-auto shrink-0 font-mono text-base-content/45">
+                              {agent_doc_edit_location(item)}
+                            </span>
+                          </div>
+                          <div
+                            :if={agent_doc_edit_rows(item) != []}
+                            data-role="doc-edit-excerpt"
+                            class="px-2.5 py-1.5 font-mono text-[11px] leading-relaxed"
+                          >
+                            <div
+                              :for={row <- agent_doc_edit_rows(item)}
+                              class={[
+                                "truncate border-l-2 pl-2",
+                                row.hit? && "border-primary bg-primary/10 text-base-content/90",
+                                !row.hit? && "border-transparent text-base-content/45"
+                              ]}
+                            >
+                              {row.text}
+                            </div>
+                          </div>
+                          <div
+                            :if={agent_doc_edit_rows(item) == []}
+                            data-role="doc-edit-excerpt"
+                            class="px-2.5 py-1.5 font-mono text-[11px] text-base-content/70"
+                          >
+                            {agent_doc_edit_marker(item)}
+                          </div>
+                        </div>
+                      </div>
                     <% "thinking" -> %>
                       <div
                         data-role="operation-block"
@@ -1483,7 +1633,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                       <div
                         data-role="agent-text"
                         data-message-id={dom_id}
-                        aria-busy={agent_item_status(item) == "running"}
+                        aria-busy={agent_item_loading?(item, @local_agent_editor_preview)}
                         class="block min-w-0 px-3 py-1 text-[14px] leading-relaxed text-justify break-words text-base-content"
                       >
                         <div data-role="agent-text-body" data-message-id={dom_id}>
@@ -1493,7 +1643,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                           />
                         </div>
                         <span
-                          :if={agent_item_loading?(item)}
+                          :if={agent_item_loading?(item, @local_agent_editor_preview)}
                           id={"#{dom_id}-loading"}
                           phx-update="ignore"
                           data-role="agent-loading"
@@ -1714,7 +1864,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                           data-role="agent-model-provider-favicon"
                           aria-hidden="true"
                           alt=""
-                          class="size-3.5 shrink-0 opacity-85"
+                          class="size-3.5 shrink-0 opacity-90 [filter:brightness(0)_invert(0.82)]"
                         />
                         <span class="min-w-0 truncate">
                           {local_agent_selected_model_label(@local_agent.model)}
@@ -1937,7 +2087,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                         <img
                           src={provider.favicon_src}
                           alt=""
-                          class="size-4 shrink-0 opacity-85"
+                          class="size-4 shrink-0 opacity-90 [filter:brightness(0)_invert(0.82)]"
                         />
                         <div class="min-w-0">
                           <p class="truncate font-medium text-base-content">{provider.label}</p>
@@ -1970,7 +2120,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                         <img
                           src={provider.favicon_src}
                           alt=""
-                          class="size-4 shrink-0 opacity-85"
+                          class="size-4 shrink-0 opacity-90 [filter:brightness(0)_invert(0.82)]"
                         />
                         <div class="min-w-0">
                           <p class="truncate font-medium text-base-content">{provider.label}</p>
@@ -2160,6 +2310,71 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
+  # Default-ON document VFS: when the workspace mounts (connected only), ensure
+  # the exfuse projection mount in the background — `Exfuse.mount/3` blocks until
+  # the mount settles, so we never stall the LiveView on it — and reflect the
+  # header toggle optimistically. Teardown is owned by
+  # `Ecrits.Workspace.Session.terminate/2`. Idempotent across tabs/refreshes.
+  defp maybe_ensure_fuse_mount(socket) do
+    path = socket.assigns[:workspace_path]
+
+    if connected?(socket) and is_binary(path) and Ecrits.Fuse.DocMount.enabled?() do
+      Task.start(fn -> Ecrits.Fuse.DocMount.ensure(path) end)
+      socket |> assign(:fuse_mode, true) |> subscribe_doc_vfs(path) |> apply_vfs_write_policy()
+    else
+      assign(socket, :fuse_mode, false)
+    end
+  end
+
+  # The mounted `.md` is writable ONLY when the workspace agent access is
+  # "full-workspace" — a direct file write is the agent modifying the workspace,
+  # so it honours the same gate as the MCP tools. Pushed to the FUSE layer
+  # (Ecrits.Fuse.OpenDocs) whenever the mount comes up or the access changes.
+  defp apply_vfs_write_policy(socket) do
+    path = socket.assigns[:workspace_path]
+    if is_binary(path), do: Ecrits.Fuse.OpenDocs.set_writable(path, vfs_writable?(socket))
+    socket
+  end
+
+  defp vfs_writable?(socket) do
+    case socket.assigns[:local_agent] do
+      %{access: %{id: "full-workspace"}} -> true
+      _ -> false
+    end
+  end
+
+  # Subscribe (once) to the workspace's doc-VFS edit broadcasts so a DIRECT file
+  # edit of a mounted `.md` (routed by Ecrits.Doc.Projection.write_back/3) shows a
+  # card in the chat rail — the agent edits the file, not doc.edit.
+  defp subscribe_doc_vfs(socket, root) do
+    topic = "doc_vfs:" <> Path.expand(root)
+
+    if connected?(socket) and socket.assigns[:doc_vfs_topic] != topic do
+      Phoenix.PubSub.subscribe(Ecrits.PubSub, topic)
+      assign(socket, :doc_vfs_topic, topic)
+    else
+      socket
+    end
+  end
+
+  # The chat-rail card for a DIRECT file edit (write_back broadcast). Same shape
+  # as the doc.edit card, but sourced from the VFS write, not a tool call.
+  defp vfs_doc_edit_card(info) do
+    {:ok, %{rows: rows}} =
+      Ecrits.Doc.Projection.edit_excerpt(info.path, marker: info[:marker], context: 3)
+
+    n = info[:applied] || 1
+
+    %{
+      dom_id: "local-agent-vfsedit-#{System.unique_integer([:positive, :monotonic])}",
+      role: :doc_edit,
+      doc: info[:doc] || "document",
+      location: "file edit · #{n} change#{if n == 1, do: "", else: "s"}",
+      marker: info[:marker] || "",
+      rows: rows
+    }
+  end
+
   defp do_mount_workspace(socket, path) do
     case WorkspaceAdapter.mount(path) do
       {:ok, workspace} ->
@@ -2169,8 +2384,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         |> assign(:tree, Map.get(workspace, :tree, []))
         |> assign(:workspace_error, nil)
         |> assign(:page_title, workspace_title(workspace))
-        |> maybe_start_fs_watcher()
+        |> maybe_subscribe_workspace_fs_events()
         |> maybe_subscribe_workspace_files()
+        |> maybe_ensure_fuse_mount()
 
       {:error, _reason} ->
         # Workspace failed to mount (bad / inaccessible path) — send the user
@@ -2548,13 +2764,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp doc_browser_result(_params), do: {:error, "browser_apply_failed"}
 
   # Attach this LiveView to the durable per-workspace `Ecrits.Workspace.Session`
-  # (keyed by canonical path) and START + SEED its foreground agent. This is the
+  # (keyed by canonical path) and START + SEED this LiveView pid's foreground
+  # agent. This is the
   # ONLY LiveView for the workspace: it holds the provider/model/access +
   # open-document seed, starts the agent, subscribes to it, and renders the chat
-  # inline. On a browser refresh the SAME agent pid / provider thread / transcript
-  # / title are re-bound, NEVER recreated; this LiveView re-mounts, finds the
-  # bound agent and `snapshot_local_agent/3` repaints the transcript. The static
-  # (disconnected) render spawns nothing.
+  # inline. Re-running handle_params in the same LiveView pid reuses the same
+  # agent; a browser refresh mounts a new pid and starts a fresh active rail. The
+  # static (disconnected) render spawns nothing.
   defp attach_workspace_session(%{assigns: %{workspace_error: error}} = socket)
        when is_binary(error),
        do: socket
@@ -2583,8 +2799,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         # A doc switch re-runs handle_params with the SAME agent — don't
         # double-subscribe (it would deliver every event twice) or re-snapshot
         # (it would wipe the live transcript). Snapshot only on a FRESH bind (the
-        # initial mount / a browser refresh), which repaints the durable
-        # transcript + title + status + pending count (refresh-survival).
+        # initial mount or selecting an older recent rail), which repaints that
+        # rail's transcript + title + status + pending count.
         if socket.assigns.local_agent_session_id != agent_id do
           :ok = WorkspaceSession.subscribe(ws)
           snapshot_local_agent(socket, ws, agent_id)
@@ -2604,10 +2820,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  # Bind + repaint the inline chat from the durable foreground agent's
-  # display-only snapshot (initial bind / browser refresh). codex `thread/resume`
+  # Bind + repaint the inline chat from the foreground agent's display-only
+  # snapshot (initial bind / selecting a recent rail). codex `thread/resume`
   # restores MEMORY but does NOT re-stream past messages, so without this the
-  # re-attached pane is blank — repaint the prior bubbles from the transcript.
+  # does not re-stream past messages, so repaint the prior bubbles from the transcript.
   defp snapshot_local_agent(socket, ws, agent_id) do
     snapshot = WorkspaceSession.snapshot(ws)
     stored_opts = Map.get(snapshot, :adapter_opts, [])
@@ -2622,18 +2838,18 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_turn_id, snapshot_current_turn_id(snapshot))
     |> assign(:local_agent_text, "")
     |> assign(:local_agent_text_segment, 0)
+    |> assign(:local_agent_editor_preview, nil)
     |> assign(:local_agent_reasoning_text, "")
     |> assign(:local_agent_reasoning_open?, false)
     |> assign(:local_agent_active_tools, %{})
-    # Restore the pending-queue count after a refresh (Phase 5). A snapshot from a
+    # Restore the pending-queue count from the selected rail (Phase 5). A snapshot from a
     # pre-Phase-5 agent has no `:pending` key → default 0.
     |> assign(:local_agent_pending, Map.get(snapshot, :pending, 0))
     |> assign(:local_agent_queue, queued_items_from_snapshot(Map.get(snapshot, :queued, [])))
     |> assign(:local_agent_queue_index, 0)
-    |> restore_agent_title(snapshot.title)
-    # Hydrate reasoning/access from the session's stored adapter_opts so that a
-    # browser refresh shows the SAME setting the user last selected — not the URL
-    # param (which is no longer written for these settings).
+    |> restore_agent_title(snapshot.title, Map.get(snapshot, :title_user_edited?, false))
+    # Hydrate reasoning/access from the selected rail's stored adapter_opts — not
+    # the URL param (which is no longer written for these settings).
     |> hydrate_agent_options_from_session(stored_opts)
     |> stream(:local_agent_items, [], reset: true)
     |> replay_local_agent_transcript(snapshot.transcript)
@@ -2794,6 +3010,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_turn_id, nil)
     |> assign(:local_agent_text, "")
     |> assign(:local_agent_text_segment, 0)
+    |> assign(:local_agent_editor_preview, nil)
     |> assign(:local_agent_reasoning_text, "")
     |> assign(:local_agent_reasoning_open?, false)
     |> assign(:local_agent_active_tools, %{})
@@ -2816,9 +3033,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     :exit, reason -> {:error, {:session_unavailable, reason}}
   end
 
-  # Settings used to SEED the foreground agent on first attach (later attaches
-  # re-use the agent and these are applied live). Mirrors local_agent_session_opts
-  # minus the explicit `:id` (the Session derives the stable foreground id).
+  # Settings used to SEED the foreground agent on first attach. Same-pid attaches
+  # re-use the active rail and apply live settings. Mirrors local_agent_session_opts
+  # minus the explicit `:id` (the Session derives the id from path + rail key).
   defp local_agent_attach_settings(socket) do
     socket
     |> local_agent_session_opts()
@@ -3074,10 +3291,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> Keyword.put(:workspace_path, workspace_path)
     |> put_pool_document_id(socket.assigns[:pool_document_id])
 
-    # NOTE: no `:id` here. The durable foreground-agent id is derived from the
-    # canonical workspace PATH by `Ecrits.Workspace.Session` (cookieless), so a
-    # refresh re-derives the SAME id and re-attaches to the SAME agent / provider
-    # thread. (local_agent_attach_settings also strips any stray :id defensively.)
+    # NOTE: no `:id` here. `Ecrits.Workspace.Session` derives it from the
+    # canonical workspace path and this LiveView's active rail key.
   end
 
   # The agent's doc.* ACTIVE doc is the `Ecrits.Doc.Pool` id (what doc.context
@@ -3107,26 +3322,28 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  # Start a file-system watcher for the mounted workspace root once the socket
-  # is connected. Idempotent: an existing watcher is kept.
-  defp maybe_start_fs_watcher(%{assigns: %{fs_watcher_pid: pid}} = socket) when is_pid(pid) do
-    socket
-  end
-
-  defp maybe_start_fs_watcher(socket) do
+  # Subscribe to the shared per-workspace file watcher owned by
+  # `Ecrits.Workspace.Session`. Idempotent per workspace root: multiple tabs can
+  # subscribe, but only the Session starts a macOS watcher for that root.
+  defp maybe_subscribe_workspace_fs_events(socket) do
     root = workspace_root_path(socket.assigns.workspace)
+    subscribed_paths = socket.assigns.workspace_fs_subscribed_paths
 
-    if connected?(socket) and is_binary(root) and root != "" do
-      case FileSystem.start_link(dirs: [root]) do
-        {:ok, pid} ->
-          FileSystem.subscribe(pid)
-          assign(socket, :fs_watcher_pid, pid)
+    cond do
+      not (connected?(socket) and is_binary(root) and root != "") ->
+        socket
 
-        _other ->
-          socket
-      end
-    else
-      socket
+      MapSet.member?(subscribed_paths, Path.expand(root)) ->
+        socket
+
+      true ->
+        :ok = WorkspaceSession.subscribe_file_events(root)
+
+        assign(
+          socket,
+          :workspace_fs_subscribed_paths,
+          MapSet.put(subscribed_paths, Path.expand(root))
+        )
     end
   end
 
@@ -3340,36 +3557,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     assigns.tree
     |> local_file_tree_paths()
     |> Map.new(&{&1, workspace_document_path(assigns, &1)})
-  end
-
-  defp local_document_tab_close_hrefs(assigns) do
-    tabs = assigns.open_documents || []
-    active_id = assigns.active_document_id
-
-    tabs
-    |> Enum.with_index()
-    |> Map.new(fn {tab, index} ->
-      target =
-        if tab.id == active_id do
-          remaining = List.delete_at(tabs, index)
-
-          case remaining do
-            [] ->
-              ~p"/workspace?#{workspace_query(assigns, [])}"
-
-            _ ->
-              neighbor = Enum.at(remaining, min(index, length(remaining) - 1))
-              workspace_document_path(assigns, neighbor.path)
-          end
-        else
-          case assigns.active_document_path do
-            path when is_binary(path) and path != "" -> workspace_document_path(assigns, path)
-            _ -> ~p"/workspace?#{workspace_query(assigns, [])}"
-          end
-        end
-
-      {tab.id, target}
-    end)
   end
 
   defp local_file_tree_paths(nodes) do
@@ -3968,6 +4155,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp select_local_agent_access(value, socket) do
     socket
     |> put_local_agent_access(normalize_access_control(value))
+    |> apply_vfs_write_policy()
     |> persist_agent_options()
     |> noreply()
   end
@@ -4621,8 +4809,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   # Start a fresh foreground rail while preserving the older rail in the recent
-  # drawer. Browser reloads re-attach to the active rail recorded by the
-  # path-keyed Workspace.Session.
+  # drawer. The current LiveView pid owns the active rail; older rails stay in
+  # the browser session's recent list.
   defp restart_local_agent_session(socket) do
     _ = maybe_cancel_active_local_agent(socket)
 
@@ -4679,6 +4867,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     socket
     |> assign(:local_agent_turn_id, turn_id)
     |> assign(:local_agent_status, :running)
+    |> assign(:local_agent_editor_preview, nil)
+    |> ensure_inline_editor_preview(turn_id)
   end
 
   # A QUEUED turn just drained (Phase 5): `local_agent_turn_id` was nil (the prior
@@ -4697,6 +4887,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_status, :running)
     |> assign(:local_agent_text, "")
     |> assign(:local_agent_text_segment, 0)
+    |> assign(:local_agent_editor_preview, nil)
     |> assign(:local_agent_reasoning_text, "")
     |> remove_local_agent_queue_item(turn_id)
     |> sync_local_agent_pending()
@@ -4706,6 +4897,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     )
     |> stream_insert(:local_agent_items, agent_reasoning_item(turn_id, "", :pending))
     |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "", :running, 0))
+    |> ensure_inline_editor_preview(turn_id)
   end
 
   defp apply_local_agent_event(socket, %{type: type, title: title})
@@ -4713,6 +4905,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     if socket.assigns.local_agent_title_user_edited? do
       socket
     else
+      persist_generated_agent_title(socket, title)
+
       socket
       |> assign_local_agent_title(title)
       |> refresh_local_agent_rails()
@@ -4729,11 +4923,23 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     socket
     |> assign(:local_agent_text, text)
+    |> ensure_inline_editor_preview(turn_id)
+    |> inline_editor_preview_accumulate_delta(turn_id, delta)
     |> push_event("local_agent_text_append", %{
       message_id: agent_assistant_dom_id(turn_id, segment),
       piece: String.replace(delta, ~r/\n{2,}/, "\n")
     })
     |> schedule_local_agent_text_flush()
+  end
+
+  defp apply_local_agent_event(
+         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
+         %{type: :edit_delta, turn_id: turn_id, delta: delta}
+       )
+       when is_binary(delta) do
+    socket
+    |> ensure_inline_editor_preview(turn_id)
+    |> inline_editor_preview_accumulate_delta(turn_id, delta)
   end
 
   defp apply_local_agent_event(
@@ -4773,7 +4979,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> maybe_remove_empty_agent_placeholder()
     |> update(
       :local_agent_active_tools,
-      &Map.put(&1 || %{}, tool_call_id, %{name: name, input: input})
+      &Map.put(&1 || %{}, tool_call_id, %{name: name, input: input, args: arguments})
     )
     |> stream_insert(
       :local_agent_items,
@@ -4791,12 +4997,21 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     input = active[:input]
     output = agent_tool_payload(name, result)
 
-    socket
-    |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
-    |> stream_insert(
-      :local_agent_items,
-      agent_tool_item(tool_call_id, name, :completed, tool_io_body(input, output))
-    )
+    socket =
+      socket
+      |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
+      |> stream_insert(
+        :local_agent_items,
+        agent_tool_item(tool_call_id, name, :completed, tool_io_body(input, output))
+      )
+
+    # A successful doc.edit also drops a compact "file viewer" card showing WHERE
+    # the edit landed — the document, the location, and an excerpt of the now-
+    # edited projection with the changed line highlighted.
+    case maybe_doc_edit_card(socket, tool_call_id, name, active[:args], result) do
+      nil -> socket
+      card -> stream_insert(socket, :local_agent_items, card)
+    end
   end
 
   defp apply_local_agent_event(socket, %{
@@ -4839,14 +5054,23 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     # call). Every earlier segment was already emitted at its tool boundary by
     # close_local_agent_text_segment/1.
     pending = socket.assigns.local_agent_text
+    segment = socket.assigns.local_agent_text_segment
+    editor_preview? = editor_preview_turn?(socket.assigns[:local_agent_editor_preview], turn_id)
 
     socket
     |> cancel_local_agent_text_flush()
     |> assign(:local_agent_turn_id, nil)
     |> assign(:local_agent_text, "")
+    |> finalize_inline_editor_preview(turn_id, :sent)
     |> assign(:local_agent_status, :idle)
     |> maybe_remove_empty_reasoning(turn_id)
     |> assign(:local_agent_reasoning_text, "")
+    |> maybe_remove_empty_agent_placeholder_for_editor_preview(
+      turn_id,
+      pending,
+      segment,
+      editor_preview?
+    )
     |> maybe_stream_final_agent_text(turn_id, pending)
     |> finalize_dangling_tools("Turn ended before the tool finished.")
   end
@@ -4859,6 +5083,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> cancel_local_agent_text_flush()
     |> assign(:local_agent_turn_id, nil)
     |> assign(:local_agent_text, "")
+    |> finalize_inline_editor_preview(turn_id, :failed)
     |> assign(:local_agent_status, :failed)
     |> assign(:local_agent_error, local_agent_error(reason))
     |> maybe_remove_empty_reasoning(turn_id)
@@ -4878,6 +5103,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> cancel_local_agent_text_flush()
     |> assign(:local_agent_turn_id, nil)
     |> assign(:local_agent_text, "")
+    |> finalize_inline_editor_preview(turn_id, :cancelled)
     |> assign(:local_agent_status, :cancelled)
     |> maybe_remove_empty_reasoning(turn_id)
     |> assign(:local_agent_reasoning_text, "")
@@ -4888,26 +5114,34 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp apply_local_agent_event(socket, %{type: :turn_cancelled}), do: socket
   defp apply_local_agent_event(socket, _event), do: socket
 
-  # ── inline chat: transcript repaint (refresh-survival) ─────────────
+  defp persist_generated_agent_title(socket, title) do
+    case socket.assigns.local_agent_session_id do
+      session_id when is_binary(session_id) -> ACP.set_generated_title(session_id, title)
+      _ -> :ok
+    end
+  end
 
-  # Restore the chat header from the durable agent's retained title. A brand-new
-  # or empty rail resets to the default title so switching rails cannot leak the
-  # previous rail's title.
-  defp restore_agent_title(socket, title) when is_binary(title) and title != "" do
+  # ── inline chat: transcript repaint ────────────────────────────────
+
+  # Restore the chat header from the durable agent's retained title. The snapshot
+  # carries the manual-edit pin separately; an auto-derived stored title must not
+  # block later provider/generated title events.
+  defp restore_agent_title(socket, title, title_user_edited?)
+       when is_binary(title) and title != "" do
     socket
-    |> assign(:local_agent_title_user_edited?, true)
+    |> assign(:local_agent_title_user_edited?, title_user_edited? == true)
     |> assign_local_agent_title(title)
   end
 
-  defp restore_agent_title(socket, _title) do
+  defp restore_agent_title(socket, _title, _title_user_edited?) do
     socket
     |> assign(:local_agent_title_user_edited?, false)
     |> assign_local_agent_title(default_local_agent_title())
   end
 
-  # Repaint the chat pane from the durable agent's display-only transcript (used
-  # after a browser refresh re-binds the foreground agent). New transcript entries
-  # store ordered display rows (`items`) so tool-call history survives refresh.
+  # Repaint the chat pane from the selected agent's display-only transcript.
+  # New transcript entries store ordered display rows (`items`) so tool-call
+  # history survives in the recent-chat list.
   # Older in-memory sessions only have %{turn_id, user, agent}; keep that fallback.
   defp replay_local_agent_transcript(socket, turns) when is_list(turns) do
     Enum.reduce(turns, socket, fn turn, acc ->
@@ -5048,6 +5282,110 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   # ── inline chat: streaming text buffer helpers ─────────────────────
 
+  defp ensure_inline_editor_preview(socket, turn_id) when is_binary(turn_id) do
+    case inline_editor_preview_seed(socket, turn_id) do
+      nil ->
+        socket
+
+      seed ->
+        state = socket.assigns[:local_agent_editor_preview]
+
+        if state && state.turn_id == turn_id && state.document_id == seed.document_id do
+          socket
+        else
+          state = Map.merge(seed, %{text: "", delta_count: 0, status: :running})
+
+          socket
+          |> assign(:local_agent_editor_preview, state)
+          |> stream_insert(:local_agent_items, agent_editor_preview_item(state))
+        end
+    end
+  end
+
+  defp ensure_inline_editor_preview(socket, _turn_id), do: socket
+
+  defp inline_editor_preview_accumulate_delta(socket, turn_id, delta)
+       when is_binary(turn_id) and is_binary(delta) do
+    socket = ensure_inline_editor_preview(socket, turn_id)
+
+    case socket.assigns[:local_agent_editor_preview] do
+      %{turn_id: ^turn_id, document_id: document_id} = state when is_binary(document_id) ->
+        text = preview_text_append(state.text, delta)
+        state = %{state | text: text, delta_count: state.delta_count + 1, status: :running}
+
+        payload = %{
+          turn_id: turn_id,
+          document_id: document_id,
+          delta: delta,
+          text: text,
+          delta_count: state.delta_count
+        }
+
+        Process.send_after(self(), {:editor_preview_delta, payload}, 0)
+
+        socket
+        |> assign(:local_agent_editor_preview, state)
+        |> stream_insert(:local_agent_items, agent_editor_preview_item(state))
+        |> push_event("editor.preview_delta", payload)
+
+      _other ->
+        socket
+    end
+  end
+
+  defp inline_editor_preview_accumulate_delta(socket, _turn_id, _delta), do: socket
+
+  defp finalize_inline_editor_preview(socket, turn_id, status) when is_binary(turn_id) do
+    case socket.assigns[:local_agent_editor_preview] do
+      %{turn_id: ^turn_id} = state ->
+        state = %{state | status: status}
+
+        socket
+        |> assign(:local_agent_editor_preview, nil)
+        |> stream_insert(:local_agent_items, agent_editor_preview_item(state))
+
+      _other ->
+        socket
+    end
+  end
+
+  defp finalize_inline_editor_preview(socket, _turn_id, _status), do: socket
+
+  defp inline_editor_preview_seed(socket, turn_id) do
+    document = socket.assigns[:active_document]
+    path = socket.assigns[:active_document_path]
+    document_id = active_document_id(socket)
+
+    with %{relative_path: relative_path} <- document,
+         true <- is_binary(relative_path),
+         true <- is_binary(document_id) do
+      %{
+        turn_id: turn_id,
+        document_id: document_id,
+        document: document,
+        document_path: path || relative_path,
+        document_spec: local_document_spec(document),
+        canvas_id:
+          "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-canvas",
+        bytes_url: local_document_bytes_url(socket.assigns.workspace_path, relative_path),
+        href: workspace_document_path(socket, path || relative_path)
+      }
+    else
+      _other -> nil
+    end
+  end
+
+  defp preview_text_append(text, delta) do
+    text = (text || "") <> delta
+
+    if String.length(text) <= @local_agent_editor_preview_max do
+      text
+    else
+      start = String.length(text) - @local_agent_editor_preview_max
+      "..." <> String.slice(text, start, @local_agent_editor_preview_max)
+    end
+  end
+
   defp close_local_agent_text_segment(socket) do
     socket = cancel_local_agent_text_flush(socket)
 
@@ -5139,6 +5477,30 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp maybe_stream_final_agent_text(socket, _turn_id, _text), do: socket
 
+  defp maybe_remove_empty_agent_placeholder_for_editor_preview(
+         socket,
+         turn_id,
+         pending,
+         segment,
+         true
+       )
+       when pending in [nil, ""] do
+    stream_delete(
+      socket,
+      :local_agent_items,
+      agent_assistant_item(turn_id, "", :running, segment)
+    )
+  end
+
+  defp maybe_remove_empty_agent_placeholder_for_editor_preview(
+         socket,
+         _turn_id,
+         _pending,
+         _segment,
+         _editor_preview?
+       ),
+       do: socket
+
   # On cancel, keep what the agent already streamed (finalize the in-flight bubble
   # with the accumulated partial, in place). Do NOT emit a "Cancelled."
   # placeholder; if nothing was streamed yet, drop the empty running bubble.
@@ -5201,7 +5563,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   defp agent_assistant_item(turn_id, body, status, segment \\ 0) do
-    %{dom_id: agent_assistant_dom_id(turn_id, segment), role: :agent, status: status, body: body}
+    %{
+      dom_id: agent_assistant_dom_id(turn_id, segment),
+      role: :agent,
+      status: status,
+      body: body,
+      turn_id: turn_id
+    }
   end
 
   defp agent_reasoning_item(turn_id, body, status) do
@@ -5222,6 +5590,141 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       status: status,
       body: body || ""
     }
+  end
+
+  defp agent_editor_preview_item(state) do
+    %{
+      dom_id: "local-agent-editor-preview-#{state.turn_id}-#{dom_token(state.document_id)}",
+      role: :editor_preview,
+      status: state.status,
+      turn_id: state.turn_id,
+      document_id: state.document_id,
+      document: state.document,
+      document_path: state.document_path,
+      document_spec: state.document_spec,
+      canvas_id: state.canvas_id,
+      bytes_url: state.bytes_url,
+      href: state.href,
+      body: state.text,
+      delta_count: state.delta_count
+    }
+  end
+
+  # Build the compact doc-edit "file viewer" card for a completed doc.edit. nil
+  # for non-edit tools or when no editable content/document can be resolved (the
+  # plain tool block still renders either way).
+  defp maybe_doc_edit_card(socket, tool_call_id, "doc.edit", args, result) when is_map(args) do
+    with op when is_map(op) <- doc_edit_primary_op(args),
+         marker when is_binary(marker) <- doc_edit_marker(op) do
+      {doc, rows} =
+        case resolve_edit_doc_path(socket, args) do
+          {:ok, path} ->
+            {:ok, %{rows: rows}} =
+              Ecrits.Doc.Projection.edit_excerpt(path, marker: marker, context: 3)
+
+            # Prefer the resolved filename over the raw arg (the agent often passes
+            # an opaque doc id like `d_docx_…`).
+            {Path.basename(path), rows}
+
+          _ ->
+            {doc_edit_label(args), []}
+        end
+
+      %{
+        dom_id: "local-agent-docedit-#{tool_call_id}",
+        role: :doc_edit,
+        doc: doc,
+        location: doc_edit_location(op, result),
+        marker: marker,
+        rows: rows
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp maybe_doc_edit_card(_socket, _id, _name, _args, _result), do: nil
+
+  defp doc_edit_primary_op(args) do
+    cond do
+      is_map(args["op"]) -> args["op"]
+      is_list(args["ops"]) -> Enum.find(args["ops"], &is_map/1)
+      true -> nil
+    end
+  end
+
+  # The text the edit put into the document (insert_text/insert_paragraph text,
+  # or replace_text/set_cell replacement) — what we locate in the projection.
+  defp doc_edit_marker(op) when is_map(op) do
+    case op["replacement"] || op["text"] do
+      raw when is_binary(raw) ->
+        raw |> String.split("\n") |> Enum.map(&String.trim/1) |> Enum.find(&(&1 != ""))
+
+      _ ->
+        nil
+    end
+  end
+
+  defp doc_edit_label(args) do
+    case args["document"] do
+      d when is_binary(d) and d != "" -> Path.basename(d)
+      _ -> "document"
+    end
+  end
+
+  defp doc_edit_location(op, result) do
+    cond do
+      is_binary(op["ref"]) and op["ref"] != "" -> op["ref"]
+      p = doc_edit_para_idx(result) -> "¶#{p}"
+      is_binary(op["op"]) -> op["op"]
+      true -> ""
+    end
+  end
+
+  defp doc_edit_para_idx(result) when is_map(result) do
+    get_in(result, ["native", Access.at(0), "paraIdx"]) ||
+      get_in(result, ["native", Access.at(1), "paraIdx"])
+  end
+
+  defp doc_edit_para_idx(result) when is_binary(result) do
+    case Regex.run(~r/"paraIdx"\s*:\s*(\d+)/, result) do
+      [_, n] -> n
+      _ -> nil
+    end
+  end
+
+  defp doc_edit_para_idx(_result), do: nil
+
+  # Resolve doc.edit's `document` arg to an absolute path for projection: a
+  # workspace-relative/abs path that exists, else an open Pool doc matched by id
+  # or basename. :error when unresolvable (card renders without an excerpt).
+  defp resolve_edit_doc_path(socket, args) do
+    root = socket.assigns[:workspace_path]
+    doc = args["document"]
+
+    cond do
+      is_binary(doc) and is_binary(root) and File.regular?(Path.expand(doc, root)) ->
+        {:ok, Path.expand(doc, root)}
+
+      is_binary(doc) ->
+        pool_doc_path(doc)
+
+      true ->
+        :error
+    end
+  end
+
+  defp pool_doc_path(doc) do
+    Ecrits.Doc.Pool.list()
+    |> Enum.find(fn d -> d[:id] == doc or Path.basename(to_string(d[:path])) == doc end)
+    |> case do
+      %{path: path} when is_binary(path) -> {:ok, path}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
   end
 
   defp active_tool_name(%{name: name}), do: name
@@ -5260,6 +5763,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp agent_item_data_role(%{role: :tool}), do: "local-agent-tool"
   defp agent_item_data_role(%{role: :thinking}), do: "local-agent-thinking"
+  defp agent_item_data_role(%{role: :editor_preview}), do: "local-agent-editor-preview"
   defp agent_item_data_role(_item), do: "local-agent-message"
 
   defp agent_item_role(%{role: role}), do: to_string(role)
@@ -5275,6 +5779,20 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     agent_item_status(item) == "running" and agent_item_body(item) == ""
   end
 
+  defp agent_item_loading?(item, editor_preview) do
+    agent_item_loading?(item) and not editor_preview_turn_item?(editor_preview, item)
+  end
+
+  defp editor_preview_turn_item?(editor_preview, item) do
+    case {editor_preview, item} do
+      {%{turn_id: turn_id}, %{turn_id: turn_id}} when is_binary(turn_id) -> true
+      _other -> false
+    end
+  end
+
+  defp editor_preview_turn?(%{turn_id: turn_id}, turn_id) when is_binary(turn_id), do: true
+  defp editor_preview_turn?(_editor_preview, _turn_id), do: false
+
   defp agent_item_title(%{title: title}) when is_binary(title), do: title
   defp agent_item_title(_item), do: "Tool"
 
@@ -5283,6 +5801,43 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp agent_item_picks(%{picks: picks}) when is_list(picks), do: picks
   defp agent_item_picks(_item), do: []
+
+  defp agent_editor_preview_document(%{document: document}), do: document
+  defp agent_editor_preview_path(%{document_path: path}) when is_binary(path), do: path
+  defp agent_editor_preview_path(_item), do: nil
+
+  defp agent_editor_preview_spec(%{document_spec: spec}) when is_map(spec), do: spec
+  defp agent_editor_preview_spec(_item), do: nil
+
+  defp agent_editor_preview_canvas_id(%{canvas_id: id}) when is_binary(id), do: id
+  defp agent_editor_preview_canvas_id(_item), do: "local-agent-editor-preview"
+
+  defp agent_editor_preview_bytes_url(%{bytes_url: url}) when is_binary(url), do: url
+  defp agent_editor_preview_bytes_url(_item), do: nil
+
+  defp agent_editor_preview_href(%{href: href}) when is_binary(href), do: href
+  defp agent_editor_preview_href(_item), do: nil
+
+  defp agent_editor_preview_status(%{status: status}) when is_atom(status), do: status
+  defp agent_editor_preview_status(_item), do: :running
+
+  defp agent_editor_preview_text(%{body: body}) when is_binary(body), do: body
+  defp agent_editor_preview_text(_item), do: ""
+
+  defp agent_editor_preview_delta_count(%{delta_count: count}) when is_integer(count), do: count
+  defp agent_editor_preview_delta_count(_item), do: 0
+
+  defp agent_doc_edit_doc(%{doc: doc}) when is_binary(doc), do: doc
+  defp agent_doc_edit_doc(_item), do: "document"
+
+  defp agent_doc_edit_location(%{location: loc}) when is_binary(loc), do: loc
+  defp agent_doc_edit_location(_item), do: ""
+
+  defp agent_doc_edit_rows(%{rows: rows}) when is_list(rows), do: rows
+  defp agent_doc_edit_rows(_item), do: []
+
+  defp agent_doc_edit_marker(%{marker: m}) when is_binary(m), do: m
+  defp agent_doc_edit_marker(_item), do: ""
 
   # Chip label: the picked snippet only. An empty element (blank paragraph,
   # image, ...) keeps the chip compact — icon + type, ref on hover — instead of
@@ -5321,6 +5876,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   defp agent_item_class(%{role: :tool}) do
+    "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5"
+  end
+
+  defp agent_item_class(%{role: :doc_edit}) do
+    "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5"
+  end
+
+  defp agent_item_class(%{role: :editor_preview}) do
     "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5"
   end
 

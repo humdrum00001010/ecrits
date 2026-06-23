@@ -20,13 +20,21 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages do
   attr :document_id, :string, required: true
   attr :bytes_url, :string, default: nil
   attr :local_document_format, :string, required: true
+  attr :mirror?, :boolean, default: false
+  attr :preview_turn_id, :string, default: nil
+  attr :preview_text, :string, default: ""
+  attr :preview_delta_count, :integer, default: 0
 
   def render(assigns) do
     ~H"""
     <div
       id={@id}
       phx-hook="WasmHwpEditor"
-      class="relative h-full min-h-0 overflow-auto bg-white"
+      class={[
+        "relative h-full min-h-0 bg-white",
+        @mirror? && "overflow-hidden pointer-events-none",
+        !@mirror? && "overflow-auto"
+      ]}
       data-component="canvas-local-hwp-pages"
       data-renderer="rhwp-wasm"
       data-role="local-hwp-editor"
@@ -37,6 +45,10 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages do
       data-local-document-id={@document_id}
       data-local-document-format={@local_document_format}
       data-bytes-url={@bytes_url}
+      data-editor-mirror={to_string(@mirror?)}
+      data-preview-turn-id={@preview_turn_id}
+      data-preview-text={@preview_text}
+      data-preview-delta-count={@preview_delta_count}
     >
       <%!-- The OS IME needs an editable element to compose into (Korean editing,
             a later phase). Kept TRULY INVISIBLE — transparent text AND caret —
@@ -62,6 +74,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages do
       <div
         id={"#{@id}-pages"}
         data-role="local-hwp-pages"
+        data-editor-zoomable
         class="ehwp-document-stack ehwp-document-stack--local"
         phx-update="ignore"
       >

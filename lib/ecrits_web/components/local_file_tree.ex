@@ -88,8 +88,7 @@ defmodule EcritsWeb.Components.LocalFileTree do
         ]}>
           <span
             id={"#{@node_dom_id}-icon"}
-            phx-update="ignore"
-            class="inline-flex size-4 shrink-0 items-center justify-center text-base-content/50"
+            class="inline-flex size-4 shrink-0 items-center justify-center text-base-content/70"
             aria-hidden="true"
           >
             <.icon name={file_icon(@extension)} class="size-4 shrink-0" />
@@ -170,8 +169,7 @@ defmodule EcritsWeb.Components.LocalFileTree do
         >
           <span
             id={"#{@node_dom_id}-icon"}
-            phx-update="ignore"
-            class="inline-flex size-4 shrink-0 items-center justify-center text-base-content/50"
+            class="inline-flex size-4 shrink-0 items-center justify-center text-base-content/70"
             aria-hidden="true"
           >
             <.icon name={file_icon(@extension)} class="size-4 shrink-0" />

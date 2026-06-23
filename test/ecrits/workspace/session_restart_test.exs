@@ -115,7 +115,7 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert snapshot.status == :idle
   end
 
-  test "re-attach with the SAME provider reuses the agent (refresh-survival is preserved)",
+  test "re-attach from the same LiveView pid with the SAME provider reuses the agent",
        %{path: path, ws: ws} do
     agent_id = ws.agent_id
     old_pid = AcpAgent.whereis(agent_id)
@@ -124,8 +124,8 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     Session.subscribe_agent(agent_id)
     assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
 
-    # A browser refresh re-attaches with the SAME provider. The durable agent —
-    # its pid, provider thread and transcript — must be preserved, NOT restarted.
+    # A same-LiveView re-attach with the SAME provider preserves that LiveView's
+    # active rail and does not restart the provider thread.
     {:ok, ws2} =
       Session.attach(path,
         provider: "codex",
@@ -142,10 +142,13 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert AcpAgent.agent_snapshot(agent_id).transcript != []
   end
 
-  test "same workspace path isolates foreground agents by Phoenix session id", %{path: path} do
+  test "same workspace path isolates foreground agents by caller LiveView pid", %{path: path} do
+    live_a = start_live_process()
+    live_b = start_live_process()
+
     {:ok, ws_a} =
-      Session.attach(path,
-        live_session_id: "phx-session-a",
+      attach_from(live_a, path,
+        live_session_id: "same-browser-session",
         provider: "codex",
         adapter_opts: [
           exmcp_adapter: EcritsWeb.FakeAcpAdapter,
@@ -155,8 +158,8 @@ defmodule Ecrits.Workspace.SessionRestartTest do
       )
 
     {:ok, ws_b} =
-      Session.attach(path,
-        live_session_id: "phx-session-b",
+      attach_from(live_b, path,
+        live_session_id: "same-browser-session",
         provider: "codex",
         adapter_opts: [
           exmcp_adapter: EcritsWeb.FakeAcpAdapter,
@@ -181,8 +184,8 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert AcpAgent.agent_snapshot(ws_b.agent_id).transcript == []
 
     {:ok, ws_a2} =
-      Session.attach(path,
-        live_session_id: "phx-session-a",
+      attach_from(live_a, path,
+        live_session_id: "same-browser-session",
         provider: "codex",
         adapter_opts: [
           exmcp_adapter: EcritsWeb.FakeAcpAdapter,
@@ -196,7 +199,46 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert AcpAgent.agent_snapshot(ws_a.agent_id).transcript != []
   end
 
+  test "new LiveView pid starts a fresh rail and keeps old browser-session chats in recents",
+       %{path: path} do
+    settings = [
+      live_session_id: "browser-refresh",
+      provider: "codex",
+      adapter_opts: [
+        exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+        script: [{:text_delta, "reply"}]
+      ],
+      workspace_root: path
+    ]
+
+    live_1 = start_live_process()
+    {:ok, ws1} = attach_from(live_1, path, settings)
+    old_agent_pid = AcpAgent.whereis(ws1.agent_id)
+
+    Session.subscribe_agent(ws1.agent_id)
+    {:ok, %{id: turn_id}} = AcpAgent.send_turn(nil, ws1.agent_id, "old rail")
+    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+
+    stop_live_process(live_1)
+    sync_session(path)
+
+    assert AcpAgent.whereis(ws1.agent_id) == old_agent_pid
+
+    live_2 = start_live_process()
+    {:ok, ws2} = attach_from(live_2, path, settings)
+
+    refute ws2.agent_id == ws1.agent_id
+    assert AcpAgent.agent_snapshot(ws2.agent_id).transcript == []
+
+    recents = Session.recent_foregrounds(ws2)
+    assert Enum.any?(recents, &(&1.agent_id == ws2.agent_id and &1.active?))
+    assert Enum.any?(recents, &(&1.agent_id == ws1.agent_id and not &1.active?))
+  end
+
   test "same browser session can switch between recent foreground rails", %{path: path} do
+    path = Path.join(path, "recents")
+    File.mkdir_p!(path)
+
     settings = [
       live_session_id: "phx-session-recents",
       provider: "codex",
@@ -312,5 +354,50 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert reattached_ws.agent_id == agent_id
     assert AcpAgent.whereis(agent_id) == old_pid
     assert {:ok, %{document_path: "first.hwp"}} = AcpAgent.status(nil, agent_id)
+  end
+
+  defp start_live_process do
+    pid =
+      spawn(fn ->
+        live_process_loop()
+      end)
+
+    on_exit(fn -> stop_live_process(pid) end)
+    pid
+  end
+
+  defp live_process_loop do
+    receive do
+      {:attach, caller, ref, path, settings} ->
+        send(caller, {ref, Session.attach(path, settings)})
+        live_process_loop()
+
+      :stop ->
+        :ok
+    end
+  end
+
+  defp attach_from(pid, path, settings) do
+    ref = make_ref()
+    send(pid, {:attach, self(), ref, path, settings})
+    assert_receive {^ref, result}, 1_000
+    result
+  end
+
+  defp stop_live_process(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      ref = Process.monitor(pid)
+      send(pid, :stop)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+    end
+
+    :ok
+  end
+
+  defp sync_session(path) do
+    case Session.whereis(path) do
+      pid when is_pid(pid) -> :sys.get_state(pid)
+      nil -> :ok
+    end
   end
 end

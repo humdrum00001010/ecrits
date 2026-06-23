@@ -22,12 +22,20 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
   attr :document_path, :string, default: nil
   attr :local_document_format, :string, required: true
   attr :bytes_url, :string, default: nil
+  attr :mirror?, :boolean, default: false
+  attr :preview_turn_id, :string, default: nil
+  attr :preview_text, :string, default: ""
+  attr :preview_delta_count, :integer, default: 0
 
   def render(assigns) do
     ~H"""
     <div
       id={@id}
-      class="relative h-full min-h-0 overflow-auto bg-base-200"
+      class={[
+        "relative h-full min-h-0 bg-base-200",
+        @mirror? && "overflow-hidden pointer-events-none",
+        !@mirror? && "overflow-auto"
+      ]}
       data-component="canvas-local-office-wasm"
       data-renderer="libreoffice-wasm"
       data-role="office-wasm-viewer"
@@ -36,6 +44,10 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
       data-local-document-format={@local_document_format}
       data-office-asset-version={office_asset_version()}
       data-bytes-url={@bytes_url}
+      data-editor-mirror={to_string(@mirror?)}
+      data-preview-turn-id={@preview_turn_id}
+      data-preview-text={@preview_text}
+      data-preview-delta-count={@preview_delta_count}
       phx-hook="WasmOfficeEditor"
     >
       <%!-- The OS IME needs an editable element to compose into (Korean editing).
@@ -68,6 +80,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
       <div
         id={"#{@id}-pages"}
         data-role="office-wasm-pages"
+        data-editor-zoomable
         class="flex min-h-full flex-col items-center gap-4 py-4"
         phx-update="ignore"
       >

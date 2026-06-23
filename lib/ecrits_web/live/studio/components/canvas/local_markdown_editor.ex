@@ -78,7 +78,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalMarkdownEditor do
         phx-hook="ObservexPreview"
         class="chat-markdown min-h-0 flex-1 overflow-auto p-6 text-[15px] leading-[1.7]"
       >
-        {@preview_html}
+        <div data-editor-zoomable>
+          {@preview_html}
+        </div>
       </div>
     </div>
     """

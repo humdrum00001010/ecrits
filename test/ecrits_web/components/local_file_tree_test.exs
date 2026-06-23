@@ -65,7 +65,7 @@ defmodule EcritsWeb.Components.LocalFileTreeTest do
     assert Enum.all?(ids, &String.starts_with?(&1, "local-file-node-hwp-"))
 
     for row <- korean_rows do
-      assert row |> LazyHTML.query(~s([phx-update="ignore"] .hero-document-check)) |> Enum.any?()
+      assert row |> LazyHTML.query(".hero-document-check") |> Enum.any?()
     end
   end
 end

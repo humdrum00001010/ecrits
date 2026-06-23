@@ -61,6 +61,10 @@ defmodule EcritsWeb.Layouts do
 
   slot :inner_block, required: true
 
+  attr :fuse_mode, :any,
+    default: nil,
+    doc: "workspace doc-VFS state: nil hides the FUSE toggle; true/false shows it"
+
   def app(assigns) do
     ~H"""
     <div class="drawer">
@@ -77,7 +81,7 @@ defmodule EcritsWeb.Layouts do
       />
 
       <div class="drawer-content flex flex-col min-h-screen pt-[60px]">
-        <.top_nav current_scope={@current_scope} chrome={@chrome} />
+        <.top_nav current_scope={@current_scope} chrome={@chrome} fuse_mode={@fuse_mode} />
 
         <Breadcrumbs.breadcrumbs :if={@current_scope} trail={@breadcrumbs || []} />
 
@@ -120,6 +124,7 @@ defmodule EcritsWeb.Layouts do
 
   attr :current_scope, :map, default: nil
   attr :chrome, :string, default: "app", values: ~w(app landing)
+  attr :fuse_mode, :any, default: nil
 
   @doc """
   Top navigation for the local workspace product.
@@ -136,6 +141,41 @@ defmodule EcritsWeb.Layouts do
           <Brand.mark class="flex-none" />
           <span class="inline-flex h-[22px] items-center leading-none">Ecrits</span>
         </.link>
+      </div>
+
+      <div :if={@fuse_mode != nil} class="ml-auto flex items-center">
+        <button
+          id="fuse-mode-toggle"
+          type="button"
+          phx-click="toggle_fuse"
+          aria-pressed={"#{@fuse_mode == true}"}
+          aria-label={
+            if(@fuse_mode == true,
+              do: "Disable editable text mount (FUSE)",
+              else: "Enable editable text mount (FUSE)"
+            )
+          }
+          title="Mount this workspace's documents as editable text files (FUSE)"
+          class={[
+            "relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors duration-150",
+            "focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cs-blue)]",
+            @fuse_mode == true &&
+              "border-[color-mix(in_oklab,var(--cs-green)_42%,transparent)] bg-[color-mix(in_oklab,var(--cs-green)_12%,transparent)] text-[var(--cs-green)] hover:bg-[color-mix(in_oklab,var(--cs-green)_16%,transparent)]",
+            @fuse_mode != true &&
+              "border-transparent text-[var(--cs-muted)] hover:border-[color-mix(in_oklab,var(--cs-ink)_15%,transparent)] hover:bg-[color-mix(in_oklab,var(--cs-ink)_6%,transparent)] hover:text-[var(--cs-ink)]"
+          ]}
+        >
+          <.icon name="hero-document-text" class="size-4" />
+          <span
+            class={[
+              "absolute right-1 top-1 size-1.5 rounded-full border border-[var(--cs-bg)]",
+              @fuse_mode == true && "bg-[var(--cs-green)]",
+              @fuse_mode != true && "bg-[color-mix(in_oklab,var(--cs-ink)_24%,transparent)]"
+            ]}
+            aria-hidden="true"
+          >
+          </span>
+        </button>
       </div>
     </header>
     """

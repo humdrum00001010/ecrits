@@ -1,27 +1,25 @@
 defmodule Ecrits.Workspace.Session do
   @moduledoc """
-  Per-workspace MODEL + directory, keyed by the canonical workspace **path**
-  (cookieless — the path is in the URL). This is the durable facade the
-  workspace LiveView talks to; it survives the LiveView dying / a browser
-  refresh, so re-attaching after a refresh returns the SAME foreground agent
-  (same pid, same provider thread, same transcript + title).
+  Per-workspace MODEL + directory, keyed by the canonical workspace **path**.
+  This is the durable facade the workspace LiveView talks to. Foreground chat
+  rails are keyed by the caller LiveView process pid, while the Phoenix browser
+  session id only scopes the recent-conversation list.
 
   ## Responsibilities (Phase 1)
 
-    * **agents roster** — records the **foreground agent** bound to this
-      workspace (`%{agent_id => %{role: :foreground, pid: pid}}`). The foreground
-      agent is get-or-started ONCE per path on the first `attach/2`; later
-      attaches re-use it.
+    * **agents roster** — records the foreground agents bound to this workspace
+      (`%{agent_id => %{role: :foreground, pid: pid}}`). Each LiveView process
+      gets its own active foreground rail; completed rails remain selectable in
+      the same browser session's recent list.
     * **facade** — `attach/2`, `subscribe/1`, `foreground_agent/1`, `title/1`,
       `send_turn/2`, `cancel/2`, `rename/2`. The turn verbs delegate to the
       foreground agent.
 
   The Session holds **no live doc handles** and supervises **no agents** — the
   foreground agent is a `Ecrits.Local.AcpAgent.Session` GenServer held under
-  `Ecrits.Local.AcpAgent.SessionSupervisor` (durable in its own right), keyed by
-  a stable per-workspace agent id derived from the path. The Session is the
-  directory that binds path → foreground agent and the single entry point the
-  LiveView uses, so a refresh re-attaches rather than recreating anything.
+  `Ecrits.Local.AcpAgent.SessionSupervisor` (durable in its own right). The
+  Session is the directory that binds path + LiveView pid → foreground agent and
+  the single entry point the LiveView uses.
 
   Later phases extend the roster (background/worker agents), add the
   `viewers`/`owners` maps + the wasm/NIF routing decision, and the doc topic.
@@ -35,6 +33,7 @@ defmodule Ecrits.Workspace.Session do
 
   @registry Ecrits.Workspace.SessionRegistry
   @supervisor Ecrits.Workspace.SessionSupervisor
+  @pubsub Ecrits.PubSub
   @default_live_session_id "__default__"
   @max_recent_foregrounds 12
 
@@ -55,9 +54,9 @@ defmodule Ecrits.Workspace.Session do
   Returns the workspace handle (`t:ws/0`) carrying the canonical path and the
   resolved foreground agent id + topic, so the caller can `subscribe/1` and
   delegate turn verbs. `settings` seed the foreground agent on FIRST attach
-  (provider/adapter_opts/workspace_root/document_path/pool_document_id). On a
-  later attach (browser refresh), the existing agent is re-used and only live
-  adapter settings are applied — document context rides on each turn send.
+  (provider/adapter_opts/workspace_root/document_path/pool_document_id).
+  Later attaches from the same LiveView pid re-use its active rail; attaches
+  from a new pid start a fresh active rail and leave older rails in recents.
   """
   @spec attach(String.t(), keyword()) :: {:ok, ws()} | {:error, term()}
   def attach(path, settings \\ []) when is_binary(path) do
@@ -255,14 +254,20 @@ defmodule Ecrits.Workspace.Session do
 
   @doc """
   Display-only snapshot of the foreground agent: `%{transcript, status, title}`.
-  Used by the LiveView to repaint the chat pane after a browser refresh.
+  Used by the LiveView to repaint the active or selected recent rail.
   """
-  @spec snapshot(ws()) :: %{transcript: list(), status: atom(), title: String.t() | nil}
+  @spec snapshot(ws()) :: %{
+          required(:transcript) => list(),
+          required(:status) => atom(),
+          required(:title) => String.t() | nil,
+          optional(:title_user_edited?) => boolean()
+        }
   def snapshot(%{agent_id: agent_id}) when is_binary(agent_id) do
     AcpAgent.agent_snapshot(agent_id)
   end
 
-  def snapshot(_ws), do: %{transcript: [], status: :offline, title: nil}
+  def snapshot(_ws),
+    do: %{transcript: [], status: :offline, title: nil, title_user_edited?: false}
 
   @doc """
   Delegate a chat turn to the foreground agent. `input` is a bare **string**
@@ -448,6 +453,28 @@ defmodule Ecrits.Workspace.Session do
   @spec doc_topic(String.t()) :: String.t()
   def doc_topic(path) when is_binary(path), do: "workspace_doc:" <> canonical_path(path)
 
+  @doc """
+  Subscribe the caller to file-system changes for `path` and ensure the shared
+  per-workspace watcher is running.
+
+  The watcher is owned by the durable `Workspace.Session`, not by any particular
+  LiveView socket, so multiple tabs/reloads of the same workspace do not spawn
+  duplicate macOS watcher processes.
+  """
+  @spec subscribe_file_events(ws() | String.t()) :: :ok
+  def subscribe_file_events(%{path: path}) when is_binary(path), do: subscribe_file_events(path)
+
+  def subscribe_file_events(path) when is_binary(path) do
+    canonical = canonical_path(path)
+    :ok = Phoenix.PubSub.subscribe(@pubsub, file_events_topic(canonical))
+
+    with {:ok, _pid} <- ensure_started(canonical) do
+      GenServer.call(via(canonical), :ensure_file_watcher)
+    end
+
+    :ok
+  end
+
   @doc "Canonicalize a workspace path so the key is stable regardless of trailing slash etc."
   @spec canonical_path(String.t()) :: String.t()
   def canonical_path(path) when is_binary(path), do: Path.expand(path)
@@ -517,10 +544,10 @@ defmodule Ecrits.Workspace.Session do
        path: Keyword.fetch!(opts, :path),
        # agents roster: %{agent_id => %{role: :foreground, pid: pid}}
        agents: %{},
-       # Phoenix session scoped foreground bindings:
+       # Browser-session scoped foreground bindings:
        # %{rail_key => %{agent_id: id, provider: "codex" | "claude" | nil, owner_session_id: id}}
        foregrounds: %{},
-       # Active rail per Phoenix browser session: %{live_session_id => rail_key}
+       # Active rail per LiveView process key: %{live_view_key => rail_key}
        active_foregrounds: %{},
        # Most-recently-used rail keys, newest first.
        foreground_order: [],
@@ -534,13 +561,16 @@ defmodule Ecrits.Workspace.Session do
        owners: %{},
        # Per-doc human viewers (browser WASM authority): %{document_id => lv_pid}.
        # A viewer here makes `route/2` return `{:browser, lv}` for that doc.
-       viewers: %{}
+       viewers: %{},
+       # Shared file-system watcher for this workspace root. LiveViews subscribe to
+       # this Session's PubSub topic instead of each starting their own watcher.
+       fs_watcher_pid: nil
      }}
   end
 
   @impl true
-  def handle_call({:attach, settings}, _from, state) do
-    case ensure_foreground_agent(state, settings) do
+  def handle_call({:attach, settings}, {live_view_pid, _tag}, state) do
+    case ensure_foreground_agent(state, settings, live_view_pid) do
       {:ok, state, %{id: agent_id, rail_key: rail_key, live_session_id: live_session_id}} ->
         ws = ws(state.path, live_session_id, rail_key, agent_id)
         {:reply, {:ok, ws}, state}
@@ -555,8 +585,8 @@ defmodule Ecrits.Workspace.Session do
     {:reply, first_foreground(state), state}
   end
 
-  def handle_call({:restart_foreground, settings}, _from, state) do
-    case restart_foreground_agent(state, settings) do
+  def handle_call({:restart_foreground, settings}, {live_view_pid, _tag}, state) do
+    case restart_foreground_agent(state, settings, live_view_pid) do
       {:ok, state, %{id: agent_id, rail_key: rail_key, live_session_id: live_session_id}} ->
         ws = ws(state.path, live_session_id, rail_key, agent_id)
         {:reply, {:ok, ws}, state}
@@ -566,13 +596,15 @@ defmodule Ecrits.Workspace.Session do
     end
   end
 
-  def handle_call({:new_foreground, settings}, _from, state) do
+  def handle_call({:new_foreground, settings}, {live_view_pid, _tag}, state) do
     live_session_id = foreground_session_key(settings)
+    live_view_key = foreground_live_view_key(live_view_pid)
     state = ensure_foregrounds(state)
-    active_rail_key = active_foreground_key(state, live_session_id)
+    state = monitor_foreground_live_view(state, live_view_pid)
+    active_rail_key = active_foreground_key(state, live_view_key)
 
     if empty_foreground?(state, active_rail_key) do
-      case restart_foreground_agent(state, settings, active_rail_key) do
+      case restart_foreground_agent(state, settings, active_rail_key, live_view_key) do
         {:ok, state, %{id: agent_id, rail_key: rail_key}} ->
           ws = ws(state.path, live_session_id, rail_key, agent_id)
           {:reply, {:ok, ws}, state}
@@ -581,9 +613,9 @@ defmodule Ecrits.Workspace.Session do
           {:reply, {:error, reason}, state}
       end
     else
-      rail_key = new_foreground_key(live_session_id)
+      rail_key = new_foreground_key(live_view_key)
 
-      case start_foreground_agent(state, settings, rail_key) do
+      case start_foreground_agent(state, settings, rail_key, live_view_key) do
         {:ok, state, %{id: agent_id, rail_key: rail_key}} ->
           ws = ws(state.path, live_session_id, rail_key, agent_id)
           {:reply, {:ok, ws}, state}
@@ -594,16 +626,18 @@ defmodule Ecrits.Workspace.Session do
     end
   end
 
-  def handle_call({:select_foreground, rail_key, settings}, _from, state) do
+  def handle_call({:select_foreground, rail_key, settings}, {live_view_pid, _tag}, state) do
     live_session_id = foreground_session_key(settings)
+    live_view_key = foreground_live_view_key(live_view_pid)
     state = ensure_foregrounds(state)
+    state = monitor_foreground_live_view(state, live_view_pid)
 
     with %{owner_session_id: ^live_session_id, agent_id: agent_id} = meta <-
            Map.get(state.foregrounds, rail_key),
          true <- is_binary(agent_id) do
       cond do
         provider_switch?(meta.provider, Keyword.get(settings, :provider)) ->
-          case restart_foreground_agent(state, settings, rail_key) do
+          case restart_foreground_agent(state, settings, rail_key, live_view_key) do
             {:ok, state, %{id: agent_id}} ->
               {:reply, {:ok, ws(state.path, live_session_id, rail_key, agent_id)}, state}
 
@@ -616,13 +650,13 @@ defmodule Ecrits.Workspace.Session do
 
           state =
             state
-            |> activate_foreground(live_session_id, rail_key)
+            |> activate_foreground(live_view_key, rail_key)
             |> bump_foreground_order(rail_key)
 
           {:reply, {:ok, ws(state.path, live_session_id, rail_key, agent_id)}, state}
 
         true ->
-          case start_foreground_agent(state, settings, rail_key) do
+          case start_foreground_agent(state, settings, rail_key, live_view_key) do
             {:ok, state, %{id: agent_id}} ->
               {:reply, {:ok, ws(state.path, live_session_id, rail_key, agent_id)}, state}
 
@@ -758,18 +792,55 @@ defmodule Ecrits.Workspace.Session do
     {:reply, :ok, %{state | owners: owners}}
   end
 
+  def handle_call(:ensure_file_watcher, _from, state) do
+    {:reply, :ok, ensure_file_watcher(state)}
+  end
+
   @impl true
+  def handle_info({:file_event, pid, :stop}, %{fs_watcher_pid: pid} = state) do
+    {:noreply, %{state | fs_watcher_pid: nil}}
+  end
+
+  def handle_info({:file_event, pid, {path, _events}}, %{fs_watcher_pid: pid} = state)
+      when is_binary(path) do
+    # Ignore churn from the document VFS mount itself (<root>/.ecrits/mount); it
+    # is never user content and would otherwise trigger pointless tree refreshes.
+    unless String.contains?(path, "/.ecrits/") do
+      Phoenix.PubSub.broadcast(
+        @pubsub,
+        file_events_topic(state.path),
+        {:workspace_fs_event, path}
+      )
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:file_event, _pid, _payload}, state), do: {:noreply, state}
+
   # A crashed viewer relinquishes its browser claim on every doc it backed, so
   # those docs fall back to their server Editors.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     state = ensure_maps(state)
-    {:noreply, %{state | viewers: drop_viewer_everywhere(state.viewers, pid)}}
+    state = ensure_foregrounds(state)
+
+    state =
+      state
+      |> Map.put(:viewers, drop_viewer_everywhere(state.viewers, pid))
+      |> drop_live_view_foreground(pid)
+
+    {:noreply, state}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
+    _ = stop_file_watcher(state)
+    # Tear down the document VFS mount when the workspace session truly ends
+    # (best-effort; no-op if it was never mounted / already gone).
+    _ = if is_binary(state.path), do: Ecrits.Fuse.DocMount.teardown(state.path)
+
     state
     |> Map.get(:agents, %{})
     |> Map.keys()
@@ -785,19 +856,59 @@ defmodule Ecrits.Workspace.Session do
     state
     |> Map.put_new(:owners, %{})
     |> Map.put_new(:viewers, %{})
+    |> Map.put_new(:fs_watcher_pid, nil)
   end
+
+  defp ensure_file_watcher(state) do
+    state = ensure_maps(state)
+
+    case state.fs_watcher_pid do
+      pid when is_pid(pid) ->
+        if Process.alive?(pid),
+          do: state,
+          else: start_file_watcher(%{state | fs_watcher_pid: nil})
+
+      _ ->
+        start_file_watcher(state)
+    end
+  end
+
+  defp start_file_watcher(state) do
+    if is_binary(state.path) and state.path != "" do
+      case FileSystem.start_link(dirs: [state.path]) do
+        {:ok, pid} ->
+          FileSystem.subscribe(pid)
+          %{state | fs_watcher_pid: pid}
+
+        _other ->
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp stop_file_watcher(%{fs_watcher_pid: pid}) when is_pid(pid) do
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+    :ok
+  end
+
+  defp stop_file_watcher(_state), do: :ok
+
+  defp file_events_topic(path), do: "workspace_files:" <> canonical_path(path)
 
   # ── foreground-agent binding ───────────────────────────────────────
 
-  # Get-or-start the foreground agent for this workspace + Phoenix session. The
-  # workspace Session remains path-keyed for document routing; the foreground
-  # chat agent is keyed by a stable id derived from path + live_session_id, so two
-  # browser sessions viewing the same workspace do not share a rail, while a
-  # refresh with the same Phoenix session re-attaches to the same agent.
-  defp ensure_foreground_agent(state, settings) do
+  # Get-or-start the foreground agent for this workspace + LiveView process. The
+  # workspace Session remains path-keyed for document routing; the active chat
+  # agent is keyed by a stable id derived from path + caller pid. The Phoenix
+  # browser session id only scopes the recent-conversation list.
+  defp ensure_foreground_agent(state, settings, live_view_pid) do
     live_session_id = foreground_session_key(settings)
+    live_view_key = foreground_live_view_key(live_view_pid)
     state = ensure_foregrounds(state)
-    rail_key = active_foreground_key(state, live_session_id)
+    state = monitor_foreground_live_view(state, live_view_pid)
+    rail_key = active_foreground_key(state, live_view_key)
 
     case current_foreground(state, rail_key) do
       %{id: agent_id} = fg ->
@@ -810,24 +921,24 @@ defmodule Ecrits.Workspace.Session do
           # requests a DIFFERENT provider must do a genuine restart — otherwise the
           # stale adapter keeps serving turns under the new provider's model and the
           # provider rejects them (observed: "'sonnet' not supported with Codex").
-          restart_foreground_agent(state, settings, rail_key)
+          restart_foreground_agent(state, settings, rail_key, live_view_key)
         else
           _ = maybe_apply_settings(agent_id, settings)
 
           state =
             state
-            |> activate_foreground(live_session_id, rail_key)
+            |> activate_foreground(live_view_key, rail_key)
             |> bump_foreground_order(rail_key)
 
           {:ok, state, Map.merge(fg, %{rail_key: rail_key, live_session_id: live_session_id})}
         end
 
       nil ->
-        start_foreground_agent(state, settings, rail_key)
+        start_foreground_agent(state, settings, rail_key, live_view_key)
     end
   end
 
-  defp start_foreground_agent(state, settings, rail_key) do
+  defp start_foreground_agent(state, settings, rail_key, live_view_key) do
     live_session_id = foreground_session_key(settings)
     agent_id = foreground_agent_id(state.path, rail_key)
     opts = Keyword.put(settings, :id, agent_id)
@@ -838,7 +949,13 @@ defmodule Ecrits.Workspace.Session do
 
         state =
           state
-          |> put_foreground(live_session_id, rail_key, agent_id, Keyword.get(settings, :provider))
+          |> put_foreground(
+            live_session_id,
+            live_view_key,
+            rail_key,
+            agent_id,
+            Keyword.get(settings, :provider)
+          )
           |> Map.update!(:agents, &Map.put(&1, agent_id, %{role: :foreground, pid: pid}))
 
         {:ok, state,
@@ -850,8 +967,8 @@ defmodule Ecrits.Workspace.Session do
   end
 
   # A provider SWITCH only when both the bound and requested providers are known
-  # and differ. A re-attach that doesn't pin a provider (nil) — or pins the same
-  # one — reuses the durable agent, preserving refresh-survival.
+  # and differ. A same-pid re-attach that doesn't pin a provider (nil) — or pins
+  # the same one — reuses the active LiveView rail.
   defp provider_switch?(bound, requested)
        when is_binary(bound) and is_binary(requested),
        do: bound != requested
@@ -888,15 +1005,16 @@ defmodule Ecrits.Workspace.Session do
   # path-keyed id to be fully released from the registry, then start a fresh agent
   # with the new provider/adapter + settings. The new agent reuses the same stable
   # id but begins with an EMPTY transcript + default title.
-  defp restart_foreground_agent(state, settings) do
-    live_session_id = foreground_session_key(settings)
+  defp restart_foreground_agent(state, settings, live_view_pid) do
+    live_view_key = foreground_live_view_key(live_view_pid)
     state = ensure_foregrounds(state)
-    rail_key = active_foreground_key(state, live_session_id)
+    state = monitor_foreground_live_view(state, live_view_pid)
+    rail_key = active_foreground_key(state, live_view_key)
 
-    restart_foreground_agent(state, settings, rail_key)
+    restart_foreground_agent(state, settings, rail_key, live_view_key)
   end
 
-  defp restart_foreground_agent(state, settings, rail_key) do
+  defp restart_foreground_agent(state, settings, rail_key, live_view_key) do
     live_session_id = foreground_session_key(settings)
     agent_id = foreground_agent_id(state.path, rail_key)
 
@@ -917,7 +1035,13 @@ defmodule Ecrits.Workspace.Session do
 
         state =
           state
-          |> put_foreground(live_session_id, rail_key, agent_id, Keyword.get(settings, :provider))
+          |> put_foreground(
+            live_session_id,
+            live_view_key,
+            rail_key,
+            agent_id,
+            Keyword.get(settings, :provider)
+          )
           |> Map.update!(:agents, &Map.put(&1, agent_id, %{role: :foreground, pid: pid}))
 
         {:ok, state,
@@ -1010,6 +1134,50 @@ defmodule Ecrits.Workspace.Session do
 
   defp foreground_session_key(_settings), do: @default_live_session_id
 
+  defp foreground_live_view_key(pid) when is_pid(pid) do
+    "lv-" <>
+      (:crypto.hash(:sha256, :erlang.term_to_binary(pid))
+       |> Base.url_encode64(padding: false)
+       |> binary_part(0, 16))
+  end
+
+  defp monitor_foreground_live_view(state, pid) when is_pid(pid) do
+    Process.monitor(pid)
+    state
+  end
+
+  defp drop_live_view_foreground(state, pid) when is_pid(pid) do
+    state = ensure_foregrounds(state)
+    live_view_key = foreground_live_view_key(pid)
+
+    case Map.pop(state.active_foregrounds, live_view_key) do
+      {nil, _active_foregrounds} ->
+        state
+
+      {rail_key, active_foregrounds} ->
+        state = %{state | active_foregrounds: active_foregrounds}
+
+        if empty_foreground?(state, rail_key) and not foreground_active?(state, rail_key) do
+          case Map.get(state.foregrounds, rail_key) do
+            %{agent_id: agent_id} when is_binary(agent_id) ->
+              _ = AcpAgent.close(agent_id)
+              drop_foreground(state, rail_key, agent_id)
+
+            _ ->
+              state
+          end
+        else
+          state
+        end
+    end
+  end
+
+  defp foreground_active?(state, rail_key) do
+    state.active_foregrounds
+    |> Map.values()
+    |> Enum.any?(&(&1 == rail_key))
+  end
+
   defp foreground_provider(state, rail_key) do
     state = ensure_foregrounds(state)
 
@@ -1033,7 +1201,7 @@ defmodule Ecrits.Workspace.Session do
     active_foregrounds =
       state
       |> Map.get(:active_foregrounds, %{})
-      |> ensure_active_foregrounds(foregrounds)
+      |> normalize_active_foregrounds(foregrounds)
 
     foreground_order =
       state
@@ -1076,28 +1244,29 @@ defmodule Ecrits.Workspace.Session do
     end)
   end
 
-  defp ensure_active_foregrounds(active_foregrounds, foregrounds)
+  defp normalize_active_foregrounds(active_foregrounds, foregrounds)
        when is_map(active_foregrounds) do
-    Enum.reduce(foregrounds, active_foregrounds, fn {rail_key, meta}, acc ->
-      owner_session_id = meta.owner_session_id || rail_key
-      Map.put_new(acc, owner_session_id, rail_key)
+    active_foregrounds
+    |> Enum.filter(fn {_live_view_key, rail_key} ->
+      is_binary(rail_key) and Map.has_key?(foregrounds, rail_key)
     end)
+    |> Map.new()
   end
 
-  defp ensure_active_foregrounds(_active_foregrounds, foregrounds) do
-    ensure_active_foregrounds(%{}, foregrounds)
+  defp normalize_active_foregrounds(_active_foregrounds, _foregrounds) do
+    %{}
   end
 
-  defp active_foreground_key(state, live_session_id) do
+  defp active_foreground_key(state, live_view_key) do
     state = ensure_foregrounds(state)
 
-    case Map.get(state.active_foregrounds, live_session_id) do
+    case Map.get(state.active_foregrounds, live_view_key) do
       rail_key when is_binary(rail_key) and is_map_key(state.foregrounds, rail_key) -> rail_key
-      _ -> live_session_id
+      _ -> live_view_key
     end
   end
 
-  defp put_foreground(state, live_session_id, rail_key, agent_id, provider) do
+  defp put_foreground(state, live_session_id, live_view_key, rail_key, agent_id, provider) do
     state = ensure_foregrounds(state)
 
     foregrounds =
@@ -1109,7 +1278,7 @@ defmodule Ecrits.Workspace.Session do
 
     state =
       %{state | foregrounds: foregrounds}
-      |> activate_foreground(live_session_id, rail_key)
+      |> activate_foreground(live_view_key, rail_key)
       |> bump_foreground_order(rail_key)
 
     if rail_key == @default_live_session_id or is_nil(Map.get(state, :foreground_id)) do
@@ -1119,9 +1288,9 @@ defmodule Ecrits.Workspace.Session do
     end
   end
 
-  defp activate_foreground(state, live_session_id, rail_key) do
+  defp activate_foreground(state, live_view_key, rail_key) do
     state = ensure_foregrounds(state)
-    %{state | active_foregrounds: Map.put(state.active_foregrounds, live_session_id, rail_key)}
+    %{state | active_foregrounds: Map.put(state.active_foregrounds, live_view_key, rail_key)}
   end
 
   defp bump_foreground_order(state, rail_key) do
@@ -1136,7 +1305,6 @@ defmodule Ecrits.Workspace.Session do
 
   defp drop_foreground(state, rail_key, agent_id) do
     state = ensure_foregrounds(state)
-    meta = Map.get(state.foregrounds, rail_key)
 
     state = %{
       state
@@ -1145,17 +1313,10 @@ defmodule Ecrits.Workspace.Session do
         foreground_order: Enum.reject(state.foreground_order, &(&1 == rail_key))
     }
 
-    state =
-      case meta do
-        %{owner_session_id: owner_session_id} ->
-          update_in(
-            state.active_foregrounds,
-            &drop_active_foreground(&1, owner_session_id, rail_key)
-          )
-
-        _ ->
-          state
-      end
+    state = %{
+      state
+      | active_foregrounds: drop_active_foreground(state.active_foregrounds, rail_key)
+    }
 
     if Map.get(state, :foreground_id) == agent_id do
       %{state | foreground_id: nil, foreground_provider: nil}
@@ -1164,16 +1325,15 @@ defmodule Ecrits.Workspace.Session do
     end
   end
 
-  defp drop_active_foreground(active_foregrounds, owner_session_id, rail_key) do
-    case Map.get(active_foregrounds, owner_session_id) do
-      ^rail_key -> Map.delete(active_foregrounds, owner_session_id)
-      _ -> active_foregrounds
-    end
+  defp drop_active_foreground(active_foregrounds, rail_key) do
+    active_foregrounds
+    |> Enum.reject(fn {_live_view_key, active_rail_key} -> active_rail_key == rail_key end)
+    |> Map.new()
   end
 
   defp recent_foregrounds_for(state, live_session_id, active_rail_key) do
     state = ensure_foregrounds(state)
-    active_rail_key = active_rail_key || Map.get(state.active_foregrounds, live_session_id)
+    active_rail_key = active_rail_key
 
     state.foreground_order
     |> Enum.flat_map(fn rail_key ->
@@ -1199,8 +1359,8 @@ defmodule Ecrits.Workspace.Session do
     end)
   end
 
-  defp new_foreground_key(live_session_id) do
-    live_session_id <> ":rail:" <> Ecto.UUID.generate()
+  defp new_foreground_key(live_view_key) do
+    live_view_key <> ":rail:" <> Ecto.UUID.generate()
   end
 
   # Remove `lv`'s viewer claim from EVERY doc it currently backs (a previously-
@@ -1211,17 +1371,17 @@ defmodule Ecrits.Workspace.Session do
     |> Map.new()
   end
 
-  # Stable foreground-agent id for a workspace path + Phoenix session.
-  # Deterministic so a refresh re-derives the SAME id and re-attaches to the SAME
-  # agent. The default key preserves the older path-only id for legacy callers.
+  # Stable foreground-agent id for a workspace path + rail key. Same LiveView pid
+  # re-derives the same rail key; a refreshed LiveView gets a different key. The
+  # default key preserves the older path-only id for legacy callers.
   defp foreground_agent_id(path, @default_live_session_id) do
     "fg-" <>
       (:crypto.hash(:sha256, path) |> Base.url_encode64(padding: false) |> binary_part(0, 32))
   end
 
-  defp foreground_agent_id(path, live_session_id) do
+  defp foreground_agent_id(path, rail_key) do
     "fg-" <>
-      (:crypto.hash(:sha256, path <> <<0>> <> live_session_id)
+      (:crypto.hash(:sha256, path <> <<0>> <> rail_key)
        |> Base.url_encode64(padding: false)
        |> binary_part(0, 32))
   end

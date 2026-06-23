@@ -22,7 +22,6 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   attr :save_state, :string, default: nil
   attr :open_documents, :list, default: []
   attr :active_document_id, :string, default: nil
-  attr :tab_close_hrefs, :map, default: %{}
   attr :dirty_document_ids, :any, default: nil
   attr :hwp_pages, :any, required: true
   attr :hwp_page_count, :integer, default: 0
@@ -97,16 +96,15 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                     </span>
                     <span class="min-w-0 truncate">{tab.name}</span>
                   </button>
-                  <a
-                    href={Map.get(@tab_close_hrefs, tab.id, "#")}
-                    role="button"
+                  <button
+                    type="button"
                     phx-click={tab_close_js(tab)}
                     data-role="document-tab-close"
                     aria-label={"Close #{tab.name}"}
                     class="my-auto mr-1.5 inline-flex size-6 shrink-0 items-center justify-center rounded text-base-content/45 transition-colors hover:bg-base-200 hover:text-base-content"
                   >
                     <.icon name="hero-x-mark" class="size-3" />
-                  </a>
+                  </button>
                 </div>
               </div>
 
@@ -195,6 +193,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 <.quick_toolbar_italic_icon />
               </button>
               <button
+                :if={not markdown_format?(@document.format)}
                 type="button"
                 data-command="image"
                 aria-label="Insert image"
@@ -295,10 +294,126 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
     """
   end
 
+  attr :id, :string, required: true
+  attr :document, :map, required: true
+  attr :document_path, :string, default: nil
+  attr :document_spec, :map, default: nil
+  attr :canvas_id, :string, required: true
+  attr :hwp_bytes_url, :string, default: nil
+  attr :href, :string, default: nil
+  attr :status, :atom, default: :running
+  attr :turn_id, :string, default: nil
+  attr :preview_text, :string, default: ""
+  attr :delta_count, :integer, default: 0
+  attr :markdown_source, :string, default: ""
+  attr :markdown_preview_html, :any, default: ""
+
+  def embedded_document(assigns) do
+    assigns =
+      assigns
+      |> assign(:document_path, assigns.document_path || document_path(assigns.document))
+      |> assign(:document_spec, assigns.document_spec || embedded_document_spec(assigns.document))
+
+    ~H"""
+    <div
+      id={@id}
+      data-role="editor-preview"
+      data-document-id={@document.id}
+      data-document-path={@document_path}
+      data-preview-delta-count={@delta_count}
+      data-preview-status={@status}
+      class="min-w-0 overflow-hidden rounded-md border border-base-content/15 bg-base-100"
+    >
+      <div class="flex min-w-0 items-center gap-2 border-b border-base-content/10 px-2.5 py-1.5">
+        <.icon name="hero-pencil-square" class="size-3.5 shrink-0 text-base-content/55" />
+        <span class="min-w-0 flex-1 truncate text-[12px] font-medium leading-4 text-base-content/80">
+          {embedded_document_title(@document, @document_path)}
+        </span>
+        <span
+          data-role="editor-preview-delta-count"
+          class="shrink-0 font-mono text-[10px] leading-4 text-base-content/45"
+        >
+          {@delta_count}
+        </span>
+        <.link
+          :if={@href}
+          navigate={@href}
+          data-role="editor-preview-open"
+          class="inline-flex size-6 shrink-0 items-center justify-center rounded text-base-content/55 transition-colors hover:bg-base-200 hover:text-base-content"
+          aria-label="Open in editor"
+          title="Open in editor"
+        >
+          <.icon name="hero-arrow-top-right-on-square" class="size-3.5" />
+        </.link>
+      </div>
+      <div class="h-64 min-h-0 overflow-hidden bg-base-200">
+        <LocalHwpPages.render
+          :if={ehwp_format?(@document.format)}
+          id={@canvas_id}
+          pages={[]}
+          page_count={0}
+          spec={@document_spec}
+          document_id={@document.id}
+          bytes_url={@hwp_bytes_url}
+          local_document_format={@document.format}
+          mirror?={true}
+          preview_turn_id={@turn_id}
+          preview_text={@preview_text}
+          preview_delta_count={@delta_count}
+        />
+        <LocalMarkdownEditor.render
+          :if={markdown_format?(@document.format)}
+          id={@canvas_id}
+          document_id={@document.id}
+          local_document_format={@document.format}
+          source={@markdown_source || @preview_text}
+          preview_html={@markdown_preview_html}
+        />
+        <LocalOfficeWasm.render
+          :if={not ehwp_format?(@document.format) and not markdown_format?(@document.format)}
+          id={@canvas_id}
+          document_id={@document.id}
+          document_path={@document_path}
+          local_document_format={@document.format}
+          bytes_url={@hwp_bytes_url}
+          mirror?={true}
+          preview_turn_id={@turn_id}
+          preview_text={@preview_text}
+          preview_delta_count={@delta_count}
+        />
+      </div>
+    </div>
+    """
+  end
+
   defp ehwp_format?(format), do: format in ~w(hwp hwpx)
   defp markdown_format?(format), do: format in ~w(md markdown)
   defp document_path(%{relative_path: relative_path}), do: relative_path
   defp document_path(_document), do: nil
+
+  defp embedded_document_title(_document, path) when is_binary(path) and path != "",
+    do: Path.basename(path)
+
+  defp embedded_document_title(%{name: name}, _path) when is_binary(name) and name != "",
+    do: name
+
+  defp embedded_document_title(_document, _path), do: "document"
+
+  defp embedded_document_spec(%{format: "hwp"} = document) do
+    %{
+      key: "local_hwp_preview",
+      name: Path.basename(document.relative_path),
+      template_hwp_path: document.relative_path
+    }
+  end
+
+  defp embedded_document_spec(%{relative_path: relative_path}) do
+    %{
+      key: "local_hwpx_preview",
+      name: Path.basename(relative_path),
+      template_hwpx_path: relative_path
+    }
+  end
 
   defp quick_toolbar_button_class do
     [
@@ -344,7 +459,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   end
 
   defp tab_close_js(tab) do
-    JS.hide(to: "#studio-document-tab-#{tab.id}")
+    JS.set_attribute({"hidden", ""}, to: "#studio-document-tab-#{tab.id}")
     |> JS.push("tab_close", value: %{id: tab.id})
   end
 end
