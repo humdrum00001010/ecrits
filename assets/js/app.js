@@ -709,12 +709,19 @@ function applyEditorZoom(content, state, scale) {
   const ratio = previous > 0 ? scale / previous : 1
   const scroller = state.scroller?.isConnected ? state.scroller : findEditorZoomScroller(content)
   content.style.transform = `scale(${formatEditorZoom(scale)})`
+  updateEditorZoomFootprint(content, scale)
   if (ratio !== 1) {
     scroller.scrollLeft = (scroller.scrollLeft + state.anchorX) * ratio - state.anchorX
     scroller.scrollTop = (scroller.scrollTop + state.anchorY) * ratio - state.anchorY
   }
   state.scroller = scroller
   state.scale = scale
+}
+
+function updateEditorZoomFootprint(content, scale) {
+  const height = content.offsetHeight
+  const delta = height * (scale - 1)
+  content.style.marginBottom = Math.abs(delta) > 0.5 ? `${delta}px` : ""
 }
 
 function readEditorZoom(content) {
