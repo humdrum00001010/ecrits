@@ -18,6 +18,7 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
   alias Ecrits.Local.Document
+  alias Ecrits.Local.Document.ByteSpool
 
   @spec open(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def open(workspace_root, relative_path, opts \\ []) do
@@ -38,8 +39,8 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   @spec checkpoint(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def checkpoint(document_id, params) when is_binary(document_id) and is_map(params) do
     with {:ok, %Document{} = document} <- Document.document(document_id),
-         :ok <- verify_format(document, params),
          {:ok, bytes} <- decode_bytes(params),
+         :ok <- verify_format(document, params),
          {:ok, saved_document, snapshot} <- Document.checkpoint(document, bytes, attrs(params)) do
       :ok = sync_server_twin(document, bytes)
       {:ok, save_response(saved_document, snapshot)}
@@ -49,8 +50,8 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   @spec save(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def save(document_id, params) when is_binary(document_id) and is_map(params) do
     with {:ok, %Document{} = document} <- Document.document(document_id),
-         :ok <- verify_format(document, params),
          {:ok, bytes} <- decode_bytes(params),
+         :ok <- verify_format(document, params),
          {:ok, saved_document, snapshot} <- Document.save(document, bytes, attrs(params)) do
       :ok = sync_server_twin(document, bytes)
       {:ok, save_response(saved_document, snapshot)}
@@ -90,15 +91,7 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
     }
   end
 
-  defp decode_bytes(%{"bytes_base64" => encoded}) when is_binary(encoded),
-    do: Base.decode64(encoded)
-
-  defp decode_bytes(%{bytes_base64: encoded}) when is_binary(encoded),
-    do: Base.decode64(encoded)
-
-  defp decode_bytes(%{"bytes" => bytes}) when is_binary(bytes), do: {:ok, bytes}
-  defp decode_bytes(%{bytes: bytes}) when is_binary(bytes), do: {:ok, bytes}
-  defp decode_bytes(_params), do: {:error, :missing_bytes}
+  defp decode_bytes(params), do: ByteSpool.decode(params)
 
   defp verify_format(document, params) do
     case param(params, :format) do

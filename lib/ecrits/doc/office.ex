@@ -60,6 +60,7 @@ defmodule Ecrits.Doc.Office do
 
   alias Ecrits.Doc.Office.Instance
   alias Ecrits.Doc.Office.Ref
+  alias Ecrits.Doc.Office.XlsxReader
   alias Ecrits.Doc.Op
   alias Libreofficex.LokBackend.Native
 
@@ -423,7 +424,27 @@ defmodule Ecrits.Doc.Office do
   the walker provides them. Public so tests/callers can read the raw IR.
   """
   @spec elements(handle()) :: {:ok, [map()]} | {:error, term()}
+  def elements(%{doc: _, kind: :xlsx, path: path} = handle) when is_binary(path) do
+    case native_elements(handle) do
+      {:ok, nodes} = ok when is_list(nodes) ->
+        if xlsx_element_list?(nodes) do
+          ok
+        else
+          fallback_xlsx_elements(path, ok)
+        end
+
+      {:error, _reason} = error ->
+        fallback_xlsx_elements(path, error)
+    end
+  end
+
   def elements(%{doc: _} = handle) do
+    native_elements(handle)
+  end
+
+  def elements(_handle), do: {:error, :invalid_handle}
+
+  defp native_elements(%{doc: _} = handle) do
     Instance.run(handle, fn session ->
       case Native.uno_elements(session) do
         {:ok, json} ->
@@ -444,7 +465,22 @@ defmodule Ecrits.Doc.Office do
     end)
   end
 
-  def elements(_handle), do: {:error, :invalid_handle}
+  defp fallback_xlsx_elements(path, native_result) do
+    case XlsxReader.elements(path) do
+      {:ok, nodes} -> {:ok, nodes}
+      {:error, _reason} -> native_result
+    end
+  end
+
+  defp xlsx_element_list?(nodes) do
+    Enum.any?(nodes, fn
+      %{"type" => "cell", "ref" => "sheet[" <> _} -> true
+      %{"ref" => "sheet[" <> _} -> true
+      %{type: "cell", ref: "sheet[" <> _} -> true
+      %{ref: "sheet[" <> _} -> true
+      _ -> false
+    end)
+  end
 
   @impl true
   # `Ecrits.Doc` callback: full-IR element enumeration (docx/pptx `doc.find all:true`

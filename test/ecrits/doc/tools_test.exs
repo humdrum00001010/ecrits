@@ -44,22 +44,30 @@ defmodule Ecrits.Doc.ToolsTest do
     test "exposes the common doc.* surface with schemas and risk levels" do
       names = Tools.tools() |> Enum.map(&(&1["namespace"] <> "." <> &1["name"]))
 
-      for n <- ~w(doc.context doc.list doc.open doc.create doc.read doc.find
-                  doc.get doc.set doc.edit doc.save doc.render) do
+      for n <- ~w(doc.context doc.list doc.open doc.open_doc doc.close_doc
+                  doc.create doc.read doc.find doc.get doc.set doc.edit
+                  doc.save doc.render) do
         assert n in names, "expected #{n} in tool catalog"
       end
 
-      # The consolidated surface is eleven tools (ten + doc.render, the visual
-      # feedback loop); the former doc.inspect and doc.apply_style are folded
-      # into doc.get / doc.set. The authoring guide is NOT a tool — it is the
-      # MCP server's `instructions` (one global copy per session).
+      # The consolidated surface is thirteen tools: the original doc.* surface,
+      # doc.render, plus the VFS mount-control pair doc.open_doc/doc.close_doc.
+      # The former doc.inspect and doc.apply_style are folded into doc.get /
+      # doc.set. The authoring guide is NOT a tool — it is the MCP server's
+      # `instructions` (one global copy per session).
       assert "doc.read_table" not in names
       assert "doc.inspect" not in names
       assert "doc.apply_style" not in names
-      assert length(names) == 11
+      assert length(names) == 13
 
       find_schema = Enum.find(Tools.tools(), &(&1["name"] == "find"))["inputSchema"]
       assert "formula_cell" in get_in(find_schema, ["properties", "type", "enum"])
+
+      create_tool = Enum.find(Tools.tools(), &(&1["name"] == "create"))
+      assert create_tool["description"] =~ "doc.open never creates files"
+      assert create_tool["description"] =~ "explicitly asks for a new/output document"
+      assert create_tool["description"] =~ "never for read-only read/inspect/summarize tasks"
+      assert create_tool["annotations"] == %{"readOnlyHint" => false}
 
       for tool <- Tools.tools() do
         assert is_map(tool["inputSchema"])
@@ -87,6 +95,8 @@ defmodule Ecrits.Doc.ToolsTest do
       assert by_name["doc.read"] == "read"
       assert by_name["doc.find"] == "read"
       assert by_name["doc.list"] == "read"
+      assert by_name["doc.open_doc"] == "read"
+      assert by_name["doc.close_doc"] == "read"
       assert by_name["doc.set"] == "write"
       assert by_name["doc.edit"] == "write"
       assert by_name["doc.save"] == "write"

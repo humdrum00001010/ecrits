@@ -177,6 +177,32 @@ defmodule Ecrits.Local.DocumentTest do
     assert :ok = Document.close(document_id)
   end
 
+  test "rhwp adapter saves snapshot payload from uploaded byte token", %{root: root} do
+    path = Path.join(root, "contract.hwpx")
+    original = hwpx_fixture()
+    saved = hwpx_fixture()
+    File.write!(path, original)
+
+    assert {:ok, %{document_id: document_id, bytes: ^original, format: "hwpx"}} =
+             RhwpAdapter.open(root, "contract.hwpx")
+
+    assert {:ok, token, token_path} = Ecrits.Local.Document.ByteSpool.reserve()
+    File.write!(token_path, saved)
+
+    assert {:ok, response} =
+             RhwpAdapter.save(document_id, %{
+               "bytes_token" => token,
+               "format" => "hwpx",
+               "request_id" => "save-token-1"
+             })
+
+    assert response.ok
+    assert File.read!(path) == saved
+    refute File.exists?(token_path)
+
+    assert :ok = Document.close(document_id)
+  end
+
   test "records local rhwp text mutation events without changing bytes", %{root: root} do
     source = hwpx_fixture()
     path = Path.join(root, "contract.hwpx")

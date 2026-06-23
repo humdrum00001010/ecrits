@@ -15,8 +15,15 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
 
   setup do
     prev = Application.get_env(:ehwp, :runtime)
+    prev_vfs = Application.get_env(:ecrits, :doc_vfs)
     Application.put_env(:ehwp, :runtime, FakeEhwpRuntime)
-    on_exit(fn -> restore(:ehwp, :runtime, prev) end)
+    Application.put_env(:ecrits, :doc_vfs, enabled: false)
+
+    on_exit(fn ->
+      restore(:ehwp, :runtime, prev)
+      restore(:ecrits, :doc_vfs, prev_vfs)
+    end)
+
     :ok
   end
 

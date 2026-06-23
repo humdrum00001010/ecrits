@@ -19,7 +19,12 @@ defmodule EcritsWeb.LocalDocumentBytesController do
 
   use EcritsWeb, :controller
 
+  alias Ecrits.Local.Document.ByteSpool
   alias Ecrits.Local.Document
+
+  @max_upload_bytes 256 * 1024 * 1024
+  @read_length 1 * 1024 * 1024
+  @read_timeout 30_000
 
   def show(conn, %{"path" => workspace_path, "document" => relative_path})
       when is_binary(workspace_path) and is_binary(relative_path) do
@@ -39,6 +44,23 @@ defmodule EcritsWeb.LocalDocumentBytesController do
 
   def show(conn, _params), do: send_resp(conn, 400, "")
 
+  def create(conn, _params) do
+    with {:ok, token, path} <- ByteSpool.reserve(),
+         {:ok, bytes} <- write_request_body(conn, path) do
+      json(conn, %{ok: true, bytes_token: token, bytes: bytes})
+    else
+      {:error, :too_large} ->
+        conn
+        |> put_status(:payload_too_large)
+        |> json(%{ok: false, error: "document bytes upload is too large"})
+
+      {:error, reason} ->
+        conn
+        |> put_status(:bad_request)
+        |> json(%{ok: false, error: inspect(reason)})
+    end
+  end
+
   # pptx "build" slides animate overlapping shapes; the static WASM viewer paints
   # all build states at once → ghosted glyphs (#57 D). Serve the animation
   # final-state for VIEWING. Fail-safe: any error serves the original bytes.
@@ -50,4 +72,52 @@ defmodule EcritsWeb.LocalDocumentBytesController do
   end
 
   defp maybe_flatten_pptx(_format, bytes), do: bytes
+
+  defp write_request_body(conn, path) do
+    result =
+      File.open(path, [:write, :binary], fn io ->
+        read_body_to_file(conn, io, 0)
+      end)
+
+    case result do
+      {:ok, {:ok, bytes}} ->
+        {:ok, bytes}
+
+      {:ok, {:error, reason}} ->
+        _ = File.rm(path)
+        {:error, reason}
+
+      {:error, reason} ->
+        _ = File.rm(path)
+        {:error, reason}
+    end
+  end
+
+  defp read_body_to_file(conn, io, total) do
+    case Plug.Conn.read_body(conn,
+           length: @read_length,
+           read_length: @read_length,
+           read_timeout: @read_timeout
+         ) do
+      {:ok, chunk, _conn} ->
+        write_chunk(io, chunk, total)
+
+      {:more, chunk, conn} ->
+        case write_chunk(io, chunk, total) do
+          {:ok, next_total} -> read_body_to_file(conn, io, next_total)
+          {:error, _reason} = error -> error
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp write_chunk(_io, chunk, total) when total + byte_size(chunk) > @max_upload_bytes,
+    do: {:error, :too_large}
+
+  defp write_chunk(io, chunk, total) do
+    :ok = IO.binwrite(io, chunk)
+    {:ok, total + byte_size(chunk)}
+  end
 end

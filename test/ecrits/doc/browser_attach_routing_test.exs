@@ -25,6 +25,7 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
 
   alias Ecrits.Doc.Pool
   alias Ecrits.Doc.Tools
+  alias Ecrits.Local.Document.ByteSpool
   alias Ecrits.Test.FakeEhwpRuntime
   alias Ecrits.Workspace.Session
 
@@ -260,7 +261,16 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       bytes = "PPTX-BROWSER-BYTES"
       File.mkdir_p!(path)
 
-      lv = browser_reply_lv(self(), %{"bytes_base64" => Base.encode64(bytes)})
+      assert {:ok, token, token_path} = ByteSpool.reserve()
+      File.write!(token_path, bytes)
+
+      lv =
+        browser_reply_lv(self(), %{
+          "bytes_token" => token,
+          "bytes" => byte_size(bytes),
+          "format" => "pptx"
+        })
+
       :ok = Session.attach_viewer(path, doc, lv)
 
       tool_ctx =
@@ -278,6 +288,7 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
 
       assert_receive {:browser_request, :save, %{}}
       assert File.read!(doc_path) == bytes
+      refute File.exists?(token_path)
 
       send(lv, :stop)
     end

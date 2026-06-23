@@ -30,6 +30,14 @@ defmodule Ecrits.Doc.MCPServer do
   @server_name "ecrits-doc-tools"
   @server_version "0.1.0"
 
+  # In FUSE/VFS mode the document is edited AS A FILE under `.ecrits/mount/` with
+  # native shell tools (cat/grep/sed) — the `doc.*` read/find/edit MCP tools are
+  # deliberately NOT exposed (exposing them lets the agent bypass the file, which
+  # defeats the VFS). The ONLY MCP tools available in FUSE mode are the
+  # mount-control pair (open/close a document in the VFS), which has no
+  # file-level equivalent.
+  @vfs_allowed_tools ~w(doc.open_doc doc.close_doc)
+
   @impl true
   def init(_args), do: {:ok, %{}}
 
@@ -59,8 +67,25 @@ defmodule Ecrits.Doc.MCPServer do
 
   @impl true
   def handle_list_tools(_cursor, state) do
-    {:ok, Enum.map(Tools.tools(), &to_mcp_tool/1), nil, state}
+    tools =
+      Tools.tools()
+      |> restrict_for_fuse()
+      |> Enum.map(&to_mcp_tool/1)
+
+    {:ok, tools, nil, state}
   end
+
+  # FUSE mode: advertise ONLY the mount-control tools; everything else is done by
+  # editing the projected file with shell tools.
+  defp restrict_for_fuse(tools) do
+    if fuse_mode?() do
+      Enum.filter(tools, fn t -> (t["namespace"] <> "." <> t["name"]) in @vfs_allowed_tools end)
+    else
+      tools
+    end
+  end
+
+  defp fuse_mode?, do: Ecrits.Fuse.DocMount.enabled?()
 
   # Codex's MCP connection manager probes `resources/list` on *every* server
   # right after `initialize` (before it builds the per-turn tool list). The
@@ -91,6 +116,30 @@ defmodule Ecrits.Doc.MCPServer do
   end
 
   defp run_tool(ctx, name, args, state) do
+    if fuse_mode?() and name not in @vfs_allowed_tools do
+      disabled_in_fuse(name, state)
+    else
+      do_run_tool(ctx, name, args, state)
+    end
+  end
+
+  # The agent may still try a `doc.*` tool from a cached tool list — refuse it
+  # and point it at the file, so FUSE mode is enforced end-to-end (not just in
+  # the advertised list).
+  defp disabled_in_fuse(name, state) do
+    msg = %{
+      "error" => "disabled_in_fuse_mode",
+      "tool" => name,
+      "message" =>
+        "FUSE mode: the document is a file. Read/find/edit it with native shell " <>
+          "tools over `.ecrits/mount/<name>.md` (cat/grep/sed). Only doc.open_doc / " <>
+          "doc.close_doc are available as MCP tools."
+    }
+
+    {:ok, %{content: [json_content(msg)], isError: true}, state}
+  end
+
+  defp do_run_tool(ctx, name, args, state) do
     started_at = System.monotonic_time(:millisecond)
     result = Tools.call(ctx, name, args)
     log_tool_timing(ctx, name, result, started_at)

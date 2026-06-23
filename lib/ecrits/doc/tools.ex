@@ -58,6 +58,7 @@ defmodule Ecrits.Doc.Tools do
 
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
+  alias Ecrits.Local.Document.ByteSpool
   alias Ecrits.Workspace.Session
   require Logger
 
@@ -123,11 +124,47 @@ defmodule Ecrits.Doc.Tools do
     },
     %{
       "namespace" => @namespace,
+      "name" => "open_doc",
+      "description" =>
+        "Expose a workspace document as an editable text file in the doc VFS, " <>
+          "mounted at <workspace>/.ecrits/mount/<name>.md. Call this to make a " <>
+          "document readable/greppable as a normal file (cat, rg, sed, grep) from " <>
+          "the shell; the projected text is the whole document. Root-level " <>
+          "documents only. Returns {opened, path, mounted_at}. Reverse with " <>
+          "doc.close_doc.",
+      "risk" => "read",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{"path" => %{"type" => "string", "minLength" => 1}},
+        "required" => ["path"]
+      },
+      "annotations" => %{"readOnlyHint" => true}
+    },
+    %{
+      "namespace" => @namespace,
+      "name" => "close_doc",
+      "description" =>
+        "Remove a document from the doc VFS mount (reverse of doc.open_doc): the " <>
+          "projected <name>.md disappears from <workspace>/.ecrits/mount/. " <>
+          "Returns {closed}.",
+      "risk" => "read",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{"path" => %{"type" => "string", "minLength" => 1}},
+        "required" => ["path"]
+      },
+      "annotations" => %{"readOnlyHint" => true}
+    },
+    %{
+      "namespace" => @namespace,
       "name" => "create",
       "description" =>
-        "Create a document at `path` (kind from extension). Optional `from` clones an " <>
-          "existing file or open doc (byte-copy — inherits ALL template formatting; " <>
-          "then replace content in place, don't rebuild its tables). Blank pptx/docx: " <>
+        "Create a NEW output document at `path` (kind from extension). Use only " <>
+          "when the user explicitly asks for a new/output document; never for " <>
+          "read-only read/inspect/summarize tasks. doc.open never creates files. " <>
+          "Optional `from` clones an existing file or open doc " <>
+          "(byte-copy — inherits ALL template formatting; then replace content in " <>
+          "place, don't rebuild its tables). Blank pptx/docx: " <>
           "design it yourself per this server's instructions (the design guide). " <>
           "Quick fixed-template pptx: pass `deck` {title, subtitle, slides:[...]}. " <>
           "Save with doc.save.",
@@ -190,7 +227,8 @@ defmodule Ecrits.Doc.Tools do
           }
         },
         "required" => ["path"]
-      }
+      },
+      "annotations" => %{"readOnlyHint" => false}
     },
     %{
       "namespace" => @namespace,
@@ -668,6 +706,51 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
+  def call(ctx, "doc.open_doc", args) do
+    with {:ok, path} <- require_string(args, "path"),
+         {:ok, abs} <- confine_path(ctx, path),
+         {:ok, root} <- vfs_root(ctx),
+         :ok <- ensure_root_level(root, abs),
+         :ok <- ensure_projectable(abs) do
+      name = Path.basename(abs)
+      Ecrits.Fuse.OpenDocs.open(root, name)
+
+      mounted_at =
+        case Ecrits.Fuse.DocMount.ensure(root) do
+          {:ok, _} ->
+            Path.join(
+              Ecrits.Fuse.DocMount.mount_point(root),
+              Ecrits.Doc.Projection.projected_name(name)
+            )
+
+          _ ->
+            nil
+        end
+
+      {:ok,
+       %{
+         "opened" => name,
+         "path" => abs,
+         "mounted_at" => mounted_at,
+         "vfs_enabled" => Ecrits.Fuse.DocMount.enabled?()
+       }}
+    else
+      {:error, reason} -> {:error, error_json(reason)}
+    end
+  end
+
+  def call(ctx, "doc.close_doc", args) do
+    with {:ok, path} <- require_string(args, "path"),
+         {:ok, abs} <- confine_path(ctx, path),
+         {:ok, root} <- vfs_root(ctx) do
+      name = Path.basename(abs)
+      Ecrits.Fuse.OpenDocs.close(root, name)
+      {:ok, %{"closed" => name}}
+    else
+      {:error, reason} -> {:error, error_json(reason)}
+    end
+  end
+
   def call(ctx, "doc.create", args) do
     with :ok <- enforce_writable(ctx),
          {:ok, path} <- require_string(args, "path"),
@@ -910,13 +993,11 @@ defmodule Ecrits.Doc.Tools do
   defp render_viewed_snapshot(ctx, lv, document, args) do
     case browser_call(lv, args, :save, %{}) do
       {:ok, %{} = saved} ->
-        b64 = saved["bytes_base64"] || saved[:bytes_base64]
-
-        case is_binary(b64) && Base.decode64(b64) do
+        case ByteSpool.decode(saved) do
           {:ok, bytes} ->
             render_viewed_bytes(bytes, viewed_kind(ctx, document, saved), args)
 
-          _ ->
+          {:error, _reason} ->
             {:error, error_json({:render_failed, "viewer returned no/invalid bytes"})}
         end
 
@@ -2301,21 +2382,40 @@ defmodule Ecrits.Doc.Tools do
   defp cell_sort_key(cell), do: {cell["row"] || 0, cell["col"] || 0}
 
   defp compact_headers(cells) do
+    header_row = table_header_row(cells)
+
     cells
-    |> Enum.filter(&(&1["row"] == 0))
+    |> Enum.filter(&(&1["row"] == header_row))
     |> Enum.sort_by(&(&1["col"] || 0))
     |> Enum.map(&Map.take(&1, ["col", "text"]))
   end
 
   defp compact_row_labels(cells, target_row) do
+    header_row = table_header_row(cells)
+    label_col = table_label_col(cells)
+
     cells
-    |> Enum.filter(&((&1["col"] || 0) == 0 and (&1["row"] || 0) > 0))
+    |> Enum.filter(&(&1["col"] == label_col and (&1["row"] || 0) > header_row))
     |> Enum.filter(fn cell ->
       text = cell["text"] |> to_string() |> String.trim()
       text != "" or cell["row"] == target_row
     end)
     |> Enum.sort_by(&(&1["row"] || 0))
     |> Enum.map(&Map.take(&1, ["row", "text"]))
+  end
+
+  defp table_header_row(cells) do
+    cells
+    |> Enum.map(& &1["row"])
+    |> Enum.filter(&is_integer/1)
+    |> Enum.min(fn -> 0 end)
+  end
+
+  defp table_label_col(cells) do
+    cells
+    |> Enum.map(& &1["col"])
+    |> Enum.filter(&is_integer/1)
+    |> Enum.min(fn -> 0 end)
   end
 
   defp compact_cells(cells, target_ref) do
@@ -2564,6 +2664,9 @@ defmodule Ecrits.Doc.Tools do
         end
 
       match = Regex.run(~r/^(tbl\[[^\]]+\])(?:\/cell\[.*\])?$/, trimmed) ->
+        Enum.at(match, 1)
+
+      match = Regex.run(~r/^(sheet\[[^\]]+\])(?:\/cell\[.*\])?$/, trimmed) ->
         Enum.at(match, 1)
 
       match = Regex.run(~r/^hwp:s(\d+)\/p(\d+)\/tbl(\d+)/, trimmed) ->
@@ -2957,16 +3060,19 @@ defmodule Ecrits.Doc.Tools do
   defp save_browser(lv, args, path) do
     case browser_call(lv, args, :save, %{}) do
       {:ok, %{} = res} ->
-        b64 = res["bytes_base64"] || res[:bytes_base64]
-
-        with true <- is_binary(b64) or {:error, {:save_failed, "viewer returned no bytes"}},
-             {:ok, bytes} <- Base.decode64(b64),
+        with {:ok, bytes} <- ByteSpool.decode(res),
              :ok <- File.write(path, bytes) do
           broadcast_file_written(path)
           {:ok, %{"ok" => true}}
         else
-          :error -> {:error, error_json({:save_failed, "viewer returned invalid base64"})}
-          {:error, reason} -> {:error, error_json(reason)}
+          {:error, :missing_bytes} ->
+            {:error, error_json({:save_failed, "viewer returned no bytes"})}
+
+          {:error, :invalid_base64} ->
+            {:error, error_json({:save_failed, "viewer returned invalid base64"})}
+
+          {:error, reason} ->
+            {:error, error_json(reason)}
         end
 
       {:error, _reason} = error ->
@@ -3162,11 +3268,39 @@ defmodule Ecrits.Doc.Tools do
   # Live property values for doc.get, best-effort: nil when the engine can't read
   # them yet, so the reflective discovery still stands.
   defp best_effort_values(editor, ref, props) do
-    case Editor.get(editor, ref, props) do
-      {:ok, values} -> stringify(values)
-      {:error, _reason} -> nil
+    native_values =
+      case Editor.get(editor, ref, nil) do
+        {:ok, values} -> stringify(values)
+        {:error, _reason} -> %{}
+      end
+
+    element_values = element_values_for_ref(editor, ref)
+
+    case Map.merge(element_values, native_values) do
+      values when values == %{} -> nil
+      values -> narrow_get_values(values, props)
     end
   end
+
+  defp element_values_for_ref(editor, ref) do
+    case Editor.elements(editor) do
+      {:ok, nodes} when is_list(nodes) ->
+        nodes
+        |> Enum.map(&stringify/1)
+        |> Enum.find(%{}, &(ref_to_string(Map.get(&1, "ref")) == ref))
+        |> Map.drop(["ref", "type"])
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp narrow_get_values(values, props) when is_list(props) and props != [] do
+    wanted = MapSet.new(Enum.map(props, &to_string/1))
+    Map.filter(values, fn {key, _value} -> MapSet.member?(wanted, key) end)
+  end
+
+  defp narrow_get_values(values, _props), do: values
 
   # Combine the property VALUES (from get) with the reflective metadata (type,
   # settable property NAMES, child refs) into the one doc.get result. `values`
@@ -3370,6 +3504,35 @@ defmodule Ecrits.Doc.Tools do
 
       _ ->
         {:ok, path}
+    end
+  end
+
+  # The workspace root for the doc VFS open-set (`Ecrits.Fuse.OpenDocs` /
+  # `DocMount` key). `ctx.session_path` is the agent's workspace root.
+  defp vfs_root(ctx) do
+    case Map.get(ctx, :session_path) do
+      root when is_binary(root) and root != "" -> {:ok, Path.expand(root)}
+      _ -> {:error, {:invalid_params, "no workspace root in this context"}}
+    end
+  end
+
+  # The flat doc VFS projects root-level documents only (basename keyed).
+  defp ensure_root_level(root, abs) do
+    if Path.dirname(abs) == root,
+      do: :ok,
+      else: {:error, {:invalid_params, "doc.open_doc supports workspace-root documents only"}}
+  end
+
+  defp ensure_projectable(abs) do
+    cond do
+      not Ecrits.Doc.Projection.supported?(abs) ->
+        {:error, {:invalid_params, "unsupported document type: #{Path.extname(abs)}"}}
+
+      not File.regular?(abs) ->
+        {:error, {:invalid_params, "no such file: #{abs}"}}
+
+      true ->
+        :ok
     end
   end
 
