@@ -645,13 +645,31 @@ window.addEventListener("wheel", event => {
 
   event.preventDefault()
   const current = Number.parseFloat(content.dataset.editorZoom || content.style.zoom || "1") || 1
-  const next = Math.min(5, Math.max(0.4, current * Math.exp(-event.deltaY * 0.01)))
-  content.dataset.editorZoom = String(next)
-  content.style.zoom = String(next)
+  const step = Math.min(0.12, Math.abs(event.deltaY) * 0.0015)
+  const factor = 1 + step
+  const next = Math.min(4, Math.max(0.5, event.deltaY < 0 ? current * factor : current / factor))
+  const scroller = findEditorZoomScroller(content)
+  const rect = scroller.getBoundingClientRect()
+  const anchorX = scroller.scrollLeft + event.clientX - rect.left
+  const anchorY = scroller.scrollTop + event.clientY - rect.top
+  const ratio = next / current
+  const zoom = String(Number(next.toFixed(4)))
+  content.dataset.editorZoom = zoom
+  content.style.zoom = zoom
+  scroller.scrollLeft = anchorX * ratio - (event.clientX - rect.left)
+  scroller.scrollTop = anchorY * ratio - (event.clientY - rect.top)
   content.dispatchEvent(new Event("scroll"))
   content.parentElement?.dispatchEvent(new Event("scroll"))
   window.dispatchEvent(new Event("resize"))
 }, {passive: false, capture: true})
+
+function findEditorZoomScroller(content) {
+  for (let el = content.parentElement; el; el = el.parentElement) {
+    const style = window.getComputedStyle(el)
+    if (/(auto|scroll)/.test(`${style.overflow}${style.overflowX}${style.overflowY}`) && (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth)) return el
+  }
+  return document.scrollingElement || document.documentElement
+}
 
 // Show progress bar on live navigation and form submits
 topbar.config({barColors: {0: "#29d"}, shadowColor: "rgba(0, 0, 0, .3)"})
