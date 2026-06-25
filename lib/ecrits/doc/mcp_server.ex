@@ -135,7 +135,11 @@ defmodule Ecrits.Doc.MCPServer do
           "([[[payload_node]]]). Read/find/edit payload node fields with native shell " <>
           "tools over `.ecrits/mount/<name>.jsonl` (cat/grep/sed). Never replace " <>
           "the file with one payload object and never look for mounted_at inside " <>
-          "the JSONL; it is IR-only. For whole-file rewrites, create the temp file " <>
+          "the JSONL; it is IR-only. Never create, copy, or edit fallback JSONL " <>
+          "outside `.ecrits/mount`; `/tmp/<name>.jsonl` and workspace-root " <>
+          "<name>.jsonl are fake scratch files that do not route to the document. " <>
+          "If `.ecrits/mount/<name>.jsonl` is missing after `doc.open_doc`, stop " <>
+          "and report that blocker. For whole-file rewrites, create the temp file " <>
           "inside `.ecrits/mount` and mv it over the target; do not use mktemp " <>
           "outside the mount or dd over the target. Insert pictures as a payload node inside an " <>
           "existing paragraph list such as " <>

@@ -823,14 +823,19 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
 
     Workflow:
     1. `doc.open_doc {path}` (path = the workspace document name) mounts the doc
-       and returns a `.ecrits/mount/<name>.jsonl` path under the workspace root.
-       The JSONL file itself is IR-only; it does NOT contain `mounted_at`,
-       `mount_status`, or other tool metadata. If the MCP tool is hidden but the
-       mounted file already exists at `.ecrits/mount/<name>.jsonl`, use that
-       path as the VFS target. Never treat a missing `mounted_at` field inside
-       the JSONL as a blocker. Do not call `doc.close_doc` until the edit and
-       verification are complete, unless the user explicitly asks to unmount;
-       closing removes the mounted file you need to edit.
+      and returns a `.ecrits/mount/<name>.jsonl` path under the workspace root.
+      The JSONL file itself is IR-only; it does NOT contain `mounted_at`,
+      `mount_status`, or other tool metadata. If the MCP tool is hidden but the
+      mounted file already exists at `.ecrits/mount/<name>.jsonl`, use that
+      path as the VFS target. Never treat a missing `mounted_at` field inside
+      the JSONL as a blocker. Do not call `doc.close_doc` until the edit and
+      verification are complete, unless the user explicitly asks to unmount;
+      closing removes the mounted file you need to edit.
+      NEVER create, copy, or edit a JSONL projection anywhere else. A file like
+      `/tmp/<name>.jsonl`, `<workspace>/<name>.jsonl`, or any scratch/staged JSONL
+      outside `.ecrits/mount/` is fake and does NOT route to the document. If
+      `.ecrits/mount/<name>.jsonl` is missing after `doc.open_doc`, stop and
+      report that exact blocker; do not invent a fallback JSONL file.
     2. That file is the document's IR as one compact nested JSON value, not
        Markdown and not a flat positional stream:
        `[ [ [ payload_node, ... ], ... ], ... ]`
@@ -851,9 +856,9 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
        keeping each existing node's `"type"` unchanged. Keep existing payload
        order stable unless you are intentionally inserting or deleting one
        supported native payload.
-       For whole-file rewrites, create the temp file inside the same
-       `.ecrits/mount/` directory, then rename it over the target. Do NOT use
-       `mktemp`, `dd`, or any temp path outside the mount. Example:
+      For whole-file rewrites, create the temp file inside the same
+      `.ecrits/mount/` directory, then rename it over the target. Do NOT use
+      `mktemp`, `dd`, or any temp path outside the mount. Example:
        `tmp=".ecrits/mount/<name>.jsonl.tmp"; jq -c '...' "$target" > "$tmp" && mv "$tmp" "$target"`
        This keeps the write on the VFS `create`/`write`/`rename` path.
        To CREATE a native table, insert one new payload object at the desired

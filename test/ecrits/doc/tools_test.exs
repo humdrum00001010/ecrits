@@ -72,6 +72,9 @@ defmodule Ecrits.Doc.ToolsTest do
       open_doc_tool = Enum.find(Tools.tools(), &(&1["name"] == "open_doc"))
       assert open_doc_tool["description"] =~ "JSONL is IR-only"
       assert open_doc_tool["description"] =~ "does not contain mounted_at"
+      assert open_doc_tool["description"] =~ "Never create, copy, or edit fallback JSONL outside"
+      assert open_doc_tool["description"] =~ "/tmp/<name>.jsonl"
+      assert open_doc_tool["description"] =~ "do not route to the document"
       assert open_doc_tool["description"] =~ "temp file inside the same .ecrits/mount"
       assert open_doc_tool["description"] =~ "do not use mktemp"
       assert open_doc_tool["description"] =~ "or dd over the target"

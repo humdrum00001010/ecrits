@@ -133,7 +133,11 @@ defmodule Ecrits.Doc.Tools do
           "the shell; the projected JSONL is the whole document IR as one nested " <>
           "list value: sections -> paragraphs -> payload nodes. Root-level " <>
           "documents only. The JSONL is IR-only and does not contain mounted_at " <>
-          "metadata. For whole-file rewrites, write a temp file inside the same " <>
+          "metadata. Never create, copy, or edit fallback JSONL outside " <>
+          ".ecrits/mount; /tmp/<name>.jsonl and workspace-root <name>.jsonl are fake " <>
+          "scratch files that do not route to the document. If mounted_at is null " <>
+          "or the .ecrits/mount/<name>.jsonl file is missing, report the blocker " <>
+          "instead of editing. For whole-file rewrites, write a temp file inside the same " <>
           ".ecrits/mount directory and mv it over the target; do not use mktemp " <>
           "outside the mount or dd over the target. Never replace it with one payload object. Insert a " <>
           "picture by adding a payload node inside an existing paragraph list " <>
