@@ -4,7 +4,6 @@ defmodule Ecrits.Local.Workspace do
   """
 
   alias Ecrits.Local.FS
-  alias Ecrits.Local.SnapshotStore
 
   defstruct [:root]
 
@@ -56,16 +55,4 @@ defmodule Ecrits.Local.Workspace do
 
   def write_file(root, relative, contents, opts) when is_binary(root),
     do: FS.write(root, relative, contents, opts)
-
-  @doc """
-  Capture current file contents before saving over them.
-  """
-  @spec checkpoint(t() | String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
-  def checkpoint(workspace_or_root, relative, attrs \\ %{})
-
-  def checkpoint(%__MODULE__{root: root}, relative, attrs),
-    do: SnapshotStore.checkpoint(root, relative, attrs)
-
-  def checkpoint(root, relative, attrs) when is_binary(root),
-    do: SnapshotStore.checkpoint(root, relative, attrs)
 end
