@@ -563,34 +563,42 @@ defmodule Ecrits.Doc.Projection do
   # JSONL and the short-lived layered-record JSONL are still accepted so stale
   # buffers fail structurally only if their node identity actually diverges.
   defp parse_ir_jsonl(bytes) do
+    case Jason.decode(bytes) do
+      {:ok, value} -> parse_projection_values([value])
+      {:error, _} -> parse_ir_jsonl_lines(bytes)
+    end
+  end
+
+  defp parse_ir_jsonl_lines(bytes) do
     bytes
     |> String.split("\n")
     |> Enum.reject(&(&1 == ""))
     |> decode_jsonl_values()
     |> case do
-      {:ok, []} ->
-        {:ok, []}
-
-      {:ok, [nested]} when is_list(nested) ->
-        parse_nested_projection(nested)
-
       {:ok, values} ->
-        cond do
-          Enum.all?(values, &raw_ir_node?/1) ->
-            {:ok, Enum.map(values, &expand_projected_node/1)}
-
-          Enum.all?(values, &layer_record?/1) ->
-            parse_layered_records(values)
-
-          Enum.all?(values, &is_list/1) ->
-            parse_nested_projection(values)
-
-          true ->
-            {:error, :invalid_ir_jsonl}
-        end
+        parse_projection_values(values)
 
       error ->
         error
+    end
+  end
+
+  defp parse_projection_values([]), do: {:ok, []}
+  defp parse_projection_values([nested]) when is_list(nested), do: parse_nested_projection(nested)
+
+  defp parse_projection_values(values) do
+    cond do
+      Enum.all?(values, &raw_ir_node?/1) ->
+        {:ok, Enum.map(values, &expand_projected_node/1)}
+
+      Enum.all?(values, &layer_record?/1) ->
+        parse_layered_records(values)
+
+      Enum.all?(values, &is_list/1) ->
+        parse_nested_projection(values)
+
+      true ->
+        {:error, :invalid_ir_jsonl}
     end
   end
 

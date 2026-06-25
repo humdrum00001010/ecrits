@@ -156,6 +156,30 @@ defmodule Ecrits.Doc.ProjectionTest do
       end
     end
 
+    test "accepts pretty-printed nested JSON from mounted file rewrites", %{ehwp: ehwp} do
+      if not ehwp do
+        IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection pretty JSON write_back e2e")
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_writeback_pretty_json", ".hwpx")
+        on_exit(fn -> cleanup_tmp(path) end)
+
+        {:ok, bytes} = Projection.project_file(path)
+        {_lines, doc} = decode_projection(bytes)
+        {node_path, node} = first_text_paragraph(doc)
+        new_text = "JSONL_WRITEBACK_PRETTY_OK"
+
+        pretty_bytes =
+          doc
+          |> replace_payload_node(node_path, Map.put(node, "text", new_text))
+          |> Jason.encode!(pretty: true)
+
+        assert {:ok, %{applied: 1}} = Projection.write_back(path, pretty_bytes)
+
+        assert {:ok, after_bytes} = Projection.project_file(path)
+        assert after_bytes =~ new_text
+      end
+    end
+
     test "omits positional HWPX refs from payload JSON", %{ehwp: ehwp} do
       if not ehwp do
         IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection HWPX ref elision e2e")

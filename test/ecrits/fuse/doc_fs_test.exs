@@ -406,10 +406,43 @@ defmodule Ecrits.Fuse.DocFsTest do
     end
   end
 
-  defp replace_first_cell_text(bytes, text) do
+  test "turn-completion flush commits staged pretty nested JSON" do
+    if not ehwp_available?(@hwpx_fixture) do
+      IO.puts("\n[skip] ehwp NIF unavailable; skipping DocFs staged pretty JSON flush e2e")
+    else
+      root = tmp_root("doc_fs_staged_pretty_flush")
+      path = Path.join(root, "doc.hwpx")
+      File.cp!(@hwpx_fixture, path)
+
+      on_exit(fn ->
+        _ = Pool.close_by_path(path)
+        OpenDocs.close(root, "doc.hwpx")
+        File.rm_rf(root)
+      end)
+
+      OpenDocs.open(root, "doc.hwpx")
+      OpenDocs.set_writable(root, true)
+
+      {:ok, bytes} = Projection.project_file(path)
+      new_bytes = replace_first_cell_text(bytes, "DOCFS_STAGED_PRETTY_FLUSH_OK", pretty: true)
+      OpenDocs.stage(root, "doc.hwpx", new_bytes, {:invalid_ir_json, "["})
+
+      assert %{committed: ["doc.hwpx"], pending: []} = DocFs.flush_staged(root)
+      assert OpenDocs.staged(root, "doc.hwpx") == :error
+      assert {:ok, after_bytes} = Projection.project_file(path)
+      assert after_bytes =~ "DOCFS_STAGED_PRETTY_FLUSH_OK"
+    end
+  end
+
+  defp replace_first_cell_text(bytes, text, opts \\ []) do
     [doc] = bytes |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
     {doc, true} = replace_first_cell_text_in_doc(doc, text, false)
-    Jason.encode!(doc) <> "\n"
+
+    if Keyword.get(opts, :pretty, false) do
+      Jason.encode!(doc, pretty: true)
+    else
+      Jason.encode!(doc) <> "\n"
+    end
   end
 
   defp replace_first_cell_text_in_doc(sections, text, changed?) do
