@@ -75,14 +75,5 @@ defmodule EcritsWeb.LocalRootTest do
       refute has_element?(lv, "#local-mount-path")
       refute has_element?(lv, ~s(a[href="/users/log-in"]))
     end
-
-    test "validates the mount picker through LiveView", %{conn: conn} do
-      {:ok, lv, _html} = live(conn, ~p"/")
-
-      render_click(lv, "mount_workspace", %{"path" => ""})
-
-      assert has_element?(lv, "#local-mount-error")
-      assert has_element?(lv, "#local-mount-picker-surface")
-    end
   end
 end

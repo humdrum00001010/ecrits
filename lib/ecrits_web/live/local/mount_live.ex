@@ -31,21 +31,6 @@ defmodule EcritsWeb.Local.MountLive do
     end
   end
 
-  def handle_event("mount_workspace", %{"local_path" => %{"path" => path}}, socket) do
-    mount_workspace(socket, path)
-  end
-
-  def handle_event("mount_workspace", %{"path" => path}, socket) do
-    mount_workspace(socket, path)
-  end
-
-  def handle_event("mount_workspace", _params, socket) do
-    {:noreply,
-     socket
-     |> assign(:mount_error, "Choose a workspace folder.")
-     |> assign(:path_form, path_form())}
-  end
-
   @impl true
   def handle_async(:choose_mount_directory, {:ok, {:ok, path}}, socket) do
     socket
