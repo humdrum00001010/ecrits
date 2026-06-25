@@ -25,6 +25,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   @local_document_upload_max_size 50_000_000
   @local_document_upload_accept ~w(.hwp .hwpx .doc .docx .xls .xlsx .ppt .pptx .rtf .md .markdown)
   @local_document_open_async :open_local_document
+  @doc_vfs_mount_async :ensure_doc_vfs_mount
   # Debounce interval for re-rendering the streaming agent message body as
   # formatted markdown (raw client-side appends give instant sub-debounce
   # feedback; the tick re-renders the accumulated buffer through MDEx).
@@ -1027,6 +1028,23 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       verb: "set",
       payload: %{sets: sets}
     })
+  end
+
+  @impl true
+  def handle_async(@doc_vfs_mount_async, {:ok, {path, result}}, socket) do
+    {:noreply, apply_doc_vfs_mount_result(socket, path, result)}
+  end
+
+  def handle_async(@doc_vfs_mount_async, {:exit, reason}, socket) do
+    Logger.warning("[DocMount] async ensure exited: #{inspect(reason)}")
+
+    case socket.assigns[:workspace_path] do
+      path when is_binary(path) ->
+        {:noreply, put_doc_vfs_mount_state(socket, path, DocMount.mounted?(path))}
+
+      _other ->
+        {:noreply, assign(socket, :fuse_mode, false)}
+    end
   end
 
   @impl true
@@ -2339,18 +2357,53 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   # Default-ON document VFS: when the workspace mounts (connected only), ensure
   # the exfuse projection mount in the background — `Exfuse.mount/3` blocks until
-  # the mount settles, so we never stall the LiveView on it — and reflect the
-  # header toggle optimistically. Teardown is owned by
-  # `Ecrits.Workspace.Session.terminate/2`. Idempotent across tabs/refreshes.
+  # the mount settles, so we never stall the LiveView on it. The header toggle is
+  # only true after the OS mount table says the mount is actually serving.
+  # Teardown is owned by `Ecrits.Workspace.Session.terminate/2`. Idempotent across
+  # tabs/refreshes.
   defp maybe_ensure_fuse_mount(socket) do
     path = socket.assigns[:workspace_path]
 
     if connected?(socket) and is_binary(path) and Ecrits.Fuse.DocMount.enabled?() do
-      Task.start(fn -> Ecrits.Fuse.DocMount.ensure(path) end)
-      socket |> assign(:fuse_mode, true) |> subscribe_doc_vfs(path) |> apply_vfs_write_policy()
+      mounted? = DocMount.mounted?(path)
+      socket = put_doc_vfs_mount_state(socket, path, mounted?)
+
+      if mounted? do
+        socket
+      else
+        start_async(socket, @doc_vfs_mount_async, fn ->
+          {path, Ecrits.Fuse.DocMount.ensure(path)}
+        end)
+      end
     else
-      assign(socket, :fuse_mode, false)
+      socket
+      |> assign(:fuse_mode, false)
+      |> unsubscribe_doc_vfs()
+      |> apply_vfs_write_policy()
     end
+  end
+
+  defp apply_doc_vfs_mount_result(socket, path, result) do
+    mounted? = DocMount.mounted?(path)
+
+    unless mounted? or match?({:ok, _}, result) do
+      Logger.warning("[DocMount] async ensure did not mount #{path}: #{inspect(result)}")
+    end
+
+    if socket.assigns[:workspace_path] == path do
+      socket
+      |> put_doc_vfs_mount_state(path, mounted?)
+      |> maybe_apply_live_local_agent_options(true)
+    else
+      socket
+    end
+  end
+
+  defp put_doc_vfs_mount_state(socket, path, mounted?) do
+    socket
+    |> assign(:fuse_mode, mounted?)
+    |> sync_doc_vfs_subscription(path, mounted?)
+    |> apply_vfs_write_policy()
   end
 
   # The mounted `.jsonl` is writable ONLY when the workspace agent access is
@@ -2364,9 +2417,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   defp vfs_writable?(socket) do
-    case socket.assigns[:local_agent] do
-      %{access: %{id: "full-workspace"}} -> true
-      _ -> false
+    if socket.assigns[:fuse_mode] == true do
+      case socket.assigns[:local_agent] do
+        %{access: %{id: "full-workspace"}} -> true
+        _ -> false
+      end
+    else
+      false
     end
   end
 
@@ -3177,7 +3234,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     _ =
       WorkspaceSession.update_options(
         ws,
-        LocalAgentConfig.adapter_opts(socket.assigns.local_agent, workspace_path)
+        local_agent_adapter_opts(socket, workspace_path)
       )
 
     socket
@@ -3396,7 +3453,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     adapter_opts =
       local_agent_ui
       |> Keyword.get(:adapter_opts, [])
-      |> Keyword.merge(LocalAgentConfig.adapter_opts(socket.assigns.local_agent, workspace_path))
+      |> Keyword.merge(local_agent_adapter_opts(socket, workspace_path))
 
     local_agent_ui
     |> Keyword.put(:provider, socket.assigns.local_agent.provider.key)
@@ -3410,6 +3467,15 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     # NOTE: no `:id` here. `Ecrits.Workspace.Session` derives it from the
     # canonical workspace path and this LiveView's active rail key.
+  end
+
+  defp local_agent_adapter_opts(socket, workspace_path) do
+    socket.assigns.local_agent
+    |> LocalAgentConfig.adapter_opts(workspace_path)
+    |> Keyword.put(
+      :doc_vfs_mounted,
+      is_binary(workspace_path) and Ecrits.Fuse.DocMount.mounted?(workspace_path)
+    )
   end
 
   # The agent's doc.* ACTIVE doc is the `Ecrits.Doc.Pool` id (what doc.context
@@ -4903,7 +4969,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     workspace_path = workspace_root_path(socket.assigns.workspace || %{})
 
     [
-      adapter_opts: LocalAgentConfig.adapter_opts(socket.assigns.local_agent, workspace_path),
+      adapter_opts: local_agent_adapter_opts(socket, workspace_path),
       document_path: socket.assigns[:active_document_path],
       pool_document_id: socket.assigns[:pool_document_id]
     ]

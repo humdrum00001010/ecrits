@@ -743,10 +743,14 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # doc.context.current_document, not prompt-embedded path text.
   defp doc_preamble(opts) do
     status = Ecrits.Fuse.DocMount.status()
+    vfs_mounted? = Keyword.get(opts, :doc_vfs_mounted, status.enabled?)
 
     cond do
-      status.enabled? ->
+      status.enabled? and vfs_mounted? ->
         fuse_preamble(opts)
+
+      status.enabled? ->
+        unmounted_vfs_preamble(status, opts)
 
       fs_vfs_expected?(status) ->
         blocked_vfs_preamble(status, opts)
@@ -754,6 +758,22 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       true ->
         legacy_doc_preamble(opts)
     end
+  end
+
+  defp unmounted_vfs_preamble(status, opts) do
+    """
+    [System] Doc VFS backend is available, but this workspace is not mounted right now:
+    #{status.message}
+
+    Do not claim `.ecrits/mount/<name>.jsonl` exists until `doc.open_doc` returns
+    a non-null `mounted_at`. Do not use `.md`, and do not shell-read the raw
+    binary document. For this/current/open document, call `doc.open_doc`; if it
+    returns `mounted_at: null`, report the `mount_status` / `mount_error` blocker
+    instead of editing. Only after `mounted_at` is non-null should you read/edit
+    the mounted JSONL file with shell tools.
+
+    Voice: caveman. Short answer, no filler; report result/blockers only.
+    """ <> ultracode_keyword(opts)
   end
 
   defp fs_vfs_expected?(%{backend: :fskit, reason: reason})
@@ -808,7 +828,9 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
        `mount_status`, or other tool metadata. If the MCP tool is hidden but the
        mounted file already exists at `.ecrits/mount/<name>.jsonl`, use that
        path as the VFS target. Never treat a missing `mounted_at` field inside
-       the JSONL as a blocker.
+       the JSONL as a blocker. Do not call `doc.close_doc` until the edit and
+       verification are complete, unless the user explicitly asks to unmount;
+       closing removes the mounted file you need to edit.
     2. That file is the document's IR as one compact nested JSON value, not
        Markdown and not a flat positional stream:
        `[ [ [ payload_node, ... ], ... ], ... ]`
@@ -819,6 +841,12 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
        they carry semantic addressing from the backend. READ with `cat`/`sed -n`;
        FIND with `grep -n`/`rg` over it. For "this/current/open document", it is
        the one the user is viewing — `doc.open_doc` it, then operate on its file.
+       Interpret normal placement words directly in this nested structure:
+       "below/after the table" means find the relevant `"type":"table"` payload
+       and insert the new payload immediately after that table payload in the
+       same paragraph list. Do not create a new section/paragraph wrapper unless
+       the user explicitly asks for a structural paragraph change and the VFS
+       supports that change.
     3. EDIT existing payloads by changing fields IN PLACE with a shell command,
        keeping each existing node's `"type"` unchanged. Keep existing payload
        order stable unless you are intentionally inserting or deleting one
@@ -846,9 +874,11 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
        `"treatAsChar": false`; otherwise new pictures are inline at the nested
        position. Move an existing picture by editing that payload's `x`, `y`,
        and `treatAsChar` fields in place; resize by editing `width`/`height`.
-       Delete a picture by removing that picture payload from its paragraph list. Other
-       add/remove/reorder/ref/type edits are structural and rejected in this VFS
-       write-back.
+       Delete a picture by removing that picture payload from its paragraph list.
+       If the user asks for an image from the internet, download it to a normal
+       workspace file first and use that absolute local path as `src`; do not
+       put remote URLs into the JSONL. Other add/remove/reorder/ref/type edits
+       are structural and rejected in this VFS write-back.
        `"text"` changes route as scoped text edits; other payload node field
        changes route through the native property setter when the backend supports
        them. Unsupported/derived fields fail loudly. The write routes onto the

@@ -1388,10 +1388,12 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
+    root = LocalWorkspaceAdapterStub.valid_path()
+
     {:ok, lv, _html} =
       live(
         conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex"]}"
+        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
       )
 
     session_id = subscribe_agent(lv)
@@ -1424,10 +1426,12 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
+    root = LocalWorkspaceAdapterStub.valid_path()
+
     {:ok, lv, _html} =
       live(
         conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex"]}"
+        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
       )
 
     session_id = subscribe_agent(lv)
@@ -1438,9 +1442,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert_receive {:fake_acp_prompt, _sid, prompt}, 1_000
     mount_status = Ecrits.Fuse.DocMount.status()
+    mounted? = Ecrits.Fuse.DocMount.mounted?(root)
 
     cond do
-      mount_status.enabled? ->
+      mount_status.enabled? and mounted? ->
         assert prompt =~ "FUSE/VFS mode"
         assert prompt =~ "doc.open_doc"
         assert prompt =~ "doc.close_doc"
@@ -1477,6 +1482,18 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         assert prompt =~ "There is NO doc.read"
         assert prompt =~ "doc.context"
         refute prompt =~ "current_document.document"
+
+      mount_status.enabled? ->
+        normalized_prompt = String.replace(prompt, ~r/\s+/, " ")
+        assert prompt =~ "Doc VFS backend is available, but this workspace is not mounted"
+        assert prompt =~ mount_status.message
+        assert prompt =~ "doc.open_doc"
+        assert prompt =~ "mounted_at"
+        assert prompt =~ "mount_status"
+        assert prompt =~ "mount_error"
+        assert prompt =~ "Do not use `.md`"
+        assert normalized_prompt =~ "do not shell-read the raw binary document"
+        refute prompt =~ "FUSE/VFS mode: documents are EDITABLE FILES"
 
       mount_status.backend == :fskit and
           mount_status.reason in [
@@ -1640,35 +1657,44 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
   test "hydrated full workspace access reapplies VFS write policy", %{conn: conn} do
     previous_vfs = Application.get_env(:ecrits, :doc_vfs)
-    on_exit(fn -> restore_doc_vfs_env(previous_vfs) end)
-
     root = LocalWorkspaceAdapterStub.valid_path()
+
+    on_exit(fn ->
+      _ = Ecrits.Fuse.DocMount.teardown(root)
+      restore_doc_vfs_env(previous_vfs)
+    end)
+
     Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :fuse)
 
-    if Ecrits.Fuse.DocMount.status().enabled? do
-      {:ok, lv, _html} =
-        live(conn, ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}")
+    cond do
+      not Ecrits.Fuse.DocMount.status().enabled? ->
+        IO.puts("\n[skip] FUSE backend unavailable; skipping VFS write-policy hydration check")
 
-      lv
-      |> element("#local-agent-inline-access-full-workspace")
-      |> render_click()
+      not match?({:ok, _}, Ecrits.Fuse.DocMount.ensure(root)) ->
+        IO.puts("\n[skip] FUSE mount failed; skipping VFS write-policy hydration check")
 
-      sync_liveview(lv)
-      assert Ecrits.Fuse.OpenDocs.writable?(root)
+      true ->
+        {:ok, lv, _html} =
+          live(conn, ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}")
 
-      Ecrits.Fuse.OpenDocs.set_writable(root, false)
-      refute Ecrits.Fuse.OpenDocs.writable?(root)
+        lv
+        |> element("#local-agent-inline-access-full-workspace")
+        |> render_click()
 
-      render_patch(
-        lv,
-        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
-      )
+        sync_liveview(lv)
+        assert Ecrits.Fuse.OpenDocs.writable?(root)
 
-      sync_liveview(lv)
-      assert has_element?(lv, ~s([data-selected-access="full-workspace"]))
-      assert Ecrits.Fuse.OpenDocs.writable?(root)
-    else
-      IO.puts("\n[skip] FUSE backend unavailable; skipping VFS write-policy hydration check")
+        Ecrits.Fuse.OpenDocs.set_writable(root, false)
+        refute Ecrits.Fuse.OpenDocs.writable?(root)
+
+        render_patch(
+          lv,
+          ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
+        )
+
+        sync_liveview(lv)
+        assert has_element?(lv, ~s([data-selected-access="full-workspace"]))
+        assert Ecrits.Fuse.OpenDocs.writable?(root)
     end
   end
 
