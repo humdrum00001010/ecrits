@@ -80,6 +80,10 @@ defmodule Ecrits.Doc.ToolsTest do
       assert open_doc_tool["description"] =~ "or dd over the target"
       assert open_doc_tool["description"] =~ "inside an existing paragraph list"
 
+      close_doc_tool = Enum.find(Tools.tools(), &(&1["name"] == "close_doc"))
+      assert close_doc_tool["description"] =~ "explicit unmount requests only"
+      assert close_doc_tool["description"] =~ "closing mid-turn removes the file"
+
       for tool <- Tools.tools() do
         assert is_map(tool["inputSchema"])
         assert tool["risk"] in ["read", "write"]

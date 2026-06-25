@@ -22,6 +22,7 @@ defmodule Ecrits.Doc.MCPServer do
 
   use ExMCP.Server.Handler
 
+  alias Ecrits.Doc.MCPToolPolicy
   alias Ecrits.Doc.Tools
   alias Ecrits.Local.AcpAgent.Session, as: AgentLive
   alias Ecrits.Workspace.Session, as: WorkspaceSession
@@ -29,14 +30,6 @@ defmodule Ecrits.Doc.MCPServer do
 
   @server_name "ecrits-doc-tools"
   @server_version "0.1.0"
-
-  # In FUSE/VFS mode the document is edited AS A FILE under `.ecrits/mount/` with
-  # native shell tools (cat/grep/sed) — the `doc.*` read/find/edit MCP tools are
-  # deliberately NOT exposed (exposing them lets the agent bypass the file, which
-  # defeats the VFS). The ONLY MCP tools available in FUSE mode are the
-  # mount-control pair (open/close a document in the VFS), which has no
-  # file-level equivalent.
-  @vfs_allowed_tools ~w(doc.open_doc doc.close_doc)
 
   @impl true
   def init(_args), do: {:ok, %{}}
@@ -69,20 +62,10 @@ defmodule Ecrits.Doc.MCPServer do
   def handle_list_tools(_cursor, state) do
     tools =
       Tools.tools()
-      |> restrict_for_fuse()
+      |> MCPToolPolicy.restrict_for_vfs(fuse_mode?())
       |> Enum.map(&to_mcp_tool/1)
 
     {:ok, tools, nil, state}
-  end
-
-  # FUSE mode: advertise ONLY the mount-control tools; everything else is done by
-  # editing the projected file with shell tools.
-  defp restrict_for_fuse(tools) do
-    if fuse_mode?() do
-      Enum.filter(tools, fn t -> (t["namespace"] <> "." <> t["name"]) in @vfs_allowed_tools end)
-    else
-      tools
-    end
   end
 
   defp fuse_mode?, do: Ecrits.Fuse.DocMount.enabled?()
@@ -116,7 +99,7 @@ defmodule Ecrits.Doc.MCPServer do
   end
 
   defp run_tool(ctx, name, args, state) do
-    if fuse_mode?() and name not in @vfs_allowed_tools do
+    if fuse_mode?() and not MCPToolPolicy.vfs_allowed?(name) do
       disabled_in_fuse(name, state)
     else
       do_run_tool(ctx, name, args, state)
@@ -127,31 +110,8 @@ defmodule Ecrits.Doc.MCPServer do
   # and point it at the file, so FUSE mode is enforced end-to-end (not just in
   # the advertised list).
   defp disabled_in_fuse(name, state) do
-    msg = %{
-      "error" => "disabled_in_fuse_mode",
-      "tool" => name,
-      "message" =>
-        "FUSE mode: the document is a nested JSONL IR file " <>
-          "([[[payload_node]]]). Read/find/edit payload node fields with native shell " <>
-          "tools over `.ecrits/mount/<name>.jsonl` (cat/grep/sed). Never replace " <>
-          "the file with one payload object and never look for mounted_at inside " <>
-          "the JSONL; it is IR-only. Never create, copy, or edit fallback JSONL " <>
-          "outside `.ecrits/mount`; `/tmp/<name>.jsonl` and workspace-root " <>
-          "<name>.jsonl are fake scratch files that do not route to the document. " <>
-          "If `.ecrits/mount/<name>.jsonl` is missing after `doc.open_doc`, stop " <>
-          "and report that blocker. For whole-file rewrites, create the temp file " <>
-          "inside `.ecrits/mount` and mv it over the target; do not use mktemp " <>
-          "outside the mount or dd over the target. Insert pictures as a payload node inside an " <>
-          "existing paragraph list such as " <>
-          "{\"type\":\"picture\",\"src\":\"/abs/img.png\"}; ecrits chooses a readable " <>
-          "default size from the image aspect, so width/height are only needed for " <>
-          "intentional HWPUNIT resizing. Move by editing x/y/treatAsChar; resize by " <>
-          "editing width/height; delete by removing that " <>
-          "payload from its paragraph list. Only doc.open_doc / doc.close_doc are " <>
-          "available as MCP tools."
-    }
-
-    {:ok, %{content: [json_content(msg)], isError: true}, state}
+    {:ok, %{content: [json_content(MCPToolPolicy.disabled_in_vfs_message(name))], isError: true},
+     state}
   end
 
   defp do_run_tool(ctx, name, args, state) do

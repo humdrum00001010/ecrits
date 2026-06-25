@@ -806,22 +806,23 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     """ <> legacy_doc_preamble(opts)
   end
 
-  # FUSE/VFS mode: documents are FILES. Only the mount-control MCP tools exist
-  # (doc.open_doc/doc.close_doc); read/find/edit happen with native shell tools
-  # over the projected IR file. This matches the MCPServer tool gate (both key on
-  # `DocMount.enabled?()`), so the agent is never told about a tool it can't call.
+  # FUSE/VFS mode: documents are FILES. Only doc.open_doc is advertised as an MCP
+  # tool; read/find/edit happen with native shell tools over the projected IR file.
+  # This matches the MCPServer tool gate (both key on `DocMount.enabled?()`), so
+  # the agent is never told about a tool it can't call.
   defp fuse_preamble(opts) do
     """
     [System] FUSE/VFS mode: documents are EDITABLE FILES, not opaque binaries.
-    The ONLY MCP tools available are `doc.open_doc {path}` (mount a document into
-    the VFS) and `doc.close_doc {path}` (unmount). There is NO doc.read /
-    doc.find / doc.context / doc.edit / doc.set / doc.save — do EVERYTHING ELSE
+    The ONLY MCP tool to call is `doc.open_doc {path}` (mount a document into
+    the VFS). There is NO doc.read / doc.find / doc.context / doc.edit /
+    doc.set / doc.save — do EVERYTHING ELSE
     with your native shell/file tools over the mounted file.
     NEVER type `doc.open_doc` in the shell; it is an MCP tool call, not a command.
     If `doc.open_doc` is not immediately visible as a callable MCP tool, use
-    resource/tool discovery only to surface `doc.open_doc` / `doc.close_doc`, then
-    call `doc.open_doc`. Do not use discovery as a substitute for editing the
-    mounted file.
+    resource/tool discovery only to surface `doc.open_doc`, then call
+    `doc.open_doc`. Do not use discovery as a substitute for editing the mounted
+    file. Do not call `doc.close_doc` in normal edit turns, even if a cached tool
+    list shows it; closing removes the projected file before verification.
 
     Workflow:
     1. First action for this/current/open-document file work: call
@@ -831,9 +832,8 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       `mount_status`, or other tool metadata. If the MCP tool is hidden but the
       mounted file already exists at `.ecrits/mount/<name>.jsonl`, use that
       path as the VFS target. Never treat a missing `mounted_at` field inside
-      the JSONL as a blocker. Do not call `doc.close_doc` until the edit and
-      verification are complete, unless the user explicitly asks to unmount;
-      closing removes the mounted file you need to edit.
+      the JSONL as a blocker. Keep the document open through edit and
+      verification; do not use `doc.close_doc` as cleanup.
       NEVER create, copy, or edit a JSONL projection anywhere else. A file like
       `/tmp/<name>.jsonl`, `<workspace>/<name>.jsonl`, or any scratch/staged JSONL
       outside `.ecrits/mount/` is fake and does NOT route to the document. If

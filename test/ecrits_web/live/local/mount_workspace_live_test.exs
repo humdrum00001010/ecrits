@@ -1447,8 +1447,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     cond do
       mount_status.enabled? and mounted? ->
         assert prompt =~ "FUSE/VFS mode"
+        assert prompt =~ "The ONLY MCP tool to call is `doc.open_doc"
         assert prompt =~ "doc.open_doc"
-        assert prompt =~ "doc.close_doc"
+        assert prompt =~ "Do not call `doc.close_doc` in normal edit turns"
         assert prompt =~ "NEVER type `doc.open_doc` in the shell"
         assert prompt =~ "resource/tool discovery only to surface `doc.open_doc`"
         assert prompt =~ "Do not use discovery as a substitute for editing"

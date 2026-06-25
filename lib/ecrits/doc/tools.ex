@@ -151,7 +151,8 @@ defmodule Ecrits.Doc.Tools do
           "payload from the paragraph list. Returns {opened, " <>
           "path, mounted_at, mount_status}; when " <>
           "mounted_at is null, mount_status/mount_error explain the FSKit/FUSE blocker. " <>
-          "Reverse with doc.close_doc.",
+          "Keep the document open while editing and verifying the mounted file; " <>
+          "do not use doc.close_doc as cleanup during an edit turn.",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
@@ -166,6 +167,8 @@ defmodule Ecrits.Doc.Tools do
       "description" =>
         "Remove a document from the doc VFS mount (reverse of doc.open_doc): the " <>
           "projected <name>.jsonl disappears from <workspace>/.ecrits/mount/. " <>
+          "This is for explicit unmount requests only, not normal edit cleanup or " <>
+          "verification; closing mid-turn removes the file the agent needs to edit. " <>
           "Returns {closed}.",
       "risk" => "read",
       "inputSchema" => %{
