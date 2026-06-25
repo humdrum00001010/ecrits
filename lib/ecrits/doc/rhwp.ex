@@ -167,12 +167,15 @@ defmodule Ecrits.Doc.Rhwp do
     case safe_query(ehwp_handle, %{q: "elements"}) do
       {:ok, json} when is_binary(json) ->
         case Jason.decode(json) do
-          {:ok, nodes} when is_list(nodes) -> {:ok, attach_context(nodes)}
-          _ -> {:error, {:not_supported, "elements query returned non-array"}}
+          {:ok, nodes} when is_list(nodes) ->
+            {:ok, nodes |> attach_context() |> enrich_picture_nodes(ehwp_handle)}
+
+          _ ->
+            {:error, {:not_supported, "elements query returned non-array"}}
         end
 
       {:ok, nodes} when is_list(nodes) ->
-        {:ok, attach_context(nodes)}
+        {:ok, nodes |> attach_context() |> enrich_picture_nodes(ehwp_handle)}
 
       {:error, reason} ->
         {:error, {:not_supported, inspect(reason)}}
@@ -183,6 +186,26 @@ defmodule Ecrits.Doc.Rhwp do
   end
 
   def elements(_handle, _opts), do: {:error, {:not_supported, "no ehwp handle"}}
+
+  @projected_picture_props ~w(width height horzOffset vertOffset treatAsChar
+                              horzRelTo vertRelTo horzAlign vertAlign textWrap
+                              description originalWidth originalHeight)
+
+  defp enrich_picture_nodes(nodes, ehwp_handle) do
+    Enum.map(nodes, fn
+      %{"type" => "picture", "ref" => ref} = node when is_map(ref) ->
+        case get(%{ehwp: ehwp_handle}, ref, @projected_picture_props) do
+          {:ok, props} when is_map(props) ->
+            Map.merge(node, Map.take(props, @projected_picture_props))
+
+          _ ->
+            node
+        end
+
+      node ->
+        node
+    end)
+  end
 
   # Run an ehwp read query, converting a raise/exit (older NIF without the verb,
   # crashed session) into an `{:error, _}` so the caller never propagates it.
@@ -571,6 +594,22 @@ defmodule Ecrits.Doc.Rhwp do
     "SpaceAfter" => %PropSpec{key: "spacingAfter", cast: :int}
   }
 
+  @picture_prop_spec %{
+    "Width" => %PropSpec{key: "width", cast: :int},
+    "Height" => %PropSpec{key: "height", cast: :int},
+    "PosX" => %PropSpec{key: "horzOffset", cast: :int},
+    "PosY" => %PropSpec{key: "vertOffset", cast: :int},
+    "TreatAsChar" => %PropSpec{key: "treatAsChar", cast: :bool},
+    "Caption" => %PropSpec{key: "caption", cast: :verbatim},
+    "width" => %PropSpec{key: "width", cast: :int},
+    "height" => %PropSpec{key: "height", cast: :int},
+    "x" => %PropSpec{key: "horzOffset", cast: :int},
+    "y" => %PropSpec{key: "vertOffset", cast: :int},
+    "horzOffset" => %PropSpec{key: "horzOffset", cast: :int},
+    "vertOffset" => %PropSpec{key: "vertOffset", cast: :int},
+    "treatAsChar" => %PropSpec{key: "treatAsChar", cast: :bool}
+  }
+
   def set(%{ehwp: ehwp_handle}, ref, props) when is_map(props) do
     {kind, prop_map} = pop_kind(props)
     resolved = kind || ref_kind(ref)
@@ -609,10 +648,30 @@ defmodule Ecrits.Doc.Rhwp do
     end
   end
 
-  # set_properties kinds: only paragraph props need translation (cell/picture/
-  # shape/table/equation props are already engine-native).
+  # set_properties kinds: paragraph and picture accept agent-facing aliases; the
+  # remaining control kinds pass native engine keys through.
   defp translate_props_for_kind("paragraph", props), do: translate(props, @para_prop_spec)
+  defp translate_props_for_kind("picture", props), do: translate_picture_props(props)
   defp translate_props_for_kind(_kind, props), do: props
+
+  defp translate_picture_props(props) do
+    translated = translate(props, @picture_prop_spec)
+
+    if picture_move_props?(props) do
+      translated
+      |> Map.put_new("treatAsChar", false)
+      |> Map.put_new("horzRelTo", "Paper")
+      |> Map.put_new("vertRelTo", "Paper")
+      |> Map.put_new("horzAlign", "Left")
+      |> Map.put_new("vertAlign", "Top")
+    else
+      translated
+    end
+  end
+
+  defp picture_move_props?(props) do
+    Enum.any?(Map.keys(props), &(to_string(&1) in ~w(PosX PosY x y horzOffset vertOffset)))
+  end
 
   # The ONE eval of a translation spec: map each property through its
   # `%PropSpec{}`, casting the value by its declared type. A key absent from the
@@ -1350,6 +1409,10 @@ defmodule Ecrits.Doc.Rhwp do
     end
   end
 
+  defp ref_kind(%{"type" => type}) when is_binary(type) and type != "", do: type
+  defp ref_kind(%{type: type}) when is_binary(type) and type != "", do: type
+  defp ref_kind(%{"cell" => _cell}), do: "cell"
+  defp ref_kind(%{cell: _cell}), do: "cell"
   defp ref_kind(_ref), do: "char"
 
   defp maybe_put(map, _key, nil), do: map

@@ -58,6 +58,7 @@ defmodule Ecrits.Doc.Tools do
 
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
+  alias Ecrits.Fuse.DocMount
   alias Ecrits.Local.Document.ByteSpool
   alias Ecrits.Workspace.Session
   require Logger
@@ -126,12 +127,27 @@ defmodule Ecrits.Doc.Tools do
       "namespace" => @namespace,
       "name" => "open_doc",
       "description" =>
-        "Expose a workspace document as an editable text file in the doc VFS, " <>
-          "mounted at <workspace>/.ecrits/mount/<name>.md. Call this to make a " <>
+        "Expose a workspace document as an editable JSONL IR file in the doc VFS, " <>
+          "mounted at <workspace>/.ecrits/mount/<name>.jsonl. Call this to make a " <>
           "document readable/greppable as a normal file (cat, rg, sed, grep) from " <>
-          "the shell; the projected text is the whole document. Root-level " <>
-          "documents only. Returns {opened, path, mounted_at}. Reverse with " <>
-          "doc.close_doc.",
+          "the shell; the projected JSONL is the whole document IR as one nested " <>
+          "list value: sections -> paragraphs -> payload nodes. Root-level " <>
+          "documents only. The JSONL is IR-only and does not contain mounted_at " <>
+          "metadata. For whole-file rewrites, write a temp file inside the same " <>
+          ".ecrits/mount directory and mv it over the target; do not use mktemp " <>
+          "outside the mount or dd over the target. Never replace it with one payload object. Insert a " <>
+          "picture by adding a payload node inside an existing paragraph list " <>
+          "like " <>
+          "{\"type\":\"picture\",\"src\":\"/abs/img.png\"}; ecrits chooses a readable " <>
+          "default size from the image aspect, and width/height are only needed " <>
+          "for intentional HWPUNIT resizing. New pictures are inline unless the " <>
+          "payload explicitly sets treatAsChar:false with x/y; move an existing " <>
+          "picture by editing x/y/treatAsChar, resize by editing width/height, " <>
+          "and delete one by removing its " <>
+          "payload from the paragraph list. Returns {opened, " <>
+          "path, mounted_at, mount_status}; when " <>
+          "mounted_at is null, mount_status/mount_error explain the FSKit/FUSE blocker. " <>
+          "Reverse with doc.close_doc.",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
@@ -145,7 +161,7 @@ defmodule Ecrits.Doc.Tools do
       "name" => "close_doc",
       "description" =>
         "Remove a document from the doc VFS mount (reverse of doc.open_doc): the " <>
-          "projected <name>.md disappears from <workspace>/.ecrits/mount/. " <>
+          "projected <name>.jsonl disappears from <workspace>/.ecrits/mount/. " <>
           "Returns {closed}.",
       "risk" => "read",
       "inputSchema" => %{
@@ -715,16 +731,24 @@ defmodule Ecrits.Doc.Tools do
       name = Path.basename(abs)
       Ecrits.Fuse.OpenDocs.open(root, name)
 
-      mounted_at =
+      mount_status = Ecrits.Fuse.DocMount.status()
+
+      {mounted_at, mount_error} =
         case Ecrits.Fuse.DocMount.ensure(root) do
           {:ok, _} ->
-            Path.join(
-              Ecrits.Fuse.DocMount.mount_point(root),
-              Ecrits.Doc.Projection.projected_name(name)
-            )
+            mounted =
+              Path.join(
+                Ecrits.Fuse.DocMount.mount_point(root),
+                Ecrits.Doc.Projection.projected_name(name)
+              )
 
-          _ ->
-            nil
+            {mounted, nil}
+
+          :disabled ->
+            {nil, Map.get(mount_status, :message)}
+
+          {:error, reason} ->
+            {nil, inspect(reason)}
         end
 
       {:ok,
@@ -732,7 +756,9 @@ defmodule Ecrits.Doc.Tools do
          "opened" => name,
          "path" => abs,
          "mounted_at" => mounted_at,
-         "vfs_enabled" => Ecrits.Fuse.DocMount.enabled?()
+         "mount_error" => mount_error,
+         "mount_status" => doc_mount_status_json(mount_status),
+         "vfs_enabled" => mount_status.enabled?
        }}
     else
       {:error, reason} -> {:error, error_json(reason)}
@@ -3494,12 +3520,14 @@ defmodule Ecrits.Doc.Tools do
       root when is_binary(root) and root != "" ->
         root_expanded = Path.expand(root)
         expanded = Path.expand(path, root_expanded)
+        canonical_root = DocMount.canonical_root(root_expanded)
+        canonical_expanded = canonical_path_for_compare(expanded)
 
-        if expanded == root_expanded or
-             String.starts_with?(expanded, root_expanded <> "/") do
+        if canonical_expanded == canonical_root or
+             String.starts_with?(canonical_expanded, canonical_root <> "/") do
           {:ok, expanded}
         else
-          {:error, {:outside_workspace, root_expanded}}
+          {:error, {:outside_workspace, canonical_root}}
         end
 
       _ ->
@@ -3511,16 +3539,21 @@ defmodule Ecrits.Doc.Tools do
   # `DocMount` key). `ctx.session_path` is the agent's workspace root.
   defp vfs_root(ctx) do
     case Map.get(ctx, :session_path) do
-      root when is_binary(root) and root != "" -> {:ok, Path.expand(root)}
+      root when is_binary(root) and root != "" -> {:ok, DocMount.canonical_root(root)}
       _ -> {:error, {:invalid_params, "no workspace root in this context"}}
     end
   end
 
   # The flat doc VFS projects root-level documents only (basename keyed).
   defp ensure_root_level(root, abs) do
-    if Path.dirname(abs) == root,
+    if DocMount.canonical_root(Path.dirname(abs)) == root,
       do: :ok,
       else: {:error, {:invalid_params, "doc.open_doc supports workspace-root documents only"}}
+  end
+
+  defp canonical_path_for_compare(path) when is_binary(path) do
+    path = Path.expand(path)
+    Path.join(DocMount.canonical_root(Path.dirname(path)), Path.basename(path))
   end
 
   defp ensure_projectable(abs) do
@@ -3534,6 +3567,16 @@ defmodule Ecrits.Doc.Tools do
       true ->
         :ok
     end
+  end
+
+  defp doc_mount_status_json(status) do
+    %{
+      "backend" => status.backend |> to_string(),
+      "enabled" => status.enabled?,
+      "reason" => status.reason && to_string(status.reason),
+      "message" => status.message,
+      "settings_url" => status.settings_url
+    }
   end
 
   defp get(args, keys), do: get_in_args(args, keys)

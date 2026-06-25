@@ -35,10 +35,11 @@ config :ecrits,
 config :ecrits, :local_agent, provider: "codex"
 
 # Document VFS (Ecrits.Fuse.*): mount the workspace's documents as grep-able/
-# editable text files under <workspace>/.ecrits/mount via exfuse. Default ON; the
-# header "FUSE" toggle flips it per-workspace at runtime. Also gated on macFUSE +
-# the exfuse port (Ecrits.Fuse.DocMount.enabled?/0), and DocMount.ensure/1 verifies
-# the kernel mount actually took, rolling back cleanly otherwise.
+# editable JSONL IR files under <workspace>/.ecrits/mount via exfuse. Default ON;
+# the header "FUSE" toggle flips it per-workspace at runtime. On macOS the native
+# backend is FSKit; on Linux/other Unix it is the FUSE/libfuse Rust port.
+# DocMount.ensure/1 verifies the kernel mount actually took, rolling back cleanly
+# otherwise.
 #
 # CAVEAT (macOS TCC): mounting inside ~/Downloads, ~/Desktop, ~/Documents is denied
 # unless the host process has Full Disk Access — there the mount rolls back and the

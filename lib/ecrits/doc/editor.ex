@@ -225,7 +225,7 @@ defmodule Ecrits.Doc.Editor do
   def handle_call({:elements, opts}, _from, st) do
     # Optional backend capability: surface a clean not_supported error when the
     # backend doesn't implement `elements/2` so the Tools layer falls back.
-    if function_exported?(st.backend, :elements, 2) do
+    if Code.ensure_loaded?(st.backend) and function_exported?(st.backend, :elements, 2) do
       {:reply, st.backend.elements(st.handle, opts), st}
     else
       {:reply, {:error, {:not_supported, "backend has no elements/2"}}, st}

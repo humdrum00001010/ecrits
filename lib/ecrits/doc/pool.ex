@@ -33,6 +33,7 @@ defmodule Ecrits.Doc.Pool do
 
   alias Ecrits.Doc
   alias Ecrits.Doc.Editor
+  alias Ecrits.Fuse.DocMount
 
   @default_name __MODULE__
 
@@ -200,6 +201,7 @@ defmodule Ecrits.Doc.Pool do
 
   @impl true
   def handle_call({:open, path, opts}, _from, st) do
+    path = canonical_path(path)
     kind = Keyword.get(opts, :kind, :hwp)
 
     case Doc.backend_for(kind) do
@@ -222,6 +224,7 @@ defmodule Ecrits.Doc.Pool do
   end
 
   def handle_call({:create, path, opts}, _from, st) do
+    path = canonical_path(path)
     kind = Keyword.get(opts, :kind, :hwp)
 
     case Doc.backend_for(kind) do
@@ -283,6 +286,8 @@ defmodule Ecrits.Doc.Pool do
   end
 
   def handle_call({:info_by_path, path}, _from, st) do
+    path = canonical_path(path)
+
     reply =
       with document_id when is_binary(document_id) <- Map.get(st.by_path, path),
            doc when is_map(doc) <- Map.get(st.docs, document_id) do
@@ -396,11 +401,22 @@ defmodule Ecrits.Doc.Pool do
   """
   @spec document_id_for(String.t(), atom()) :: document_id()
   def document_id_for(path, kind) do
+    path = canonical_path(path)
+
     hash =
       :crypto.hash(:sha256, "#{kind}:#{path}")
       |> Base.url_encode64(padding: false)
       |> String.slice(0, 16)
 
     "d_#{kind}_#{hash}"
+  end
+
+  defp canonical_path(path) when is_binary(path) do
+    if Path.type(path) == :absolute do
+      path = Path.expand(path)
+      Path.join(DocMount.canonical_root(Path.dirname(path)), Path.basename(path))
+    else
+      path
+    end
   end
 end

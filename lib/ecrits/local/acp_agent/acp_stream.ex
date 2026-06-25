@@ -742,11 +742,48 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   # caveman voice). The current document handle is now an MCP contract:
   # doc.context.current_document, not prompt-embedded path text.
   defp doc_preamble(opts) do
-    if Ecrits.Fuse.DocMount.enabled?() do
-      fuse_preamble(opts)
-    else
-      legacy_doc_preamble(opts)
+    status = Ecrits.Fuse.DocMount.status()
+
+    cond do
+      status.enabled? ->
+        fuse_preamble(opts)
+
+      fs_vfs_expected?(status) ->
+        blocked_vfs_preamble(status, opts)
+
+      true ->
+        legacy_doc_preamble(opts)
     end
+  end
+
+  defp fs_vfs_expected?(%{backend: :fskit, reason: reason})
+       when reason in [
+              :fskit_extension_disabled,
+              :fskit_extension_not_registered,
+              :fskit_extension_unsigned
+            ],
+       do: true
+
+  defp fs_vfs_expected?(_status), do: false
+
+  defp blocked_vfs_preamble(status, opts) do
+    settings_line =
+      if is_binary(status.settings_url) and status.settings_url != "" do
+        "Settings URL: #{status.settings_url}\n"
+      else
+        ""
+      end
+
+    """
+    [System] FSKit/VFS is configured but not mountable right now:
+    #{status.message}
+    #{settings_line}
+    Do not claim `.ecrits/mount/<name>.jsonl` exists until `doc.open_doc` returns
+    a non-null `mounted_at`. Do not use `.md`. Use the normal doc MCP tools for
+    this turn unless the user enables FSKit first; `doc.open_doc` will report the
+    same `mount_status` blocker.
+
+    """ <> legacy_doc_preamble(opts)
   end
 
   # FUSE/VFS mode: documents are FILES. Only the mount-control MCP tools exist
@@ -760,19 +797,62 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     the VFS) and `doc.close_doc {path}` (unmount). There is NO doc.read /
     doc.find / doc.context / doc.edit / doc.set / doc.save — do EVERYTHING ELSE
     with your native shell/file tools over the mounted file.
+    NEVER type `doc.open_doc` in the shell; it is an MCP tool call, not a command.
+    Do not call resource-discovery tools (`list_mcp_resources`,
+    `list_mcp_resource_templates`) as a substitute for editing the mounted file.
 
     Workflow:
     1. `doc.open_doc {path}` (path = the workspace document name) mounts the doc
-       and returns a `.ecrits/mount/<name>.md` path under the workspace root.
-    2. That file is the document's IR as JSONL — ONE JSON node per line, e.g.
-       `{"ref":...,"type":"paragraph","text":"..."}`. READ with `cat`/`sed -n`;
+       and returns a `.ecrits/mount/<name>.jsonl` path under the workspace root.
+       The JSONL file itself is IR-only; it does NOT contain `mounted_at`,
+       `mount_status`, or other tool metadata. If the MCP tool is hidden but the
+       mounted file already exists at `.ecrits/mount/<name>.jsonl`, use that
+       path as the VFS target. Never treat a missing `mounted_at` field inside
+       the JSONL as a blocker.
+    2. That file is the document's IR as one compact nested JSON value, not
+       Markdown and not a flat positional stream:
+       `[ [ [ payload_node, ... ], ... ], ... ]`
+       means `sections -> paragraphs -> payload nodes`.
+       Positional HWPX refs are NOT payload fields here: do not add
+       `{"ref":[0,385,0]}` or invent any positional ref. The nested list position
+       is the positional address. Rich non-positional refs may appear only when
+       they carry semantic addressing from the backend. READ with `cat`/`sed -n`;
        FIND with `grep -n`/`rg` over it. For "this/current/open document", it is
        the one the user is viewing — `doc.open_doc` it, then operate on its file.
-    3. EDIT by changing the `"text"` field of the relevant node line(s) IN PLACE
-       with a shell command (e.g. `sed -i`), keeping every line and its `"ref"`
-       unchanged (the router rejects added/removed/reordered lines and ref
-       changes). Edit `"text"` on `paragraph` nodes only. The write routes onto
-       the live document and auto-saves — there is no doc.save.
+    3. EDIT existing payloads by changing fields IN PLACE with a shell command,
+       keeping each existing node's `"type"` unchanged. Keep existing payload
+       order stable unless you are intentionally inserting or deleting one
+       supported native payload.
+       For whole-file rewrites, create the temp file inside the same
+       `.ecrits/mount/` directory, then rename it over the target. Do NOT use
+       `mktemp`, `dd`, or any temp path outside the mount. Example:
+       `tmp=".ecrits/mount/<name>.jsonl.tmp"; jq -c '...' "$target" > "$tmp" && mv "$tmp" "$target"`
+       This keeps the write on the VFS `create`/`write`/`rename` path.
+       To CREATE a native table, insert one new payload object at the desired
+       nested-list position inside an existing paragraph list (the innermost
+       array of payload nodes), not as a metadata object, standalone object, new
+       section wrapper, or new paragraph wrapper:
+       `{"type":"table","cells":[["H1","H2"],["A","B"]],"header":true}`
+       Do not invent `"ref"` for that new table. `rows`/`cols` are optional and
+       otherwise derived from `cells`.
+       To CREATE a native picture, insert one new payload object at the desired
+       nested-list position inside an existing paragraph list (the innermost
+       array of payload nodes), not as a metadata object, standalone object, new
+       section wrapper, or new paragraph wrapper:
+       `{"type":"picture","src":"/abs/img.png"}`
+       ecrits chooses a readable default size from the image aspect; add
+       `width`/`height` only when intentionally resizing in HWPUNIT. Do not put
+       `x`/`y` on a newly inserted picture unless you explicitly set
+       `"treatAsChar": false`; otherwise new pictures are inline at the nested
+       position. Move an existing picture by editing that payload's `x`, `y`,
+       and `treatAsChar` fields in place; resize by editing `width`/`height`.
+       Delete a picture by removing that picture payload from its paragraph list. Other
+       add/remove/reorder/ref/type edits are structural and rejected in this VFS
+       write-back.
+       `"text"` changes route as scoped text edits; other payload node field
+       changes route through the native property setter when the backend supports
+       them. Unsupported/derived fields fail loudly. The write routes onto the
+       live document and auto-saves — there is no doc.save.
     4. Verify with shell (re-`grep` the mount file).
 
     Voice: caveman. Short answer, no filler; report result/blockers only.
@@ -783,9 +863,9 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
   defp legacy_doc_preamble(opts) do
     """
     [System] Use doc MCP tools for documents; never shell-read the RAW binary doc
-    files (.hwp/.docx/.pptx/.xlsx are not text). EXCEPTION — see "VFS edit" at the
-    end: when a doc is mounted as text under `.ecrits/mount/`, you read/edit THAT
-    file directly and it routes to the document.
+    files (.hwp/.docx/.pptx/.xlsx are not text). EXCEPTION: only if `doc.open_doc`
+    returns a non-null `mounted_at`, read/edit that mounted `.jsonl` IR file
+    under `.ecrits/mount/` directly; it routes to the document.
     For "this/current/open document", call `doc.context` first and use
     `current_document.document` as the `document` param. Tool names are dotted.
     Read tools: `doc.context`, `doc.list`, `doc.open`, `doc.find`, `doc.read`,

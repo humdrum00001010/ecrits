@@ -9,6 +9,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   alias Ecrits.Doc.Editor, as: DocEditor
   alias Ecrits.Doc.Pool, as: DocPool
+  alias Ecrits.Fuse.DocMount
   alias Ecrits.Local.AcpAgent, as: ACP
   alias Ecrits.Local.Document
   alias Ecrits.Local.Document.RhwpAdapter
@@ -561,8 +562,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             else: Ecrits.Fuse.DocMount.ensure(path)
 
         # Reflect the real mount state (handles :disabled / mount failure -> false).
+        mounted? = Ecrits.Fuse.DocMount.mounted?(path)
+
         socket
-        |> assign(:fuse_mode, Ecrits.Fuse.DocMount.mounted?(path))
+        |> assign(:fuse_mode, mounted?)
+        |> sync_doc_vfs_subscription(path, mounted?)
         |> apply_vfs_write_policy()
       else
         socket
@@ -775,6 +779,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         %{type: :turn_completed} ->
           socket
           |> persist_pending_agent_docs()
+          |> flush_staged_vfs_docs()
           |> refresh_tree(socket.assigns.expanded_paths)
 
         _ ->
@@ -938,24 +943,24 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  # A DIRECT edit of a mounted `.md` was routed onto the document (doc VFS
+  # A DIRECT edit of a mounted `.jsonl` was routed onto the document (doc VFS
   # write-back). Drop a file-viewer card in the chat rail showing where it landed.
   def handle_info({:vfs_doc_edited, info}, socket) when is_map(info) do
     socket =
       socket
-      |> stream_insert(:local_agent_items, vfs_doc_edit_card(info))
+      |> stream_insert(:local_agent_items, vfs_doc_edit_item(socket, info))
       |> resync_open_editor_after_vfs_edit(info)
 
     {:noreply, socket}
   end
 
-  # A VFS write edits the SERVER document model + saves to disk. The open browser
-  # WASM editor holds its own copy, so we LIVE-STREAM the change into it: when the
-  # edited doc IS the one this tab is viewing, push the same `replace_text` ops
-  # through the editor's incremental apply path (`doc.apply_edit` -> patch the
-  # WASM model -> repaint just the affected page) — NOT a full reload. The edit
-  # appears live in the real editor. (Match by PATH: `local_hwp_stream_document_id`
-  # is the Document struct id "local-…", the edit keys the Pool "d_hwpx_…".)
+  # A VFS write edits the SERVER document model + saves to disk. This function is
+  # not the FUSE write path; it only keeps an already-open browser viewer in sync
+  # after the file-level write-back has committed. For HWP viewers we can reuse
+  # the semantic non-mirror browser hook (`doc.apply_edit` -> patch the WASM model
+  # -> repaint just the affected page); that is a post-commit UI resync layer, not
+  # the authoring route. (Match by PATH: `local_hwp_stream_document_id` is the
+  # Document struct id "local-…", the edit keys the Pool "d_hwpx_…".)
   defp resync_open_editor_after_vfs_edit(socket, %{path: edited_abs} = info)
        when is_binary(edited_abs) do
     workspace_path = socket.assigns[:workspace_path]
@@ -963,6 +968,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     open_id = socket.assigns[:local_hwp_stream_document_id]
     open_rel = socket.assigns[:active_document_path]
     ops = Map.get(info, :ops, [])
+    sets = Map.get(info, :sets, [])
 
     cond do
       renderer not in [:rhwp_wasm, :office_wasm] ->
@@ -971,19 +977,17 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       not (is_binary(workspace_path) and is_binary(open_rel)) ->
         socket
 
-      Path.expand(edited_abs) != Path.expand(Path.join(workspace_path, open_rel)) ->
+      canonical_path_for_compare(edited_abs) !=
+          canonical_path_for_compare(Path.join(workspace_path, open_rel)) ->
         socket
 
       # HWP: incremental live apply (the browser-arm path). request_id is
       # synthetic — there is no MCP waiter, so the editor's reply lands on an
       # unknown id and is harmlessly ignored by `doc.browser_reply`.
-      renderer == :rhwp_wasm and ops != [] ->
-        push_event(socket, "doc.apply_edit", %{
-          request_id: "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic])),
-          document_id: open_id,
-          verb: "edit",
-          payload: %{ops: ops}
-        })
+      renderer == :rhwp_wasm and (ops != [] or sets != []) ->
+        socket
+        |> push_vfs_browser_edit(open_id, ops)
+        |> push_vfs_browser_set(open_id, sets)
 
       # Office (no incremental op path here) or no ops: re-fetch saved bytes.
       true ->
@@ -1002,6 +1006,28 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   defp resync_open_editor_after_vfs_edit(socket, _info), do: socket
+
+  defp push_vfs_browser_edit(socket, _document_id, []), do: socket
+
+  defp push_vfs_browser_edit(socket, document_id, ops) do
+    push_event(socket, "doc.apply_edit", %{
+      request_id: "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic])),
+      document_id: document_id,
+      verb: "edit",
+      payload: %{ops: ops}
+    })
+  end
+
+  defp push_vfs_browser_set(socket, _document_id, []), do: socket
+
+  defp push_vfs_browser_set(socket, document_id, sets) do
+    push_event(socket, "doc.apply_edit", %{
+      request_id: "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic])),
+      document_id: document_id,
+      verb: "set",
+      payload: %{sets: sets}
+    })
+  end
 
   @impl true
   def handle_async(@local_document_open_async, {:ok, {ref, path, result}}, socket) do
@@ -1512,6 +1538,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                           turn_id={Map.get(item, :turn_id)}
                           preview_text={agent_editor_preview_text(item)}
                           delta_count={agent_editor_preview_delta_count(item)}
+                          preview_highlights={agent_editor_preview_highlights(item)}
                           markdown_source={agent_editor_preview_text(item)}
                           markdown_preview_html=""
                         />
@@ -2326,7 +2353,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  # The mounted `.md` is writable ONLY when the workspace agent access is
+  # The mounted `.jsonl` is writable ONLY when the workspace agent access is
   # "full-workspace" — a direct file write is the agent modifying the workspace,
   # so it honours the same gate as the MCP tools. Pushed to the FUSE layer
   # (Ecrits.Fuse.OpenDocs) whenever the mount comes up or the access changes.
@@ -2344,21 +2371,103 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   # Subscribe (once) to the workspace's doc-VFS edit broadcasts so a DIRECT file
-  # edit of a mounted `.md` (routed by Ecrits.Doc.Projection.write_back/3) shows a
+  # edit of a mounted `.jsonl` (routed by Ecrits.Doc.Projection.write_back/3) shows a
   # card in the chat rail — the agent edits the file, not doc.edit.
   defp subscribe_doc_vfs(socket, root) do
-    topic = "doc_vfs:" <> Path.expand(root)
+    topic = "doc_vfs:" <> DocMount.canonical_root(root)
 
-    if connected?(socket) and socket.assigns[:doc_vfs_topic] != topic do
-      Phoenix.PubSub.subscribe(Ecrits.PubSub, topic)
-      assign(socket, :doc_vfs_topic, topic)
-    else
-      socket
+    cond do
+      not connected?(socket) ->
+        socket
+
+      socket.assigns[:doc_vfs_topic] == topic ->
+        socket
+
+      true ->
+        socket = unsubscribe_doc_vfs(socket)
+
+        Phoenix.PubSub.subscribe(Ecrits.PubSub, topic)
+        assign(socket, :doc_vfs_topic, topic)
     end
   end
 
-  # The chat-rail card for a DIRECT file edit (write_back broadcast). Same shape
-  # as the doc.edit card, but sourced from the VFS write, not a tool call.
+  defp unsubscribe_doc_vfs(socket) do
+    if connected?(socket) and is_binary(socket.assigns[:doc_vfs_topic]) do
+      Phoenix.PubSub.unsubscribe(Ecrits.PubSub, socket.assigns.doc_vfs_topic)
+    end
+
+    assign(socket, :doc_vfs_topic, nil)
+  end
+
+  defp sync_doc_vfs_subscription(socket, root, true) when is_binary(root),
+    do: subscribe_doc_vfs(socket, root)
+
+  defp sync_doc_vfs_subscription(socket, _root, _mounted?),
+    do: unsubscribe_doc_vfs(socket)
+
+  # The chat-rail view for a DIRECT file edit (write_back broadcast). Prefer the
+  # canonical embedded document viewer when the edited file is the active doc;
+  # keep the text excerpt only as a fallback for background/non-open documents.
+  defp vfs_doc_edit_item(socket, info) do
+    vfs_editor_preview_item(socket, info) || vfs_doc_edit_card(info)
+  end
+
+  defp vfs_editor_preview_item(socket, %{path: edited_abs} = info)
+       when is_binary(edited_abs) do
+    workspace_path = socket.assigns[:workspace_path]
+    document = socket.assigns[:active_document]
+    document_id = active_document_id(socket)
+
+    with %{relative_path: relative_path} <- document,
+         document_path when is_binary(document_path) <-
+           socket.assigns[:active_document_path] || relative_path,
+         true <- is_binary(workspace_path),
+         true <- is_binary(relative_path),
+         true <- is_binary(document_id),
+         true <-
+           canonical_path_for_compare(edited_abs) ==
+             canonical_path_for_compare(Path.join(workspace_path, document_path)) do
+      turn_id = "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
+      state = %{
+        turn_id: turn_id,
+        document_id: document_id,
+        document: document,
+        document_path: document_path,
+        document_spec: local_document_spec(document),
+        canvas_id:
+          "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-canvas",
+        bytes_url:
+          workspace_path
+          |> local_document_bytes_url(relative_path)
+          |> cache_bust_url(),
+        href: workspace_document_path(socket, document_path),
+        text: "",
+        delta_count: info[:applied] || 1,
+        highlights: vfs_preview_highlights(info),
+        status: :sent
+      }
+
+      agent_editor_preview_item(state)
+    else
+      _ -> nil
+    end
+  end
+
+  defp vfs_editor_preview_item(_socket, _info), do: nil
+
+  defp vfs_preview_highlights(%{highlights: highlights}) when is_list(highlights), do: highlights
+  defp vfs_preview_highlights(_info), do: []
+
+  defp cache_bust_url(url) when is_binary(url) do
+    separator = if String.contains?(url, "?"), do: "&", else: "?"
+    url <> separator <> "v=" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+  end
+
+  defp cache_bust_url(url), do: url
+
+  # Fallback card for a direct file edit when no open canonical viewer can be
+  # resolved for the edited document.
   defp vfs_doc_edit_card(info) do
     {:ok, %{rows: rows}} =
       Ecrits.Doc.Projection.edit_excerpt(info.path, marker: info[:marker], context: 3)
@@ -2810,6 +2919,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           |> assign(:local_agent_session_id, agent_id)
           |> assign(:local_agent_rail_key, Map.get(ws, :rail_key))
           |> refresh_local_agent_rails()
+          |> apply_vfs_write_policy()
         end
 
       {:error, _reason, _ws} ->
@@ -2851,6 +2961,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     # Hydrate reasoning/access from the selected rail's stored adapter_opts — not
     # the URL param (which is no longer written for these settings).
     |> hydrate_agent_options_from_session(stored_opts)
+    |> apply_vfs_write_policy()
     |> stream(:local_agent_items, [], reset: true)
     |> replay_local_agent_transcript(snapshot.transcript)
     |> refresh_local_agent_rails()
@@ -3102,6 +3213,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           paths -> after_auto_save(socket, Enum.reverse(paths))
         end
     end
+  end
+
+  defp flush_staged_vfs_docs(socket) do
+    path = socket.assigns[:workspace_path]
+    if is_binary(path), do: _ = Ecrits.Fuse.DocFs.flush_staged(path)
+    socket
   end
 
   defp safe_dirty_docs do
@@ -3380,8 +3497,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     root = workspace_root_path(socket.assigns.workspace)
 
     if is_binary(root) and root != "" and is_binary(path) and path != "" do
-      abs_root = Path.expand(root)
-      abs_path = Path.expand(path)
+      abs_root = DocMount.canonical_root(root)
+      abs_path = canonical_path_for_compare(path)
       relative = Path.relative_to(abs_path, abs_root)
 
       relative != abs_path and relative != "." and
@@ -3389,6 +3506,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     else
       false
     end
+  end
+
+  defp canonical_path_for_compare(path) when is_binary(path) do
+    path = Path.expand(path)
+    Path.join(DocMount.canonical_root(Path.dirname(path)), Path.basename(path))
   end
 
   # Ignore the metadata tree, dotfiles, and editor swap files; everything else
@@ -4598,10 +4720,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         "document" => pick_field(pick, "document", 500),
         "type" => pick_field(pick, "type", 50),
         "ref" => pick_field(pick, "ref", 500),
-        "text" => pick_field(pick, "text", 200)
+        "text" => pick_field(pick, "text", 200),
+        "hint" => pick_field(pick, "hint", 300)
       }
     end)
-    |> Enum.reject(&(&1["ref"] == "" and &1["text"] == ""))
+    |> Enum.reject(&(&1["ref"] == "" and &1["text"] == "" and &1["hint"] == ""))
   end
 
   defp sanitize_picks(_picks), do: []
@@ -4626,9 +4749,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       "Selected document elements (#{length(picks)}):\n```json\n" <>
         Jason.encode!(picks, pretty: true) <>
         "\n```\n" <>
-        "Picked refs are authoritative. Skip doc.context/doc.find discovery: " <>
-        "call doc.read/doc.edit/doc.set directly on these refs, passing each " <>
+        "Picked refs are authoritative. Skip doc.context/doc.find discovery. " <>
+        "When using doc.* tools, call doc.read/doc.edit/doc.set directly on these refs, passing each " <>
         "pick's `document` value (the file path) as the tools' `document` param. " <>
+        "When using mounted FUSE/VFS JSONL, treat picked refs as target hints for the nested JSONL; " <>
+        "for HWP picture refs like {\"section\":s,\"paragraph\":p,\"control\":c}, edit the picture payload " <>
+        "in section s / paragraph p at picture-control order c. " <>
         "For existing HWP paragraph division, use doc.edit op `split` at offsets; " <>
         "do not use replace_text with newlines.\n"
 
@@ -4868,7 +4994,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_turn_id, turn_id)
     |> assign(:local_agent_status, :running)
     |> assign(:local_agent_editor_preview, nil)
-    |> ensure_inline_editor_preview(turn_id)
   end
 
   # A QUEUED turn just drained (Phase 5): `local_agent_turn_id` was nil (the prior
@@ -4897,7 +5022,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     )
     |> stream_insert(:local_agent_items, agent_reasoning_item(turn_id, "", :pending))
     |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "", :running, 0))
-    |> ensure_inline_editor_preview(turn_id)
   end
 
   defp apply_local_agent_event(socket, %{type: type, title: title})
@@ -4923,8 +5047,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     socket
     |> assign(:local_agent_text, text)
-    |> ensure_inline_editor_preview(turn_id)
-    |> inline_editor_preview_accumulate_delta(turn_id, delta)
     |> push_event("local_agent_text_append", %{
       message_id: agent_assistant_dom_id(turn_id, segment),
       piece: String.replace(delta, ~r/\n{2,}/, "\n")
@@ -5606,7 +5728,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       bytes_url: state.bytes_url,
       href: state.href,
       body: state.text,
-      delta_count: state.delta_count
+      delta_count: state.delta_count,
+      highlights: Map.get(state, :highlights, [])
     }
   end
 
@@ -5826,6 +5949,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp agent_editor_preview_delta_count(%{delta_count: count}) when is_integer(count), do: count
   defp agent_editor_preview_delta_count(_item), do: 0
+
+  defp agent_editor_preview_highlights(%{highlights: highlights}) when is_list(highlights),
+    do: highlights
+
+  defp agent_editor_preview_highlights(_item), do: []
 
   defp agent_doc_edit_doc(%{doc: doc}) when is_binary(doc), do: doc
   defp agent_doc_edit_doc(_item), do: "document"

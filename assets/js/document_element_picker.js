@@ -112,15 +112,46 @@ export function bindElementPickerTarget(target) {
   }
 }
 
+function compactPick(pick) {
+  return {
+    document: pick.document,
+    type: pick.type,
+    ref: pick.ref,
+    text: (pick.text || "").slice(0, 200),
+    hint: (pick.hint || "").slice(0, 300),
+  }
+}
+
+function implicitAgentPicks() {
+  const editors = document.querySelectorAll("[data-role='local-hwp-editor']")
+  const picks = []
+
+  for (const el of editors) {
+    const editor = el.__wasmHwpEditor
+    if (!editor || typeof editor.agentSelectionPicks !== "function") continue
+    for (const pick of editor.agentSelectionPicks() || []) picks.push(pick)
+  }
+
+  return picks
+}
+
+function dedupeCompactPicks(picks) {
+  const seen = new Set()
+
+  return picks.filter(pick => {
+    const key = pickKey(pick)
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 // The compact pick shape the ChatInput hook pushes to the server (the agent
-// reads document/type/ref/text; rects/ir stay editor-side).
+// reads document/type/ref/text/hint; rects/ir stay editor-side). Explicit
+// composer picks are visible chips; implicit active editor selections are sent
+// only when the user submits the chat message.
 export function compactPicks() {
-  return state.picks.map(p => ({
-    document: p.document,
-    type: p.type,
-    ref: p.ref,
-    text: (p.text || "").slice(0, 200),
-  }))
+  return dedupeCompactPicks([...state.picks, ...implicitAgentPicks()]).map(compactPick)
 }
 
 // One small removable chip per pick, in a strip above the composer textarea.

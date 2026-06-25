@@ -1509,11 +1509,15 @@ describe("WasmHwpEditor image move", () => {
       binDataId: "image-bin",
       width: 10,
       height: 20,
+      cropLeft: 0,
+      cropTop: 0,
+      cropRight: 90,
+      cropBottom: 80,
       ...props,
     },
   })
 
-  it("commits picture moves with geometry-only properties", () => {
+  it("commits picture moves with geometry-only properties and does not echo crop", () => {
     const calls: Array<{ name: string; args?: unknown[] }> = []
     const editor = {
       ...WasmHwpEditor,
@@ -1551,7 +1555,8 @@ describe("WasmHwpEditor image move", () => {
     })
     assert.ok(calls.some(call => call.name === "scheduleSnapshot"))
     assert.ok(calls.some(call => call.name === "paintPickedHighlights"))
-    assert.equal(editor.localImagePick, imagePick)
+    assert.equal(JSON.parse(editor.localImagePick.ref).control, 3)
+    assert.deepEqual(editor.localImagePick.rects[0], { pageIndex: 0, x: 24, y: 36, width: 120, height: 80 })
   })
 
   it("plain image clicks select locally without adding chat composer picks", () => {
@@ -1627,7 +1632,115 @@ describe("WasmHwpEditor image move", () => {
     assert.deepEqual(editor.documentAdornmentPicks(), [imagePick])
   })
 
-  it("commits picture resizes with geometry-only properties", () => {
+  it("sends local image selection as an implicit agent pick", () => {
+    const picker = (globalThis as any).window.EcritsDocumentElementPicker
+    picker.clearPicks()
+    const editor = {
+      ...WasmHwpEditor,
+      el: { dataset: { documentPath: "/tmp/doc.hwp" } },
+      localImagePick: imagePick,
+    } as any
+    const documentAny = (globalThis as any).document
+    const originalQuerySelectorAll = documentAny.querySelectorAll
+    documentAny.querySelectorAll = (selector: string) =>
+      selector === "[data-role='local-hwp-editor']" ? [{ __wasmHwpEditor: editor }] : []
+
+    try {
+      assert.deepEqual(editor.currentDocumentPicks(), [])
+
+      const picks = picker.compactPicks()
+      assert.equal(picks.length, 1)
+      assert.equal(picks[0].document, "/tmp/doc.hwp")
+      assert.equal(picks[0].type, "image")
+      assert.equal(picks[0].ref, imagePick.ref)
+      assert.equal(picks[0].text, "")
+      assert.equal(
+        picks[0].hint,
+        "active HWP image selection; VFS nested target section=0; paragraph=2; picture-control order=3"
+      )
+    } finally {
+      documentAny.querySelectorAll = originalQuerySelectorAll
+      picker.clearPicks()
+    }
+  })
+
+  it("deletes the selected picture with Backspace even when no text caret is active", () => {
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        deletePictureControl: (...args: unknown[]) => calls.push({ name: "deletePictureControl", args }),
+      },
+      caret: null,
+      localImagePick: imagePick,
+      pushUndoCheckpoint: () => calls.push({ name: "pushUndoCheckpoint" }),
+      clearSelection: () => calls.push({ name: "clearSelection" }),
+      clearSelectionOverlays: () => calls.push({ name: "clearSelectionOverlays" }),
+      recordOp: (...args: unknown[]) => calls.push({ name: "recordOp", args }),
+      finishAgentEdit: (...args: unknown[]) => calls.push({ name: "finishAgentEdit", args }),
+      imeProxy: { value: "stale" },
+    } as any
+    const event = {
+      key: "Backspace",
+      isComposing: false,
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      preventDefault: () => calls.push({ name: "preventDefault" }),
+      stopPropagation: () => calls.push({ name: "stopPropagation" }),
+    } as any
+
+    editor.handleKeyDown(event)
+
+    assert.deepEqual(
+      calls.map(call => call.name),
+      [
+        "preventDefault",
+        "stopPropagation",
+        "pushUndoCheckpoint",
+        "deletePictureControl",
+        "clearSelection",
+        "clearSelectionOverlays",
+        "recordOp",
+        "finishAgentEdit",
+      ]
+    )
+    assert.deepEqual(calls.find(call => call.name === "deletePictureControl")?.args, [0, 2, 3])
+    assert.deepEqual(calls.find(call => call.name === "recordOp")?.args, [
+      "PictureDeleted",
+      { section: 0, paragraph: 2, control: 3 },
+    ])
+    assert.equal(editor.localImagePick, null)
+    assert.equal(editor.imeProxy.value, "")
+  })
+
+  it("falls back to live picture layout hit-testing after geometry changes", () => {
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        pickAtPoint: () => JSON.stringify({
+          type: "paragraph",
+          ref: { section: 0, paragraph: 2, offset: 0 },
+          rects: [],
+        }),
+        getPageControlLayout: () => JSON.stringify({
+          controls: [{ secIdx: 0, paraIdx: 2, controlIdx: 3, x: 100, y: 120, w: 220, h: 160 }],
+        }),
+        getPictureProperties: () => JSON.stringify({ width: 22000, height: 16000 }),
+      },
+      collectElements: () => [
+        { type: "picture", ref: { section: 0, paragraph: 2, control: 3, type: "picture" } },
+      ],
+    } as any
+
+    const pick = editor.hwpPick({ x: 180, y: 150 }, 0)
+
+    assert.equal(pick.type, "picture")
+    assert.deepEqual(pick.ref, { section: 0, paragraph: 2, control: 3, type: "picture" })
+    assert.deepEqual(pick.rects, [{ pageIndex: 0, x: 100, y: 120, width: 220, height: 160 }])
+  })
+
+  it("commits picture resizes with geometry-only properties and does not echo crop", () => {
     const calls: Array<{ name: string; args?: unknown[] }> = []
     const editor = {
       ...WasmHwpEditor,
@@ -1675,11 +1788,8 @@ describe("WasmHwpEditor image move", () => {
     assert.deepEqual(JSON.parse(setCall.args?.[3] as string), {
       width: 440,
       height: 330,
-      cropLeft: 0,
-      cropTop: 0,
-      cropRight: 0,
-      cropBottom: 0,
     })
     assert.ok(calls.some(call => call.name === "scheduleSnapshot"))
+    assert.equal(JSON.parse(editor.localImagePick.ref).control, 3)
   })
 })

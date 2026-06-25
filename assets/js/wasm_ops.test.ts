@@ -62,6 +62,8 @@ function makeDoc(over: Record<string, any> = {}) {
     setShapeProperties: spy(),
     setColumnDef: spy(),
     insertPicture: spy(),
+    insertPictureEx: spy(),
+    insertPictureBase64: spy(),
     // tables
     createTable: spy(),
     createTableEx: spy(),
@@ -130,6 +132,8 @@ function run(verb: string, op: Partial<Op>, ref: Partial<ParsedRef> | null, ctx:
 }
 const isErr = (r: any): r is { error: string } => r && typeof r.error === "string"
 const isOk = (r: any): r is { ok: true; extra?: any } => r && r.ok === true
+const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+const b64Bytes = (b64: string) => Uint8Array.from(Buffer.from(b64, "base64"))
 
 // ─── registry shape ──────────────────────────────────────────────────────────
 
@@ -747,7 +751,7 @@ describe("insert_picture", () => {
     assert.ok(isErr(r) && /integer 'width' and 'height'/.test(r.error))
   })
 
-  it("decodes base64 and calls insertPicture with the full arg list", () => {
+  it("decodes base64 and calls insertPictureBase64 with JSON options", () => {
     const ctx = makeCtx({ base64ToBytes: spy(() => new Uint8Array([9, 9])) })
     const op = {
       image_base64: "AAA", width: 4000, height: 3000,
@@ -755,16 +759,95 @@ describe("insert_picture", () => {
     }
     const r = run("insert_picture", op, { section: 0, paragraph: 1, offset: 5 }, ctx)
     assert.ok(isOk(r) && r.extra.extension === "jpg" && r.extra.width === 4000)
-    assert.deepEqual(argsOf(ctx.doc.insertPicture), [
-      0, 1, 5, "", new Uint8Array([9, 9]), 4000, 3000, 800, 600, "jpg", "logo",
-    ])
+    const [optionsJson, b64] = argsOf(ctx.doc.insertPictureBase64)
+    assert.deepEqual(JSON.parse(optionsJson), {
+      sectionIdx: 0,
+      paraIdx: 1,
+      charOffset: 5,
+      cellPath: "",
+      width: 4000,
+      height: 3000,
+      naturalWidthPx: 800,
+      naturalHeightPx: 600,
+      extension: "jpg",
+      description: "logo",
+      paperOffsetXHu: null,
+      paperOffsetYHu: null,
+    })
+    assert.equal(b64, "AAA")
+    assert.equal(called(ctx.doc.insertPictureEx), false)
+    assert.equal(called(ctx.doc.insertPicture), false)
+  })
+
+  it("rejects inline image bytes whose natural dimensions contradict the image header", () => {
+    const ctx = makeCtx({ base64ToBytes: spy(() => b64Bytes(png1x1)) })
+    const r = run(
+      "insert_picture",
+      {
+        image_base64: png1x1,
+        width: 4376,
+        height: 3287,
+        extension: "png",
+        natural_width_px: 3200,
+        natural_height_px: 2400,
+      },
+      { section: 0, paragraph: 1, offset: 0 },
+      ctx
+    )
+    assert.ok(isErr(r) && /bytes are 1x1px/.test(r.error))
+    assert.equal(called(ctx.doc.insertPictureBase64), false)
   })
 
   it("passes the cell path JSON when the ref is a cell with a cellPath", () => {
     const ctx = makeCtx()
     const ref = { section: 0, paragraph: 2, offset: 0, cell: { cellPath: [1, 2] } }
     run("insert_picture", { image_base64: "AAA", width: 10, height: 10 }, ref, ctx)
-    assert.equal(argsOf(ctx.doc.insertPicture)[3], JSON.stringify([1, 2]))
+    assert.equal(JSON.parse(argsOf(ctx.doc.insertPictureBase64)[0]).cellPath, JSON.stringify([1, 2]))
+  })
+
+  it("derives a cell path for regular table-cell refs from doc.find", () => {
+    const ctx = makeCtx()
+    const ref = {
+      section: 0,
+      paragraph: 9,
+      offset: 0,
+      cell: { parentParaIndex: 9, controlIndex: 2, cellIndex: 5, cellParaIndex: 1 },
+    }
+    run("insert_picture", { image_base64: "AAA", width: 10, height: 10 }, ref, ctx)
+    assert.deepEqual(JSON.parse(JSON.parse(argsOf(ctx.doc.insertPictureBase64)[0]).cellPath), [
+      { controlIndex: 2, cellIndex: 5, cellParaIndex: 1 },
+    ])
+  })
+
+  it("falls back to insertPictureEx when insertPictureBase64 is unavailable", () => {
+    const ctx = makeCtx({ base64ToBytes: spy(() => new Uint8Array([9, 9])) }, { insertPictureBase64: undefined })
+    const r = run(
+      "insert_picture",
+      { image_base64: "AAA", width: 10, height: 20 },
+      { section: 0, paragraph: 1, offset: 5 },
+      ctx
+    )
+    assert.ok(isOk(r))
+    const [optionsJson, bytes] = argsOf(ctx.doc.insertPictureEx)
+    assert.equal(JSON.parse(optionsJson).paraIdx, 1)
+    assert.deepEqual(bytes, new Uint8Array([9, 9]))
+  })
+
+  it("falls back to positional insertPicture for older wasm builds", () => {
+    const ctx = makeCtx(
+      { base64ToBytes: spy(() => new Uint8Array([9, 9])) },
+      { insertPictureBase64: undefined, insertPictureEx: undefined }
+    )
+    const r = run(
+      "insert_picture",
+      { image_base64: "AAA", width: 10, height: 20, x: 30, y: 40 },
+      { section: 0, paragraph: 1, offset: 5 },
+      ctx
+    )
+    assert.ok(isOk(r))
+    assert.deepEqual(argsOf(ctx.doc.insertPicture), [
+      0, 1, 5, "", new Uint8Array([9, 9]), 10, 20, 0, 0, "png", "", 30, 40,
+    ])
   })
 
   it("maps invalid base64 to a descriptive error", () => {

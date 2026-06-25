@@ -252,6 +252,7 @@ export const keyboardSubsystem = {
     if (!this.doc) return
     if (event.isComposing) return // IME owns the keystroke
     if (this.handleEditShortcut(event)) return
+    if (this.handleSelectedImageDeleteKey(event)) return
     if (!this.caret) return
     if (event.metaKey || event.ctrlKey || event.altKey) return // unhandled shortcuts pass through
     if (event.key === "Tab") {
@@ -311,6 +312,62 @@ export const keyboardSubsystem = {
       default:
         break
     }
+  },
+
+  handleSelectedImageDeleteKey(event) {
+    if (event.metaKey || event.ctrlKey || event.altKey) return false
+    if (event.key !== "Backspace" && event.key !== "Delete") return false
+    if (!this.localImagePick || !/image|picture/i.test(this.localImagePick.type || "")) return false
+
+    event.preventDefault()
+    event.stopPropagation()
+    if (this.deleteSelectedImage()) {
+      if (this.imeProxy) this.imeProxy.value = ""
+    }
+    return true
+  },
+
+  selectedImageTarget() {
+    if (!this.localImagePick || !/image|picture/i.test(this.localImagePick.type || "")) return null
+    let ref = this.localImagePick.ref
+    if (typeof ref === "string") {
+      try {
+        ref = JSON.parse(ref)
+      } catch (_) {
+        return null
+      }
+    }
+    if (!ref || typeof ref !== "object") return null
+
+    const section = Number(ref.section ?? ref.sectionIndex ?? 0)
+    const paragraph = Number(ref.paragraph ?? ref.paragraphIndex)
+    const control = Number(ref.control ?? ref.controlIndex)
+    if (![section, paragraph, control].every(Number.isInteger)) return null
+    return { section, paragraph, control }
+  },
+
+  deleteSelectedImage() {
+    const target = this.selectedImageTarget()
+    if (!target || !this.doc) return false
+
+    this.pushUndoCheckpoint()
+    try {
+      this.doc.deletePictureControl(target.section, target.paragraph, target.control)
+    } catch (error) {
+      console.error("[wasm-hwp] deletePictureControl failed", error)
+      return false
+    }
+
+    this.localImagePick = null
+    this.clearSelection()
+    this.clearSelectionOverlays()
+    this.recordOp("PictureDeleted", {
+      section: target.section,
+      paragraph: target.paragraph,
+      control: target.control
+    })
+    this.finishAgentEdit({})
+    return true
   },
 
   handleEditShortcut(event) {

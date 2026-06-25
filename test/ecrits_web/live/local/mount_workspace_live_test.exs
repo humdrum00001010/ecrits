@@ -1073,10 +1073,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    assert has_element?(
-             lv,
-             ~s([data-role="office-wasm-viewer"][data-local-document-format="xlsx"])
-           )
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="office-wasm-viewer"][data-local-document-format="xlsx"])
+    )
 
     session_id = subscribe_agent(lv)
     session_pid = AcpAgent.whereis(session_id)
@@ -1145,8 +1145,12 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp"]}"
       )
 
-    assert has_element?(lv, "#local-rhwp-shell[data-component='studio-local-document-surface']")
-    assert has_element?(lv, "#studio-root[data-local-document-id]")
+    assert_has_element_after_open_sync(
+      lv,
+      "#local-rhwp-shell[data-component='studio-local-document-surface']"
+    )
+
+    assert_has_element_after_open_sync(lv, "#studio-root[data-local-document-id]")
     assert has_element?(lv, "#studio-document-header")
     refute has_element?(lv, "#local-file-tree-breadcrumb")
     assert has_element?(lv, "#studio-document-tabs[data-role='document-tabs']")
@@ -1293,6 +1297,11 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     {:ok, lv, _html} =
       live(conn, ~p"/workspace?#{[path: root, document: "drafts/service.hwpx"]}")
 
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="local-hwp-editor"][data-local-document-format="hwpx"][data-document-path="drafts/service.hwpx"])
+    )
+
     pid = lv.pid
     document_id = local_rhwp_document_id(lv)
 
@@ -1405,7 +1414,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 2_000
   end
 
-  test "ordinary document prompt uses VFS document mount instead of embedding selected path",
+  test "ordinary document prompt uses VFS mount when available without embedding selected path",
        %{conn: conn} do
     use_test_agent_adapter!(
       adapter_opts: [
@@ -1428,18 +1437,76 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     |> render_submit()
 
     assert_receive {:fake_acp_prompt, _sid, prompt}, 1_000
-    assert prompt =~ "FUSE/VFS mode"
-    assert prompt =~ "doc.open_doc"
-    assert prompt =~ "doc.close_doc"
-    assert prompt =~ ".ecrits/mount/<name>.md"
-    assert prompt =~ "READ with `cat`/`sed -n`"
-    assert prompt =~ "FIND with `grep -n`/`rg`"
-    assert prompt =~ "there is no doc.save"
-    assert prompt =~ "Read-only questions: cat/grep and answer, do not edit"
-    assert prompt =~ "No fabrication"
-    assert prompt =~ "There is NO doc.read"
-    assert prompt =~ "doc.context"
-    refute prompt =~ "current_document.document"
+    mount_status = Ecrits.Fuse.DocMount.status()
+
+    cond do
+      mount_status.enabled? ->
+        assert prompt =~ "FUSE/VFS mode"
+        assert prompt =~ "doc.open_doc"
+        assert prompt =~ "doc.close_doc"
+        assert prompt =~ "NEVER type `doc.open_doc` in the shell"
+        assert prompt =~ "Do not call resource-discovery tools"
+        assert prompt =~ "list_mcp_resources"
+        assert prompt =~ ".ecrits/mount/<name>.jsonl"
+        assert prompt =~ "The JSONL file itself is IR-only"
+        assert prompt =~ "does NOT contain `mounted_at`"
+        assert prompt =~ "Never treat a missing `mounted_at` field inside"
+        assert prompt =~ "[ [ [ payload_node"
+        assert prompt =~ "Positional HWPX refs are NOT payload fields"
+        assert prompt =~ "The nested list position"
+        assert prompt =~ "inside an existing paragraph list"
+        assert prompt =~ "not as a metadata object"
+        assert prompt =~ "create the temp file inside the same\n   `.ecrits/mount/` directory"
+        assert prompt =~ "Do NOT use\n   `mktemp`, `dd`, or any temp path outside the mount"
+        assert prompt =~ "VFS `create`/`write`/`rename` path"
+        assert prompt =~ ~s({"type":"table","cells":[["H1","H2"],["A","B"]],"header":true})
+
+        assert prompt =~ ~s({"type":"picture","src":"/abs/img.png"})
+        assert prompt =~ "readable default size"
+        assert prompt =~ "intentionally resizing in HWPUNIT"
+
+        assert prompt =~ "Move an existing picture by editing"
+        assert prompt =~ "resize by editing `width`/`height`"
+        assert prompt =~ "Delete a picture by removing that picture payload"
+        refute prompt =~ "Positional HWPX refs are lists"
+        assert prompt =~ "READ with `cat`/`sed -n`"
+        assert prompt =~ "FIND with `grep -n`/`rg`"
+        assert prompt =~ "there is no doc.save"
+        assert prompt =~ "Read-only questions: cat/grep and answer, do not edit"
+        assert prompt =~ "No fabrication"
+        assert prompt =~ "There is NO doc.read"
+        assert prompt =~ "doc.context"
+        refute prompt =~ "current_document.document"
+
+      mount_status.backend == :fskit and
+          mount_status.reason in [
+            :fskit_extension_disabled,
+            :fskit_extension_not_registered,
+            :fskit_extension_unsigned
+          ] ->
+        assert prompt =~ "FSKit/VFS is configured but not mountable"
+        assert prompt =~ mount_status.message
+
+        if mount_status.settings_url do
+          assert prompt =~ Ecrits.Fuse.DocMount.settings_url()
+        end
+
+        assert prompt =~ "mounted_at"
+        assert prompt =~ "mount_status"
+        assert prompt =~ "Use doc MCP tools"
+        assert prompt =~ "doc.context"
+        assert prompt =~ "current_document.document"
+        assert prompt =~ "doc.open_doc"
+        refute prompt =~ "FUSE/VFS mode: documents are EDITABLE FILES"
+        assert prompt =~ "Do not use `.md`"
+
+      true ->
+        assert prompt =~ "Use doc MCP tools"
+        assert prompt =~ "doc.context"
+        assert prompt =~ "current_document.document"
+        refute prompt =~ "FUSE/VFS mode"
+    end
+
     refute prompt =~ "template.hwp"
     refute prompt =~ "pass this as `document`"
 
@@ -1447,6 +1514,162 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
                    1_000
 
     sync_liveview(lv)
+  end
+
+  test "manual FUSE enable subscribes direct VFS edit cards", %{conn: conn} do
+    previous_vfs = Application.get_env(:ecrits, :doc_vfs)
+    on_exit(fn -> restore_doc_vfs_env(previous_vfs) end)
+
+    root = LocalWorkspaceAdapterStub.valid_path()
+    Application.put_env(:ecrits, :doc_vfs, enabled: false)
+
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
+      )
+
+    assert has_element?(lv, ~s(#fuse-mode-toggle[aria-pressed="false"]))
+
+    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :fuse)
+
+    cond do
+      not Ecrits.Fuse.DocMount.status().enabled? ->
+        IO.puts("\n[skip] FUSE backend unavailable; skipping manual VFS subscription check")
+
+      not match?({:ok, _}, Ecrits.Fuse.DocMount.ensure(root)) ->
+        IO.puts("\n[skip] FUSE mount failed; skipping manual VFS subscription check")
+
+      true ->
+        lv
+        |> element("#fuse-mode-toggle")
+        |> render_click()
+
+        sync_liveview(lv)
+        assert Ecrits.Fuse.DocMount.mounted?(root)
+
+        Phoenix.PubSub.broadcast(
+          Ecrits.PubSub,
+          "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root),
+          {:vfs_doc_edited,
+           %{
+             path: Path.join(root, "template.hwp"),
+             doc: "template.hwp",
+             applied: 1,
+             marker: "SYNTHETIC_VFS_CARD",
+             highlights: [
+               %{
+                 "kind" => "text",
+                 "op" => "replace_text",
+                 "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+                 "text" => "SYNTHETIC_VFS_CARD"
+               }
+             ]
+           }}
+        )
+
+        sync_liveview(lv)
+
+        assert has_element?(
+                 lv,
+                 ~s([data-role="editor-preview"][data-document-path="template.hwp"])
+               )
+
+        assert has_element?(
+                 lv,
+                 ~s([data-role="local-hwp-editor"][data-editor-mirror="true"][data-preview-text=""][data-preview-highlights*="SYNTHETIC_VFS_CARD"])
+               )
+
+        refute has_element?(lv, ~s([data-role="doc-edit-card"]))
+    end
+  end
+
+  test "VFS property writes are pushed to the open HWP browser editor", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+
+    {:ok, lv, _html} =
+      live(
+        conn,
+        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
+      )
+
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="local-hwp-editor"][data-local-document-format="hwp"][data-document-path="template.hwp"])
+    )
+
+    ref = %{
+      "section" => 0,
+      "paragraph" => 0,
+      "offset" => 0,
+      "cell" => %{
+        "parentParaIndex" => 0,
+        "controlIndex" => 0,
+        "cellIndex" => 0,
+        "cellParaIndex" => 0
+      }
+    }
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwp"),
+         doc: "template.hwp",
+         applied: 1,
+         highlights: [%{"kind" => "set", "ref" => ref, "type" => "cell"}],
+         sets: [
+           %{
+             "ref" => ref,
+             "props" => %{"kind" => "cell", "BackgroundColor" => "#CFFAFE"}
+           }
+         ]
+       }}
+    )
+
+    assert_push_event(
+      lv,
+      "doc.apply_edit",
+      %{verb: "set", payload: %{sets: [set_payload]}},
+      1_000
+    )
+
+    assert set_payload["ref"] == ref
+    assert set_payload["props"]["BackgroundColor"] == "#CFFAFE"
+  end
+
+  test "hydrated full workspace access reapplies VFS write policy", %{conn: conn} do
+    previous_vfs = Application.get_env(:ecrits, :doc_vfs)
+    on_exit(fn -> restore_doc_vfs_env(previous_vfs) end)
+
+    root = LocalWorkspaceAdapterStub.valid_path()
+    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :fuse)
+
+    if Ecrits.Fuse.DocMount.status().enabled? do
+      {:ok, lv, _html} =
+        live(conn, ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}")
+
+      lv
+      |> element("#local-agent-inline-access-full-workspace")
+      |> render_click()
+
+      sync_liveview(lv)
+      assert Ecrits.Fuse.OpenDocs.writable?(root)
+
+      Ecrits.Fuse.OpenDocs.set_writable(root, false)
+      refute Ecrits.Fuse.OpenDocs.writable?(root)
+
+      render_patch(
+        lv,
+        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
+      )
+
+      sync_liveview(lv)
+      assert has_element?(lv, ~s([data-selected-access="full-workspace"]))
+      assert Ecrits.Fuse.OpenDocs.writable?(root)
+    else
+      IO.puts("\n[skip] FUSE backend unavailable; skipping VFS write-policy hydration check")
+    end
   end
 
   test "selecting a document preserves the chat-rail conversation and session", %{conn: conn} do
@@ -1768,9 +1991,13 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     # #32/#34 (path-first): the pick's `document` path IS the tools' document
     # handle — no separate id is stamped, and the turn tells the agent to skip
-    # doc.context/doc.find discovery and pass the path directly.
+    # doc.context/doc.find discovery and pass the path directly. VFS turns use
+    # the same refs as nested-JSONL target hints instead of doc.edit commands.
     refute prompt =~ "document_id"
     assert prompt =~ "Skip doc.context/doc.find discovery"
+    assert prompt =~ "When using doc.* tools"
+    assert prompt =~ "When using mounted FUSE/VFS JSONL"
+    assert prompt =~ "picture-control order c"
     assert prompt =~ "`document` value (the file path)"
 
     assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
@@ -2656,7 +2883,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
            )
   end
 
-  test "agent text deltas create an embedded editor preview for the active document", %{
+  test "agent prose deltas do not create an embedded editor preview for the active document", %{
     conn: conn
   } do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "draft"}]])
@@ -2667,10 +2894,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/ledger.xlsx", provider: "codex"]}"
       )
 
-    assert has_element?(
-             lv,
-             ~s([data-role="office-wasm-viewer"][data-local-document-format="xlsx"])
-           )
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="office-wasm-viewer"][data-local-document-format="xlsx"])
+    )
 
     lv
     |> form("#local-agent-form", agent: %{message: "edit workbook"})
@@ -2678,31 +2905,21 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert_push_event(
       lv,
-      "editor.preview_delta",
-      %{
-        turn_id: turn_id,
-        document_id: document_id,
-        delta: "draft",
-        text: "draft",
-        delta_count: 1
-      },
+      "local_agent_text_append",
+      %{message_id: _message_id, piece: "draft"},
       1_000
     )
 
-    assert is_binary(turn_id)
-    assert is_binary(document_id)
-    assert document_id != ""
+    refute_push_event(lv, "editor.preview_delta", %{text: "draft"}, 200)
 
     sync_liveview(lv)
 
-    assert has_element?(
-             lv,
-             ~s([data-role="editor-preview"][data-document-id="#{document_id}"][data-preview-delta-count="1"])
-           )
+    refute has_element?(lv, ~s([data-role="editor-preview"]))
 
     assert has_element?(
              lv,
-             ~s([data-component="canvas-local-office-wasm"][data-document-id="#{document_id}"][data-editor-mirror="true"][data-preview-text="draft"])
+             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"]),
+             "draft"
            )
   end
 
@@ -3410,6 +3627,18 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         :ok
     end
   end
+
+  defp assert_has_element_after_open_sync(lv, selector) do
+    unless has_element?(lv, selector) do
+      sync_workspace_session(LocalWorkspaceAdapterStub.valid_path())
+      sync_liveview(lv)
+    end
+
+    assert has_element?(lv, selector)
+  end
+
+  defp restore_doc_vfs_env(nil), do: Application.delete_env(:ecrits, :doc_vfs)
+  defp restore_doc_vfs_env(value), do: Application.put_env(:ecrits, :doc_vfs, value)
 
   defp liveview_assign(lv, key) do
     lv.pid

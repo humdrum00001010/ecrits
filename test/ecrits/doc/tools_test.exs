@@ -69,6 +69,14 @@ defmodule Ecrits.Doc.ToolsTest do
       assert create_tool["description"] =~ "never for read-only read/inspect/summarize tasks"
       assert create_tool["annotations"] == %{"readOnlyHint" => false}
 
+      open_doc_tool = Enum.find(Tools.tools(), &(&1["name"] == "open_doc"))
+      assert open_doc_tool["description"] =~ "JSONL is IR-only"
+      assert open_doc_tool["description"] =~ "does not contain mounted_at"
+      assert open_doc_tool["description"] =~ "temp file inside the same .ecrits/mount"
+      assert open_doc_tool["description"] =~ "do not use mktemp"
+      assert open_doc_tool["description"] =~ "or dd over the target"
+      assert open_doc_tool["description"] =~ "inside an existing paragraph list"
+
       for tool <- Tools.tools() do
         assert is_map(tool["inputSchema"])
         assert tool["risk"] in ["read", "write"]

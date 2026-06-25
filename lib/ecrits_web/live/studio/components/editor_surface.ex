@@ -305,6 +305,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   attr :turn_id, :string, default: nil
   attr :preview_text, :string, default: ""
   attr :delta_count, :integer, default: 0
+  attr :preview_highlights, :list, default: []
   attr :markdown_source, :string, default: ""
   attr :markdown_preview_html, :any, default: ""
 
@@ -313,6 +314,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
       assigns
       |> assign(:document_path, assigns.document_path || document_path(assigns.document))
       |> assign(:document_spec, assigns.document_spec || embedded_document_spec(assigns.document))
+      |> assign(:preview_highlights_json, Jason.encode!(assigns.preview_highlights || []))
 
     ~H"""
     <div
@@ -360,6 +362,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
           preview_turn_id={@turn_id}
           preview_text={@preview_text}
           preview_delta_count={@delta_count}
+          preview_highlights={@preview_highlights_json}
         />
         <LocalMarkdownEditor.render
           :if={markdown_format?(@document.format)}
@@ -380,6 +383,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
           preview_turn_id={@turn_id}
           preview_text={@preview_text}
           preview_delta_count={@delta_count}
+          preview_highlights={@preview_highlights_json}
         />
       </div>
     </div>

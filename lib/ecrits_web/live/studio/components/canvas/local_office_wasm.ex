@@ -26,6 +26,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
   attr :preview_turn_id, :string, default: nil
   attr :preview_text, :string, default: ""
   attr :preview_delta_count, :integer, default: 0
+  attr :preview_highlights, :string, default: "[]"
 
   def render(assigns) do
     ~H"""
@@ -48,6 +49,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
       data-preview-turn-id={@preview_turn_id}
       data-preview-text={@preview_text}
       data-preview-delta-count={@preview_delta_count}
+      data-preview-highlights={@preview_highlights}
       phx-hook="WasmOfficeEditor"
     >
       <%!-- The OS IME needs an editable element to compose into (Korean editing).

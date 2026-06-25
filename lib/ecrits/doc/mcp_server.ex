@@ -131,9 +131,20 @@ defmodule Ecrits.Doc.MCPServer do
       "error" => "disabled_in_fuse_mode",
       "tool" => name,
       "message" =>
-        "FUSE mode: the document is a file. Read/find/edit it with native shell " <>
-          "tools over `.ecrits/mount/<name>.md` (cat/grep/sed). Only doc.open_doc / " <>
-          "doc.close_doc are available as MCP tools."
+        "FUSE mode: the document is a nested JSONL IR file " <>
+          "([[[payload_node]]]). Read/find/edit payload node fields with native shell " <>
+          "tools over `.ecrits/mount/<name>.jsonl` (cat/grep/sed). Never replace " <>
+          "the file with one payload object and never look for mounted_at inside " <>
+          "the JSONL; it is IR-only. For whole-file rewrites, create the temp file " <>
+          "inside `.ecrits/mount` and mv it over the target; do not use mktemp " <>
+          "outside the mount or dd over the target. Insert pictures as a payload node inside an " <>
+          "existing paragraph list such as " <>
+          "{\"type\":\"picture\",\"src\":\"/abs/img.png\"}; ecrits chooses a readable " <>
+          "default size from the image aspect, so width/height are only needed for " <>
+          "intentional HWPUNIT resizing. Move by editing x/y/treatAsChar; resize by " <>
+          "editing width/height; delete by removing that " <>
+          "payload from its paragraph list. Only doc.open_doc / doc.close_doc are " <>
+          "available as MCP tools."
     }
 
     {:ok, %{content: [json_content(msg)], isError: true}, state}

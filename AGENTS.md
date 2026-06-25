@@ -64,9 +64,11 @@ Keep mix deps fetched over https and LFS pushes over ssh push-url; stage only re
 Restart with `deps_changed` only after deps/NIFs/assets moved, then verify the editor on a live document.
 
 
-## exfuse dep (the doc VFS FUSE layer)
+## exfuse dep (the doc VFS native filesystem layer)
 
-`exfuse` is a plain source git dep for the doc VFS FUSE layer; it is fetched from public GitHub over https and builds its Rust port locally with cargo and macFUSE.
+`exfuse` is a plain source git dep for the doc VFS native filesystem layer; it is fetched from public GitHub over https and builds its native backend locally.
+In this project, "FUSE" is an overloaded/saturated shorthand for the user-space filesystem integration layer: on macOS it should mean FSKit, while on Linux it means the FUSE/libfuse backend. Do not treat macFUSE as the macOS target unless explicitly debugging the legacy backend.
+The mounted document projection is JSONL IR, not Markdown: opened docs appear as `<name>.jsonl` under `.ecrits/mount/`. Each `.jsonl` file is one compact nested JSON value in this shape: `[ [ [ payload_node, ... ], ... ], ... ]`, meaning `sections -> paragraphs -> payload nodes`. Positional HWPX refs must not appear as fixed payload fields like `{"ref":[0,385,0]}`; the nested list position is the positional address. Rich non-positional refs may remain only when they carry semantic addressing. Edit payload node fields in place; keep the nested list order and each node's `type` stable. To create a native table, insert one new payload node at the desired nested-list position with the brief shape `{"type":"table","cells":[["H1","H2"],["A","B"]],"header":true}` and do not invent a `ref` for it. To create a native picture, insert one new payload node at the desired nested-list position with the brief shape `{"type":"picture","src":"/abs/img.png"}` and let ecrits choose a readable default size from the image aspect; use `width`/`height` only when intentionally resizing in HWPUNIT, move it by editing `x`, `y`, and `treatAsChar`, and delete it by removing that payload from the paragraph list. Do not introduce `.md` as the doc VFS projection format.
 For exfuse bugs, work in `$EXFUSE_DIR`, test with `mise exec -- mix test`, push to `github.com/humdrum00001010/exfuse`, then run `mise exec -- mix deps.update exfuse` in ecrits to advance the locked branch and rebuild the port.
 Restart with `deps_changed`, then verify the live mount/workspace path; do not patch `deps/exfuse` or ship prebuilt port artifacts.
 

@@ -22,8 +22,8 @@ defmodule Ecrits.Doc.RhwpImageTest do
     assert op.extension == "png"
     assert op.natural_width_px == 1
     assert op.natural_height_px == 1
-    assert op.width == 8504
-    assert op.height == 8504
+    assert op.width == 22_000
+    assert op.height == 22_000
   end
 
   test "for_browser accepts file URL src", %{path: path} do
@@ -46,6 +46,99 @@ defmodule Ecrits.Doc.RhwpImageTest do
 
     assert op.width == 3200
     assert op.height == 2400
+  end
+
+  test "for_browser normalizes natural-pixel dimensions that would render tiny" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "ecrits_rhwp_image_wide_#{System.unique_integer([:positive])}.png"
+      )
+
+    png =
+      <<
+        0x89,
+        0x50,
+        0x4E,
+        0x47,
+        0x0D,
+        0x0A,
+        0x1A,
+        0x0A,
+        0x00,
+        0x00,
+        0x00,
+        0x0D,
+        0x49,
+        0x48,
+        0x44,
+        0x52,
+        0x00,
+        0x00,
+        0x14,
+        0x50,
+        0x00,
+        0x00,
+        0x0B,
+        0xB8,
+        0x08,
+        0x02,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00
+      >>
+
+    File.write!(path, png)
+    on_exit(fn -> File.rm(path) end)
+
+    assert {:ok, op} =
+             Image.for_browser(%{
+               op: "insert_picture",
+               ref: "end",
+               src: path,
+               width: 5200,
+               height: 3000
+             })
+
+    assert op.width == 22_000
+    assert op.height == 12_692
+  end
+
+  test "for_browser rejects declared natural dimensions that contradict file bytes", %{path: path} do
+    assert {:error, %{message: message}} =
+             Image.for_browser(%{
+               op: "insert_picture",
+               ref: "end",
+               src: path,
+               natural_width_px: 3200,
+               natural_height_px: 2400
+             })
+
+    assert message =~ "image bytes are 1x1px"
+    assert message =~ "declare 3200x2400px"
+  end
+
+  test "resolve_src rejects inline bins that contradict declared natural dimensions" do
+    assert {:error, %{message: message}} =
+             Image.resolve_src(
+               %{
+                 op: "insert_picture",
+                 bins: [@png_1x1],
+                 width: 4376,
+                 height: 3287,
+                 extension: "png",
+                 natural_width_px: 3200,
+                 natural_height_px: 2400
+               },
+               %Ehwp.Op.Ref{section: 0, paragraph: 2, offset: 0}
+             )
+
+    assert message =~ "image bytes are 1x1px"
+    assert message =~ "declare 3200x2400px"
   end
 
   test "for_browser inlines slide picture bytes without changing slide geometry", %{path: path} do

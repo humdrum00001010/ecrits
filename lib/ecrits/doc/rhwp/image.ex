@@ -7,7 +7,10 @@ defmodule Ecrits.Doc.Rhwp.Image do
       (at the given resolved ref) + the raw `bins` the NIF takes out-of-band by
       `:bin_index`, plus the natural pixel size. The engine PLACES the picture
       (fit-to-width capped to the paragraph's real placeable width); a
-      caller-supplied `width`/`height` is honored verbatim (#46).
+      caller-supplied `width`/`height` is honored unless it exactly matches the
+      image's natural pixel dimensions and is too small for a readable document
+      placement; that case is treated as a pixel/HWPUNIT mixup and normalized to
+      the default placed size.
     * `for_browser/1` — the BROWSER (WASM) arm, which can't read the server
       filesystem, so it gets the bytes inline as `:image_base64` plus concrete
       placed dimensions when the agent supplied only `src`.
@@ -31,27 +34,26 @@ defmodule Ecrits.Doc.Rhwp.Image do
   def resolve_src(%{op: "insert_picture"} = op, %Ehwp.Op.Ref{} = at) do
     case picture_bytes(op) do
       {:ok, bytes, ext_hint} ->
-        {nw, nh} =
-          if is_integer(op[:natural_width_px]) and is_integer(op[:natural_height_px]) do
-            {op[:natural_width_px], op[:natural_height_px]}
-          else
-            pixel_dims(bytes, ext_hint)
-          end
+        actual_dims = pixel_dims(bytes, ext_hint)
 
-        # (#46) width/height absent (nil) = "let the ENGINE fit to the paragraph's
-        # real placeable width"; a caller override passes through.
-        pic = %Ehwp.Op.InsertPicture{
-          at: at,
-          bin_index: op[:bin_index] || 0,
-          extension: present_string(op[:extension]) || ext_hint || "",
-          width: op[:width],
-          height: op[:height],
-          natural_width_px: nw,
-          natural_height_px: nh,
-          description: op[:description] || ""
-        }
+        with :ok <- validate_declared_dims(op, actual_dims) do
+          {nw, nh} = natural_dims(op, actual_dims)
 
-        {:ok, pic, [bytes]}
+          {width, height} = placed_size(op, nw, nh)
+
+          pic = %Ehwp.Op.InsertPicture{
+            at: at,
+            bin_index: op[:bin_index] || 0,
+            extension: present_string(op[:extension]) || ext_hint || "",
+            width: width,
+            height: height,
+            natural_width_px: nw,
+            natural_height_px: nh,
+            description: op[:description] || ""
+          }
+
+          {:ok, pic, [bytes]}
+        end
 
       :passthrough ->
         {:ok, op}
@@ -95,18 +97,22 @@ defmodule Ecrits.Doc.Rhwp.Image do
       when is_binary(src) and src != "" do
     with {:ok, bytes} <- read_file(src) do
       ext = extension(src)
-      {nw, nh} = pixel_dims(bytes, ext)
+      actual_dims = pixel_dims(bytes, ext)
 
-      op =
-        op
-        |> Map.delete(:src)
-        |> Map.put(:image_base64, Base.encode64(bytes))
-        |> Map.put(:extension, present_string(op[:extension]) || ext)
-        |> Map.put(:natural_width_px, op[:natural_width_px] || nw)
-        |> Map.put(:natural_height_px, op[:natural_height_px] || nh)
-        |> maybe_put_inline_browser_size(nw, nh)
+      with :ok <- validate_declared_dims(op, actual_dims) do
+        {nw, nh} = natural_dims(op, actual_dims)
 
-      {:ok, op}
+        op =
+          op
+          |> Map.delete(:src)
+          |> Map.put(:image_base64, Base.encode64(bytes))
+          |> Map.put(:extension, present_string(op[:extension]) || ext)
+          |> Map.put(:natural_width_px, nw)
+          |> Map.put(:natural_height_px, nh)
+          |> maybe_put_inline_browser_size(nw, nh)
+
+        {:ok, op}
+      end
     end
   end
 
@@ -114,7 +120,7 @@ defmodule Ecrits.Doc.Rhwp.Image do
 
   # ── internals ──────────────────────────────────────────────────────────────
 
-  @browser_default_max_unit 8504
+  @default_max_unit 22_000
 
   defp extension(src) do
     src
@@ -146,11 +152,45 @@ defmodule Ecrits.Doc.Rhwp.Image do
   defp present_string(s) when is_binary(s) and s != "", do: s
   defp present_string(_), do: nil
 
+  defp declared_dims(%{natural_width_px: w, natural_height_px: h})
+       when is_integer(w) and w > 0 and is_integer(h) and h > 0,
+       do: {w, h}
+
+  defp declared_dims(_op), do: nil
+
+  defp natural_dims(op, {actual_w, actual_h} = actual) when actual_w > 0 and actual_h > 0 do
+    declared_dims(op) || actual
+  end
+
+  defp natural_dims(op, _actual), do: declared_dims(op) || {0, 0}
+
+  defp validate_declared_dims(_op, {0, 0}), do: :ok
+
+  defp validate_declared_dims(op, actual) do
+    case declared_dims(op) do
+      nil ->
+        :ok
+
+      ^actual ->
+        :ok
+
+      {declared_w, declared_h} ->
+        {actual_w, actual_h} = actual
+
+        {:error,
+         %{
+           kind: "insert_picture",
+           message:
+             "image bytes are #{actual_w}x#{actual_h}px but natural_width_px/natural_height_px declare #{declared_w}x#{declared_h}px"
+         }}
+    end
+  end
+
   defp maybe_put_inline_browser_size(%{page: page} = op, _nw, _nh) when is_binary(page),
     do: op
 
   defp maybe_put_inline_browser_size(op, nw, nh) do
-    {width, height} = browser_size(op, nw, nh)
+    {width, height} = placed_size(op, nw, nh)
 
     op
     |> Map.put(:width, width)
@@ -169,11 +209,14 @@ defmodule Ecrits.Doc.Rhwp.Image do
 
   defp file_source_path(src), do: src
 
-  defp browser_size(op, natural_width, natural_height) do
+  defp placed_size(op, natural_width, natural_height) do
     width = positive_int(op[:width])
     height = positive_int(op[:height])
 
     cond do
+      pixel_sized?(width, height, natural_width, natural_height) ->
+        fit_size(natural_width, natural_height, @default_max_unit)
+
       width && height ->
         {width, height}
 
@@ -184,8 +227,15 @@ defmodule Ecrits.Doc.Rhwp.Image do
         {scaled_width(height, natural_width, natural_height), height}
 
       true ->
-        fit_size(natural_width, natural_height, @browser_default_max_unit)
+        fit_size(natural_width, natural_height, @default_max_unit)
     end
+  end
+
+  defp pixel_sized?(width, height, natural_width, natural_height) do
+    is_integer(width) and is_integer(height) and
+      natural_width > 0 and natural_height > 0 and
+      width == natural_width and height == natural_height and
+      max(width, height) < @default_max_unit
   end
 
   defp positive_int(value) when is_integer(value) and value > 0, do: value
@@ -196,14 +246,14 @@ defmodule Ecrits.Doc.Rhwp.Image do
     max(1, round(width * natural_height / natural_width))
   end
 
-  defp scaled_height(_width, _natural_width, _natural_height), do: @browser_default_max_unit
+  defp scaled_height(_width, _natural_width, _natural_height), do: @default_max_unit
 
   defp scaled_width(height, natural_width, natural_height)
        when natural_width > 0 and natural_height > 0 do
     max(1, round(height * natural_width / natural_height))
   end
 
-  defp scaled_width(_height, _natural_width, _natural_height), do: @browser_default_max_unit
+  defp scaled_width(_height, _natural_width, _natural_height), do: @default_max_unit
 
   defp fit_size(natural_width, natural_height, max_unit)
        when natural_width > 0 and natural_height > 0 do

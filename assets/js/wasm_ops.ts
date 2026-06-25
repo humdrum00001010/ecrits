@@ -70,6 +70,73 @@ export type Op =
 
 export type OpHandler = (ctx: EditorContext, op: Op, ref: ParsedRef | null, verb: string) => OpResult
 
+type ImageDims = { width: number; height: number }
+
+const imageByteDims = (bytes: Uint8Array): ImageDims | null => {
+    if (!bytes || bytes.length < 10) return null
+    if (
+      bytes.length >= 24 &&
+      bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+      bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a &&
+      bytes[12] === 0x49 && bytes[13] === 0x48 && bytes[14] === 0x44 && bytes[15] === 0x52
+    ) {
+      return {
+        width: (((bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19]) >>> 0),
+        height: (((bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23]) >>> 0),
+      }
+    }
+    if (bytes.length >= 10 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+      return {
+        width: bytes[6] | (bytes[7] << 8),
+        height: bytes[8] | (bytes[9] << 8),
+      }
+    }
+    if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+      let i = 2
+      while (i + 8 < bytes.length) {
+        if (bytes[i] !== 0xff) { i++; continue }
+        while (i < bytes.length && bytes[i] === 0xff) i++
+        const marker = bytes[i++]
+        if (marker === 0xd9 || marker === 0xda) break
+        if (marker >= 0xd0 && marker <= 0xd8) continue
+        if (i + 1 >= bytes.length) break
+        const len = (bytes[i] << 8) | bytes[i + 1]
+        if (len < 2 || i + len > bytes.length) break
+        const sof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
+        if (sof && len >= 7) {
+          return {
+            height: (bytes[i + 3] << 8) | bytes[i + 4],
+            width: (bytes[i + 5] << 8) | bytes[i + 6],
+          }
+        }
+        i += len
+      }
+    }
+    return null
+}
+
+const declaredImageDims = (op: Op): ImageDims | null => {
+    const width = Number.isInteger(op.natural_width_px)
+      ? op.natural_width_px
+      : Number.isInteger(op.naturalWidthPx)
+        ? op.naturalWidthPx
+        : 0
+    const height = Number.isInteger(op.natural_height_px)
+      ? op.natural_height_px
+      : Number.isInteger(op.naturalHeightPx)
+        ? op.naturalHeightPx
+        : 0
+    return width > 0 && height > 0 ? { width, height } : null
+}
+
+const validateDeclaredImageDims = (op: Op, bytes: Uint8Array): string | null => {
+    const actual = imageByteDims(bytes)
+    const declared = declaredImageDims(op)
+    if (!actual || !declared) return null
+    if (actual.width === declared.width && actual.height === declared.height) return null
+    return `insert_picture image bytes are ${actual.width}x${actual.height}px but natural_width_px/natural_height_px declare ${declared.width}x${declared.height}px; use a real image src/base64 pair`
+}
+
 const opReplaceText: OpHandler = (ctx, op, ref, verb) => {
     const query = op.query != null ? String(op.query) : ""
     if (!query) return { error: "replace_text requires a non-empty query" }
@@ -568,6 +635,7 @@ const opInsertTable: OpHandler = (ctx, op, ref, verb) => {
     const offset = Number.isInteger(ref.offset) ? ref.offset : 0
     const treatAsChar = op.treat_as_char === true
     const colWidths = Array.isArray(op.col_widths) ? op.col_widths.filter(Number.isInteger) : null
+    let rawResult: any = null
     try {
       if (treatAsChar || (colWidths && colWidths.length)) {
         const optionsJson = JSON.stringify({
@@ -579,15 +647,65 @@ const opInsertTable: OpHandler = (ctx, op, ref, verb) => {
           treatAsChar,
           ...(colWidths && colWidths.length ? { colWidths } : {})
         })
-        ctx.doc.createTableEx(optionsJson)
+        rawResult = ctx.doc.createTableEx(optionsJson)
       } else {
-        ctx.doc.createTable(ref.section, ref.paragraph, offset, rows, cols)
+        rawResult = ctx.doc.createTable(ref.section, ref.paragraph, offset, rows, cols)
       }
     } catch (error) {
       return { error: `createTable failed: ${String((error && error.message) || error)}` }
     }
-    ctx.recordOp("AgentInsertTable", { section: ref.section, para: ref.paragraph, offset, rows, cols, treatAsChar })
-    return { ok: true, extra: { rows, cols } }
+
+    let meta: any = {}
+    try {
+      meta = typeof rawResult === "string" ? JSON.parse(rawResult) : (rawResult || {})
+    } catch (_) {
+      meta = {}
+    }
+
+    const tablePara = Number.isInteger(meta.paraIdx) ? meta.paraIdx : ref.paragraph
+    const control = Number.isInteger(meta.controlIdx) ? meta.controlIdx : 0
+    const cells = Array.isArray(op.cells) ? op.cells : []
+    let cellsFilled = 0
+
+    try {
+      for (let row = 0; row < Math.min(rows, cells.length); row++) {
+        const values = Array.isArray(cells[row]) ? cells[row] : [cells[row]]
+        for (let col = 0; col < Math.min(cols, values.length); col++) {
+          const text = String(values[col] == null ? "" : values[col])
+          if (text === "") continue
+          const cellIndex = row * cols + col
+          const cell = {
+            parentParaIndex: tablePara,
+            controlIndex: control,
+            cellIndex,
+            cellParaIndex: 0
+          }
+          const cellRef = {
+            section: ref.section,
+            paragraph: tablePara,
+            offset: 0,
+            cell
+          }
+          ctx.insertTextLinesInCell(cellRef, cell, 0, text)
+          cellsFilled += 1
+        }
+      }
+
+      if (op.header === true) {
+        const color = ctx.colorValueToBgr(op.header_color || op.headerColor || "#e8e8e8")
+        const props = color == null ? null : JSON.stringify({ BackgroundColor: color })
+        if (props) {
+          for (let col = 0; col < cols; col++) {
+            ctx.doc.setCellProperties(ref.section, tablePara, control, col, props)
+          }
+        }
+      }
+    } catch (error) {
+      return { error: `createTable cell fill failed: ${String((error && error.message) || error)}` }
+    }
+
+    ctx.recordOp("AgentInsertTable", { section: ref.section, para: tablePara, control, offset, rows, cols, treatAsChar, cellsFilled })
+    return { ok: true, extra: { rows, cols, cells_filled: cellsFilled, paraIdx: tablePara, controlIdx: control } }
 }
 
   // Table structure ops: insert/delete row+column, merge cells, split a cell.
@@ -758,9 +876,46 @@ const opInsertPicture: OpHandler = (ctx, op, ref, verb) => {
     } catch (error) {
       return { error: `insert_picture: invalid base64 image data (${String((error && error.message) || error)})` }
     }
-    const cellPathJson = ref.cell && ref.cell.cellPath ? JSON.stringify(ref.cell.cellPath) : ""
+    const dimError = validateDeclaredImageDims(op, bytes)
+    if (dimError) return { error: dimError }
+    const cellPath =
+      ref.cell && ref.cell.cellPath
+        ? ref.cell.cellPath
+        : ref.cell
+          ? [{
+              controlIndex: ref.cell.controlIndex ?? 0,
+              cellIndex: ref.cell.cellIndex ?? 0,
+              cellParaIndex: ref.cell.cellParaIndex ?? 0,
+            }]
+          : null
+    const cellPathJson = cellPath ? JSON.stringify(cellPath) : ""
     try {
-      ctx.doc.insertPicture(ref.section, ref.paragraph, offset, cellPathJson, bytes, width, height, naturalW, naturalH, extension, description)
+      const paperOffsetX = Number.isInteger(op.paper_offset_x_hu) ? op.paper_offset_x_hu : (Number.isInteger(op.x) ? op.x : null)
+      const paperOffsetY = Number.isInteger(op.paper_offset_y_hu) ? op.paper_offset_y_hu : (Number.isInteger(op.y) ? op.y : null)
+      const options = {
+        sectionIdx: ref.section,
+        paraIdx: ref.paragraph,
+        charOffset: offset,
+        cellPath: cellPathJson,
+        width,
+        height,
+        naturalWidthPx: naturalW,
+        naturalHeightPx: naturalH,
+        extension,
+        description,
+        paperOffsetXHu: paperOffsetX,
+        paperOffsetYHu: paperOffsetY,
+      }
+      if (typeof ctx.doc.insertPictureBase64 === "function") {
+        ctx.doc.insertPictureBase64(JSON.stringify(options), String(b64))
+      } else if (typeof ctx.doc.insertPictureEx === "function") {
+        ctx.doc.insertPictureEx(JSON.stringify(options), bytes)
+      } else {
+        ctx.doc.insertPicture(
+          ref.section, ref.paragraph, offset, cellPathJson, bytes, width, height, naturalW,
+          naturalH, extension, description, paperOffsetX, paperOffsetY
+        )
+      }
     } catch (error) {
       return { error: `insertPicture failed: ${String((error && error.message) || error)}` }
     }
