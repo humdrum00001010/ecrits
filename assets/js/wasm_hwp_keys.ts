@@ -75,7 +75,6 @@ export const keyboardSubsystem = {
       const data = event.data != null ? event.data : this.imeProxy.value
       // Typing over a selection replaces it: delete the range, then insert.
       if (data) {
-        this.pushUndoCheckpoint()
         if (this.hasSelection()) this.deleteSelection()
         this.insertPlainTextAtCaret(data)
       }
@@ -87,7 +86,6 @@ export const keyboardSubsystem = {
   // Korean IME — compositionstart arms a provisional (empty) region at the caret.
   handleCompositionStart(_event) {
     if (!this.doc || !this.caret) return
-    this.pushUndoCheckpoint()
     // Composing over a selection replaces it first.
     if (this.hasSelection()) this.deleteSelection()
     this.skipNextCompositionInput = null
@@ -251,7 +249,6 @@ export const keyboardSubsystem = {
     }
     if (!this.doc) return
     if (event.isComposing) return // IME owns the keystroke
-    if (this.handleEditShortcut(event)) return
     if (this.handleSelectedImageDeleteKey(event)) return
     if (!this.caret) return
     if (event.metaKey || event.ctrlKey || event.altKey) return // unhandled shortcuts pass through
@@ -267,7 +264,6 @@ export const keyboardSubsystem = {
     if (this.hasSelection() &&
         (event.key === "Backspace" || event.key === "Delete" || event.key === "Enter")) {
       event.preventDefault()
-      this.pushUndoCheckpoint()
       this.deleteSelection()
       if (event.key === "Enter") this.splitAtCaret()
       return
@@ -276,17 +272,14 @@ export const keyboardSubsystem = {
     switch (event.key) {
       case "Backspace":
         event.preventDefault()
-        this.pushUndoCheckpoint()
         this.deleteBackward()
         break
       case "Delete":
         event.preventDefault()
-        this.pushUndoCheckpoint()
         this.deleteForward()
         break
       case "Enter":
         event.preventDefault()
-        this.pushUndoCheckpoint()
         this.splitAtCaret()
         break
       case "ArrowLeft":
@@ -350,7 +343,6 @@ export const keyboardSubsystem = {
     const target = this.selectedImageTarget()
     if (!target || !this.doc) return false
 
-    this.pushUndoCheckpoint()
     try {
       this.doc.deletePictureControl(target.section, target.paragraph, target.control)
     } catch (error) {
@@ -370,20 +362,6 @@ export const keyboardSubsystem = {
     return true
   },
 
-  handleEditShortcut(event) {
-    if (event.altKey || !(event.metaKey || event.ctrlKey)) return false
-    const key = String(event.key || "").toLowerCase()
-    const undo = key === "z" && !event.shiftKey
-    const redo = (key === "z" && event.shiftKey) || (key === "y" && event.ctrlKey && !event.metaKey)
-    if (!undo && !redo) return false
-    event.preventDefault()
-    event.stopPropagation()
-    if (redo) this.redoHistory()
-    else this.undoHistory()
-    if (this.imeProxy) this.imeProxy.value = ""
-    return true
-  },
-
   handleCopy(event) {
     const text = this.selectedText ? this.selectedText() : ""
     if (!text || !event.clipboardData) return
@@ -397,7 +375,6 @@ export const keyboardSubsystem = {
     const text = event.clipboardData && event.clipboardData.getData("text/plain")
     if (!text) return
     event.preventDefault()
-    this.pushUndoCheckpoint()
     if (this.hasSelection()) this.deleteSelection()
     this.insertPlainTextAtCaret(text)
   },

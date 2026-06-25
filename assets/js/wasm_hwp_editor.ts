@@ -220,8 +220,6 @@ const WasmHwpEditor = {
     this.skipNextCompositionInput = null
     this.snapshotTimer = null
     this.snapshotSeq = 0
-    this.undoStack = []
-    this.redoStack = []
     this.caretBlinkOn = true
     this.elementPickerEnabled = false
     this.pickerHover = null
@@ -1017,8 +1015,6 @@ const WasmHwpEditor = {
       this.selection = null
       this.localImagePick = null
       this.composing = null
-      this.undoStack = []
-      this.redoStack = []
       this.previewPatchHighlight = null
       if (!this.mirror) window.__rhwpDoc = this.doc
 
@@ -1526,91 +1522,6 @@ const WasmHwpEditor = {
 
   cloneEditorPoint(point) {
     return point ? JSON.parse(JSON.stringify(point)) : null
-  },
-
-  captureHistorySnapshot() {
-    if (!this.doc) return null
-    try {
-      const bytes = this.format === "hwpx" ? this.doc.exportHwpx() : this.doc.exportHwp()
-      return {
-        format: this.format,
-        bytes: new Uint8Array(bytes),
-        caret: this.cloneEditorPoint(this.caret),
-        selection: this.cloneEditorPoint(this.selection),
-        pageCount: this.pageCount
-      }
-    } catch (error) {
-      console.error("[wasm-hwp] history snapshot failed", error)
-      return null
-    }
-  },
-
-  historyBytesEqual(a, b) {
-    if (!a || !b || a.length !== b.length) return false
-    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
-    return true
-  },
-
-  pushUndoCheckpoint() {
-    const snapshot = this.captureHistorySnapshot()
-    if (!snapshot) return false
-    const last = this.undoStack && this.undoStack[this.undoStack.length - 1]
-    if (last && this.historyBytesEqual(last.bytes, snapshot.bytes)) return false
-    this.undoStack.push(snapshot)
-    if (this.undoStack.length > 30) this.undoStack.shift()
-    this.redoStack = []
-    return true
-  },
-
-  restoreHistorySnapshot(snapshot) {
-    if (!snapshot || !snapshot.bytes) return false
-    try {
-      const previous = this.doc
-      this.doc = new HwpDocument(snapshot.bytes)
-      try { this.doc.convertToEditable() } catch (_) {}
-      if (previous) {
-        try { previous.free() } catch (_) {}
-      }
-      this.format = snapshot.format || this.format
-      this.pageCount = this.doc.pageCount()
-      this.caret = this.cloneEditorPoint(snapshot.caret)
-      this.selection = this.cloneEditorPoint(snapshot.selection)
-      this.composing = null
-      if (!this.mirror) window.__rhwpDoc = this.doc
-      this.buildPageStack()
-      this.renderVisiblePages()
-      this.clearSelectionOverlays()
-      if (this.selection) this.renderSelection()
-      if (this.caret) {
-        this.refreshCursorRect()
-        this.renderCaretPage()
-        this.drawCaret(this.caret)
-        this.anchorProxy()
-      }
-      this.scheduleSnapshot()
-      return true
-    } catch (error) {
-      console.error("[wasm-hwp] history restore failed", error)
-      return false
-    }
-  },
-
-  undoHistory() {
-    if (!this.undoStack || !this.undoStack.length) return false
-    const redo = this.captureHistorySnapshot()
-    const snapshot = this.undoStack.pop()
-    if (!this.restoreHistorySnapshot(snapshot)) return false
-    if (redo) this.redoStack.push(redo)
-    return true
-  },
-
-  redoHistory() {
-    if (!this.redoStack || !this.redoStack.length) return false
-    const undo = this.captureHistorySnapshot()
-    const snapshot = this.redoStack.pop()
-    if (!this.restoreHistorySnapshot(snapshot)) return false
-    if (undo) this.undoStack.push(undo)
-    return true
   },
 
   handleToolbarCommand(detail) {
@@ -2206,7 +2117,6 @@ const WasmHwpEditor = {
         width: this.doc.pxToHwpUnit(drag.curW),
         height: this.doc.pxToHwpUnit(drag.curH)
       })
-      this.pushUndoCheckpoint()
       try {
         this.doc.setPictureProperties(drag.section, drag.paraIdx, drag.controlIdx, JSON.stringify(next))
       } catch (_) {
@@ -2253,7 +2163,6 @@ const WasmHwpEditor = {
       horzOffset: this.doc.pxToHwpUnit(drag.curX),
       vertOffset: this.doc.pxToHwpUnit(drag.curY)
     })
-    this.pushUndoCheckpoint()
     try {
       this.doc.setPictureProperties(drag.section, drag.paraIdx, drag.controlIdx, JSON.stringify(floatProps))
     } catch (_) {
