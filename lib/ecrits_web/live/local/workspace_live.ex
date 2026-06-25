@@ -557,18 +557,17 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
     socket =
       if is_binary(path) do
-        _ =
-          if socket.assigns.fuse_mode == true,
-            do: Ecrits.Fuse.DocMount.teardown(path),
-            else: Ecrits.Fuse.DocMount.ensure(path)
+        mounted? =
+          if socket.assigns.fuse_mode == true do
+            _ = DocMount.teardown(path)
+            DocMount.mounted?(path)
+          else
+            path
+            |> DocMount.ensure()
+            |> doc_vfs_mounted_after_ensure(path)
+          end
 
-        # Reflect the real mount state (handles :disabled / mount failure -> false).
-        mounted? = Ecrits.Fuse.DocMount.mounted?(path)
-
-        socket
-        |> assign(:fuse_mode, mounted?)
-        |> sync_doc_vfs_subscription(path, mounted?)
-        |> apply_vfs_write_policy()
+        put_doc_vfs_mount_state(socket, path, mounted?)
       else
         socket
       end
@@ -2384,7 +2383,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   defp apply_doc_vfs_mount_result(socket, path, result) do
-    mounted? = DocMount.mounted?(path)
+    mounted? = doc_vfs_mounted_after_ensure(result, path)
 
     unless mounted? or match?({:ok, _}, result) do
       Logger.warning("[DocMount] async ensure did not mount #{path}: #{inspect(result)}")
@@ -2398,6 +2397,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       socket
     end
   end
+
+  defp doc_vfs_mounted_after_ensure({:ok, _state}, _path), do: true
+  defp doc_vfs_mounted_after_ensure(:disabled, _path), do: false
+  defp doc_vfs_mounted_after_ensure(_result, path), do: DocMount.mounted?(path)
 
   defp put_doc_vfs_mount_state(socket, path, mounted?) do
     socket

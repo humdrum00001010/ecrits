@@ -818,11 +818,14 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     doc.find / doc.context / doc.edit / doc.set / doc.save — do EVERYTHING ELSE
     with your native shell/file tools over the mounted file.
     NEVER type `doc.open_doc` in the shell; it is an MCP tool call, not a command.
-    Do not call resource-discovery tools (`list_mcp_resources`,
-    `list_mcp_resource_templates`) as a substitute for editing the mounted file.
+    If `doc.open_doc` is not immediately visible as a callable MCP tool, use
+    resource/tool discovery only to surface `doc.open_doc` / `doc.close_doc`, then
+    call `doc.open_doc`. Do not use discovery as a substitute for editing the
+    mounted file.
 
     Workflow:
-    1. `doc.open_doc {path}` (path = the workspace document name) mounts the doc
+    1. First action for this/current/open-document file work: call
+       `doc.open_doc {path}` (path = the workspace document name). It mounts the doc
       and returns a `.ecrits/mount/<name>.jsonl` path under the workspace root.
       The JSONL file itself is IR-only; it does NOT contain `mounted_at`,
       `mount_status`, or other tool metadata. If the MCP tool is hidden but the
