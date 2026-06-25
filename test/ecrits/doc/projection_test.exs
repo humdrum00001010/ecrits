@@ -367,6 +367,175 @@ defmodule Ecrits.Doc.ProjectionTest do
       end
     end
 
+    test "inserts a picture while unchanged existing picture payloads have no exposed refs", %{
+      ehwp: ehwp
+    } do
+      if not ehwp do
+        IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection second picture insert e2e")
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_second_picture_insert", ".hwpx")
+        on_exit(fn -> cleanup_tmp(path) end)
+
+        {:ok, bytes} = Projection.project_file(path)
+        {_lines, doc} = decode_projection(bytes)
+        {anchor_path, _node} = first_text_paragraph(doc)
+
+        first_picture = %{
+          "type" => "picture",
+          "src" => @image_fixture,
+          "description" => "JSONL_EXISTING_PICTURE"
+        }
+
+        first_bytes =
+          doc
+          |> insert_payload_node(insert_after(anchor_path), first_picture)
+          |> encode_projection()
+
+        assert {:ok, %{applied: 1}} = Projection.write_back(path, first_bytes)
+
+        {:ok, after_first_bytes} = Projection.project_file(path)
+        {_lines, after_first_doc} = decode_projection(after_first_bytes)
+        {table_path, _table} = first_payload(after_first_doc, &(&1["type"] == "table"))
+
+        second_picture = %{
+          "type" => "picture",
+          "src" => @image_fixture,
+          "description" => "JSONL_SECOND_PICTURE"
+        }
+
+        second_bytes =
+          after_first_doc
+          |> insert_payload_node(insert_after(table_path), second_picture)
+          |> Jason.encode!(pretty: true)
+
+        assert {:ok, %{applied: 1}} = Projection.write_back(path, second_bytes)
+        assert {:ok, after_second_bytes} = Projection.project_file(path)
+        assert after_second_bytes =~ "JSONL_EXISTING_PICTURE"
+        assert after_second_bytes =~ "JSONL_SECOND_PICTURE"
+      end
+    end
+
+    test "does not misread adjacent existing pictures as delete and insert during earlier insert" do
+      old_nodes = [
+        %{
+          "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+          "text" => "",
+          "type" => "paragraph"
+        },
+        %{
+          "ref" => %{"section" => 0, "paragraph" => 0, "control" => 0, "type" => "table"},
+          "text" => "AUTH_TBL",
+          "type" => "table"
+        },
+        %{
+          "col" => 0,
+          "ref" => %{
+            "section" => 0,
+            "paragraph" => 0,
+            "offset" => 0,
+            "cell" => %{
+              "parentParaIndex" => 0,
+              "controlIndex" => 0,
+              "cellIndex" => 0,
+              "cellParaIndex" => 0
+            }
+          },
+          "row" => 0,
+          "text" => "AUTH_TBL",
+          "type" => "cell"
+        },
+        %{
+          "description" => "AGENT_APPEND_RED",
+          "height" => 22_000,
+          "ref" => %{"section" => 2, "paragraph" => 10, "control" => 0, "type" => "picture"},
+          "text" => "",
+          "treatAsChar" => true,
+          "type" => "picture",
+          "width" => 22_000
+        },
+        %{
+          "description" => "AGENT_APPEND_BLUE",
+          "height" => 22_000,
+          "ref" => %{"section" => 2, "paragraph" => 10, "control" => 1, "type" => "picture"},
+          "text" => "",
+          "treatAsChar" => true,
+          "type" => "picture",
+          "width" => 22_000
+        }
+      ]
+
+      new_nodes = [
+        %{"text" => "", "type" => "paragraph"},
+        %{"text" => "AUTH_TBL", "type" => "table"},
+        %{
+          "description" => "DBG_BIRD_INSERT",
+          "src" => "/tmp/ecrits-fuse-hwpx-tidewave/bird_song_sparrow.jpg",
+          "type" => "picture"
+        },
+        %{"col" => 0, "row" => 0, "text" => "AUTH_TBL", "type" => "cell"},
+        %{
+          "description" => "AGENT_APPEND_RED",
+          "height" => 22_000,
+          "text" => "",
+          "treatAsChar" => true,
+          "type" => "picture",
+          "width" => 22_000
+        },
+        %{
+          "description" => "AGENT_APPEND_BLUE",
+          "height" => 22_000,
+          "text" => "",
+          "treatAsChar" => true,
+          "type" => "picture",
+          "width" => 22_000
+        }
+      ]
+
+      assert [
+               {:insert_picture, %{"description" => "DBG_BIRD_INSERT"}, "DBG_BIRD_INSERT", %{}}
+             ] = Projection.__compute_ir_changes_for_test__(old_nodes, new_nodes)
+    end
+
+    test "still allows deleting one picture while editing the next picture by identity" do
+      old_nodes = [
+        %{
+          "description" => "AGENT_APPEND_RED",
+          "height" => 22_000,
+          "ref" => %{"section" => 2, "paragraph" => 10, "control" => 0, "type" => "picture"},
+          "text" => "",
+          "treatAsChar" => true,
+          "type" => "picture",
+          "width" => 22_000
+        },
+        %{
+          "description" => "AGENT_APPEND_BLUE",
+          "height" => 22_000,
+          "ref" => %{"section" => 2, "paragraph" => 10, "control" => 1, "type" => "picture"},
+          "text" => "",
+          "treatAsChar" => true,
+          "type" => "picture",
+          "width" => 22_000
+        }
+      ]
+
+      new_nodes = [
+        %{
+          "description" => "AGENT_APPEND_BLUE",
+          "height" => 24_000,
+          "text" => "",
+          "treatAsChar" => true,
+          "type" => "picture",
+          "width" => 24_000
+        }
+      ]
+
+      assert [
+               {:delete_node, %{"op" => "delete_node"}, "AGENT_APPEND_RED"},
+               {:set, %{"control" => 1, "paragraph" => 10, "section" => 2, "type" => "picture"},
+                "picture", %{"height" => 24_000, "width" => 24_000}}
+             ] = Projection.__compute_ir_changes_for_test__(old_nodes, new_nodes)
+    end
+
     test "routes picture insert, move and delete through native HWPX write-back", %{ehwp: ehwp} do
       if not ehwp do
         IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection write_back HWPX picture e2e")

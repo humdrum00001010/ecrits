@@ -866,6 +866,12 @@ defmodule Ecrits.Doc.Projection do
     end
   end
 
+  if Mix.env() == :test do
+    @doc false
+    def __compute_ir_changes_for_test__(old_nodes, new_nodes),
+      do: compute_ir_changes(old_nodes, new_nodes)
+  end
+
   defp scan_ir_changes(old_nodes, new_nodes, old_index, new_index, acc) do
     old_done? = old_index >= length(old_nodes)
     new_done? = new_index >= length(new_nodes)
@@ -899,7 +905,8 @@ defmodule Ecrits.Doc.Projection do
               scan_ir_changes(old_nodes, new_nodes, old_index, new_index + 1, [insert | acc])
             end
 
-          deletable_payload?(old) and aligns_after_deleted_payload?(old_nodes, old_index, new) ->
+          deletable_payload?(old) and not same_payload_identity?(old, new) and
+              aligns_after_deleted_payload?(old_nodes, old_index, new) ->
             with {:ok, delete} <- payload_delete_change(old) do
               scan_ir_changes(old_nodes, new_nodes, old_index + 1, new_index, [delete | acc])
             end
@@ -937,6 +944,9 @@ defmodule Ecrits.Doc.Projection do
 
       old_type != new_type ->
         {:error, :structural_change}
+
+      old_node == new_node ->
+        {:ok, []}
 
       is_nil(raw_ref) ->
         {:error, :unroutable}
@@ -994,12 +1004,44 @@ defmodule Ecrits.Doc.Projection do
         false
 
       next_old ->
-        case existing_node_changes(next_old, new) do
-          {:ok, _changes} -> true
-          {:error, _reason} -> false
-        end
+        same_payload_identity?(next_old, new)
     end
   end
+
+  defp same_payload_identity?(old, new) do
+    old = normalize_ir_value(old)
+    new = normalize_ir_value(new)
+
+    cond do
+      Map.get(old, "type") != Map.get(new, "type") ->
+        false
+
+      Map.get(old, "type") == "picture" ->
+        same_picture_identity?(old, new)
+
+      true ->
+        strip_ref(old) == strip_ref(new)
+    end
+  end
+
+  defp same_picture_identity?(old, new) do
+    case {picture_identity_marker(old), picture_identity_marker(new)} do
+      {old_marker, new_marker} when is_binary(old_marker) and is_binary(new_marker) ->
+        old_marker == new_marker
+
+      _ ->
+        strip_ref(old) == strip_ref(new)
+    end
+  end
+
+  defp picture_identity_marker(node) do
+    Enum.find_value(["description", "alt", "src", "path"], fn key ->
+      value = Map.get(node, key)
+      if is_binary(value) and value != "", do: value
+    end)
+  end
+
+  defp strip_ref(node), do: node |> normalize_ir_value() |> Map.delete("ref")
 
   defp payload_insert_change(node, anchor) do
     cond do
