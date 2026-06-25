@@ -116,9 +116,9 @@ defmodule Ecrits.Fuse.DocMount do
   @spec settings_url() :: String.t()
   def settings_url, do: @fskit_settings_url
 
-  @doc "Whether the workspace's mount point is live in the OS mount table."
+  @doc "Whether the workspace's mount point is mounted and serving requests."
   @spec mounted?(String.t()) :: boolean()
-  def mounted?(root), do: in_mount_table?(mount_point(root))
+  def mounted?(root), do: mounted_and_live?(root)
 
   # Mounted AND actually serving. A mount left by a prior crash/restart (port
   # killed without a clean unmount) lingers in the mount table but returns I/O
@@ -201,6 +201,7 @@ defmodule Ecrits.Fuse.DocMount do
     # Clear any lingering/half-stopped server for this point (e.g. a concurrent
     # mounter raced us) so we don't end up with two servers on one mount point.
     _ = Exfuse.umount(point)
+    clean_dead_mount(point)
     ensure_clean_dir(point)
 
     mount_once(root, point, backend, 2)
@@ -262,12 +263,19 @@ defmodule Ecrits.Fuse.DocMount do
   defp mount_serving?(_point, 0), do: false
 
   defp mount_serving?(point, tries) do
-    if in_mount_table?(point) do
+    if mounted_point_live?(point) do
       true
     else
       Process.sleep(250)
       mount_serving?(point, tries - 1)
     end
+  end
+
+  defp mounted_point_live?(point), do: in_mount_table?(point) and live?(point)
+
+  defp clean_dead_mount(point) do
+    if in_mount_table?(point) and not live?(point), do: clean_leaf(point)
+    :ok
   end
 
   # mkdir_p the mount LEAF, healing a dead/stale mount node a prior teardown may
