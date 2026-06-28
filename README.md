@@ -1,7 +1,5 @@
 # Ecrits
 
-See [GLOBAL_GOAL.md](GLOBAL_GOAL.md) for the product and architecture direction: a local-first, code-editor-like document editor that gives agents native document editability through MCP.
-
 To start your Phoenix server:
 
 * Run `mix setup` to install and setup dependencies
