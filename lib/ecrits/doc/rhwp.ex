@@ -1090,36 +1090,52 @@ defmodule Ecrits.Doc.Rhwp do
   @doc """
   Rasterize one page to a PNG at `path` — the HWP arm of the doc.render visual
   feedback loop. `page` is the 1-BASED page number as a string ("1", "2", …;
-  HWP pages are unnamed, unlike Impress slides). The SVG comes from the engine's
-  own renderer (`render_page_svg`); `rsvg-convert` rasterizes it at `width` px.
+  HWP pages are unnamed, unlike Impress slides). The engine rasterizes the page
+  in-process at `width` px (`render_page_png`, native Skia, ~35ms/page); the
+  legacy SVG + `rsvg-convert` pipeline (~196ms/page) remains only as a fallback.
   """
   @spec render_page(handle(), String.t() | integer(), String.t(), pos_integer()) ::
           :ok | {:error, term()}
   def render_page(%{ehwp: ehwp_handle}, page, path, width) do
     case Integer.parse(to_string(page)) do
       {idx, ""} when idx >= 1 ->
-        with {:ok, svg, _meta} <- Ehwp.render_page_svg(ehwp_handle, idx - 1),
-             svg_path = path <> ".svg",
-             :ok <- File.write(svg_path, svg) do
-          try do
-            case System.cmd("rsvg-convert", ["-w", to_string(width), "-o", path, svg_path],
-                   stderr_to_stdout: true
-                 ) do
-              {_out, 0} -> :ok
-              {out, code} -> {:error, {:render_failed, "rsvg-convert exit #{code}: #{out}"}}
-            end
-          rescue
-            # rsvg-convert not installed on this machine.
-            e in ErlangError -> {:error, {:render_failed, inspect(e.original)}}
-          after
-            File.rm(svg_path)
-          end
+        case Ehwp.render_page_png(ehwp_handle, idx - 1, width) do
+          {:ok, png, _meta} ->
+            File.write(path, png)
+
+          {:error, {:page_out_of_range, _}} = error ->
+            error
+
+          {:error, _reason} ->
+            render_page_via_rsvg(ehwp_handle, idx - 1, path, width)
         end
 
       _other ->
         {:error,
          {:invalid_params,
           "HWP page must be a 1-based page NUMBER string (\"1\", \"2\", …), got: #{inspect(page)}"}}
+    end
+  end
+
+  # Fallback rasterizer: engine SVG piped through the external `rsvg-convert`
+  # binary. Only reached when the in-process Skia raster fails on a page.
+  defp render_page_via_rsvg(ehwp_handle, page_index, path, width) do
+    with {:ok, svg, _meta} <- Ehwp.render_page_svg(ehwp_handle, page_index),
+         svg_path = path <> ".svg",
+         :ok <- File.write(svg_path, svg) do
+      try do
+        case System.cmd("rsvg-convert", ["-w", to_string(width), "-o", path, svg_path],
+               stderr_to_stdout: true
+             ) do
+          {_out, 0} -> :ok
+          {out, code} -> {:error, {:render_failed, "rsvg-convert exit #{code}: #{out}"}}
+        end
+      rescue
+        # rsvg-convert not installed on this machine.
+        e in ErlangError -> {:error, {:render_failed, inspect(e.original)}}
+      after
+        File.rm(svg_path)
+      end
     end
   end
 
