@@ -22,7 +22,7 @@ defmodule Ecrits.Doc.MCPToolPolicy do
       "error" => "disabled_in_fuse_mode",
       "tool" => name,
       "message" =>
-        "FUSE mode: the document is a nested JSONL IR file " <>
+        "VFS mode: the document is a nested JSONL IR file " <>
           "([[[payload_node]]]). Read/find/edit payload node fields with native shell " <>
           "tools over `.ecrits/mount/<name>.jsonl` (cat/grep/sed). Never replace " <>
           "the file with one payload object and never look for mounted_at inside " <>

@@ -9,7 +9,7 @@ defmodule Ecrits.Fuse.DocMount do
 
   `ensure/1` and `teardown/1` are defensive: they run from the workspace
   `Ecrits.Workspace.Session` GenServer (and a LiveView Task), so a mount failure
-  (missing native backend, FUSE/FSKit error) must NEVER crash the caller. Both
+  (missing native backend, VFS backend error) must NEVER crash the caller. Both
   rescue/catch and log via `Logger`.
 
   Truth about "is it mounted?" comes from the OS mount table, not `Exfuse.list/0`
@@ -55,7 +55,7 @@ defmodule Ecrits.Fuse.DocMount do
   Full local availability status for the selected doc VFS backend.
 
   `enabled?/0` intentionally stays boolean for fast gates, while this function is
-  used by tools/prompts to explain why FSKit/FUSE is not mountable.
+  used by tools/prompts to explain why the selected doc VFS backend is not mountable.
   """
   @spec status() :: %{
           enabled?: boolean(),
@@ -270,7 +270,7 @@ defmodule Ecrits.Fuse.DocMount do
   end
 
   # mkdir_p the mount LEAF, healing a dead/stale mount node a prior teardown may
-  # have left (mkdir over a dead FUSE node raises File.Error :enotdir).
+  # have left (mkdir over a dead VFS node raises File.Error :enotdir).
   defp ensure_clean_dir(point) do
     File.mkdir_p!(point)
   rescue

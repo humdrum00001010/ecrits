@@ -107,7 +107,7 @@ defmodule Ecrits.Doc.MCPServer do
   end
 
   # The agent may still try a `doc.*` tool from a cached tool list — refuse it
-  # and point it at the file, so FUSE mode is enforced end-to-end (not just in
+  # and point it at the file, so VFS mode is enforced end-to-end (not just in
   # the advertised list).
   defp disabled_in_fuse(name, state) do
     {:ok, %{content: [json_content(MCPToolPolicy.disabled_in_vfs_message(name))], isError: true},

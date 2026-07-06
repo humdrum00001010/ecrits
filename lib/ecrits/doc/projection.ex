@@ -5,7 +5,7 @@ defmodule Ecrits.Doc.Projection do
   This is the JSONL projection of the exfuse doc-VFS migration
   (`docs/plans/2026-06-23-exfuse-doc-vfs-migration.md`, Layer 3 / Phase 1). It
   renders a WHOLE document — HWP/HWPX/docx/pptx/xlsx — to a single stable byte
-  blob that a FUSE filesystem serves as `<name>.jsonl`, so a human (or the agent,
+  blob that the document VFS serves as `<name>.jsonl`, so a human (or the agent,
   whose cwd is the workspace root) can `cat`/`rg` the document's text without an
   MCP round-trip.
 
@@ -17,7 +17,7 @@ defmodule Ecrits.Doc.Projection do
     1. `Ecrits.Doc.Pool.open/2` loads the document into the pool, inferring the
        backend `kind:` from the file extension. `open/2` is idempotent — a doc
        the workspace is already viewing is reused, not reopened — so projection
-       NEVER disposes the doc afterwards (lifecycle is the FUSE/Session layer's
+       NEVER disposes the doc afterwards (lifecycle is the VFS/Session layer's
        job, not ours).
     2. `Ecrits.Doc.Editor.elements/2` returns the FULL document IR (not the
        30-paragraph `doc.read` window). Each IR node is a map carrying at least
@@ -166,7 +166,7 @@ defmodule Ecrits.Doc.Projection do
 
   Returns `{:ok, term}` (a `:erlang.phash2/1` of the bytes — the cheapest
   correct option, since the Editor/Pool expose no independent IR fingerprint)
-  or `{:error, reason}` when the document cannot be projected. Used for the FUSE
+  or `{:error, reason}` when the document cannot be projected. Used for the VFS
   `getattr` size/mtime signal.
   """
   @spec fingerprint(String.t()) :: {:ok, term()} | {:error, term()}
@@ -349,7 +349,7 @@ defmodule Ecrits.Doc.Projection do
 
   @doc """
   Apply a direct overwrite of the projected `.jsonl` back onto the live document
-  at `abs_path` (FUSE write-back / Phase 2). Diffs the incoming `new_bytes`
+  at `abs_path` (VFS write-back / Phase 2). Diffs the incoming `new_bytes`
   against the current projection's reconstructed payload nodes and applies
   changed fields directly to the mounted server editor: paragraph `"text"`
   changes become scoped text edits, cell `"text"` changes become whole-cell
@@ -357,7 +357,7 @@ defmodule Ecrits.Doc.Projection do
   payload becomes native `insert_table`, and other node-field changes become
   native property writes.
   This is not the MCP/browser `doc.edit` -> `doc.apply_edit` path; that path remains the
-  semantic hook for non-FUSE editor requests and may only be used later to resync
+  semantic hook for non-VFS editor requests and may only be used later to resync
   an already-open browser viewer.
 
   `opts`: `:root` (workspace root, for the edit ctx path guard).
@@ -772,7 +772,7 @@ defmodule Ecrits.Doc.Projection do
     |> Enum.find(&(is_binary(&1) and &1 != ""))
   end
 
-  # A FUSE write is a FILE-LEVEL modification of the document, NOT a `doc.edit`.
+  # A VFS write is a FILE-LEVEL modification of the document, NOT a `doc.edit`.
   # We apply each changed line straight onto the document's SERVER model
   # (`Editor.apply` -> `backend.edit`) and persist its bytes (`Editor.save`) —
   # the agent-facing `doc.edit`/`doc.save` MCP tools are deliberately NOT on this

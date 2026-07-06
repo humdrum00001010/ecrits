@@ -34,7 +34,7 @@ defmodule Ecrits.Fuse.DocFs do
   (`OpenDocs.writable?/1`) → `:erofs` when read-only.
 
   Handlers touch only ETS (`OpenDocs`) and `Projection` (which reads/writes the
-  doc via the Pool/Editor) — never the BEAM `:file_server`, which a FUSE handler
+  doc via the Pool/Editor) — never the BEAM `:file_server`, which a VFS handler
   must avoid (an in-BEAM `File.*` on the mount would deadlock it). See
   `docs/plans/2026-06-23-exfuse-doc-vfs-migration.md`.
   """
@@ -164,7 +164,7 @@ defmodule Ecrits.Fuse.DocFs do
 
   # A new file in the mount — an in-place editor's temp file. Register a
   # transient (sourceless) buffer; it commits only when renamed over a projected
-  # doc. FUSE `create` is create+open, so no separate `open` follows.
+  # doc. VFS `create` is create+open, so no separate `open` follows.
   create "/:name" do
     if OpenDocs.writable?(state.root) do
       {handle, socket} = new_handle(socket, name)
@@ -211,9 +211,10 @@ defmodule Ecrits.Fuse.DocFs do
     end
   end
 
-  # macFUSE can call flush before a large full-file rewrite has reached a valid
-  # whole JSON value. Commit on release instead; it is the final close for the
-  # handle. Transient temp files also survive flush so temp+rename editors work.
+  # Some VFS backends can call flush before a large full-file rewrite has reached
+  # a valid whole JSON value. Commit on release instead; it is the final close
+  # for the handle. Transient temp files also survive flush so temp+rename
+  # editors work.
   flush "/:_name" do
     {:noreply, socket}
   end
@@ -534,7 +535,7 @@ defmodule Ecrits.Fuse.DocFs do
   # when the projection changes. The FUSE-era 64MB over-estimate floor is
   # fatal under FSKit: the kernel believes the file is huge, the first `read`
   # comes back short mid-file, and UserFS turns that short read into EIO
-  # (macFUSE tolerated it). The moving mtime makes the kernel drop cached
+  # (the legacy FUSE backend tolerated it). The moving mtime makes the kernel drop cached
   # pages and pick up the new size after the live document was edited
   # (browser UI, doc.* tools, write-back). Rendering the projection here
   # costs the same as one `read` op — which already re-projects per call.

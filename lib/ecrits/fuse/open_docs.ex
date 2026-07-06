@@ -8,7 +8,7 @@ defmodule Ecrits.Fuse.OpenDocs do
   Backed by a single public, named ETS set owned by this GenServer (started in
   the supervision tree). Keys are `{canonical_root, name}` where `name` is the
   document's basename (the flat VFS is root-level). Reads/writes hit ETS directly
-  from any process (the FUSE handler, the MCP tool) — no GenServer call on the
+  from any process (the VFS handler, the MCP tool) — no GenServer call on the
   hot path — and degrade to empty/no-op if the table is somehow absent.
   """
 

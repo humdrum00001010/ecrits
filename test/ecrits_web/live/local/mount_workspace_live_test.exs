@@ -1003,7 +1003,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     refute has_element?(lv, ~s([data-role="local-hwp-editor"]))
   end
 
-  test "FUSE semantic edits replay into the visible active office WASM editor", %{conn: conn} do
+  test "VFS semantic edits replay into the visible active office WASM editor", %{conn: conn} do
     root = LocalWorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root, document: "drafts/reference.docx")
 
@@ -1060,7 +1060,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert bytes_url == initial_url
   end
 
-  test "FUSE edits without semantic ops reload the visible active office WASM editor", %{
+  test "VFS edits without semantic ops reload the visible active office WASM editor", %{
     conn: conn
   } do
     root = LocalWorkspaceAdapterStub.valid_path()
@@ -1566,7 +1566,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     cond do
       mount_status.enabled? and mounted? ->
-        assert prompt =~ "FUSE/VFS mode"
+        assert prompt =~ "#{doc_vfs_backend_mode_label(mount_status)} mode"
         assert prompt =~ "The ONLY MCP tool to call is `doc.open_doc"
         assert prompt =~ "doc.open_doc"
         assert prompt =~ "Do not call `doc.close_doc` in normal edit turns"
@@ -1636,7 +1636,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         assert prompt =~ "mount_error"
         assert prompt =~ "Do not use `.md`"
         assert normalized_prompt =~ "do not shell-read the raw binary document"
-        refute prompt =~ "FUSE/VFS mode: documents are EDITABLE FILES"
+        refute prompt =~ "documents are EDITABLE FILES"
 
       mount_status.backend == :fskit and
           mount_status.reason in [
@@ -1657,14 +1657,14 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         assert prompt =~ "doc.context"
         assert prompt =~ "current_document.document"
         assert prompt =~ "doc.open_doc"
-        refute prompt =~ "FUSE/VFS mode: documents are EDITABLE FILES"
+        refute prompt =~ "documents are EDITABLE FILES"
         assert prompt =~ "Do not use `.md`"
 
       true ->
         assert prompt =~ "Use doc MCP tools"
         assert prompt =~ "doc.context"
         assert prompt =~ "current_document.document"
-        refute prompt =~ "FUSE/VFS mode"
+        refute prompt =~ "VFS mode"
     end
 
     refute prompt =~ "template.hwp"
@@ -1676,7 +1676,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     sync_liveview(lv)
   end
 
-  test "manual FUSE enable subscribes direct VFS edit cards", %{conn: conn} do
+  test "manual VFS enable subscribes direct VFS edit cards", %{conn: conn} do
     previous_vfs = Application.get_env(:ecrits, :doc_vfs)
     on_exit(fn -> restore_doc_vfs_env(previous_vfs) end)
 
@@ -1687,14 +1687,14 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(lv, ~s(#fuse-mode-toggle[aria-pressed="false"]))
 
-    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :fuse)
+    Application.put_env(:ecrits, :doc_vfs, enabled: true)
 
     cond do
       not Ecrits.Fuse.DocMount.status().enabled? ->
-        IO.puts("\n[skip] FUSE backend unavailable; skipping manual VFS subscription check")
+        IO.puts("\n[skip] doc VFS backend unavailable; skipping manual VFS subscription check")
 
       not match?({:ok, _}, Ecrits.Fuse.DocMount.ensure(root)) ->
-        IO.puts("\n[skip] FUSE mount failed; skipping manual VFS subscription check")
+        IO.puts("\n[skip] doc VFS mount failed; skipping manual VFS subscription check")
 
       true ->
         lv
@@ -1799,14 +1799,14 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       restore_doc_vfs_env(previous_vfs)
     end)
 
-    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :fuse)
+    Application.put_env(:ecrits, :doc_vfs, enabled: true)
 
     cond do
       not Ecrits.Fuse.DocMount.status().enabled? ->
-        IO.puts("\n[skip] FUSE backend unavailable; skipping VFS write-policy hydration check")
+        IO.puts("\n[skip] doc VFS backend unavailable; skipping VFS write-policy hydration check")
 
       not match?({:ok, _}, Ecrits.Fuse.DocMount.ensure(root)) ->
-        IO.puts("\n[skip] FUSE mount failed; skipping VFS write-policy hydration check")
+        IO.puts("\n[skip] doc VFS mount failed; skipping VFS write-policy hydration check")
 
       true ->
         {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
@@ -2129,7 +2129,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     refute prompt =~ "document_id"
     assert prompt =~ "Skip doc.context/doc.find discovery"
     assert prompt =~ "When using doc.* tools"
-    assert prompt =~ "When using mounted FUSE/VFS JSONL"
+    assert prompt =~ "When using mounted #{doc_vfs_backend_mode_label()} JSONL"
     assert prompt =~ "picture-control order c"
     assert prompt =~ "`document` value (the file path)"
 
@@ -3847,6 +3847,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     rm_rf_workspace!(root)
   end
+
+  defp doc_vfs_backend_mode_label(status \\ Ecrits.Fuse.DocMount.status())
+  defp doc_vfs_backend_mode_label(%{backend: :fskit}), do: "FSKit/VFS"
+  defp doc_vfs_backend_mode_label(%{backend: :fuse}), do: "FUSE/VFS"
 
   defp rm_rf_workspace!(root, attempts \\ 3)
 

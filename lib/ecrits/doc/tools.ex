@@ -160,7 +160,7 @@ defmodule Ecrits.Doc.Tools do
           "normalize away after write-back; never insert another copy when the target " <>
           "position already has that picture node. Returns {opened, " <>
           "path, mounted_at, mount_status}; when " <>
-          "mounted_at is null, mount_status/mount_error explain the FSKit/FUSE blocker. " <>
+          "mounted_at is null, mount_status/mount_error explain the doc VFS blocker. " <>
           "Keep the document open while editing and verifying the mounted file; " <>
           "do not use doc.close_doc as cleanup during an edit turn.",
       "risk" => "read",

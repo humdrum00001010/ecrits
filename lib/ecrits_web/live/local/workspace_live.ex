@@ -169,7 +169,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:dirty_document_ids, MapSet.new())
      |> assign(:autosave_timers, %{})
      |> assign(:fs_watcher_pid, nil)
-     # Document VFS (exfuse) toggle state. nil hides the header "FUSE" button on
+     # Document VFS (exfuse) toggle state. nil hides the header doc-VFS button on
      # non-workspace chrome; in the workspace it is always a boolean (shown).
      |> assign(:fuse_mode, false)
      # The doc_vfs:<root> PubSub topic this LV is subscribed to (direct-edit cards).
@@ -968,7 +968,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   # A VFS write edits the SERVER document model + saves to disk. This function is
-  # not the FUSE write path; it only keeps an already-open browser viewer in sync
+  # not the VFS write path; it only keeps an already-open browser viewer in sync
   # after the file-level write-back has committed. When write-back produced exact
   # semantic ops/sets, reuse the non-mirror browser hook (`doc.apply_edit` ->
   # patch the WASM model -> repaint the affected page); that is a post-commit UI
@@ -1095,10 +1095,19 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :local_file_tree_bytes_urls, local_file_tree_bytes_urls(assigns))
+    assigns =
+      assigns
+      |> assign(:local_file_tree_bytes_urls, local_file_tree_bytes_urls(assigns))
+      |> assign(:doc_vfs_backend, DocMount.backend())
 
     ~H"""
-    <Layouts.app flash={@flash} variant="split" fuse_mode={@fuse_mode} brand_href={~p"/workspace"}>
+    <Layouts.app
+      flash={@flash}
+      variant="split"
+      fuse_mode={@fuse_mode}
+      doc_vfs_backend={@doc_vfs_backend}
+      brand_href={~p"/workspace"}
+    >
       <main
         id="local-workspace-root"
         class="h-[calc(100dvh-60px)] min-h-0 min-w-[1024px] overflow-hidden bg-[var(--cs-bg)] text-[var(--cs-ink)]"
@@ -2432,7 +2441,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   # The mounted `.jsonl` is writable ONLY when the workspace agent access is
   # "full-workspace" — a direct file write is the agent modifying the workspace,
-  # so it honours the same gate as the MCP tools. Pushed to the FUSE layer
+  # so it honours the same gate as the MCP tools. Pushed to the VFS layer
   # (Ecrits.Fuse.OpenDocs) whenever the mount comes up or the access changes.
   defp apply_vfs_write_policy(socket) do
     path = socket.assigns[:workspace_path]
@@ -4877,6 +4886,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
+  defp doc_vfs_backend_mode_label do
+    case DocMount.backend() do
+      :fskit -> "FSKit/VFS"
+      :fuse -> "FUSE/VFS"
+    end
+  end
+
   # The agent-visible prompt: typed text + the picked-element JSON block (the
   # format the picker used to inject into the textarea), plus the #32 read-path
   # override — the refs are already resolved, so the turn must not burn calls
@@ -4893,7 +4909,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         "Picked refs are authoritative. Skip doc.context/doc.find discovery. " <>
         "When using doc.* tools, call doc.read/doc.edit/doc.set directly on these refs, passing each " <>
         "pick's `document` value (the file path) as the tools' `document` param. " <>
-        "When using mounted FUSE/VFS JSONL, treat picked refs as target hints for the nested JSONL; " <>
+        "When using mounted #{doc_vfs_backend_mode_label()} JSONL, treat picked refs as target hints for the nested JSONL; " <>
         "for HWP picture refs like {\"section\":s,\"paragraph\":p,\"control\":c}, edit the picture payload " <>
         "in section s / paragraph p at picture-control order c. " <>
         "For existing HWP paragraph division, use doc.edit op `split` at offsets; " <>

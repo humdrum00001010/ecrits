@@ -64,7 +64,11 @@ defmodule EcritsWeb.Layouts do
 
   attr :fuse_mode, :any,
     default: nil,
-    doc: "workspace doc-VFS state: nil hides the FUSE toggle; true/false shows it"
+    doc: "workspace doc-VFS state: nil hides the doc-VFS toggle; true/false shows it"
+
+  attr :doc_vfs_backend, :atom,
+    default: nil,
+    doc: "selected document VFS backend, used only for user-facing labels"
 
   def app(assigns) do
     ~H"""
@@ -86,6 +90,7 @@ defmodule EcritsWeb.Layouts do
           current_scope={@current_scope}
           chrome={@chrome}
           fuse_mode={@fuse_mode}
+          doc_vfs_backend={@doc_vfs_backend}
           brand_href={@brand_href || ~p"/"}
         />
 
@@ -131,12 +136,20 @@ defmodule EcritsWeb.Layouts do
   attr :current_scope, :map, default: nil
   attr :chrome, :string, default: "app", values: ~w(app landing)
   attr :fuse_mode, :any, default: nil
+  attr :doc_vfs_backend, :atom, default: nil
   attr :brand_href, :string, default: "/"
 
   @doc """
   Top navigation for the local workspace product.
   """
   def top_nav(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :doc_vfs_backend_label,
+        doc_vfs_backend_label(assigns[:doc_vfs_backend])
+      )
+
     ~H"""
     <header class="navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px] flex-nowrap border-b border-base-300 bg-base-100 supports-[backdrop-filter]:backdrop-blur-md px-7 max-md:px-4">
       <div class="navbar-start gap-6 min-w-0">
@@ -158,11 +171,11 @@ defmodule EcritsWeb.Layouts do
           aria-pressed={"#{@fuse_mode == true}"}
           aria-label={
             if(@fuse_mode == true,
-              do: "Disable editable text mount (FUSE)",
-              else: "Enable editable text mount (FUSE)"
+              do: "Disable editable text mount (#{@doc_vfs_backend_label})",
+              else: "Enable editable text mount (#{@doc_vfs_backend_label})"
             )
           }
-          title="Mount this workspace's documents as editable text files (FUSE)"
+          title={"Mount this workspace's documents as editable text files (#{@doc_vfs_backend_label})"}
           class={[
             "relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors duration-150",
             "focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cs-blue)]",
@@ -187,6 +200,10 @@ defmodule EcritsWeb.Layouts do
     </header>
     """
   end
+
+  defp doc_vfs_backend_label(:fskit), do: "FSKit"
+  defp doc_vfs_backend_label(:fuse), do: "FUSE"
+  defp doc_vfs_backend_label(_backend), do: doc_vfs_backend_label(Ecrits.Fuse.DocMount.backend())
 
   attr :current_scope, :map,
     required: true,

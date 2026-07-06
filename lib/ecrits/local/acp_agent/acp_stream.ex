@@ -747,7 +747,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
 
     cond do
       status.enabled? and vfs_mounted? ->
-        fuse_preamble(opts)
+        mounted_vfs_preamble(status, opts)
 
       status.enabled? ->
         unmounted_vfs_preamble(status, opts)
@@ -806,13 +806,13 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     """ <> legacy_doc_preamble(opts)
   end
 
-  # FUSE/VFS mode: documents are FILES. Only doc.open_doc is advertised as an MCP
+  # Mounted VFS mode: documents are FILES. Only doc.open_doc is advertised as an MCP
   # tool; read/find/edit happen with native shell tools over the projected IR file.
   # This matches the MCPServer tool gate (both key on `DocMount.enabled?()`), so
   # the agent is never told about a tool it can't call.
-  defp fuse_preamble(opts) do
+  defp mounted_vfs_preamble(status, opts) do
     """
-    [System] FUSE/VFS mode: documents are EDITABLE FILES, not opaque binaries.
+    [System] #{doc_vfs_backend_mode_label(status)} mode: documents are EDITABLE FILES, not opaque binaries.
     The ONLY MCP tool to call is `doc.open_doc {path}` (mount a document into
     the VFS). There is NO doc.read / doc.find / doc.context / doc.edit /
     doc.set / doc.save — do EVERYTHING ELSE
@@ -911,6 +911,9 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     Read-only questions: cat/grep and answer, do not edit. No fabrication.
     """ <> ultracode_keyword(opts)
   end
+
+  defp doc_vfs_backend_mode_label(%{backend: :fskit}), do: "FSKit/VFS"
+  defp doc_vfs_backend_mode_label(%{backend: :fuse}), do: "FUSE/VFS"
 
   defp legacy_doc_preamble(opts) do
     """
