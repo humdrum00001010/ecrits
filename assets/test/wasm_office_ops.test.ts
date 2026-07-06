@@ -7,7 +7,7 @@
 
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { rewriteOfficeOp, OFFICE_OPS, type OfficeEditorContext, type OfficeElement } from "./wasm_office_ops.ts"
+import { rewriteOfficeOp, OFFICE_OPS, type OfficeEditorContext, type OfficeElement } from "../js/wasm_office_ops.ts"
 
 // A mock editor ctx whose elements are addressed by ref; setTextRefFor collapses
 // a run ref (`…/r<n>`) to its paragraph, matching the real editor.

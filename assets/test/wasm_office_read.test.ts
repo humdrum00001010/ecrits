@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { officeReadRefCandidates, readOfficeElements } from "./wasm_office_read.ts"
-import type { OfficeElement } from "./wasm_office_ops.ts"
+import { officeReadRefCandidates, readOfficeElements } from "../js/wasm_office_read.ts"
+import type { OfficeElement } from "../js/wasm_office_ops.ts"
 
 describe("readOfficeElements", () => {
   const slideElements: OfficeElement[] = [

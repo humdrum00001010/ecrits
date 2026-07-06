@@ -1,6 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { MarkdownEditor } from "./markdown_editor.js"
+import { MarkdownEditor } from "../js/markdown_editor.js"
 
 function editor(value: string, start: number, end = start) {
   const el = {
