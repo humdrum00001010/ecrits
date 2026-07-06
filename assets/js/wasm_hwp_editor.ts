@@ -19,10 +19,9 @@
 //   server so a browser close doesn't lose work.
 //
 // IME: the hidden <textarea> proxy stays the OS IME target. Plain text arrives
-// via its `input` event (non-composing); Korean composition is rendered
-// IN-DOCUMENT (provisional region replaced on each compositionupdate, committed
-// on compositionend) — NOT a separate preview overlay — matching the proven
-// server-side ehwp UX.
+// via its `input` event (non-composing). Korean composition gets an immediate
+// transient DOM preview at the caret, then the WASM document/canvas is synced
+// after a paint; compositionend commits the final text into the model.
 //
 // The wasm-bindgen `--target web` glue exposes `init(wasmUrl)` plus the
 // `HwpDocument` class. The generated ES module is served directly from the
@@ -36,9 +35,15 @@ import { keyboardSubsystem } from "./wasm_hwp_keys.ts"
 
 const WASM_URL = "/assets/rhwp/rhwp_bg.wasm"
 const RHWP_JS_URL = "/assets/rhwp/rhwp.js"
-const LOCAL_EDITOR_COMMAND_EVENT = "ecrits:local-editor-command"
-const PREVIEW_AUTHORITY_EVENT = "ecrits:editor-preview-authority"
+import {SEL} from "./selectors.ts"
+import {
+  LOCAL_EDITOR_COMMAND_EVENT,
+  LOCAL_EDITOR_STATE_EVENT,
+  PREVIEW_AUTHORITY_EVENT,
+  PREVIEW_DELTA_EVENT,
+} from "./editor_events.ts"
 const HWP_IMAGE_DEFAULT_MAX_UNIT = 22_000
+const HWP_PICK_POINT_RECT_SIZE = 48
 
 // How long the doc must stay idle (no edits) before we export+snapshot bytes
 // to the server. Each edit is instant locally; persistence is debounced so we
@@ -49,6 +54,7 @@ const SNAPSHOT_IDLE_MS = 1500
 // load (every hook instance shares the same wasm memory + HwpDocument class).
 let wasmReady = null
 let HwpDocument = null
+const hwpScrollPositions = new Map<string, { top: number; left: number }>()
 function ensureWasm() {
   if (!wasmReady) {
     wasmReady = import(RHWP_JS_URL).then((module) => {
@@ -112,6 +118,29 @@ const translateCharProps = (props) => {
   for (const [k, v] of Object.entries(props)) {
     const spec = CHAR_PROP_SPEC[k]
     if (spec) out[spec[0]] = castCharProp(spec[1], v)
+    else out[k] = v
+  }
+  return out
+}
+
+// Paragraph-property twin of CHAR_PROP_SPEC: agent PascalCase → engine keys.
+// The engine's applyParaFormat reads lowercase keys (alignment, lineSpacing,
+// lineSpacingType — the rhwp-studio ParaProperties vocabulary); alignment
+// values pass through verbatim ('left'|'center'|'right'|'justify'|
+// 'distribute'|'split'). Mirrors rhwp.ex para handling on the server arm.
+const PARA_PROP_SPEC = {
+  Alignment:       ["alignment", "verbatim"],
+  alignment:       ["alignment", "verbatim"],
+  LineSpacing:     ["lineSpacing", "int"],
+  lineSpacing:     ["lineSpacing", "int"],
+  LineSpacingType: ["lineSpacingType", "verbatim"],
+}
+
+const translateParaProps = (props) => {
+  const out = {}
+  for (const [k, v] of Object.entries(props)) {
+    const spec = PARA_PROP_SPEC[k]
+    if (spec) out[spec[0]] = spec[1] === "int" ? Math.round(Number(v)) : v
     else out[k] = v
   }
   return out
@@ -197,12 +226,15 @@ const WasmHwpEditor = {
     //                     cellParaIndex, cellPath } | null,
     //             preferredX }   // sticky x for Up/Down vertical motion
     this.caret = null
-    // Active text selection (drag-select). null when there is no selection.
-    //   selection = { section, cell, anchor: {paragraph, offset},
-    //                 focus: {paragraph, offset} }
-    // anchor = where mousedown landed; focus = where the pointer is now. A
-    // selection collapses to a plain caret when anchor and focus coincide.
-    this.selection = null
+    // The active selection — a single tagged value, never more than one kind at
+    // once. null = caret only (no selection). Read via textSel()/cellSel().
+    //   { kind: "text",  section, cell, anchor: {paragraph, offset},
+    //                    focus: {paragraph, offset} }   // anchor=press, focus=now
+    //   { kind: "cells", section, parentParaIndex, controlIndex,
+    //                    anchor: {row, col}, focus: {row, col}, bboxes }
+    //                    // rectangular table cell block (rhwp-studio model);
+    //                    // set once a drag crosses into another cell of the table
+    this.sel = null
     // Local editor selection for a picture in normal edit mode. This paints the
     // resize handle but is deliberately not part of the chat/composer picker.
     this.localImagePick = null
@@ -217,6 +249,9 @@ const WasmHwpEditor = {
     // Korean IME provisional composition region currently live in the document.
     //   composing = { start, length }  (in the caret's paragraph/cell)
     this.composing = null
+    this.pendingCompositionText = null
+    this.compositionSyncQueued = false
+    this.compositionPreviewEl = null
     this.skipNextCompositionInput = null
     this.snapshotTimer = null
     this.snapshotSeq = 0
@@ -244,14 +279,19 @@ const WasmHwpEditor = {
     this.previewAuthorityDeferredCount = 0
     this.previewAuthorityLastPayload = null
     this.authoritativePreviewObjectUrl = null
+    this.scrollPersistTimer = null
+    this.pendingScrollPosition = null
 
-    this.imeProxy = this.el.querySelector("[data-role='local-hwp-ime-proxy']")
-    this.pageStack = this.el.querySelector("[data-role='local-hwp-pages']")
+    this.imeProxy = this.el.querySelector(SEL.hwpImeProxy)
+    this.pageStack = this.el.querySelector(SEL.hwpPages)
 
     this.documentId = this.el.dataset.documentId || this.el.dataset.localDocumentId
     this.format = this.el.dataset.localDocumentFormat || "hwp"
     this.mirror = this.el.dataset.editorMirror === "true"
-    this.el.__wasmHwpEditor = this
+    this.unbindElementPicker = null
+    if (!this.mirror) this.el.__wasmHwpEditor = this
+    this.onScroll = () => this.rememberScrollPosition()
+    this.el.addEventListener("scroll", this.onScroll, { passive: true })
 
     // Pre-warm the wasm module so the first `hwp_wasm_load` doesn't pay the
     // instantiation cost on the critical path.
@@ -345,10 +385,12 @@ const WasmHwpEditor = {
       },
       { root: this.el, rootMargin: "1200px 0px", threshold: 0 }
     )
-    this.unbindElementPicker = bindElementPickerTarget(this)
+    if (!this.mirror) this.unbindElementPicker = bindElementPickerTarget(this)
   },
 
   destroyed() {
+    this.rememberScrollPosition()
+    this.flushScrollPosition()
     if (this.io) this.io.disconnect()
     if (this.blink) clearInterval(this.blink)
     // Flush-before-detach: a doc switch destroys this hook (the editor element
@@ -364,12 +406,17 @@ const WasmHwpEditor = {
       try { this.pushSnapshot() } catch (_) { /* socket gone — nothing to flush to */ }
     }
     if (this.pickerHoverRaf) cancelAnimationFrame(this.pickerHoverRaf)
+    if (this.compositionPreviewEl) {
+      this.compositionPreviewEl.remove()
+      this.compositionPreviewEl = null
+    }
     if (this.authoritativePreviewObjectUrl) {
       try { URL.revokeObjectURL(this.authoritativePreviewObjectUrl) } catch (_) {}
       this.authoritativePreviewObjectUrl = null
     }
     window.removeEventListener("resize", this.onResize)
     window.removeEventListener(PREVIEW_AUTHORITY_EVENT, this.onPreviewAuthority)
+    this.el.removeEventListener("scroll", this.onScroll)
     this.el.removeEventListener("mousedown", this.onMouseDown)
     this.el.removeEventListener("dblclick", this.onDoubleClick)
     document.removeEventListener("mousemove", this.onMouseMove)
@@ -397,7 +444,94 @@ const WasmHwpEditor = {
 
       this.el.dataset.previewAuthorityState = "waiting"
       this.requestAuthoritativePreview(payload)
+      return
     }
+    // Tab switches patch this surface (hidden toggles) without remounting the
+    // hook — re-broadcast so the shared toolbar picks up THIS doc's state (the
+    // toolbar filters by document_id, so hidden editors emitting is harmless).
+    this.scheduleToolbarStateSync()
+  },
+
+  scrollPositionKey(url = null) {
+    return [
+      this.documentId,
+      this.el?.dataset?.documentPath,
+      url,
+      this.loadedUrl,
+      this.el?.dataset?.bytesUrl
+    ].find(value => typeof value === "string" && value.length > 0) || null
+  },
+
+  rememberScrollPosition(url = null) {
+    if (this.mirror || !this.el) return
+    const key = this.scrollPositionKey(url)
+    if (!key) return
+    const position = {
+      top: Math.max(0, Math.round(this.el.scrollTop || 0)),
+      left: Math.max(0, Math.round(this.el.scrollLeft || 0))
+    }
+    hwpScrollPositions.set(key, position)
+    if (hwpScrollPositions.size > 100) {
+      const oldest = hwpScrollPositions.keys().next().value
+      if (oldest) hwpScrollPositions.delete(oldest)
+    }
+    this.queueScrollPositionPersist(position)
+  },
+
+  restoreScrollPosition(url = null) {
+    if (this.mirror || !this.el) return
+    const key = this.scrollPositionKey(url)
+    const position = (key && hwpScrollPositions.get(key)) || this.serverScrollPosition()
+    if (!position) return
+
+    const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16))
+    raf(() => {
+      raf(() => {
+        if (!this.el || this.el.isConnected === false) return
+        this.el.scrollTop = position.top
+        this.el.scrollLeft = position.left
+        this.renderVisiblePages()
+      })
+    })
+  },
+
+  serverScrollPosition() {
+    if (!this.el) return null
+    const top = Number(this.el.dataset.scrollTop)
+    const left = Number(this.el.dataset.scrollLeft)
+    const hasTop = Number.isFinite(top) && top >= 0
+    const hasLeft = Number.isFinite(left) && left >= 0
+    if (!hasTop && !hasLeft) return null
+    return {
+      top: hasTop ? Math.round(top) : 0,
+      left: hasLeft ? Math.round(left) : 0
+    }
+  },
+
+  queueScrollPositionPersist(position) {
+    if (this.mirror || !this.el || typeof this.pushEvent !== "function") return
+    if (!this.el.dataset.documentPath) return
+    this.pendingScrollPosition = position
+    if (this.scrollPersistTimer) clearTimeout(this.scrollPersistTimer)
+    this.scrollPersistTimer = setTimeout(() => this.flushScrollPosition(), 150)
+  },
+
+  flushScrollPosition() {
+    if (this.scrollPersistTimer) {
+      clearTimeout(this.scrollPersistTimer)
+      this.scrollPersistTimer = null
+    }
+    const position = this.pendingScrollPosition
+    this.pendingScrollPosition = null
+    if (this.mirror || !this.el || !position || typeof this.pushEvent !== "function") return
+    const documentPath = this.el.dataset.documentPath
+    if (!documentPath) return
+    this.pushEvent("local_document.viewport_changed", {
+      document_path: documentPath,
+      document_id: this.documentId,
+      top: position.top,
+      left: position.left
+    })
   },
 
   handleLoadedPreviewHighlights(authorityPreviewLoad = false, payload = {}) {
@@ -459,7 +593,7 @@ const WasmHwpEditor = {
     let targetCount = 0
     let targetHookCount = 0
     const targetIds = []
-    for (const target of document.querySelectorAll("[data-role='local-hwp-editor'][data-editor-mirror='false']")) {
+    for (const target of document.querySelectorAll(SEL.hwpEditorUnmirrored)) {
       const id = target.dataset.documentId || target.dataset.localDocumentId
       if (id === this.documentId) {
         targetCount += 1
@@ -642,7 +776,7 @@ const WasmHwpEditor = {
     this.updatePreviewPatchInspection()
     this.renderPreviewPatchHighlight()
     if (!this.mirror) this.publishAuthoritativePreview(payload)
-    this.el.dispatchEvent(new CustomEvent("ecrits:editor-preview-delta", {
+    this.el.dispatchEvent(new CustomEvent(PREVIEW_DELTA_EVENT, {
       bubbles: true,
       detail: {
         document_id: this.documentId,
@@ -985,6 +1119,7 @@ const WasmHwpEditor = {
     // (Spurious re-pushes come from tree-refresh / fs-watcher / reconcile cycles.)
     // Reload only on a genuine document switch (a different URL).
     if (this.doc && this.loadedUrl === url && !force) return
+    if (this.loadedUrl && this.loadedUrl !== url) this.rememberScrollPosition(this.loadedUrl)
     try {
       await ensureWasm()
       const response = await fetch(url, { credentials: "same-origin" })
@@ -1012,13 +1147,14 @@ const WasmHwpEditor = {
 
       this.pageCount = this.doc.pageCount()
       this.caret = null
-      this.selection = null
+      this.sel = null
       this.localImagePick = null
       this.composing = null
       this.previewPatchHighlight = null
       if (!this.mirror) window.__rhwpDoc = this.doc
 
       this.buildPageStack()
+      this.restoreScrollPosition(url)
       this.renderVisiblePages()
       const authorityPreviewLoad = authority_preview === true || authorityPreview === true
       const handledHighlights = this.handleLoadedPreviewHighlights(authorityPreviewLoad, {
@@ -1036,6 +1172,9 @@ const WasmHwpEditor = {
       // actually loaded — the LiveView attaches the Session viewer on this
       // event (a tab whose editor failed to load must NOT capture doc.* routing).
       this.notifyViewerState(true)
+      // Seed the toolbar before the first click — with no caret yet the state
+      // sync probes the document start, so the size field isn't empty on open.
+      this.scheduleToolbarStateSync()
     } catch (error) {
       console.error("[wasm-hwp] load failed", error)
       this.notifyViewerState(false)
@@ -1110,7 +1249,7 @@ const WasmHwpEditor = {
     if (!this.doc) return
     const section = this.pageSection(index)
     if (!section) return
-    const canvas = section.querySelector("[data-role='ehwp-canvas']")
+    const canvas = section.querySelector(SEL.ehwpCanvas)
     if (!canvas) return
 
     // Render scale = devicePixelRatio so the canvas backing store matches
@@ -1122,7 +1261,7 @@ const WasmHwpEditor = {
     try {
       this.doc.renderPageToCanvas(index, canvas, dpr)
       // Keep the caret overlay's backing store in lockstep with the page canvas.
-      const overlay = section.querySelector("[data-role='ehwp-caret-overlay']")
+      const overlay = section.querySelector(SEL.ehwpCaretOverlay)
       if (overlay) {
         overlay.width = canvas.width
         overlay.height = canvas.height
@@ -1141,7 +1280,7 @@ const WasmHwpEditor = {
 
   pageSection(index) {
     return this.pageStack &&
-      this.pageStack.querySelector(`[data-role='local-hwp-page'][data-page-index='${index}']`)
+      this.pageStack.querySelector(`${SEL.hwpPage}[data-page-index='${index}']`)
   },
 
   // Render whatever page the caret currently sits on. After an edit reflows the
@@ -1168,6 +1307,14 @@ const WasmHwpEditor = {
     const { hit, pageIndex } = hitInfo
     window.__rhwpLastHit = hit
 
+    // A fresh press dismisses any prior selection (text or cell-block). Clear it
+    // (and wipe its overlay paint) BEFORE setCaretFromHit repaints, so the
+    // highlight doesn't get restored under the new caret.
+    if (this.sel) {
+      this.clearSelection()
+      this.clearSelectionOverlays()
+    }
+
     this.elementPickerEnabled = documentElementPickerEnabled()
     if (this.elementPickerEnabled) {
       event.preventDefault()
@@ -1176,7 +1323,7 @@ const WasmHwpEditor = {
       const pick = this.hwpPickFromHit(hit, pageIndex)
       // Toggle into the multi-select set; bindElementPickerTarget's picks
       // listener repaints every highlight (incl. removal).
-      appendPickedElementToComposer(pick)
+      if (pick) appendPickedElementToComposer(pick)
       return
     }
 
@@ -1239,9 +1386,8 @@ const WasmHwpEditor = {
   },
 
   // mousemove while the button is held: hit-test the current point and extend
-  // the selection from the drag anchor to the current (focus) offset. In picker
-  // mode (no drag) it instead tracks a DOM-inspector-style hover preview of the
-  // element under the cursor.
+  // the selection from the drag anchor to the current (focus) offset.
+  // Picker mode stays visually quiet until the user actually selects an element.
   onCanvasMouseMove(event) {
     if (!this.doc) return
     if (this.imageDrag) {
@@ -1250,6 +1396,8 @@ const WasmHwpEditor = {
       return
     }
     if (!this.dragSelect) {
+      // Picker mode (no drag in flight): track a DOM-inspector-style hover
+      // preview of the element under the cursor instead of extending a selection.
       if (this.elementPickerEnabled) this.queuePickerHover(event)
       return
     }
@@ -1264,6 +1412,16 @@ const WasmHwpEditor = {
     const { hit } = hitInfo
     if (hit.sectionIndex !== undefined && hit.sectionIndex !== this.dragSelect.section) return
 
+    // Table cell-block selection: once the drag leaves the anchor cell for
+    // another cell of the same (top-level) table, it selects the rectangular
+    // cell range instead of a text run. Once promoted it owns the drag.
+    if (this.updateCellBlockFromHit(hit)) {
+      if (this.caret) this.drawCaret(this.caret)
+      this.anchorProxy()
+      if (event.cancelable) event.preventDefault()
+      return
+    }
+
     const focus = {
       paragraph: hit.paragraphIndex !== undefined ? hit.paragraphIndex : 0,
       offset: hit.charOffset !== undefined ? hit.charOffset : 0
@@ -1277,7 +1435,8 @@ const WasmHwpEditor = {
     this.setCaretFromHit(hit, ds.pageIndex)
 
     if (ds.moved) {
-      this.selection = {
+      this.sel = {
+        kind: "text",
         section: ds.section,
         cell: ds.cell,
         anchor: { ...ds.anchor },
@@ -1302,6 +1461,12 @@ const WasmHwpEditor = {
     if (!this.dragSelect) return
     const ds = this.dragSelect
     this.dragSelect = null
+    if (this.cellSel()) {
+      // A cell-block selection was established during the drag; keep its
+      // highlight until the next press (mirrors the text-selection behaviour).
+      if (this.documentAdornmentPicks().length > 0) this.paintPickedHighlights()
+      return
+    }
     if (!ds.moved) {
       // Plain click — no drag — so leave just the caret (no selection).
       this.clearSelection()
@@ -1340,7 +1505,7 @@ const WasmHwpEditor = {
   // selection still extends to the nearest in-page offset.
   hitTestEvent(event, preferPage) {
     let section = event.target && event.target.closest
-      ? event.target.closest("[data-role='local-hwp-page']")
+      ? event.target.closest(SEL.hwpPage)
       : null
     let pageIndex = section ? Number(section.dataset.pageIndex) : preferPage
     if (section == null && preferPage != null) section = this.pageSection(preferPage)
@@ -1349,7 +1514,7 @@ const WasmHwpEditor = {
     if (typeof pageIndex !== "number" || Number.isNaN(pageIndex)) {
       pageIndex = Number(section.dataset.pageIndex)
     }
-    const canvas = section.querySelector("[data-role='ehwp-canvas']")
+    const canvas = section.querySelector(SEL.ehwpCanvas)
     if (!canvas) return null
 
     const rect = canvas.getBoundingClientRect()
@@ -1379,10 +1544,146 @@ const WasmHwpEditor = {
 
   // ─── Selection rendering ─────────────────────────────────────────────────
 
-  // Drop the active selection (state only; caller re-renders).
+  // Drop the active selection (any kind) — state only; caller re-renders.
   clearSelection() {
-    this.selection = null
+    this.sel = null
     window.__rhwpSelection = null
+    window.__rhwpCellSelection = null
+  },
+
+  // Typed views of the single `this.sel` value (null unless that kind is live).
+  textSel() {
+    return this.sel && this.sel.kind === "text" ? this.sel : null
+  },
+  cellSel() {
+    return this.sel && this.sel.kind === "cells" ? this.sel : null
+  },
+
+  // ─── Table cell-block selection ──────────────────────────────────────────
+  // A drag that crosses cell boundaries selects a rectangular range of CELLS
+  // (the rhwp-studio model). The engine owns the geometry: hitTest resolves the
+  // cell under the pointer, getCellInfo maps it to {row, col}, and
+  // getTableCellBboxes gives every cell rect to paint. We only keep the
+  // anchor/focus row-col and paint the union — no front-end hit-testing.
+
+  // Nested tables (cellPath length > 1) are out of scope for block selection;
+  // such drags fall back to normal in-cell text selection.
+  isNestedCell(cellPath) {
+    return Array.isArray(cellPath) && cellPath.length > 1
+  },
+
+  // The {row, col} of a top-level table cell, or null when the engine can't
+  // resolve it. Wraps the existing cellRowCol(target) lookup (which yields
+  // {row, col} with null fields on miss) into a strict integer pair.
+  cellGridPos(section, parentParaIndex, controlIndex, cellIndex) {
+    if (!Number.isInteger(cellIndex)) return null
+    const rc = this.cellRowCol({
+      section,
+      paragraph: parentParaIndex,
+      control: controlIndex,
+      cellIndex
+    })
+    return rc && Number.isInteger(rc.row) && Number.isInteger(rc.col) ? rc : null
+  },
+
+  // Drive the cell-block selection from a drag hit. Returns true once the drag
+  // is a cell-block gesture (promoted on first cross-cell move and sticky for
+  // the rest of the drag); false leaves the move to text drag-select.
+  updateCellBlockFromHit(hit) {
+    const ds = this.dragSelect
+    const anchorCell = ds && ds.cell
+    if (!anchorCell || this.isNestedCell(anchorCell.cellPath)) return false
+
+    // Is the pointer inside a cell of the SAME top-level table as the anchor?
+    const inSameTable =
+      hit.parentParaIndex !== undefined &&
+      Number.isInteger(hit.cellIndex) &&
+      hit.sectionIndex === ds.section &&
+      hit.parentParaIndex === anchorCell.parentParaIndex &&
+      hit.controlIndex === anchorCell.controlIndex &&
+      !this.isNestedCell(hit.cellPath)
+
+    const cs = this.cellSel()
+    if (!cs) {
+      // Promote only once the pointer enters a DIFFERENT cell of the table.
+      if (!inSameTable || hit.cellIndex === anchorCell.cellIndex) return false
+      const anchorRC = this.cellGridPos(
+        ds.section, anchorCell.parentParaIndex, anchorCell.controlIndex, anchorCell.cellIndex
+      )
+      const focusRC = this.cellGridPos(
+        ds.section, anchorCell.parentParaIndex, anchorCell.controlIndex, hit.cellIndex
+      )
+      if (!anchorRC || !focusRC) return false
+      // Replaces any in-cell text selection from the drag (one `this.sel`).
+      this.sel = {
+        kind: "cells",
+        section: ds.section,
+        parentParaIndex: anchorCell.parentParaIndex,
+        controlIndex: anchorCell.controlIndex,
+        anchor: anchorRC,
+        focus: focusRC,
+        bboxes: this.tableCellBboxes(ds.section, anchorCell.parentParaIndex, anchorCell.controlIndex)
+      }
+    } else if (inSameTable) {
+      // Extend the focus; strays outside the table keep the last focus.
+      const focusRC = this.cellGridPos(
+        ds.section, cs.parentParaIndex, cs.controlIndex, hit.cellIndex
+      )
+      if (focusRC) cs.focus = focusRC
+    }
+    this.renderSelection()
+    return true
+  },
+
+  tableCellBboxes(section, parentParaIndex, controlIndex) {
+    try {
+      const arr = JSON.parse(
+        this.doc.getTableCellBboxes(section, parentParaIndex, controlIndex) || "[]"
+      )
+      return Array.isArray(arr) ? arr : []
+    } catch (error) {
+      console.error("[wasm-hwp] getTableCellBboxes failed", error)
+      return []
+    }
+  },
+
+  // The sorted row/col rectangle currently covered by anchor..focus.
+  cellSelectRange() {
+    const { anchor, focus } = this.cellSel()
+    return {
+      startRow: Math.min(anchor.row, focus.row),
+      endRow: Math.max(anchor.row, focus.row),
+      startCol: Math.min(anchor.col, focus.col),
+      endCol: Math.max(anchor.col, focus.col)
+    }
+  },
+
+  // A cell (with its merge spans) overlaps the selected rectangle.
+  cellBboxInRange(b, range) {
+    const endRow = b.row + (b.rowSpan || 1) - 1
+    const endCol = b.col + (b.colSpan || 1) - 1
+    return (
+      b.row <= range.endRow && endRow >= range.startRow &&
+      b.col <= range.endCol && endCol >= range.startCol
+    )
+  },
+
+  // Paint the cell-block rects that fall on one page (the cells arm of
+  // paintSelectionOnPage; also used by drawCaret's blink-frame restore).
+  paintCellsOnPage(pageIndex) {
+    const cs = this.cellSel()
+    if (!cs || !Array.isArray(cs.bboxes)) return
+    const overlay = this.pageOverlay(pageIndex)
+    if (!overlay) return
+    const ctx = overlay.getContext("2d")
+    if (!ctx) return
+    const range = this.cellSelectRange()
+    const s = this.scale
+    ctx.fillStyle = "rgba(29, 78, 216, 0.28)" // matches the text-selection blue
+    for (const b of cs.bboxes) {
+      if (b.pageIndex !== pageIndex || !this.cellBboxInRange(b, range)) continue
+      ctx.fillRect(b.x * s, b.y * s, Math.max(1, b.w) * s, Math.max(1, b.h) * s)
+    }
   },
 
   // Ask the engine for the line-by-line rects of the current selection and paint
@@ -1390,61 +1691,57 @@ const WasmHwpEditor = {
   // overlay the caret uses). getSelectionRects returns page-coordinate rects
   // `[{pageIndex, x, y, width, height}, ...]`; we scale them to the overlay
   // backing store exactly like drawCaret does.
-  renderSelection() {
-    // Clear selection paint from every overlay we might have drawn on. Because a
-    // selection can span pages we clear the whole visible window, then the caret
-    // is redrawn by the caller.
-    this.clearSelectionOverlays()
-
-    const sel = this.selection
-    if (!sel) {
-      if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
-      return
-    }
-    // Collapsed selection => nothing to paint.
-    if (sel.anchor.paragraph === sel.focus.paragraph && sel.anchor.offset === sel.focus.offset) {
-      if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
-      return
-    }
-
-    // Normalize so start <= end in document order.
+  // Engine line-rects for a text selection: `[{pageIndex, x, y, width, height}]`,
+  // or [] when collapsed / unavailable. Body and in-cell selections both route
+  // here (the cell case uses getSelectionRectsInCell).
+  textSelectionRects(sel) {
+    if (sel.anchor.paragraph === sel.focus.paragraph && sel.anchor.offset === sel.focus.offset) return []
     const [start, end] = this.orderedSelection(sel)
-    window.__rhwpSelection = { section: sel.section, start, end, cell: sel.cell || null }
-
-    let rects
     try {
-      let raw
-      if (sel.cell) {
-        raw = this.doc.getSelectionRectsInCell(
-          sel.section, sel.cell.parentParaIndex, sel.cell.controlIndex,
-          sel.cell.cellIndex, start.paragraph, start.offset, end.paragraph, end.offset
-        )
-      } else {
-        raw = this.doc.getSelectionRects(
-          sel.section, start.paragraph, start.offset, end.paragraph, end.offset
-        )
-      }
-      rects = raw ? JSON.parse(raw) : []
+      const raw = sel.cell
+        ? this.doc.getSelectionRectsInCell(
+            sel.section, sel.cell.parentParaIndex, sel.cell.controlIndex,
+            sel.cell.cellIndex, start.paragraph, start.offset, end.paragraph, end.offset)
+        : this.doc.getSelectionRects(
+            sel.section, start.paragraph, start.offset, end.paragraph, end.offset)
+      const rects = raw ? JSON.parse(raw) : []
+      return Array.isArray(rects) ? rects : []
     } catch (error) {
       console.error("[wasm-hwp] getSelectionRects failed", error)
-      if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
-      return
+      return []
     }
-    window.__rhwpSelectionRects = rects
-    if (!Array.isArray(rects) || rects.length === 0) {
-      if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
-      return
-    }
+  },
 
-    const s = this.scale
-    for (const r of rects) {
-      const overlay = this.pageOverlay(r.pageIndex)
-      if (!overlay) continue
-      const ctx = overlay.getContext("2d")
-      if (!ctx) continue
-      ctx.fillStyle = "rgba(29, 78, 216, 0.28)" // matches the caret blue
-      ctx.fillRect(r.x * s, r.y * s, Math.max(1, r.width) * s, Math.max(1, r.height) * s)
+  // Repaint the active selection — text OR cell-block — across every page it
+  // touches, publish the matching window.__rhwp* globals, then restore the agent
+  // preview-patch highlight. Per-page painting is delegated to
+  // paintSelectionOnPage so the caret-blink restore shares one implementation.
+  renderSelection() {
+    this.clearSelectionOverlays()
+    window.__rhwpSelection = null
+    window.__rhwpCellSelection = null
+    window.__rhwpSelectionRects = null
+
+    const pages = new Set()
+    const cs = this.cellSel()
+    const ts = this.textSel()
+    if (cs) {
+      const range = this.cellSelectRange()
+      window.__rhwpCellSelection = {
+        section: cs.section, parentParaIndex: cs.parentParaIndex,
+        controlIndex: cs.controlIndex, range
+      }
+      for (const b of cs.bboxes || []) if (this.cellBboxInRange(b, range)) pages.add(b.pageIndex)
+    } else if (ts) {
+      const rects = this.textSelectionRects(ts)
+      if (rects.length) {
+        const [start, end] = this.orderedSelection(ts)
+        window.__rhwpSelection = { section: ts.section, start, end, cell: ts.cell || null }
+        window.__rhwpSelectionRects = rects
+        for (const r of rects) pages.add(r.pageIndex)
+      }
     }
+    for (const page of pages) this.paintSelectionOnPage(page)
     if (this.previewPatchHighlight) this.paintPreviewPatchHighlightPages()
   },
 
@@ -1452,7 +1749,7 @@ const WasmHwpEditor = {
   // page stack so a moving selection doesn't leave streaks behind.
   clearSelectionOverlays() {
     if (!this.pageStack) return
-    const overlays = this.pageStack.querySelectorAll("[data-role='ehwp-caret-overlay']")
+    const overlays = this.pageStack.querySelectorAll(SEL.ehwpCaretOverlay)
     for (const overlay of overlays) {
       const ctx = overlay.getContext("2d")
       if (ctx) ctx.clearRect(0, 0, overlay.width, overlay.height)
@@ -1461,7 +1758,7 @@ const WasmHwpEditor = {
 
   pageOverlay(index) {
     const section = this.pageSection(index)
-    return section ? section.querySelector("[data-role='ehwp-caret-overlay']") : null
+    return section ? section.querySelector(SEL.ehwpCaretOverlay) : null
   },
 
   paintPreviewPatchHighlightPages() {
@@ -1480,16 +1777,17 @@ const WasmHwpEditor = {
     return before ? [a, f] : [f, a]
   },
 
-  // True when a non-collapsed selection is active.
+  // True when a non-collapsed TEXT selection is active (cell-block selections
+  // are not "text" for copy/delete/format purposes — same as before the merge).
   hasSelection() {
-    const sel = this.selection
+    const sel = this.textSel()
     return !!sel &&
       !(sel.anchor.paragraph === sel.focus.paragraph && sel.anchor.offset === sel.focus.offset)
   },
 
   // Drop the selection highlight and repaint the overlays (keeps the caret).
   collapseSelection() {
-    if (!this.selection) return
+    if (!this.sel) return
     this.clearSelection()
     this.clearSelectionOverlays()
     if (this.caret) this.drawCaret(this.caret)
@@ -1497,7 +1795,7 @@ const WasmHwpEditor = {
 
   selectedText() {
     if (!this.hasSelection() || !this.doc) return ""
-    const sel = this.selection
+    const sel = this.textSel()
     const [start, end] = this.orderedSelection(sel)
     const chunks = []
     for (let paragraph = start.paragraph; paragraph <= end.paragraph; paragraph++) {
@@ -1534,11 +1832,65 @@ const WasmHwpEditor = {
       case "italic":
         this.hwpToolbarToggleCharProp("Italic", "italic")
         break
+      case "underline":
+        this.hwpToolbarToggleCharProp("Underline", "underline")
+        break
+      case "strikethrough":
+        this.hwpToolbarToggleCharProp("Strikethrough", "strikethrough")
+        break
+      case "font-size-set":
+        if (Number.isFinite(Number(detail.size)) && Number(detail.size) > 0) {
+          this.hwpToolbarApplyProps({ FontSize: Number(detail.size) })
+        }
+        break
+      case "text-color":
+        if (detail.color) this.hwpToolbarApplyProps({ TextColor: detail.color })
+        break
+      case "highlight":
+        // shadeColor is the engine's own key (no spec entry needed — unknown
+        // keys pass through translateCharProps verbatim, mirroring studio).
+        if (detail.color) this.hwpToolbarApplyProps({ shadeColor: detail.color })
+        break
+      case "align-left":
+      case "align-center":
+      case "align-right":
+      case "align-justify":
+        this.hwpToolbarAlign(detail.command.slice("align-".length))
+        break
       case "image":
         this.hwpToolbarImage(detail)
         break
       default:
         break
+    }
+  },
+
+  // Paragraph alignment over the selection's paragraphs (or the caret
+  // paragraph). Char refs double as para refs — the para branch of applySetOne
+  // only reads section/paragraph/cell — but must be DEDUPED per paragraph
+  // (a multi-run selection yields one char ref per paragraph already).
+  hwpToolbarAlign(alignment) {
+    const seen = new Set()
+    const refs = this.hwpToolbarCharRefs().filter((ref) => {
+      const key = JSON.stringify([ref.section, ref.paragraph, ref.cell || null])
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    if (!refs.length) return
+
+    let applied = 0
+    for (const ref of refs) {
+      const result = this.applySetOne(ref, { kind: "para", Alignment: alignment })
+      if (result && result.error) {
+        console.warn("[wasm-hwp] toolbar align failed", result.error)
+      } else {
+        applied++
+      }
+    }
+    if (applied > 0) {
+      this.finishAgentEdit({})
+      this.scheduleToolbarStateSync()
     }
   },
 
@@ -1577,7 +1929,10 @@ const WasmHwpEditor = {
         applied++
       }
     }
-    if (applied > 0) this.finishAgentEdit({})
+    if (applied > 0) {
+      this.finishAgentEdit({})
+      this.scheduleToolbarStateSync()
+    }
   },
 
   hwpToolbarCharPropEnabled(ref, engineKey) {
@@ -1646,7 +2001,7 @@ const WasmHwpEditor = {
 
   hwpToolbarCharRefs() {
     if (this.hasSelection()) {
-      const sel = this.selection
+      const sel = this.textSel()
       const [start, end] = this.orderedSelection(sel)
       const refs = []
 
@@ -1703,11 +2058,11 @@ const WasmHwpEditor = {
   hwpToolbarViewportRef() {
     if (!this.doc) return null
     const hostRect = this.el.getBoundingClientRect()
-    for (const node of Array.from(this.el.querySelectorAll("[data-role='local-hwp-page']"))) {
+    for (const node of Array.from(this.el.querySelectorAll(SEL.hwpPage))) {
       const pageEl = node as any
       const r = pageEl.getBoundingClientRect()
       if (r.bottom <= hostRect.top + 8 || r.top >= hostRect.bottom) continue
-      const canvas = pageEl.querySelector("[data-role='ehwp-canvas']")
+      const canvas = pageEl.querySelector(SEL.ehwpCanvas)
       if (!canvas) continue
       const pageIndex = Number(pageEl.dataset.pageIndex)
       if (!Number.isFinite(pageIndex)) continue
@@ -1738,7 +2093,22 @@ const WasmHwpEditor = {
         cellIndex: cell.cellIndex,
         cellParaIndex: paragraph
       }
-      if (cell.cellPath) ref.cellPath = cell.cellPath
+      // Carry a cellPath ONLY for genuinely nested cells, and rebuild its last
+      // hop for THIS paragraph. Copying the selection's path verbatim poisoned
+      // parseRef: its cellPath grammar reads `paragraph` as the BODY parent and
+      // trusts the last hop's cellParaIndex, so a stale anchor path made every
+      // toolbar format on textbox/cell selections resolve to a nonexistent
+      // paragraph ("셀 문단을 찾을 수 없음") while single-level flat cell refs
+      // resolve perfectly without a path.
+      if (Array.isArray(cell.cellPath) && cell.cellPath.length > 1) {
+        const last = { ...cell.cellPath[cell.cellPath.length - 1], cellParaIndex: paragraph }
+        ref.cellPath = [...cell.cellPath.slice(0, -1), last]
+        ref.cell.cellPath = ref.cellPath
+        // parseRef's cellPath grammar reads `paragraph` as the BODY parent; the
+        // cell helpers never read ref.paragraph (they take the inner paragraph
+        // as an explicit argument), so aligning it is safe.
+        ref.paragraph = cell.parentParaIndex
+      }
     }
     return ref
   },
@@ -1774,7 +2144,7 @@ const WasmHwpEditor = {
   // selection. The engine returns the collapse point `{paraIdx, charOffset}`.
   deleteSelection() {
     if (!this.hasSelection()) return
-    const sel = this.selection
+    const sel = this.textSel()
     const [start, end] = this.orderedSelection(sel)
     const c = this.caret
     try {
@@ -1852,6 +2222,9 @@ const WasmHwpEditor = {
     this.caretBlinkOn = true
     this.drawCaret(this.caret)
     this.anchorProxy()
+    // A click is a caret move without a refreshCursorRect (the hit already
+    // carries the rect) — sync the toolbar face/toggles here as well.
+    this.scheduleToolbarStateSync()
   },
 
   // One engine call resolves the WHOLE hit: footnote-marker → containing control
@@ -1863,13 +2236,16 @@ const WasmHwpEditor = {
   hwpPick(hit, pageIndex) {
     if (!this.doc || hit.x === undefined || hit.y === undefined) return null
     let pick
-    try {
-      pick = JSON.parse(this.doc.pickAtPoint(pageIndex, hit.x, hit.y))
-    } catch (_) {
-      pick = null
+    if (typeof this.doc.pickAtPoint === "function") {
+      try {
+        pick = JSON.parse(this.doc.pickAtPoint(pageIndex, hit.x, hit.y))
+      } catch (_) {
+        pick = null
+      }
     }
     const picturePick = this.hwpPicturePickFromLayout(hit, pageIndex)
     if (picturePick) return picturePick
+    if (!pick) pick = this.hwpPickFromHitTest(hit, pageIndex)
     if (!pick) return null
     if (pick.type === "cell") {
       const r = pick.ref
@@ -1887,6 +2263,106 @@ const WasmHwpEditor = {
       }
     }
     return pick
+  },
+
+  hwpPickFromHitTest(hit, pageIndex) {
+    const section = Number(hit.sectionIndex ?? hit.section ?? 0)
+    const paragraph = Number(hit.paragraphIndex ?? hit.paragraph)
+    if (!Number.isInteger(section) || !Number.isInteger(paragraph)) return null
+
+    if (hit.cellIndex !== undefined) {
+      const parentParaIndex = Number(hit.parentParaIndex)
+      const controlIndex = Number(hit.controlIndex)
+      const cellIndex = Number(hit.cellIndex)
+      const cellParaIndex = Number(hit.cellParaIndex ?? 0)
+      if (![parentParaIndex, controlIndex, cellIndex, cellParaIndex].every(Number.isInteger)) return null
+      const cellPath = this.normalizeCellPath(hit.cellPath) || null
+
+      return {
+        type: "cell",
+        ref: {
+          section,
+          parentParaIndex,
+          controlIndex,
+          cellIndex,
+          cellParaIndex,
+          cellPath
+        },
+        rects: this.hwpCellPickRects(section, parentParaIndex, controlIndex, cellIndex, pageIndex)
+      }
+    }
+
+    const rects = this.hwpParagraphPickRects(section, paragraph, pageIndex)
+
+    return {
+      type: "paragraph",
+      ref: {
+        section,
+        paragraph,
+        offset: Number.isInteger(Number(hit.charOffset)) ? Number(hit.charOffset) : 0
+      },
+      rects: rects.length > 0 ? rects : this.hwpPointPickRect(hit, pageIndex)
+    }
+  },
+
+  hwpPointPickRect(hit, pageIndex) {
+    const x = Number(hit && hit.x)
+    const y = Number(hit && hit.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return []
+    const size = HWP_PICK_POINT_RECT_SIZE
+    return [{
+      pageIndex,
+      x: Math.max(0, x - size / 2),
+      y: Math.max(0, y - size / 2),
+      width: size,
+      height: size,
+      fallbackPoint: true
+    }]
+  },
+
+  hwpParagraphPickRects(section, paragraph, pageIndex) {
+    let len = 0
+    try { len = this.paragraphLength(section, paragraph) } catch (_) { len = 0 }
+    if (!(len > 0) || !this.doc || typeof this.doc.getSelectionRects !== "function") return []
+    try {
+      const raw = JSON.parse(this.doc.getSelectionRects(section, paragraph, 0, paragraph, len) || "[]")
+      if (!Array.isArray(raw)) return []
+      return raw
+        .map(rect => this.normalizeHwpPickRect(rect, pageIndex))
+        .filter(Boolean)
+    } catch (_) {
+      return []
+    }
+  },
+
+  hwpCellPickRects(section, parentParaIndex, controlIndex, cellIndex, pageIndex) {
+    if (!this.doc || typeof this.doc.getTableCellBboxes !== "function") return []
+    try {
+      const raw = JSON.parse(this.doc.getTableCellBboxes(section, parentParaIndex, controlIndex, pageIndex) || "[]")
+      if (!Array.isArray(raw)) return []
+      const box = raw.find(rect => Number(rect.cellIdx ?? rect.cellIndex) === Number(cellIndex))
+      const normalized = box ? this.normalizeHwpPickRect(box, pageIndex) : null
+      return normalized ? [normalized] : []
+    } catch (_) {
+      return []
+    }
+  },
+
+  normalizeHwpPickRect(rect, pageIndex) {
+    if (!rect) return null
+    const x = Number(rect.x ?? 0)
+    const y = Number(rect.y ?? 0)
+    const width = Number(rect.width ?? rect.w ?? 0)
+    const height = Number(rect.height ?? rect.h ?? 0)
+    if (!(width > 0 && height > 0)) return null
+    const page = Number(rect.pageIndex ?? pageIndex)
+    return {
+      pageIndex: Number.isInteger(page) ? page : pageIndex,
+      x,
+      y,
+      width,
+      height
+    }
   },
 
   hwpPicturePickFromLayout(hit, pageIndex) {
@@ -1916,9 +2392,15 @@ const WasmHwpEditor = {
       const paragraph = Number(c.paraIdx ?? c.paragraph)
       const controlIndex = Number(c.controlIdx ?? c.controlIndex ?? c.control)
       if (![section, paragraph, controlIndex].every(Number.isInteger)) continue
+      const cellPath = this.normalizeCellPath(c.cellPath ?? c.cell_path)
+      const cellPathJson = cellPath ? JSON.stringify(cellPath) : null
 
       try {
-        this.doc.getPictureProperties(section, paragraph, controlIndex)
+        if (cellPathJson) {
+          this.doc.getCellPicturePropertiesByPath(section, paragraph, cellPathJson, controlIndex)
+        } else {
+          this.doc.getPictureProperties(section, paragraph, controlIndex)
+        }
       } catch (_) {
         continue
       }
@@ -1927,6 +2409,7 @@ const WasmHwpEditor = {
         section,
         paragraph,
         controlIndex,
+        cellPath,
         bbox: { pageIndex, x, y, width: w, height: h }
       }
     }
@@ -1943,7 +2426,9 @@ const WasmHwpEditor = {
     const element = this.findHwpControlElement(section, paragraph, controlIndex)
     const ref = element && element.ref
       ? element.ref
-      : { section, paragraph, control: controlIndex, type: "picture" }
+      : control.cellPath
+        ? this.pictureCellRef(section, paragraph, controlIndex, control.cellPath)
+        : { section, paragraph, control: controlIndex, type: "picture" }
     const type = (element && element.type) || "picture"
     const bbox = control.bbox || {}
     const rect = {
@@ -1959,6 +2444,26 @@ const WasmHwpEditor = {
       ref,
       rects: rect.width > 0 && rect.height > 0 ? [rect] : [],
       controlIndex
+    }
+  },
+
+  pictureCellRef(section, paragraph, controlIndex, cellPath) {
+    const path = this.normalizeCellPath(cellPath)
+    if (!path) return { section, paragraph, control: controlIndex, type: "picture" }
+    const last = path[path.length - 1]
+    return {
+      section,
+      paragraph,
+      control: controlIndex,
+      type: "picture",
+      cellPath: path,
+      cell: {
+        parentParaIndex: paragraph,
+        controlIndex: path[0].controlIndex,
+        cellIndex: last.cellIndex,
+        cellParaIndex: last.cellParaIndex,
+        cellPath: path
+      }
     }
   },
 
@@ -2350,6 +2855,7 @@ const WasmHwpEditor = {
   },
 
   currentDocumentPicks() {
+    if (this.mirror) return []
     const picker = window.EcritsDocumentElementPicker
     const picks = (picker && picker.picks) || []
     const docPath = this.el.dataset.documentPath || ""
@@ -2357,6 +2863,7 @@ const WasmHwpEditor = {
   },
 
   agentSelectionPicks() {
+    if (this.mirror) return []
     const docPath = this.el.dataset.documentPath || ""
     const pick = this.localImagePick
     if (!pick || pick.document !== docPath) return []
@@ -2402,9 +2909,8 @@ const WasmHwpEditor = {
     return picks
   },
 
-  // Paint the pick highlights + hover preview that fall on ONE page's overlay,
-  // without clearing it (the caller owns the clear). Solid indigo for picks,
-  // dashed for the hover preview.
+  // Paint the selected pick highlights that fall on ONE page's overlay,
+  // without clearing it (the caller owns the clear).
   paintAdornmentsOnPage(pageIndex) {
     const overlay = this.pageOverlay(pageIndex)
     if (!overlay) return
@@ -2453,17 +2959,32 @@ const WasmHwpEditor = {
       }
     }
 
+    // Live hover preview (picker mode only): ONE clearly-visible box GATHERED over
+    // the whole element under the cursor — the union of its rects on this page,
+    // framed with a little padding. A dashed outline marks it as an un-committed
+    // preview vs a picked element's solid box. (The old per-line 0.08 fill was too
+    // faint to read as a hover box over text.)
     const hover = this.elementPickerEnabled ? this.pickerHover : null
     if (hover) {
+      let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity
       for (const rect of hover.rects || []) {
         if ((rect.pageIndex ?? 0) !== pageIndex) continue
+        x1 = Math.min(x1, rect.x)
+        y1 = Math.min(y1, rect.y)
+        x2 = Math.max(x2, rect.x + (rect.width || 0))
+        y2 = Math.max(y2, rect.y + (rect.height || 0))
+      }
+      if (x2 > x1 && y2 > y1) {
+        const pad = 2
+        const bx = (x1 - pad) * s, by = (y1 - pad) * s
+        const bw = (x2 - x1 + pad * 2) * s, bh = (y2 - y1 + pad * 2) * s
         ctx.save()
-        ctx.fillStyle = "rgba(99, 102, 241, 0.08)"
-        ctx.strokeStyle = "rgba(79, 70, 229, 0.9)"
-        ctx.lineWidth = Math.max(1.5, s)
+        ctx.fillStyle = "rgba(99, 102, 241, 0.18)"
+        ctx.strokeStyle = "rgba(79, 70, 229, 0.95)"
+        ctx.lineWidth = Math.max(2, 1.5 * s)
         ctx.setLineDash([6 * s, 4 * s])
-        ctx.fillRect(rect.x * s, rect.y * s, rect.width * s, rect.height * s)
-        ctx.strokeRect(rect.x * s, rect.y * s, rect.width * s, rect.height * s)
+        ctx.fillRect(bx, by, bw, bh)
+        ctx.strokeRect(bx, by, bw, bh)
         ctx.restore()
       }
     }
@@ -2488,7 +3009,7 @@ const WasmHwpEditor = {
       return
     }
     const overPage = event.target && event.target.closest
-      ? event.target.closest("[data-role='local-hwp-page']")
+      ? event.target.closest(SEL.hwpPage)
       : null
     if (!overPage) {
       this.setPickerHover(null)
@@ -2507,12 +3028,21 @@ const WasmHwpEditor = {
       this.setPickerHover(null)
       return
     }
+    // Preview ONLY geometry the engine actually resolved. hwpPick synthesizes a
+    // fixed-size point-square (fallbackPoint) when the native rects come back
+    // empty — hovering whitespace / a zero-length or non-text hit. Painting that
+    // reads as a "false hover": a box floating off the real element. Drop it and
+    // show nothing rather than a rect the document never had.
+    const rects = (pick.rects || [])
+      .filter(rect => rect && !rect.fallbackPoint)
+      .map(rect => ({ ...rect, pageIndex: rect.pageIndex ?? pageIndex }))
+    if (rects.length === 0) {
+      this.setPickerHover(null)
+      return
+    }
     const key = JSON.stringify({ type: pick.type, ref: pick.ref, control: pick.controlIndex })
     if (this.pickerHover && this.pickerHover.key === key) return
-    this.setPickerHover({
-      key,
-      rects: (pick.rects || []).map(r => ({ ...r, pageIndex: r.pageIndex ?? pageIndex }))
-    })
+    this.setPickerHover({ key, rects })
   },
 
   setPickerHover(hover) {
@@ -2559,6 +3089,81 @@ const WasmHwpEditor = {
     } catch (error) {
       console.error("[wasm-hwp] getCursorRect failed", error)
     }
+    this.scheduleToolbarStateSync()
+  },
+
+  // ── Toolbar state reflection (the rhwp-studio 'cursor-format-changed' UX) ──
+  // After the caret settles, read the char + para properties AT the caret and
+  // broadcast them so the quick toolbar can light up B/I/U/S and the active
+  // alignment. rAF-coalesced: a burst of caret moves reads the engine once.
+  scheduleToolbarStateSync() {
+    if (this.mirror || this.toolbarStateSyncQueued) return
+    this.toolbarStateSyncQueued = true
+    const run = () => {
+      if (!this.toolbarStateSyncQueued) return
+      this.toolbarStateSyncQueued = false
+      this.emitToolbarState()
+    }
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(run)
+      // rAF never fires while the tab is backgrounded/occluded — without this
+      // twin the queued flag sticks and ALL later syncs are swallowed.
+      setTimeout(run, 120)
+    } else {
+      setTimeout(run, 0)
+    }
+  },
+
+  emitToolbarState() {
+    if (!this.doc) return
+    // No caret yet (fresh open): probe the document start so the toolbar isn't
+    // blank until the first click.
+    const c = this.caret || { section: 0, paragraph: 0, offset: 0, cell: null, note: null }
+    // Probe just BEFORE the caret (the run the next keystroke continues), the
+    // same offset rule the toggle buttons use.
+    const offset = Math.max(0, c.offset > 0 ? c.offset - 1 : 0)
+    let charProps = {}
+    let paraProps = {}
+    try {
+      const raw = c.cell
+        ? this.doc.getCellCharPropertiesAt(
+            c.section, c.cell.parentParaIndex, c.cell.controlIndex,
+            c.cell.cellIndex, c.cell.cellParaIndex, offset
+          )
+        : this.doc.getCharPropertiesAt(c.section, c.paragraph, offset)
+      charProps = typeof raw === "string" ? JSON.parse(raw || "{}") : (raw || {})
+    } catch (_) {}
+    try {
+      let raw = null
+      if (c.cell && typeof this.doc.getCellParaPropertiesAt === "function") {
+        // Table-cell / textbox caret — most Korean official documents keep
+        // their body inside cells, so the alignment face must reflect these too.
+        raw = this.doc.getCellParaPropertiesAt(
+          c.section, c.cell.parentParaIndex, c.cell.controlIndex,
+          c.cell.cellIndex, c.cell.cellParaIndex
+        )
+      } else if (!c.cell && typeof this.doc.getParaPropertiesAt === "function") {
+        raw = this.doc.getParaPropertiesAt(c.section, c.paragraph)
+      }
+      if (raw != null) {
+        paraProps = typeof raw === "string" ? JSON.parse(raw || "{}") : (raw || {})
+      }
+    } catch (_) {}
+
+    document.dispatchEvent(new CustomEvent(LOCAL_EDITOR_STATE_EVENT, {
+      detail: {
+        document_id: this.documentId,
+        bold: charProps.bold === true,
+        italic: charProps.italic === true,
+        underline: charProps.underline === true,
+        strikethrough: charProps.strikethrough === true,
+        alignment: paraProps.alignment || null,
+        // Engine stores 1/100pt; the toolbar size field displays points.
+        font_size_pt: Number.isFinite(Number(charProps.fontSize)) && Number(charProps.fontSize) > 0
+          ? Number(charProps.fontSize) / 100
+          : null
+      }
+    }))
   },
 
   // Draw the blinking caret on the page's overlay canvas, in page coords scaled
@@ -2568,7 +3173,7 @@ const WasmHwpEditor = {
     if (!rect) return
     const section = this.pageSection(rect.pageIndex)
     if (!section) return
-    const overlay = section.querySelector("[data-role='ehwp-caret-overlay']")
+    const overlay = section.querySelector(SEL.ehwpCaretOverlay)
     if (!overlay) return
     const ctx = overlay.getContext("2d")
     if (!ctx) return
@@ -2577,10 +3182,13 @@ const WasmHwpEditor = {
     // The caret, the selection highlight AND the picker adornments share this
     // overlay; clearing it for the caret blink would wipe them, so repaint
     // both before the caret.
-    if (this.selection) this.paintSelectionOnPage(rect.pageIndex)
+    if (this.sel) this.paintSelectionOnPage(rect.pageIndex)
     this.paintPreviewPatchHighlightOnPage(rect.pageIndex)
     this.paintSavedEditHighlightsOnPage(rect.pageIndex)
     this.paintAdornmentsOnPage(rect.pageIndex)
+    // While a cell-block is selected the caret bar is hidden (the block IS the
+    // selection); only its highlight is repainted above.
+    if (this.cellSel()) return
     if (!this.caretBlinkOn) return
     const s = this.scale
     ctx.fillStyle = "#1d4ed8"
@@ -2590,30 +3198,12 @@ const WasmHwpEditor = {
   // Paint just the selection rects that fall on `pageIndex` (used by drawCaret to
   // restore the highlight after it clears the shared overlay for a blink frame).
   paintSelectionOnPage(pageIndex) {
-    const sel = this.selection
-    if (!sel) return
-    if (sel.anchor.paragraph === sel.focus.paragraph && sel.anchor.offset === sel.focus.offset) {
-      return
-    }
-    const [start, end] = this.orderedSelection(sel)
-    let rects
-    try {
-      let raw
-      if (sel.cell) {
-        raw = this.doc.getSelectionRectsInCell(
-          sel.section, sel.cell.parentParaIndex, sel.cell.controlIndex,
-          sel.cell.cellIndex, start.paragraph, start.offset, end.paragraph, end.offset
-        )
-      } else {
-        raw = this.doc.getSelectionRects(
-          sel.section, start.paragraph, start.offset, end.paragraph, end.offset
-        )
-      }
-      rects = raw ? JSON.parse(raw) : []
-    } catch (_) {
-      return
-    }
-    if (!Array.isArray(rects)) return
+    const cs = this.cellSel()
+    if (cs) { this.paintCellsOnPage(pageIndex); return }
+    const ts = this.textSel()
+    if (!ts) return
+    const rects = this.textSelectionRects(ts)
+    if (!rects.length) return
     const overlay = this.pageOverlay(pageIndex)
     if (!overlay) return
     const ctx = overlay.getContext("2d")
@@ -2633,17 +3223,77 @@ const WasmHwpEditor = {
     const rect = this.caret.cursorRect
     const section = this.pageSection(rect.pageIndex)
     if (!section) return
-    const canvas = section.querySelector("[data-role='ehwp-canvas']")
+    const canvas = section.querySelector(SEL.ehwpCanvas)
     if (!canvas) return
     const cr = canvas.getBoundingClientRect()
     const hostRect = this.el.getBoundingClientRect()
     // page units -> CSS px within the page box.
-    const cssPerPage = cr.width / (canvas.width / this.scale)
+    const scale = Number.isFinite(this.scale) && this.scale > 0 ? this.scale : 1
+    const cssPerPage = cr.width / (canvas.width / scale)
     const left = cr.left - hostRect.left + this.el.scrollLeft + rect.x * cssPerPage
     const top = cr.top - hostRect.top + this.el.scrollTop + rect.y * cssPerPage
     this.imeProxy.style.left = `${Math.round(left)}px`
     this.imeProxy.style.top = `${Math.round(top)}px`
     this.imeProxy.style.height = `${Math.max(12, Math.round((rect.height || 16) * cssPerPage))}px`
+    this.syncCompositionPreviewPosition()
+  },
+
+  ensureCompositionPreviewEl() {
+    if (this.compositionPreviewEl && this.compositionPreviewEl.isConnected) {
+      return this.compositionPreviewEl
+    }
+    if (!this.el || typeof document === "undefined" || !document.createElement) return null
+    const el = document.createElement("span")
+    el.dataset.role = "local-hwp-ime-preview"
+    el.hidden = true
+    el.style.cssText = [
+      "position:absolute",
+      "left:0",
+      "top:0",
+      "z-index:35",
+      "pointer-events:none",
+      "white-space:pre",
+      "color:#111827",
+      "background:transparent",
+      "font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+      "font-size:16px",
+      "line-height:16px",
+      "text-shadow:0 0 1px rgba(255,255,255,0.9)",
+    ].join(";")
+    this.el.appendChild(el)
+    this.compositionPreviewEl = el
+    return el
+  },
+
+  showCompositionPreview(text) {
+    const value = String(text || "")
+    if (!value) {
+      this.hideCompositionPreview()
+      return
+    }
+    const el = this.ensureCompositionPreviewEl()
+    if (!el) return
+    el.textContent = value
+    el.hidden = false
+    this.anchorProxy()
+    this.syncCompositionPreviewPosition()
+  },
+
+  hideCompositionPreview() {
+    if (!this.compositionPreviewEl) return
+    this.compositionPreviewEl.textContent = ""
+    this.compositionPreviewEl.hidden = true
+  },
+
+  syncCompositionPreviewPosition() {
+    const preview = this.compositionPreviewEl
+    if (!preview || preview.hidden || !this.imeProxy) return
+    const height = Number.parseFloat(this.imeProxy.style.height || "16") || 16
+    preview.style.left = this.imeProxy.style.left || "0px"
+    preview.style.top = this.imeProxy.style.top || "0px"
+    preview.style.height = `${height}px`
+    preview.style.fontSize = `${Math.max(12, Math.round(height * 0.86))}px`
+    preview.style.lineHeight = `${height}px`
   },
 
   // Left/Right: move the caret offset by ±1. The engine's getCursorRect gives
@@ -3045,7 +3695,15 @@ const WasmHwpEditor = {
   },
 
   normalizeCellPath(raw) {
-    const list = Array.isArray(raw) ? raw : null
+    let list = Array.isArray(raw) ? raw : null
+    if (!list && typeof raw === "string" && raw.trim() !== "") {
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) list = parsed
+      } catch (_) {
+        return null
+      }
+    }
     if (!list || list.length === 0) return null
 
     const path = []
@@ -3326,11 +3984,29 @@ const WasmHwpEditor = {
       }
       const pictureJson = JSON.stringify(translatePictureProps(rest))
       try {
-        this.doc.setPictureProperties(parsed.section, parsed.paragraph, control, pictureJson)
+        if (parsed.cell) {
+      const cellPath = parsed.cell.cellPath
+        ? parsed.cell.cellPath
+        : [{
+            controlIndex: parsed.cell.controlIndex ?? 0,
+            cellIndex: parsed.cell.cellIndex ?? 0,
+            cellParaIndex: parsed.cell.cellParaIndex ?? 0
+          }]
+      const cellPathJson = JSON.stringify(cellPath)
+      this.doc.setCellPicturePropertiesByPath(
+        parsed.section,
+        parsed.cell.parentParaIndex,
+        cellPathJson,
+        control,
+        pictureJson
+      )
+        } else {
+          this.doc.setPictureProperties(parsed.section, parsed.paragraph, control, pictureJson)
+        }
       } catch (error) {
         return { error: `setPictureProperties failed: ${String((error && error.message) || error)}` }
       }
-      this.recordOp("AgentSetPicture", { section: parsed.section, para: parsed.paragraph, control, props: rest })
+      this.recordOp("AgentSetPicture", { section: parsed.section, para: parsed.paragraph, control, cell: parsed.cell || null, props: rest })
       return { ok: true }
     }
 
@@ -3367,7 +4043,29 @@ const WasmHwpEditor = {
       return { ok: true }
     }
 
-    return { error: `set: unsupported kind '${kind}' in the browser editor (supported: cell, char, picture)` }
+    if (kind === "para") {
+      // Paragraph formatting (alignment / line spacing) — the engine call is
+      // whole-paragraph, so no offset/span is involved. Cell refs route to the
+      // in-cell variant (the engine exports footnote/hf variants too; those
+      // arrive with note refs when the caret sits inside one — not wired yet).
+      const paraJson = JSON.stringify(translateParaProps(rest))
+      const cl = parsed.cell
+      try {
+        if (cl) {
+          this.doc.applyParaFormatInCell(
+            parsed.section, cl.parentParaIndex, cl.controlIndex, cl.cellIndex, cl.cellParaIndex, paraJson
+          )
+        } else {
+          this.doc.applyParaFormat(parsed.section, parsed.paragraph, paraJson)
+        }
+      } catch (error) {
+        return { error: `applyParaFormat failed: ${String((error && error.message) || error)}` }
+      }
+      this.recordOp("AgentSetPara", { section: parsed.section, para: parsed.paragraph, cell: cl, props: rest })
+      return { ok: true }
+    }
+
+    return { error: `set: unsupported kind '${kind}' in the browser editor (supported: cell, char, para, picture)` }
   },
 
   // Batch property set (doc.set {sets:[{ref,props}, ...]}). Apply every set to

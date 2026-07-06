@@ -32,6 +32,7 @@
 // (not a silent blank canvas).
 import { appendPickedElementToComposer, bindElementPickerTarget } from "./document_element_picker.js"
 import { rewriteOfficeOp } from "./wasm_office_ops.ts"
+import {SEL} from "./selectors.ts"
 import {
   normalizeOfficeNearby as normalizeOfficeNearbyValue,
   officeReadRefCandidates as officeReadRefCandidatesValue,
@@ -39,7 +40,7 @@ import {
 } from "./wasm_office_read.ts"
 
 const OFFICE_BASE = "/assets/office/"
-const LOCAL_EDITOR_COMMAND_EVENT = "ecrits:local-editor-command"
+import {LOCAL_EDITOR_COMMAND_EVENT, PREVIEW_DELTA_EVENT} from "./editor_events.ts"
 const OFFICE_ELEMENT_METADATA_FIELDS = [
   "sheet",
   "address",
@@ -84,6 +85,7 @@ let activeOfficeShortcutEditor = null
 // tab switches imports only the final document.
 let engineLoadChain = Promise.resolve()
 let latestRequestedUrl = null
+const officeScrollPositions = new Map()
 const RUNTIME_INIT_MAX_MS = 300000
 const PAINT_EMPTY_RETRY_MAX = 6
 const PAINT_EMPTY_RETRY_BASE_MS = 80
@@ -91,6 +93,10 @@ const MAX_RENDER_PX = 33554432
 const SPREADSHEET_INTERACTIVE_RENDER_MAX_PX = 2000000
 const SPREADSHEET_INTERACTIVE_RENDER_WINDOW_MS = 250
 const SPREADSHEET_IDLE_FULL_RENDER_DELAY_MS = 1500
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 function runtimeReadyFor(assetVersion = "") {
   return !!runtimePromise && !!runtimeModule && runtimeAssetVersion === assetVersion
@@ -128,6 +134,8 @@ function serializeEngineLoad(url, assetVersion, format, run) {
     if (cachedDocumentMatches(url, assetVersion, format)) return "cached"
     if (latestRequestedUrl !== url) return "superseded"
     await run()
+    if (cachedDocumentMatches(url, assetVersion, format)) return "loaded"
+    if (latestRequestedUrl !== url) return "superseded"
     return "loaded"
   })
   // Keep the chain alive even if this link rejects, so one failed import can't
@@ -588,8 +596,49 @@ function resolveApi(Module) {
 }
 
 const WasmOfficeEditor = {
+  prewarmRuntime(assetVersion = "") {
+    if (runtimeReadyFor(assetVersion)) return Promise.resolve(runtimeModule)
+    return ensureRuntime(assetVersion)
+  },
+
+  async fastOpenDocument({ url, assetVersion = "", format = "docx", deferImportMs = 0 } = {}) {
+    if (!url) return "skipped"
+    latestRequestedUrl = url
+    if (cachedDocumentMatches(url, assetVersion, format)) return "cached"
+
+    const Module = await ensureRuntime(assetVersion)
+    const loader = Object.create(WasmOfficeEditor)
+    loader.api = resolveApi(Module)
+    loader.handle = null
+    loader.format = format || "docx"
+    loader.officeAssetVersion = assetVersion || ""
+    loader.loadedUrl = null
+    loader.pageRects = []
+    loader.parts = []
+    loader.docType = -1
+
+    return serializeEngineLoad(url, assetVersion, loader.format, async () => {
+      const response = await fetch(url, { credentials: "same-origin" })
+      if (!response.ok) throw new Error(`document bytes HTTP ${response.status}`)
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      if (deferImportMs > 0) await delay(deferImportMs)
+      if (latestRequestedUrl !== url) return
+
+      closeCachedOfficeDocument()
+      await loader.openWithBytes(Module, bytes)
+      loader.loadedUrl = url
+      loader.pageRects = loader.queryPageRects()
+      loader.parts = loader.queryParts()
+      loader.rememberActiveDocument(url)
+    })
+  },
+
   mounted() {
     this.officeHookAlive = true
+    // Debug/E2E handle (twin of el.__wasmHwpEditor) — Playwright drives the
+    // office editor through this since the Tidewave iframe is not
+    // cross-origin-isolated and can't run the office wasm at all.
+    this.el.__wasmOfficeEditor = this
     this.api = null
     this.handle = null // document handle (embind-class shape) or null
     this.loaded = false
@@ -605,6 +654,9 @@ const WasmOfficeEditor = {
     this.visible = new Set()
     this.renderQueue = new Map()
     this.renderQueueTimer = null
+    this.deferredLoadFrame = null
+    this.deferredLoadTimer = null
+    this.deferredLoadPayload = null
     this.paintEmptyRetries = new Map()
     this.paintRetryTimers = new Map()
     this.spreadsheetInteractiveRenderUntil = 0
@@ -649,9 +701,9 @@ const WasmOfficeEditor = {
     this._compositionCommittedText = ""
     this.nativeCompositionOpen = false
 
-    this.pageStack = this.el.querySelector("[data-role='office-wasm-pages']")
-    this.statusEl = this.el.querySelector("[data-role='office-wasm-status']")
-    this.imeProxy = this.el.querySelector("[data-role='office-wasm-ime-proxy']")
+    this.pageStack = this.el.querySelector(SEL.officePages)
+    this.statusEl = this.el.querySelector(SEL.officeStatus)
+    this.imeProxy = this.el.querySelector(SEL.officeImeProxy)
 
     this.documentId = this.el.dataset.documentId
     this.format = this.el.dataset.localDocumentFormat || "docx"
@@ -663,14 +715,21 @@ const WasmOfficeEditor = {
     this.previewPatchCount = Number(this.el.dataset.previewDeltaCount || "0") || 0
     this.previewPatchPendingPayload = null
     this.previewPatchInFlight = null
+    this.previewSavedHighlights = []
+    this.previewSavedHighlight = null
+    this.scrollPersistTimer = null
+    this.pendingScrollPosition = null
+    this.onScroll = () => this.rememberScrollPosition()
+    this.el.addEventListener("scroll", this.onScroll, { passive: true })
 
     const bytesUrl = this.el.dataset.bytesUrl
+    this.lastSeenBytesUrl = bytesUrl || ""
     this.setInitialStatus(bytesUrl)
 
     // Pre-warm + load on mount. The host element carries the bytes URL; the
     // server also pushes `office_wasm_load` on re-open.
     this.handleEvent("office_wasm_load", (payload) => {
-      if (this.eventMatchesDocument(payload)) this.loadDocument(payload)
+      if (this.eventMatchesDocument(payload)) this.deferLoadDocument(payload)
     })
 
     // Agent edit/read/find/set/save routed from the server because THIS office
@@ -692,8 +751,11 @@ const WasmOfficeEditor = {
       if (this.eventMatchesDocument(payload)) this.handlePreviewDelta(payload)
     })
 
-    if (this.mirror) this.patchPreviewToMountedDoc(this.el.dataset.previewText || "")
-    if (bytesUrl) this.loadDocument({ url: bytesUrl, document_id: this.documentId })
+    if (this.mirror) {
+      this.patchPreviewToMountedDoc(this.el.dataset.previewText || "")
+      this.renderSavedEditHighlights()
+    }
+    if (bytesUrl) this.deferLoadDocument({ url: bytesUrl, document_id: this.documentId })
 
     this.onResize = () => this.renderVisiblePages()
     window.addEventListener("resize", this.onResize)
@@ -757,10 +819,23 @@ const WasmOfficeEditor = {
 
   destroyed() {
     this.officeHookAlive = false
+    if (this.el.__wasmOfficeEditor === this) delete this.el.__wasmOfficeEditor
+    this.rememberScrollPosition()
+    this.flushScrollPosition()
     if (this.io) this.io.disconnect()
     if (this.blink) clearInterval(this.blink)
     if (this._caretSettle) { clearTimeout(this._caretSettle); this._caretSettle = null }
     if (this.renderQueueTimer) { clearTimeout(this.renderQueueTimer); this.renderQueueTimer = null }
+    if (this.deferredLoadFrame) {
+      const caf = window.cancelAnimationFrame || clearTimeout
+      caf(this.deferredLoadFrame)
+      this.deferredLoadFrame = null
+    }
+    if (this.deferredLoadTimer) {
+      clearTimeout(this.deferredLoadTimer)
+      this.deferredLoadTimer = null
+    }
+    this.deferredLoadPayload = null
     if (this.spreadsheetIdleRenderTimer) {
       clearTimeout(this.spreadsheetIdleRenderTimer)
       this.spreadsheetIdleRenderTimer = null
@@ -779,6 +854,7 @@ const WasmOfficeEditor = {
     if (this.pickerHoverTimer) { clearTimeout(this.pickerHoverTimer); this.pickerHoverTimer = null }
     if (this.renderQueue) this.renderQueue.clear()
     window.removeEventListener("resize", this.onResize)
+    this.el.removeEventListener("scroll", this.onScroll)
     this.el.removeEventListener("mousedown", this.onMouseDown)
     this.el.removeEventListener("dblclick", this.onDoubleClick)
     document.removeEventListener("mousemove", this.onMouseMove)
@@ -796,10 +872,18 @@ const WasmOfficeEditor = {
   },
 
   updated() {
+    const bytesUrl = this.el?.dataset?.bytesUrl || ""
+
+    if (!this.mirror && bytesUrl && bytesUrl !== this.lastSeenBytesUrl) {
+      this.lastSeenBytesUrl = bytesUrl
+      this.deferLoadDocument({ url: bytesUrl, document_id: this.documentId })
+    }
+
     if (this.mirror) {
       this.patchPreviewToMountedDoc(this.el.dataset.previewText || "", {
         delta_count: Number(this.el.dataset.previewDeltaCount || "0")
       })
+      this.renderSavedEditHighlights()
     }
   },
 
@@ -832,6 +916,105 @@ const WasmOfficeEditor = {
     const id = payload.document_id || payload.documentId
     if (this.mirror) return !!id && !!this.documentId && String(id) === String(this.documentId)
     return !id || !this.documentId || String(id) === String(this.documentId)
+  },
+
+  scrollPositionKey(url = null) {
+    return [
+      this.documentId,
+      this.el?.dataset?.documentPath,
+      url,
+      this.loadedUrl,
+      this.el?.dataset?.bytesUrl
+    ].find(value => typeof value === "string" && value.length > 0) || null
+  },
+
+  rememberScrollPosition(url = null) {
+    if (this.mirror || !this.el) return
+    const key = this.scrollPositionKey(url)
+    if (!key) return
+    const position = {
+      top: Math.max(0, Math.round(this.el.scrollTop || 0)),
+      left: Math.max(0, Math.round(this.el.scrollLeft || 0))
+    }
+    officeScrollPositions.set(key, position)
+    if (officeScrollPositions.size > 100) {
+      const oldest = officeScrollPositions.keys().next().value
+      if (oldest) officeScrollPositions.delete(oldest)
+    }
+    this.queueScrollPositionPersist(position)
+  },
+
+  restoreScrollPosition(url = null) {
+    if (this.mirror || !this.el) return
+    const key = this.scrollPositionKey(url)
+    const position = (key && officeScrollPositions.get(key)) || this.serverScrollPosition()
+    if (!position) return
+
+    const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16))
+    raf(() => {
+      raf(() => {
+        if (!this.officeHookActive()) return
+        this.el.scrollTop = position.top
+        this.el.scrollLeft = position.left
+        this.renderVisiblePages()
+      })
+    })
+  },
+
+  serverScrollPosition() {
+    if (!this.el) return null
+    const top = Number(this.el.dataset.scrollTop)
+    const left = Number(this.el.dataset.scrollLeft)
+    const hasTop = Number.isFinite(top) && top >= 0
+    const hasLeft = Number.isFinite(left) && left >= 0
+    if (!hasTop && !hasLeft) return null
+    return {
+      top: hasTop ? Math.round(top) : 0,
+      left: hasLeft ? Math.round(left) : 0
+    }
+  },
+
+  queueScrollPositionPersist(position) {
+    if (this.mirror || !this.el || typeof this.pushEvent !== "function") return
+    if (!this.el.dataset.documentPath) return
+    this.pendingScrollPosition = position
+    if (this.scrollPersistTimer) clearTimeout(this.scrollPersistTimer)
+    this.scrollPersistTimer = setTimeout(() => this.flushScrollPosition(), 150)
+  },
+
+  flushScrollPosition() {
+    if (this.scrollPersistTimer) {
+      clearTimeout(this.scrollPersistTimer)
+      this.scrollPersistTimer = null
+    }
+    const position = this.pendingScrollPosition
+    this.pendingScrollPosition = null
+    if (this.mirror || !this.el || !position || typeof this.pushEvent !== "function") return
+    const documentPath = this.el.dataset.documentPath
+    if (!documentPath) return
+    this.pushEvent("local_document.viewport_changed", {
+      document_path: documentPath,
+      document_id: this.documentId,
+      top: position.top,
+      left: position.left
+    })
+  },
+
+  deferLoadDocument(payload = {}) {
+    if (!this.officeHookActive()) return
+    this.deferredLoadPayload = payload
+    if (this.deferredLoadFrame || this.deferredLoadTimer) return
+
+    const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16))
+    this.deferredLoadFrame = raf(() => {
+      this.deferredLoadFrame = null
+      this.deferredLoadTimer = setTimeout(() => {
+        this.deferredLoadTimer = null
+        const nextPayload = this.deferredLoadPayload
+        this.deferredLoadPayload = null
+        if (nextPayload && this.officeHookActive()) this.loadDocument(nextPayload)
+      }, 0)
+    })
   },
 
   handlePreviewDelta(payload = {}) {
@@ -949,7 +1132,7 @@ const WasmOfficeEditor = {
     this.el.dataset.previewModelLength = String(modelText.length)
     this.el.dataset.previewModelTail = modelText.slice(-80)
     this.el.dataset.previewModelMatches = String(matches)
-    this.el.dispatchEvent(new CustomEvent("ecrits:editor-preview-delta", {
+    this.el.dispatchEvent(new CustomEvent(PREVIEW_DELTA_EVENT, {
       bubbles: true,
       detail: {
         document_id: this.documentId,
@@ -961,11 +1144,239 @@ const WasmOfficeEditor = {
     }))
   },
 
+  parsePreviewHighlights() {
+    const raw = this.el && this.el.dataset ? this.el.dataset.previewHighlights : ""
+    if (!raw) return []
+    try {
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed : []
+    } catch (_) {
+      return []
+    }
+  },
+
+  renderSavedEditHighlights() {
+    if (!this.mirror || !this.loaded) return
+    const highlights = this.parsePreviewHighlights()
+    this.previewSavedHighlights = highlights
+
+    if (highlights.length === 0) {
+      this.previewSavedHighlight = null
+      this.el.dataset.previewHighlightMode = ""
+      this.el.dataset.previewHighlightCount = "0"
+      this.el.dataset.previewHighlightPages = ""
+      this.el.dataset.previewHighlightError = ""
+      this.paintPickedHighlights()
+      return
+    }
+
+    let rects = []
+    const errors = []
+    for (const [index, highlight] of highlights.entries()) {
+      try {
+        const next = this.rectsForSavedOfficeHighlight(highlight).map((rect) => ({
+          ...rect,
+          savedHighlightIndex: index
+        }))
+        rects = rects.concat(next)
+      } catch (error) {
+        errors.push(String((error && error.message) || error))
+      }
+    }
+
+    const pages = new Set(rects.map((rect) => rect.pageIndex).filter(Number.isInteger))
+    this.previewSavedHighlight = { rects, pages }
+    this.el.dataset.previewHighlightMode = "saved-edit-regions"
+    this.el.dataset.previewHighlightCount = String(rects.length)
+    this.el.dataset.previewHighlightPages = Array.from(pages).join(",")
+    this.el.dataset.previewHighlightError = errors.slice(0, 3).join(";")
+
+    this.frameSavedOfficeHighlights(rects)
+    for (const page of pages) {
+      if (this.rendered && !this.rendered.get(page)) this.renderPage(page, { force: true })
+    }
+    this.paintPickedHighlights()
+  },
+
+  frameSavedOfficeHighlights(rects) {
+    if (!this.mirror || !Array.isArray(rects) || rects.length === 0) return
+    const target = rects.find((rect) => Number.isInteger(rect.pageIndex))
+    if (!target) return
+    const section = this.pageSection(target.pageIndex)
+    if (!section) return
+
+    let ratio = 1
+    try {
+      const logical = this.pageLogicalSize(target.pageIndex)
+      const bounds = section.getBoundingClientRect()
+      if (logical && logical.height > 0 && bounds && bounds.height > 0) {
+        ratio = bounds.height / logical.height
+      }
+    } catch (_) {
+      ratio = 1
+    }
+
+    const top = Number(section.offsetTop || 0) + Number(target.y || 0) * ratio - 24
+    this.el.scrollTop = Math.max(0, top)
+    this.el.dataset.previewFrameMode = "saved-office"
+    this.el.dataset.previewFramePage = String(target.pageIndex)
+    this.el.dataset.previewFrameScrollTop = String(Math.round(this.el.scrollTop || 0))
+  },
+
+  rectsForSavedOfficeHighlight(highlight) {
+    const rawRef = highlight && (highlight.ref || (highlight.op && highlight.op.ref))
+    const targetRef = rawRef == null ? "" : this.setTextRefFor(String(rawRef))
+    if (!targetRef) return []
+
+    let elements = []
+    try {
+      elements = this.officeElements()
+    } catch (_) {
+      elements = []
+    }
+
+    const target = elements.find((el) => this.officeRefMatchesHighlight(el && el.ref, targetRef)) ||
+      this.officeElementForEdit(elements, targetRef)
+    const rects = this.officeElementRects(target)
+    if (rects.length) return rects
+
+    const probed = this.probeOfficeSavedHighlightRects(targetRef, target, elements)
+    if (probed.length) return probed
+
+    const fallback = this.fallbackSavedOfficeHighlightRect(targetRef, target, elements)
+    return fallback ? [fallback] : []
+  },
+
+  officeRefMatchesHighlight(ref, targetRef) {
+    if (ref == null || targetRef == null) return false
+    return this.setTextRefFor(String(ref)) === this.setTextRefFor(String(targetRef))
+  },
+
+  officeElementRects(element) {
+    if (!element) return []
+    const raw = element.raw || element
+    const candidates = [element.rects, raw.rects, element.bounds, raw.bounds, element.rectangle, raw.rectangle]
+    for (const candidate of candidates) {
+      const rects = Array.isArray(candidate)
+        ? candidate.map((rect) => this.normalizeOfficeHighlightRect(rect, element)).filter(Boolean)
+        : [this.normalizeOfficeHighlightRect(candidate, element)].filter(Boolean)
+      if (rects.length) return rects
+    }
+    return []
+  },
+
+  normalizeOfficeHighlightRect(rect, element = {}) {
+    if (!rect || typeof rect !== "object") return null
+    const pageIndex = this.officeElementPageIndex({ ...element, ...rect }) ?? 0
+    let x = Number(rect.x ?? rect.left)
+    let y = Number(rect.y ?? rect.top)
+    let width = Number(rect.width ?? rect.w ?? rect.right)
+    let height = Number(rect.height ?? rect.h ?? rect.bottom)
+    if (Number.isFinite(Number(rect.right)) && Number.isFinite(x) && !Number.isFinite(Number(rect.width ?? rect.w))) {
+      width = Number(rect.right) - x
+    }
+    if (Number.isFinite(Number(rect.bottom)) && Number.isFinite(y) && !Number.isFinite(Number(rect.height ?? rect.h))) {
+      height = Number(rect.bottom) - y
+    }
+    if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null
+
+    const logical = this.pageLogicalSize(pageIndex)
+    if (logical && (width > logical.width * 2 || height > logical.height * 2)) {
+      x = x / 15
+      y = y / 15
+      width = width / 15
+      height = height / 15
+    }
+
+    return { pageIndex, x, y, width, height }
+  },
+
+  probeOfficeSavedHighlightRects(targetRef, target, elements) {
+    if (!this.api || typeof this.api.resolveRef !== "function") return []
+    const pages = this.officeHighlightCandidatePages(targetRef, target, elements)
+    for (const pageIndex of pages) {
+      const logical = this.pageLogicalSize(pageIndex)
+      if (!logical || !logical.width || !logical.height) continue
+      const xs = [0.16, 0.32, 0.50, 0.72].map((ratio) => Math.round(logical.width * ratio))
+      const rows = 28
+      for (let row = 1; row <= rows; row++) {
+        const y = Math.round((logical.height * row) / (rows + 1))
+        for (const x of xs) {
+          const probe = this.officeResolveAt({ pageIndex, x, y }, false)
+          if (!probe || !this.officeRefMatchesHighlight(probe.ref, targetRef)) continue
+          const rects = Array.isArray(probe.rects) ? probe.rects : []
+          if (rects.length) return rects
+        }
+      }
+    }
+    return []
+  },
+
+  officeHighlightCandidatePages(targetRef, target, elements) {
+    const pageCount = Math.max(1, this.parts && this.parts.length ? this.parts.length : 1)
+    const direct = this.officeElementPageIndex(target)
+    if (Number.isInteger(direct)) return this.pageSearchWindow(direct, pageCount)
+
+    const indexed = this.estimatedOfficeElementPage(targetRef, elements, pageCount)
+    if (Number.isInteger(indexed)) return this.pageSearchWindow(indexed, pageCount)
+
+    return Array.from({ length: Math.min(pageCount, 4) }, (_value, index) => index)
+  },
+
+  pageSearchWindow(center, pageCount) {
+    const pages = []
+    for (const index of [center, center - 1, center + 1, center - 2, center + 2]) {
+      if (index >= 0 && index < pageCount && !pages.includes(index)) pages.push(index)
+    }
+    return pages
+  },
+
+  estimatedOfficeElementPage(targetRef, elements, pageCount) {
+    const targets = (elements || []).filter((el) => el && this.isSetTextTarget(String(el.ref || "")))
+    const index = targets.findIndex((el) => this.officeRefMatchesHighlight(el.ref, targetRef))
+    if (index < 0 || targets.length === 0) return null
+    return Math.min(pageCount - 1, Math.max(0, Math.floor((index / targets.length) * pageCount)))
+  },
+
+  officeElementPageIndex(element) {
+    if (!element) return null
+    const raw = element.raw || element
+    const value = element.pageIndex ?? raw.pageIndex ?? element.part ?? raw.part
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) return Math.max(0, Math.round(numeric))
+    const page = Number(element.page ?? raw.page)
+    if (Number.isFinite(page)) return Math.max(0, Math.round(page) - 1)
+    const ref = String(element.ref || raw.ref || "")
+    const match = ref.match(/^page\[(\d+)\]/)
+    return match ? Math.max(0, Number(match[1]) - 1) : null
+  },
+
+  fallbackSavedOfficeHighlightRect(targetRef, target, elements) {
+    const pageCount = Math.max(1, this.parts && this.parts.length ? this.parts.length : 1)
+    const targets = (elements || []).filter((el) => el && this.isSetTextTarget(String(el.ref || "")))
+    const index = Math.max(0, targets.findIndex((el) => this.officeRefMatchesHighlight(el.ref, targetRef)))
+    const pageIndex = this.officeElementPageIndex(target) ??
+      this.estimatedOfficeElementPage(targetRef, elements, pageCount) ??
+      0
+    const logical = this.pageLogicalSize(pageIndex) || { width: 794, height: 1123 }
+    const perPage = Math.max(1, Math.ceil(Math.max(targets.length, 1) / pageCount))
+    const indexInPage = index % perPage
+    const y = Math.max(32, Math.round((logical.height * (indexInPage + 1)) / (perPage + 1)))
+    return {
+      pageIndex,
+      x: Math.round(logical.width * 0.14),
+      y,
+      width: Math.round(logical.width * 0.72),
+      height: 26
+    }
+  },
+
   async loadDocument({ url, asset_version }) {
     if (!this.officeHookActive()) return
     if (!url) return
     this.officeAssetVersion = asset_version || this.el.dataset.officeAssetVersion || this.officeAssetVersion || ""
     if (this.loadedUrl === url && this.parts.length) return
+    if (this.loadedUrl && this.loadedUrl !== url) this.rememberScrollPosition(this.loadedUrl)
     // Record the most-recent load intent SYNCHRONOUSLY: the global serializer
     // uses it to drop superseded imports when the user switches tabs faster than
     // a heavy deck imports (see serializeEngineLoad).
@@ -1094,11 +1505,13 @@ const WasmOfficeEditor = {
     this.notifyViewerState(true)
     this.setStatus("")
     this.buildPageStack()
+    this.restoreScrollPosition(url)
     this.renderVisiblePages()
     if (this.mirror) {
       this.patchPreviewToMountedDoc(this.previewPatchTarget || this.el.dataset.previewText || "", {
         delta_count: Number(this.el.dataset.previewDeltaCount || "0")
       })
+      this.renderSavedEditHighlights()
     }
     return true
   },
@@ -1377,7 +1790,7 @@ const WasmOfficeEditor = {
   pageSection(index) {
     return (
       this.pageStack &&
-      this.pageStack.querySelector(`[data-role='office-wasm-page'][data-page-index='${index}']`)
+      this.pageStack.querySelector(`${SEL.officePage}[data-page-index='${index}']`)
     )
   },
 
@@ -1446,8 +1859,8 @@ const WasmOfficeEditor = {
   releasePageCanvas(index) {
     const section = this.pageSection(index)
     if (!section) return
-    const canvas = section.querySelector("[data-role='office-wasm-canvas']")
-    const overlay = section.querySelector("[data-role='office-wasm-caret-overlay']")
+    const canvas = section.querySelector(SEL.officeCanvas)
+    const overlay = section.querySelector(SEL.officeCaretOverlay)
     if (canvas && (canvas.width !== 1 || canvas.height !== 1)) {
       canvas.width = 1
       canvas.height = 1
@@ -1477,7 +1890,7 @@ const WasmOfficeEditor = {
     if (!force && this.rendered.has(index)) return
     const section = this.pageSection(index)
     if (!section) return
-    const canvas = section.querySelector("[data-role='office-wasm-canvas']")
+    const canvas = section.querySelector(SEL.officeCanvas)
     if (!canvas) return
 
     const part = this.parts[index] || this.parts[0]
@@ -1526,14 +1939,18 @@ const WasmOfficeEditor = {
       // (resize/dpr changes), and redraw the caret if it lives on this page (the
       // re-paint of the page canvas does not touch the overlay, but a buildPage/
       // resize can have reset it).
-      const overlay = section.querySelector("[data-role='office-wasm-caret-overlay']")
+      const overlay = section.querySelector(SEL.officeCaretOverlay)
       if (overlay && (overlay.width !== pxW || overlay.height !== pxH)) {
         overlay.width = pxW
         overlay.height = pxH
       }
       this.rendered.set(index, true)
       if (this.spreadsheetLikeDoc()) this.takeSpreadsheetInvalidations({ record: false })
-      if (this.selectionVisual && this.selectionVisual.pages && this.selectionVisual.pages.has(index)) {
+      const savedPages = this.previewSavedHighlight && this.previewSavedHighlight.pages
+      if (
+        (this.selectionVisual && this.selectionVisual.pages && this.selectionVisual.pages.has(index)) ||
+        (savedPages && savedPages.has(index))
+      ) {
         this.paintPickedHighlights()
       }
       if (this.caret && this.caret.page - 1 === index) this.drawCaret()
@@ -2282,7 +2699,7 @@ const WasmOfficeEditor = {
   // canvas during a drag.
   eventToPageLocal(event, preferPage) {
     let section = event.target && event.target.closest
-      ? event.target.closest("[data-role='office-wasm-page']")
+      ? event.target.closest(SEL.officePage)
       : null
     let pageIndex = section ? Number(section.dataset.pageIndex) : preferPage
     if (!section && typeof preferPage === "number") section = this.pageSection(preferPage)
@@ -2290,7 +2707,7 @@ const WasmOfficeEditor = {
     if (typeof pageIndex !== "number" || Number.isNaN(pageIndex)) {
       pageIndex = Number(section.dataset.pageIndex)
     }
-    const canvas = section.querySelector("[data-role='office-wasm-canvas']")
+    const canvas = section.querySelector(SEL.officeCanvas)
     if (!canvas) return null
 
     const rect = canvas.getBoundingClientRect()
@@ -2368,6 +2785,9 @@ const WasmOfficeEditor = {
       if (requireNativeEditState) this.renderPage(fresh.page - 1, { force: true })
       this.drawCaret()
       this.anchorProxy()
+      // The LOK STATE_CHANGED format feed lands async on the LO thread; each
+      // settle tick re-broadcasts so the toolbar catches the fresh values.
+      this.scheduleToolbarStateSync()
     }
     const tick = () => {
       this._caretSettle = null
@@ -2425,10 +2845,29 @@ const WasmOfficeEditor = {
       window.__officeWasmCaret = this.caret
       this.caretBlinkOn = true
       if (repaintOnAdopt) {
-        this.renderPage(fresh.page - 1, { force: true })
+        if (requireNativeEditState) {
+          this.renderPage(fresh.page - 1, { force: true })
+        } else {
+          // Writer: the key-time repaint (renderCaretWindow) already painted the
+          // final state and drained the invalidation queue, so a settled caret
+          // usually needs NO content repaint — only late reflow (fresh engine
+          // rects) or the caret crossing onto another page does.
+          const dirty = this.takeEditInvalidationPages()
+          if (dirty === null) {
+            this.renderPage(fresh.page - 1, { force: true })
+          } else {
+            if (previous && fresh.page !== previous.page) dirty.add(fresh.page - 1)
+            for (const p of dirty) {
+              if (p === fresh.page - 1 || this.visible.has(p)) this.requestRenderPage(p, { force: true })
+            }
+          }
+        }
       }
       this.drawCaret()
       this.anchorProxy()
+      // The LOK STATE_CHANGED format feed lands async on the LO thread; each
+      // settle tick re-broadcasts so the toolbar catches the fresh values.
+      this.scheduleToolbarStateSync()
     }
     const tick = () => {
       this._caretSettle = null
@@ -2507,18 +2946,77 @@ const WasmOfficeEditor = {
     this.caretBlinkOn = true
     this.drawCaret()
     this.anchorProxy()
+    this.scheduleToolbarStateSync()
+  },
+
+  // ── Toolbar state reflection (HWP twin) ────────────────────────────────────
+  // LOK pushes ".uno:Bold=true"-style STATE_CHANGED updates as the caret moves;
+  // the wasm bindings mirror the last values into getInteractionState().format
+  // (tri-state: -1 = no update seen yet). Broadcast them on the same
+  // `ecrits:local-editor-state` bus the HWP editor uses so the toolbar lights
+  // B/I/U/S and swaps the align face with zero toolbar-side changes. Old wasm
+  // builds have no `format` key → no event → no reflection (graceful).
+  scheduleToolbarStateSync() {
+    if (this.mirror) return
+    // The STATE_CHANGED updates for one caret move arrive piecemeal AND late —
+    // LOK pushes them from SfxBindings invalidation timers, sometimes >1s after
+    // the caret settles (align can land before bold). Seq-stabilization stops
+    // too early on the quiet gap, so poll a fixed backoff tail instead; each
+    // read is a cheap mutex-guarded shared-memory string and re-emitting is
+    // idempotent for the toolbar. The token cancels the tail when the caret
+    // moves again.
+    this._toolbarStateSyncToken = (this._toolbarStateSyncToken || 0) + 1
+    const token = this._toolbarStateSyncToken
+    const delays = [120, 120, 240, 420, 660, 900]
+    let step = 0
+    const tick = () => {
+      if (token !== this._toolbarStateSyncToken || !this.officeHookAlive) return
+      if (this.emitToolbarState() === null) return // no format feed (old wasm)
+      if (step < delays.length) setTimeout(tick, delays[step++])
+    }
+    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(tick)
+    else setTimeout(tick, 0)
+  },
+
+  // Broadcast the current format state; returns the interaction seq (null when
+  // the wasm has no format feed) so the sync loop can detect stabilization.
+  emitToolbarState() {
+    if (!this.api || !this.officeHookAlive) return null
+    let format = null
+    let seq = null
+    try {
+      const raw = this.callApi("getInteractionState")
+      const state = typeof raw === "string" ? JSON.parse(raw || "{}") : (raw || {})
+      format = state.format || null
+      seq = Number.isFinite(Number(state.seq)) ? Number(state.seq) : null
+    } catch (_) {}
+    if (!format) return null
+
+    document.dispatchEvent(new CustomEvent("ecrits:local-editor-state", {
+      detail: {
+        document_id: this.documentId,
+        // Tri-state -1 (unknown) maps to false — an unlit button, matching the
+        // pre-feed behavior until the first caret move populates the state.
+        bold: format.bold === 1,
+        italic: format.italic === 1,
+        underline: format.underline === 1,
+        strikethrough: format.strikeout === 1,
+        alignment: format.align || null
+      }
+    }))
+    return seq
   },
 
   // ─── Caret overlay rendering ───────────────────────────────────────────────
 
   caretOverlay(pageIndex0) {
     const section = this.pageSection(pageIndex0)
-    return section ? section.querySelector("[data-role='office-wasm-caret-overlay']") : null
+    return section ? section.querySelector(SEL.officeCaretOverlay) : null
   },
 
   clearAllCaretOverlays() {
     if (!this.pageStack) return
-    const overlays = this.pageStack.querySelectorAll("[data-role='office-wasm-caret-overlay']")
+    const overlays = this.pageStack.querySelectorAll(SEL.officeCaretOverlay)
     for (const o of overlays) {
       const ctx = o.getContext("2d")
       if (ctx) ctx.clearRect(0, 0, o.width, o.height)
@@ -2915,6 +3413,9 @@ const WasmOfficeEditor = {
 
   paintAllAdornments() {
     const pages = new Set()
+    if (this.previewSavedHighlight) {
+      for (const rect of this.previewSavedHighlight.rects || []) pages.add(rect.pageIndex ?? 0)
+    }
     if (this.selectionVisual) {
       for (const rect of this.selectionVisual.rects || []) pages.add(rect.pageIndex ?? 0)
     }
@@ -2937,6 +3438,19 @@ const WasmOfficeEditor = {
     if (!logical || !logical.width || !logical.height) return
     const sx = overlay.width / logical.width
     const sy = overlay.height / logical.height
+
+    if (this.previewSavedHighlight) {
+      for (const rect of this.previewSavedHighlight.rects || []) {
+        if ((rect.pageIndex ?? 0) !== pageIndex) continue
+        ctx.save()
+        ctx.fillStyle = "rgba(245, 158, 11, 0.26)"
+        ctx.strokeStyle = "rgba(217, 119, 6, 0.95)"
+        ctx.lineWidth = Math.max(2, 1.5 * (this.scale || 1))
+        ctx.fillRect(rect.x * sx, rect.y * sy, Math.max(1, rect.width) * sx, Math.max(1, rect.height) * sy)
+        ctx.strokeRect(rect.x * sx, rect.y * sy, Math.max(1, rect.width) * sx, Math.max(1, rect.height) * sy)
+        ctx.restore()
+      }
+    }
 
     if (this.selectionVisual) {
       for (const rect of this.selectionVisual.rects || []) {
@@ -2987,7 +3501,7 @@ const WasmOfficeEditor = {
     const c = this.caret
     const section = this.pageSection(c.page - 1)
     if (!section) return
-    const canvas = section.querySelector("[data-role='office-wasm-canvas']")
+    const canvas = section.querySelector(SEL.officeCanvas)
     if (!canvas) return
     const cr = canvas.getBoundingClientRect()
     const hostRect = this.el.getBoundingClientRect()
@@ -3017,8 +3531,68 @@ const WasmOfficeEditor = {
     // typing burst settles to one repaint; the caret overlay (drawCaret) stays
     // immediate, so the caret still tracks each key with no lag.
     const idx = this.caret ? this.caret.page - 1 : null
-    if (typeof idx === "number") this.requestRenderPage(idx, { force: true })
-    for (const v of this.visible) if (v !== idx) this.requestRenderPage(v, { force: true })
+    if (typeof idx !== "number") {
+      for (const v of this.visible) this.requestRenderPage(v, { force: true })
+      return
+    }
+    this.requestRenderPage(idx, { force: true })
+    // Writer lays out lazily: right after postKeyEvent the engine has queued no
+    // invalidations yet — they materialize when the caret-page paint above
+    // forces layout. So consult the queue AFTER the render queue drains (its
+    // setTimeout(0) is registered first, ours second) and only then decide
+    // whether any OTHER visible page actually needs a repaint.
+    setTimeout(() => {
+      const dirty = this.takeEditInvalidationPages()
+      if (dirty === null) {
+        for (const v of this.visible) if (v !== idx) this.requestRenderPage(v, { force: true })
+        return
+      }
+      for (const p of dirty) {
+        if (p !== idx && this.visible.has(p)) this.requestRenderPage(p, { force: true })
+      }
+    }, 0)
+  },
+
+  // Engine-reported dirty pages for the edit that just ran. The invalidation
+  // queue is document-global: part-addressed docs (Impress/Draw) tag each rect
+  // with its slide index, while Writer reports part 0 with rects in document
+  // twips spanning the vertically-stacked pages — those map onto page indexes
+  // by Y-intersection with getPartPageRectangles(). Returns null (→ caller
+  // falls back to repaint-all-visible) when the engine lacks the binding, the
+  // take fails, or the queue has never produced a rect for this document —
+  // until it proves live we can't tell "nothing dirty" apart from "callback
+  // not wired". Spreadsheets keep their own queue consumer
+  // (renderSpreadsheetInputPatch), so this never runs for them.
+  takeEditInvalidationPages() {
+    if (this.spreadsheetLikeDoc()) return null
+    if (!this.hasApiMethod("takeInvalidatedTiles")) return null
+    let rects
+    try {
+      const raw = this.callApi("takeInvalidatedTiles")
+      const parsed = typeof raw === "string" && raw ? JSON.parse(raw) : []
+      rects = Array.isArray(parsed) ? parsed.filter(Boolean) : []
+    } catch (error) {
+      console.warn("[office-wasm] takeInvalidatedTiles failed", error)
+      return null
+    }
+    if (!rects.length) return this.invalidationQueueLive ? new Set() : null
+    this.invalidationQueueLive = true
+    const pages = new Set()
+    let pageRects = null
+    for (const rect of rects) {
+      if (this.presentationLikeDoc()) {
+        const part = Number(rect.part)
+        if (Number.isFinite(part) && part >= 0) pages.add(part)
+        continue
+      }
+      if (!pageRects) pageRects = this.queryPageRects()
+      const top = Number(rect.y) || 0
+      const bottom = top + (Number(rect.h) || 0)
+      pageRects.forEach((pr, i) => {
+        if (bottom >= pr.y && top <= pr.y + pr.h) pages.add(i)
+      })
+    }
+    return pages
   },
 
   markSpreadsheetInteractiveRender({ idleFullRender = false } = {}) {
@@ -3157,7 +3731,7 @@ const WasmOfficeEditor = {
     const section = this.pageSection(pageIndex)
     const anchor = this.spreadsheetInputPatchAnchor(pageIndex)
     if (!section || !this.api || !anchor) return false
-    const canvas = section.querySelector("[data-role='office-wasm-canvas']")
+    const canvas = section.querySelector(SEL.officeCanvas)
     if (!canvas || !canvas.width || !canvas.height) return false
     const ctx = canvas.getContext("2d")
     if (!ctx) return false
@@ -3409,6 +3983,27 @@ const WasmOfficeEditor = {
         : this.AWT_KEY.Y | this.LOK_KEY_MOD1
     this.runOfficeUndoCommand(keyCode)
     return true
+  },
+
+  // Dispatch one UNO command against the live document and reflect it (same
+  // repaint/settle pattern as the undo chord). The selection survives the
+  // command, so repeated presses toggle naturally.
+  runOfficeUnoCommand(command, args = "") {
+    if (!this.hasApiMethod("postUnoCommand")) return false
+    const previous = this.caret
+    try {
+      this.callApi("postUnoCommand", command, args)
+      this.renderAfterInput()
+      this.refreshCaret()
+      this.settleCaretAfterInput(previous, true)
+      this.markViewerMutated()
+      return true
+    } catch (error) {
+      console.error("[office-wasm] toolbar postUnoCommand failed", command, error)
+      return false
+    } finally {
+      if (this.imeProxy) this.imeProxy.value = ""
+    }
   },
 
   runOfficeUndoCommand(keyCode) {
@@ -3810,8 +4405,66 @@ const WasmOfficeEditor = {
     return /[\u3130-\u318F]/u.test(String(text || ""))
   },
 
+  // Toolbar format/align commands map to native UNO dispatch: it acts on the
+  // LIVE LOK selection/caret (a drag selection formats exactly the dragged
+  // range; a bare caret toggles typing attributes) and LibreOffice owns the
+  // toggle state (pressing Bold on bold text un-bolds). The old uno_set path
+  // resolved a whole element from a heuristic point (caret or 12% of the first
+  // visible page) and could never toggle OFF because the element walk carries
+  // no formatting to read back (#228) — kept only as a fallback for wasm
+  // builds without postUnoCommand.
+  TOOLBAR_UNO_COMMANDS: {
+    bold: ".uno:Bold",
+    italic: ".uno:Italic",
+    underline: ".uno:Underline",
+    strikethrough: ".uno:Strikeout",
+    "align-left": ".uno:LeftPara",
+    "align-center": ".uno:CenterPara",
+    "align-right": ".uno:RightPara",
+    "align-justify": ".uno:JustifyPara"
+  },
+
+  // Toolbar commands that carry a value (size/color) become postUnoCommand
+  // args JSON — the LOK {"Name":{"type":...,"value":...}} convention.
+  toolbarUnoArgsCommand(detail) {
+    switch (detail.command) {
+      case "font-size-set": {
+        const size = Number(detail.size)
+        if (!Number.isFinite(size) || size <= 0) return null
+        return {
+          uno: ".uno:FontHeight",
+          args: JSON.stringify({ "FontHeight.Height": { type: "float", value: size } })
+        }
+      }
+      case "text-color": {
+        const value = this.colorToLong(detail.color)
+        if (typeof value !== "number") return null
+        return { uno: ".uno:Color", args: JSON.stringify({ Color: { type: "long", value } }) }
+      }
+      case "highlight": {
+        const value = this.colorToLong(detail.color)
+        if (typeof value !== "number") return null
+        return { uno: ".uno:CharBackColor", args: JSON.stringify({ CharBackColor: { type: "long", value } }) }
+      }
+      default:
+        return null
+    }
+  },
+
   handleToolbarCommand(detail) {
     if (!this.activeToolbarTarget() || !this.toolbarCommandMatchesDocument(detail)) return
+
+    const uno = this.TOOLBAR_UNO_COMMANDS[detail.command]
+    if (uno && this.hasApiMethod("postUnoCommand")) {
+      this.runOfficeUnoCommand(uno)
+      return
+    }
+
+    const payload = this.toolbarUnoArgsCommand(detail)
+    if (payload && this.hasApiMethod("postUnoCommand")) {
+      this.runOfficeUnoCommand(payload.uno, payload.args)
+      return
+    }
 
     switch (detail.command) {
       case "bold":
@@ -3822,6 +4475,24 @@ const WasmOfficeEditor = {
       case "italic":
         this.officeToolbarToggleProp("Italic", "CharPosture").catch(error => {
           console.warn("[office-wasm] toolbar italic failed", error)
+        })
+        break
+      case "underline":
+        this.officeToolbarToggleProp("Underline", "CharUnderline").catch(error => {
+          console.warn("[office-wasm] toolbar underline failed", error)
+        })
+        break
+      case "strikethrough":
+        this.officeToolbarToggleProp("Strikethrough", "CharStrikeout").catch(error => {
+          console.warn("[office-wasm] toolbar strikethrough failed", error)
+        })
+        break
+      case "align-left":
+      case "align-center":
+      case "align-right":
+      case "align-justify":
+        this.officeToolbarApplyProps({ Alignment: detail.command.slice("align-".length) }).catch(error => {
+          console.warn("[office-wasm] toolbar align failed", error)
         })
         break
       case "image":
@@ -4934,6 +5605,9 @@ const WasmOfficeEditor = {
           break
         case "Underline":
           out.CharUnderline = v ? 1 : 0 // com.sun.star.awt.FontUnderline SINGLE=1 NONE=0
+          break
+        case "Strikethrough":
+          out.CharStrikeout = v ? 1 : 0 // com.sun.star.awt.FontStrikeout SINGLE=1 NONE=0
           break
         case "TextColor":
         case "FontColor":

@@ -105,6 +105,9 @@ const MarkdownEditor = {
       case "italic":
         this.wrapSelection("*", "*", "italic")
         break
+      case "strikethrough":
+        this.wrapSelection("~~", "~~", "strikethrough")
+        break
       default:
         break
     }

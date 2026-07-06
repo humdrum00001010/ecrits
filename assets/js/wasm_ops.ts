@@ -810,6 +810,30 @@ const opTableStructure: OpHandler = (ctx, op, ref, verb) => {
   // order — every native validates the control's variant up front and errors
   // BEFORE mutating, so a wrong-kind call is a no-op and we fall through.
 const opDeleteNode: OpHandler = (ctx, op, ref, verb) => {
+    const rawControl = ctx.rawControlIndex(op && op.ref)
+    let rawType = null
+    if (op && op.ref && typeof op.ref === "object") {
+      rawType = op.ref.type
+    } else if (op && typeof op.ref === "string") {
+      try { rawType = JSON.parse(op.ref).type } catch (_) {}
+    }
+    if (rawType === "picture" && ref && ref.cell && Number.isInteger(rawControl)) {
+      const cellPath = ref.cell.cellPath
+        ? ref.cell.cellPath
+        : [{
+            controlIndex: ref.cell.controlIndex ?? 0,
+            cellIndex: ref.cell.cellIndex ?? 0,
+            cellParaIndex: ref.cell.cellParaIndex ?? 0,
+          }]
+      try {
+        const cellPathJson = JSON.stringify(cellPath)
+        ctx.doc.deleteCellPictureControlByPath(ref.section, ref.cell.parentParaIndex, cellPathJson, rawControl)
+        ctx.recordOp("AgentDeleteNode", { section: ref.section, paragraph: ref.cell.parentParaIndex, control: rawControl, cellPath, removed: "picture" })
+        return { ok: true, extra: { removed: "picture" } }
+      } catch (error) {
+        return { error: `delete_node cell picture failed: ${String((error && error.message) || error)}` }
+      }
+    }
     const target = ctx.resolveTableTarget(ref)
     let section, paragraph, control
     if (target) {
@@ -878,6 +902,7 @@ const opInsertPicture: OpHandler = (ctx, op, ref, verb) => {
     }
     const dimError = validateDeclaredImageDims(op, bytes)
     if (dimError) return { error: dimError }
+    const inlineInCell = op.inline_in_cell === true || op.inlineInCell === true
     const cellPath =
       ref.cell && ref.cell.cellPath
         ? ref.cell.cellPath
@@ -903,6 +928,7 @@ const opInsertPicture: OpHandler = (ctx, op, ref, verb) => {
         naturalHeightPx: naturalH,
         extension,
         description,
+        inlineInCell,
         paperOffsetXHu: paperOffsetX,
         paperOffsetYHu: paperOffsetY,
       }
@@ -919,7 +945,7 @@ const opInsertPicture: OpHandler = (ctx, op, ref, verb) => {
     } catch (error) {
       return { error: `insertPicture failed: ${String((error && error.message) || error)}` }
     }
-    ctx.recordOp("AgentInsertPicture", { section: ref.section, para: ref.paragraph, offset, width, height, extension })
+    ctx.recordOp("AgentInsertPicture", { section: ref.section, para: ref.paragraph, offset, width, height, extension, inlineInCell })
     return { ok: true, extra: { width, height, extension } }
 }
 

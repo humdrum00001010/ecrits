@@ -8,23 +8,206 @@ const documentStub: any = {
   dispatchEvent: () => true,
   querySelector: () => null,
   querySelectorAll: () => [],
-  createElement: () => ({
-    dataset: {},
-    style: {},
-    classList: { add() {}, remove() {}, toggle() {} },
-    append() {},
-    appendChild() {},
-    setAttribute() {},
-  }),
+  createElement: () => {
+    const children: unknown[] = []
+    return {
+      dataset: {},
+      style: {},
+      children,
+      classList: { add() {}, remove() {}, toggle() {} },
+      append() {},
+      appendChild(child: unknown) { children.push(child) },
+      setAttribute() {},
+    }
+  },
 }
 
 ;(globalThis as any).document = (globalThis as any).document || documentStub
 ;(globalThis as any).window = (globalThis as any).window || {}
 
-const { WasmOfficeEditor } = await import("./wasm_office_editor.js")
-const { WasmHwpEditor } = await import("./wasm_hwp_editor.ts")
+const { WasmOfficeEditor } = await import("../js/wasm_office_editor.js")
+const { WasmHwpEditor } = await import("../js/wasm_hwp_editor.ts")
 
 describe("WasmOfficeEditor toolbar toggle state", () => {
+  it("routes toolbar format/align commands through native UNO dispatch", () => {
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmOfficeEditor,
+      el: { isConnected: true },
+      api: {},
+      handle: {},
+      format: "docx",
+      documentId: "doc-1",
+      parts: [{ width: 100, height: 100 }],
+      hasApiMethod: (name: string) => name === "postUnoCommand",
+      callApi: (...args: unknown[]) => calls.push({ name: "callApi", args }),
+      renderAfterInput: () => calls.push({ name: "renderAfterInput" }),
+      refreshCaret: () => calls.push({ name: "refreshCaret" }),
+      settleCaretAfterInput: () => calls.push({ name: "settleCaretAfterInput" }),
+      markViewerMutated: () => calls.push({ name: "markViewerMutated" }),
+      imeProxy: { value: "" },
+    } as any
+
+    for (const [command, uno] of [
+      ["bold", ".uno:Bold"],
+      ["strikethrough", ".uno:Strikeout"],
+      ["align-center", ".uno:CenterPara"],
+      ["align-justify", ".uno:JustifyPara"],
+    ] as const) {
+      calls.length = 0
+      editor.handleToolbarCommand({ command, document_id: "doc-1" })
+      assert.deepEqual(
+        calls.find(c => c.name === "callApi")?.args,
+        ["postUnoCommand", uno, ""],
+        `${command} → ${uno}`
+      )
+      assert.ok(calls.some(c => c.name === "renderAfterInput"), `${command} repaints`)
+      assert.ok(calls.some(c => c.name === "markViewerMutated"), `${command} marks mutated`)
+    }
+  })
+
+  it("routes font row commands through UNO with args JSON payloads", () => {
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmOfficeEditor,
+      el: { isConnected: true },
+      api: {},
+      handle: {},
+      format: "docx",
+      documentId: "doc-1",
+      parts: [{ width: 100, height: 100 }],
+      hasApiMethod: (name: string) => name === "postUnoCommand",
+      callApi: (...args: unknown[]) => calls.push({ name: "callApi", args }),
+      renderAfterInput: () => calls.push({ name: "renderAfterInput" }),
+      refreshCaret: () => calls.push({ name: "refreshCaret" }),
+      settleCaretAfterInput: () => calls.push({ name: "settleCaretAfterInput" }),
+      markViewerMutated: () => calls.push({ name: "markViewerMutated" }),
+      imeProxy: { value: "" },
+    } as any
+
+    for (const [detail, uno, args] of [
+      [
+        { command: "font-size-set", size: 13 },
+        ".uno:FontHeight",
+        JSON.stringify({ "FontHeight.Height": { type: "float", value: 13 } }),
+      ],
+      [
+        { command: "text-color", color: "#e11d48" },
+        ".uno:Color",
+        JSON.stringify({ Color: { type: "long", value: 0xe11d48 } }),
+      ],
+      [
+        { command: "highlight", color: "#fde047" },
+        ".uno:CharBackColor",
+        JSON.stringify({ CharBackColor: { type: "long", value: 0xfde047 } }),
+      ],
+    ] as const) {
+      calls.length = 0
+      editor.handleToolbarCommand({ ...detail, document_id: "doc-1" })
+      assert.deepEqual(
+        calls.find(c => c.name === "callApi")?.args,
+        ["postUnoCommand", uno, args],
+        `${detail.command} → ${uno}`
+      )
+      assert.ok(calls.some(c => c.name === "markViewerMutated"), `${detail.command} marks mutated`)
+    }
+
+    // Malformed payloads must not reach the engine.
+    for (const detail of [
+      { command: "font-size-set", size: 0 },
+      { command: "font-size-set", size: "abc" },
+      { command: "text-color" },
+      { command: "highlight", color: "not-a-color" },
+    ]) {
+      calls.length = 0
+      editor.handleToolbarCommand({ ...detail, document_id: "doc-1" })
+      assert.equal(calls.length, 0, `${JSON.stringify(detail)} is dropped`)
+    }
+  })
+
+  it("broadcasts LOK format state on the local-editor-state bus", () => {
+    const events: any[] = []
+    const doc = (globalThis as any).document
+    const originalDispatch = doc.dispatchEvent
+    doc.dispatchEvent = (event: any) => {
+      events.push(event)
+      return true
+    }
+
+    try {
+      const editor = {
+        ...WasmOfficeEditor,
+        officeHookAlive: true,
+        api: {},
+        documentId: "doc-7",
+        callApi: (name: string) =>
+          name === "getInteractionState"
+            ? JSON.stringify({
+                seq: 4,
+                format: { bold: 1, italic: 0, underline: -1, strikeout: 0, align: "center" },
+              })
+            : null,
+      } as any
+
+      editor.emitToolbarState()
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].type, "ecrits:local-editor-state")
+      assert.deepEqual(events[0].detail, {
+        document_id: "doc-7",
+        bold: true,
+        italic: false,
+        underline: false, // tri-state -1 (no update yet) maps to unlit
+        strikethrough: false,
+        alignment: "center",
+      })
+    } finally {
+      doc.dispatchEvent = originalDispatch
+    }
+  })
+
+  it("stays silent when the wasm has no format feed (old builds)", () => {
+    const events: any[] = []
+    const doc = (globalThis as any).document
+    const originalDispatch = doc.dispatchEvent
+    doc.dispatchEvent = (event: any) => {
+      events.push(event)
+      return true
+    }
+
+    try {
+      const editor = {
+        ...WasmOfficeEditor,
+        officeHookAlive: true,
+        api: {},
+        documentId: "doc-7",
+        callApi: () => JSON.stringify({ seq: 4 }),
+      } as any
+
+      editor.emitToolbarState()
+      assert.equal(events.length, 0)
+    } finally {
+      doc.dispatchEvent = originalDispatch
+    }
+  })
+
+  it("falls back to the uno_set path when postUnoCommand is unavailable", () => {
+    let toggled: unknown[] = []
+    const editor = {
+      ...WasmOfficeEditor,
+      el: { isConnected: true },
+      api: {},
+      handle: {},
+      format: "docx",
+      documentId: "doc-1",
+      hasApiMethod: () => false,
+      officeToolbarToggleProp: async (...args: unknown[]) => { toggled = args },
+    } as any
+
+    editor.handleToolbarCommand({ command: "bold", document_id: "doc-1" })
+    assert.deepEqual(toggled, ["Bold", "CharWeight"])
+  })
+
   it("treats CharWeight >= 150 as bold", () => {
     const editor = {
       ...WasmOfficeEditor,
@@ -1384,7 +1567,8 @@ describe("WasmHwpEditor clipboard editing", () => {
           return text.slice(start, start + count)
         },
       },
-      selection: {
+      sel: {
+        kind: "text",
         section: 0,
         cell: null,
         anchor: { paragraph: 0, offset: 1 },
@@ -1559,6 +1743,137 @@ describe("WasmHwpEditor image move", () => {
     assert.equal(calls.some(call => call.name === "stopPropagation"), false)
   })
 
+  it("falls back from missing pickAtPoint to hitTest paragraph picks", () => {
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        getPageControlLayout: () => JSON.stringify({ controls: [] }),
+        getParagraphLength: () => 6,
+        getSelectionRects: () => JSON.stringify([
+          { pageIndex: 2, x: 10, y: 20, width: 30, height: 40 },
+        ]),
+      },
+    } as any
+
+    const pick = editor.hwpPick(
+      { sectionIndex: 1, paragraphIndex: 2, charOffset: 3, x: 111, y: 222 },
+      2
+    )
+
+    assert.equal(pick.type, "paragraph")
+    assert.deepEqual(pick.ref, { section: 1, paragraph: 2, offset: 3 })
+    assert.deepEqual(pick.rects, [{ pageIndex: 2, x: 10, y: 20, width: 30, height: 40 }])
+  })
+
+  it("keeps native hitTest paragraph picks paintable when selection rects are empty", () => {
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        getPageControlLayout: () => JSON.stringify({ controls: [] }),
+        getParagraphLength: () => 6,
+        getSelectionRects: () => JSON.stringify([]),
+      },
+    } as any
+
+    const pick = editor.hwpPick(
+      { sectionIndex: 1, paragraphIndex: 2, charOffset: 3, x: 111, y: 222 },
+      2
+    )
+
+    assert.equal(pick.type, "paragraph")
+    assert.deepEqual(pick.ref, { section: 1, paragraph: 2, offset: 3 })
+    assert.deepEqual(pick.rects, [{ pageIndex: 2, x: 87, y: 198, width: 48, height: 48, fallbackPoint: true }])
+  })
+
+  it("previews a hover box when the cursor moves in picker mode (no drag)", () => {
+    const calls: string[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {},
+      elementPickerEnabled: true,
+      imageDrag: null,
+      dragSelect: null,
+      pickerHover: null,
+      queuePickerHover: () => calls.push("queuePickerHover"),
+    } as any
+
+    editor.onCanvasMouseMove({ buttons: 0 } as any)
+
+    assert.deepEqual(calls, ["queuePickerHover"])
+  })
+
+  it("falls back from missing pickAtPoint to hitTest cell picks", () => {
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        getPageControlLayout: () => JSON.stringify({ controls: [] }),
+        getTableCellBboxes: () => JSON.stringify([
+          { cellIdx: 4, pageIndex: 3, x: 11, y: 22, w: 33, h: 44 },
+        ]),
+      },
+    } as any
+
+    const pick = editor.hwpPick(
+      {
+        sectionIndex: 1,
+        paragraphIndex: 7,
+        charOffset: 2,
+        parentParaIndex: 5,
+        controlIndex: 6,
+        cellIndex: 4,
+        cellParaIndex: 0,
+        cellPath: [{ controlIndex: 6, cellIndex: 4, cellParaIndex: 0 }],
+        x: 111,
+        y: 222,
+      },
+      3
+    )
+
+    assert.equal(pick.type, "cell")
+    assert.deepEqual(pick.ref, {
+      section: 1,
+      paragraph: 5,
+      offset: 0,
+      cell: {
+        parentParaIndex: 5,
+        controlIndex: 6,
+        cellIndex: 4,
+        cellParaIndex: 0,
+        cellPath: [{ controlIndex: 6, cellIndex: 4, cellParaIndex: 0 }],
+      },
+    })
+    assert.deepEqual(pick.rects, [{ pageIndex: 3, x: 11, y: 22, width: 33, height: 44 }])
+  })
+
+  it("does not add a null document-element pick when hit resolution fails", () => {
+    const picker = (globalThis as any).window.EcritsDocumentElementPicker
+    picker.clearPicks()
+    picker.setEnabled(true)
+    const calls: Array<{ name: string }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {},
+      sel: null,
+      hitTestEvent: () => ({ hit: { sectionIndex: 0, paragraphIndex: 0, charOffset: 0, x: 1, y: 2 }, pageIndex: 0 }),
+      hwpPickFromHit: () => null,
+    } as any
+    const event = {
+      button: 0,
+      preventDefault: () => calls.push({ name: "preventDefault" }),
+      stopPropagation: () => calls.push({ name: "stopPropagation" }),
+    } as any
+
+    try {
+      editor.onCanvasMouseDown(event)
+      assert.deepEqual(picker.picks, [])
+      assert.ok(calls.some(call => call.name === "preventDefault"))
+      assert.ok(calls.some(call => call.name === "stopPropagation"))
+    } finally {
+      picker.clearPicks()
+      picker.setEnabled(false)
+    }
+  })
+
   it("uses local image selection for document adornments without exposing it to current chat picks", () => {
     const picker = (globalThis as any).window.EcritsDocumentElementPicker
     picker.clearPicks()
@@ -1570,6 +1885,32 @@ describe("WasmHwpEditor image move", () => {
 
     assert.deepEqual(editor.currentDocumentPicks(), [])
     assert.deepEqual(editor.documentAdornmentPicks(), [imagePick])
+  })
+
+  it("does not expose mirror preview image selections as current chat picks", () => {
+    const picker = (globalThis as any).window.EcritsDocumentElementPicker
+    picker.clearPicks()
+    const editor = {
+      ...WasmHwpEditor,
+      mirror: true,
+      el: { dataset: { documentPath: "/tmp/doc.hwp", editorMirror: "true" } },
+      localImagePick: imagePick,
+    } as any
+    const documentAny = (globalThis as any).document
+    const originalQuerySelectorAll = documentAny.querySelectorAll
+    documentAny.querySelectorAll = (selector: string) =>
+      selector === "[data-role='local-hwp-editor']"
+        ? [{ dataset: { editorMirror: "true" }, __wasmHwpEditor: editor }]
+        : []
+
+    try {
+      assert.deepEqual(editor.currentDocumentPicks(), [])
+      assert.deepEqual(editor.agentSelectionPicks(), [])
+      assert.deepEqual(picker.compactPicks(), [])
+    } finally {
+      documentAny.querySelectorAll = originalQuerySelectorAll
+      picker.clearPicks()
+    }
   })
 
   it("sends local image selection as an implicit agent pick", () => {

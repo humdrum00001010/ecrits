@@ -60,7 +60,9 @@ export const keyboardSubsystem = {
     const compositionInput = type === "insertCompositionText" || type === "insertReplacementText"
     if (this.composing) {
       if (compositionInput || event.isComposing) {
-        this.replaceComposing(this.currentCompositionText(event))
+        const str = this.currentCompositionText(event)
+        this.showCompositionPreview(str)
+        this.queueCompositionModelSync(str)
       }
       return
     }
@@ -89,28 +91,34 @@ export const keyboardSubsystem = {
     // Composing over a selection replaces it first.
     if (this.hasSelection()) this.deleteSelection()
     this.skipNextCompositionInput = null
+    this.pendingCompositionText = null
+    this.compositionSyncQueued = false
     this.composing = { start: this.caret.offset, length: 0 }
+    this.showCompositionPreview(this.currentCompositionText(_event))
   },
 
-  // compositionupdate — replace the provisional composing string IN the document
-  // (in-document composing, not a separate overlay). We delete the previous
-  // provisional run and insert the new one, then re-render + reposition caret.
+  // compositionupdate — paint the text immediately in a transient DOM preview,
+  // then sync the WASM document/canvas after a paint. The preview is the fast
+  // path users feel; the model remains the source of truth and catches up.
   handleCompositionUpdate(event) {
     if (!this.doc || !this.caret || !this.composing) return
-    this.replaceComposing(this.currentCompositionText(event))
+    const str = this.currentCompositionText(event)
+    this.showCompositionPreview(str)
+    this.queueCompositionModelSync(str)
   },
 
   // compositionend — commit. The final string is already in the document from
-  // the last compositionupdate; we just finalize the region and clear the proxy
-  // (the OS IME target).
+  // the latest queued/synchronous composition replacement; flush once more with
+  // the resolved string, then clear the preview/proxy.
   handleCompositionEnd(event) {
     if (!this.doc || !this.caret) return
     if (this.composing) {
       const str = this.currentCompositionText(event)
       // Ensure the committed string matches the final composition (some IMEs
       // send a final compositionend with the resolved text).
-      this.replaceComposing(str)
+      this.flushCompositionModelSync(str)
       this.composing = null
+      this.hideCompositionPreview()
       this.armTrailingCompositionInputGuard(str)
     }
     this.imeProxy.value = ""
@@ -158,6 +166,40 @@ export const keyboardSubsystem = {
     this.renderCaretPage()
     this.drawCaret(c)
     this.anchorProxy()
+  },
+
+  queueCompositionModelSync(str) {
+    this.pendingCompositionText = String(str || "")
+    if (this.compositionSyncQueued) return
+    this.compositionSyncQueued = true
+
+    const run = () => {
+      this.compositionSyncQueued = false
+      if (!this.composing) {
+        this.pendingCompositionText = null
+        return
+      }
+      const next = this.pendingCompositionText != null ? this.pendingCompositionText : ""
+      this.pendingCompositionText = null
+      this.replaceComposing(next)
+    }
+
+    const win = typeof window !== "undefined" ? window : null
+    const timeout = (fn) => {
+      if (win && typeof win.setTimeout === "function") win.setTimeout(fn, 0)
+      else setTimeout(fn, 0)
+    }
+    if (win && typeof win.requestAnimationFrame === "function") {
+      win.requestAnimationFrame(() => timeout(run))
+    } else {
+      timeout(run)
+    }
+  },
+
+  flushCompositionModelSync(str) {
+    this.pendingCompositionText = null
+    this.compositionSyncQueued = false
+    this.replaceComposing(String(str || ""))
   },
 
   armTrailingCompositionInputGuard(text) {

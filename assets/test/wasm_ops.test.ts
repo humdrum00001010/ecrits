@@ -11,7 +11,7 @@
 
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { OPS, type EditorContext, type Op, type ParsedRef } from "./wasm_ops.ts"
+import { OPS, type EditorContext, type Op, type ParsedRef } from "../js/wasm_ops.ts"
 
 // ─── spy + mock harness ──────────────────────────────────────────────────────
 
@@ -77,6 +77,7 @@ function makeDoc(over: Record<string, any> = {}) {
     // delete_node removers
     deleteTableControl: spy(),
     deletePictureControl: spy(),
+    deleteCellPictureControlByPath: spy(),
     deleteShapeControl: spy(),
     deleteEquationControl: spy(),
     deleteFootnote: spy(),
@@ -771,6 +772,7 @@ describe("insert_picture", () => {
       naturalHeightPx: 600,
       extension: "jpg",
       description: "logo",
+      inlineInCell: false,
       paperOffsetXHu: null,
       paperOffsetYHu: null,
     })
@@ -803,6 +805,7 @@ describe("insert_picture", () => {
     const ref = { section: 0, paragraph: 2, offset: 0, cell: { cellPath: [1, 2] } }
     run("insert_picture", { image_base64: "AAA", width: 10, height: 10 }, ref, ctx)
     assert.equal(JSON.parse(argsOf(ctx.doc.insertPictureBase64)[0]).cellPath, JSON.stringify([1, 2]))
+    assert.equal(JSON.parse(argsOf(ctx.doc.insertPictureBase64)[0]).inlineInCell, false)
   })
 
   it("derives a cell path for regular table-cell refs from doc.find", () => {
@@ -813,10 +816,11 @@ describe("insert_picture", () => {
       offset: 0,
       cell: { parentParaIndex: 9, controlIndex: 2, cellIndex: 5, cellParaIndex: 1 },
     }
-    run("insert_picture", { image_base64: "AAA", width: 10, height: 10 }, ref, ctx)
+    run("insert_picture", { image_base64: "AAA", width: 10, height: 10, inline_in_cell: true }, ref, ctx)
     assert.deepEqual(JSON.parse(JSON.parse(argsOf(ctx.doc.insertPictureBase64)[0]).cellPath), [
       { controlIndex: 2, cellIndex: 5, cellParaIndex: 1 },
     ])
+    assert.equal(JSON.parse(argsOf(ctx.doc.insertPictureBase64)[0]).inlineInCell, true)
   })
 
   it("falls back to insertPictureEx when insertPictureBase64 is unavailable", () => {
@@ -854,5 +858,31 @@ describe("insert_picture", () => {
     const ctx = makeCtx({ base64ToBytes: thrower("bad b64") })
     const r = run("insert_picture", { image_base64: "!!", width: 1, height: 1 }, { section: 0, paragraph: 1, offset: 0 }, ctx)
     assert.ok(isErr(r) && /invalid base64/.test(r.error))
+  })
+
+  it("deletes cell-contained pictures with a JSON cell path", () => {
+    const ctx = makeCtx({ rawControlIndex: spy(() => 4) })
+    const ref = {
+      section: 0,
+      paragraph: 9,
+      offset: 0,
+      cell: {
+        parentParaIndex: 9,
+        controlIndex: 2,
+        cellIndex: 5,
+        cellParaIndex: 1,
+        cellPath: [{ controlIndex: 2, cellIndex: 5, cellParaIndex: 1 }],
+      },
+    }
+
+    const result = run("delete_node", { ref: { type: "picture", control: 4 } }, ref, ctx)
+
+    assert.ok(isOk(result))
+    assert.deepEqual(argsOf(ctx.doc.deleteCellPictureControlByPath), [
+      0,
+      9,
+      JSON.stringify([{ controlIndex: 2, cellIndex: 5, cellParaIndex: 1 }]),
+      4,
+    ])
   })
 })
