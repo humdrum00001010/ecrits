@@ -49,6 +49,7 @@ defmodule EcritsWeb.Layouts do
   attr :page_title, :string, default: nil
   attr :current_document_id, :any, default: nil
   attr :show_footer, :boolean, default: true
+  attr :brand_href, :string, default: nil
 
   attr :chrome, :string,
     default: "app",
@@ -81,7 +82,12 @@ defmodule EcritsWeb.Layouts do
       />
 
       <div class="drawer-content flex flex-col min-h-screen pt-[60px]">
-        <.top_nav current_scope={@current_scope} chrome={@chrome} fuse_mode={@fuse_mode} />
+        <.top_nav
+          current_scope={@current_scope}
+          chrome={@chrome}
+          fuse_mode={@fuse_mode}
+          brand_href={@brand_href || ~p"/"}
+        />
 
         <Breadcrumbs.breadcrumbs :if={@current_scope} trail={@breadcrumbs || []} />
 
@@ -125,6 +131,7 @@ defmodule EcritsWeb.Layouts do
   attr :current_scope, :map, default: nil
   attr :chrome, :string, default: "app", values: ~w(app landing)
   attr :fuse_mode, :any, default: nil
+  attr :brand_href, :string, default: "/"
 
   @doc """
   Top navigation for the local workspace product.
@@ -134,7 +141,7 @@ defmodule EcritsWeb.Layouts do
     <header class="navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px] flex-nowrap border-b border-base-300 bg-base-100 supports-[backdrop-filter]:backdrop-blur-md px-7 max-md:px-4">
       <div class="navbar-start gap-6 min-w-0">
         <.link
-          navigate={~p"/"}
+          navigate={@brand_href}
           class="link link-hover inline-flex items-center gap-2 min-w-0 text-sm font-semibold leading-none text-base-content/85 hover:text-base-content"
           aria-label="Ecrits"
         >

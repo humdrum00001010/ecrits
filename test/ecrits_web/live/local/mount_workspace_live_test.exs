@@ -70,10 +70,11 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   alias Ecrits.Local.AcpAgent
   alias Ecrits.Local.AcpAgent.Session, as: AgentSession
   alias Ecrits.Local.Document
+  alias Ecrits.Local.WorkspaceHandoff
   alias EcritsWeb.LocalDirectoryPickerStub
   alias EcritsWeb.LocalWorkspaceAdapterStub
 
-  setup do
+  setup %{conn: conn} do
     previous = Application.get_env(:ecrits, :local_workspace_adapter)
     previous_directory_picker = Application.get_env(:ecrits, :local_directory_picker)
     previous_directory_picker_stub = Application.get_env(:ecrits, :local_directory_picker_stub)
@@ -97,6 +98,13 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     # left over from a prior test so each test starts with a fresh agent — without
     # this, a leaked in-flight turn / provider thread bleeds across tests.
     stop_workspace_session(LocalWorkspaceAdapterStub.valid_path())
+
+    live_session_id = "mount-workspace-test-#{System.unique_integer([:positive])}"
+
+    :ok =
+      WorkspaceHandoff.put_workspace_path(live_session_id, LocalWorkspaceAdapterStub.valid_path())
+
+    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: live_session_id})
 
     on_exit(fn ->
       stop_workspace_session(LocalWorkspaceAdapterStub.valid_path())
@@ -142,21 +150,24 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         Application.delete_env(:ecrits, :local_ehwp_opts)
       end
     end)
+
+    {:ok, conn: conn, local_live_session_id: live_session_id}
   end
 
   test "root renders unauthenticated mount screen", %{conn: conn} do
     {:ok, lv, html} = live(conn, ~p"/")
 
     assert has_element?(lv, "#local-mount-root")
+    assert has_element?(lv, "a[aria-label='Ecrits'][href='/']")
     assert has_element?(lv, "#local-native-directory-picker[data-role='native-directory-picker']")
     assert has_element?(lv, "#local-mount-picker-surface[data-role='mount-picker-surface']")
     assert has_element?(lv, "#local-mount-control-row[data-role='mount-control-row']")
     assert has_element?(lv, "#local-mount-control-row #local-mount-choose", "Open folder")
-    assert has_element?(lv, "#local-mount-control-row #local-path-form[method='get']")
+    assert has_element?(lv, "#local-mount-control-row #local-path-form[phx-submit='open_path']")
 
     assert has_element?(
              lv,
-             "#local-mount-control-row #local-path-input[name='path']"
+             "#local-mount-control-row #local-path-input[name='local_path[path]']"
            )
 
     assert has_element?(
@@ -201,7 +212,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     {:ok, lv, _html} =
       live(
         conn,
-        ~p"/local/agent-providers/claude/setup?#{[return_to: "/workspace?path=/tmp/ecrits&provider=claude"]}"
+        ~p"/local/agent-providers/claude/setup?#{[return_to: "/workspace"]}"
       )
 
     assert has_element?(
@@ -238,12 +249,14 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert has_element?(lv, "#local-mount-picker-surface")
   end
 
-  test "workspace path query rejects an invalid path", %{conn: conn} do
+  test "workspace path query is ignored in favor of the session handoff", %{conn: conn} do
     file_path = Path.join(LocalWorkspaceAdapterStub.valid_path(), "not-a-directory.txt")
     File.write!(file_path, "not a directory")
 
-    assert {:error, {:live_redirect, %{to: "/"}}} =
-             live(conn, ~p"/workspace?#{[path: file_path]}")
+    {:ok, lv, _html} = live(conn, ~p"/workspace?#{[path: file_path]}")
+
+    assert has_element?(lv, "#local-workspace-grid")
+    refute has_element?(lv, "#local-mount-error")
   end
 
   test "native picker unavailable renders inline error", %{conn: conn} do
@@ -290,12 +303,12 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert has_element?(lv, "#local-mount-choose[data-busy='false']", "Open folder")
   end
 
-  test "manual path form is a native GET to the workspace shell", %{conn: conn} do
+  test "manual path form submits through LiveView without URL state", %{conn: conn} do
     {:ok, lv, _html} = live(conn, ~p"/")
 
     assert has_element?(
              lv,
-             "#local-path-form[action='/workspace'][method='get'] #local-path-input[name='path']"
+             "#local-path-form[phx-submit='open_path'] #local-path-input[name='local_path[path]']"
            )
   end
 
@@ -318,20 +331,15 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert has_element?(lv, "#local-mount-choose[disabled][data-busy='true']", "Opening picker")
     send(picker_pid, :release_directory_picker)
 
-    assert_redirect(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}"
-    )
+    assert_redirect(lv, ~p"/workspace")
 
-    {:ok, workspace_lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}"
-      )
+    {:ok, workspace_lv, _html} = live(conn, ~p"/workspace")
 
     assert has_element?(workspace_lv, "#local-workspace-root")
+    assert has_element?(workspace_lv, "a[aria-label='Ecrits'][href='/workspace']")
     assert has_element?(workspace_lv, "#local-workspace-root[class*='overflow-hidden']")
     assert has_element?(workspace_lv, "#local-workspace-grid[phx-hook='LocalChatRailResizer']")
+    assert has_element?(workspace_lv, "#local-workspace-grid[data-office-asset-version]")
     assert has_element?(workspace_lv, "#local-workspace-grid[class*='h-full']")
     assert has_element?(workspace_lv, "#local-workspace-grid[class*='isolate']")
     assert has_element?(workspace_lv, "#local-workspace-grid[style*='--local-editor-z']")
@@ -370,11 +378,11 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              workspace_lv,
-             ~s(a#local-file-node-template-hwp[data-role="repo-browser-row"][href*="document=template.hwp"])
+             ~s(button#local-file-node-template-hwp[data-role="repo-browser-row"][phx-click="open_file"][phx-value-path="template.hwp"])
            )
 
-    refute has_element?(workspace_lv, ~s(a#local-file-node-template-hwp[data-phx-link]))
-    refute has_element?(workspace_lv, ~s(a#local-file-node-template-hwp[phx-click]))
+    refute has_element?(workspace_lv, ~s(button#local-file-node-template-hwp[data-phx-link]))
+    refute has_element?(workspace_lv, ~s(button#local-file-node-template-hwp[href]))
 
     assert has_element?(
              workspace_lv,
@@ -584,11 +592,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   end
 
   test "workspace chat rail reasoning option is selectable", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     assert has_element?(
              lv,
@@ -631,11 +635,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "workspace chat rail provider detail switches provider", %{conn: conn} do
     put_provider_integrations!(ready_provider_integrations())
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     lv
     |> element("#local-agent-go-to-provider")
@@ -644,12 +644,6 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     lv
     |> element("#local-agent-model-detail-claude")
     |> render_click()
-
-    # Provider/model stay URL-driven; reasoning/access do NOT (#42 — session).
-    assert_patch(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "claude", model: "default"]}"
-    )
 
     assert has_element?(
              lv,
@@ -681,11 +675,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       }
     ])
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     lv
     |> element("#local-agent-go-to-provider")
@@ -711,11 +701,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "workspace chat rail submits selected inline options to the local agent", %{conn: conn} do
     use_test_agent_adapter!(adapter_opts: [echo_opts: true])
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     assert has_element?(
              lv,
@@ -742,11 +728,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     |> element(~s([id="local-agent-inline-model-gpt-5.3-codex-spark"]))
     |> render_click()
 
-    # Model stays URL-driven (reasoning/access dropped from the URL — #42).
-    assert_patch(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex", model: "gpt-5.3-codex-spark"]}"
-    )
+    assert has_element?(
+             lv,
+             "#local-agent-provider-options[data-selected-provider='codex'][data-selected-model='gpt-5.3-codex-spark']"
+           )
 
     # reasoning + access select into the durable SESSION (no URL patch); the
     # submit below proves they were forwarded to the adapter (echoed back).
@@ -789,19 +774,17 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
            )
   end
 
-  test "workspace chat rail coerces fake provider URL to codex", %{conn: conn} do
+  test "workspace chat rail ignores fake provider URL state", %{conn: conn} do
     root = LocalWorkspaceAdapterStub.valid_path()
 
-    assert {:error, {:live_redirect, %{to: to}}} =
-             live(conn, ~p"/workspace?#{[path: root, provider: "fake"]}")
+    {:ok, lv, _html} = live(conn, ~p"/workspace?#{[path: root, provider: "fake"]}")
 
-    assert to =~ "provider=codex"
-    refute to =~ "provider=fake"
+    assert has_element?(lv, "#local-agent-provider-options[data-selected-provider='codex']")
+    assert has_element?(lv, "#local-workspace-grid")
   end
 
   test "file tree supports expansion, row-open, and format affordances", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     assert has_element?(lv, "#local-file-tree")
     assert has_element?(lv, ~s(#local-file-tree ul[role="tree"]))
@@ -811,10 +794,15 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s(a[data-role="repo-browser-row"][data-node-path="template.hwp"][data-openable="true"][data-file-extension="hwp"][href*="document=template.hwp"])
+             ~s(button[data-role="repo-browser-row"][data-node-path="template.hwp"][data-openable="true"][data-file-extension="hwp"][phx-click="open_file"])
            )
 
-    assert has_element?(lv, "#local-file-node-template-hwp[href*='document=template.hwp']")
+    assert has_element?(
+             lv,
+             "#local-file-node-template-hwp[data-bytes-url*='document=template.hwp']"
+           )
+
+    refute has_element?(lv, "#local-file-node-template-hwp[href]")
     refute has_element?(lv, ~s(#local-file-node-template-hwp[data-phx-link]))
     refute has_element?(lv, ~s([id^="open-file-"]))
     refute has_element?(lv, "#local-file-tree [data-role='file-extension']")
@@ -837,7 +825,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s(a[data-node-path="drafts/service.hwpx"][data-openable="true"][href*="document=drafts%2Fservice.hwpx"])
+             ~s(button[data-node-path="drafts/service.hwpx"][data-openable="true"][phx-click="open_file"][data-bytes-url*="document=drafts%2Fservice.hwpx"])
            )
 
     refute has_element?(lv, "#open-file-drafts-service-hwpx")
@@ -847,12 +835,12 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s(a[data-node-path="drafts/reference.docx"][data-openable="true"][data-file-extension="docx"][href*="document=drafts%2Freference.docx"])
+             ~s(button[data-node-path="drafts/reference.docx"][data-openable="true"][data-file-extension="docx"][phx-click="open_file"][data-bytes-url*="document=drafts%2Freference.docx"])
            )
 
     assert has_element?(
              lv,
-             ~s(a[data-node-path="drafts/ledger.xlsx"][data-openable="true"][data-file-extension="xlsx"][href*="document=drafts%2Fledger.xlsx"])
+             ~s(button[data-node-path="drafts/ledger.xlsx"][data-openable="true"][data-file-extension="xlsx"][phx-click="open_file"][data-bytes-url*="document=drafts%2Fledger.xlsx"])
            )
 
     lv
@@ -872,7 +860,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "#local-file-node-rulebook-md-acceptance-certificate-acceptance-certificate-md[data-tree-depth='2'][href][data-openable='true']"
+             "#local-file-node-rulebook-md-acceptance-certificate-acceptance-certificate-md[data-tree-depth='2'][data-openable='true'][phx-click='open_file']"
            )
 
     refute has_element?(
@@ -883,10 +871,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     refute has_element?(lv, "#local-rhwp-shell")
     refute has_element?(lv, "#local-rhwp-error")
 
-    render_patch(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx", provider: "codex", model: "gpt-5.5"]}"
-    )
+    open_document(lv, "drafts/service.hwpx")
 
     assert has_element?(lv, ~s([data-node-path="drafts/service.hwpx"][data-selected="true"]))
     assert has_element?(lv, ~s([data-node-path="drafts/service.hwpx"][class*="bg-base-300/70"]))
@@ -896,10 +881,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     sync_liveview(lv)
     assert has_element?(lv, "#local-rhwp-save-state", "Loaded -")
 
-    render_patch(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex", model: "gpt-5.5"]}"
-    )
+    open_document(lv, "template.hwp")
 
     refute has_element?(lv, "#local-file-tree-breadcrumb")
   end
@@ -907,11 +889,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "document query reopens a local HWPX in the EHWP shell without SaaS upload UI", %{
     conn: conn
   } do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "drafts/service.hwpx")
 
     assert has_element?(lv, "#local-rhwp-shell")
     assert has_element?(lv, "#local-rhwp-toolbar")
@@ -973,11 +951,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   end
 
   test "local HWP opens the browser-WASM shell and pushes the bytes URL to load", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "drafts/service.hwpx")
 
     render_async(lv, 2_000)
     _ = render_local_hwp_editor_html(lv)
@@ -1010,11 +984,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "document query opens a local DOCX through the client WASM office editor", %{
     conn: conn
   } do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/reference.docx"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "drafts/reference.docx")
 
     assert has_element?(lv, "#local-rhwp-shell")
     assert has_element?(lv, "#studio-document-tab-drafts-reference-docx[data-active='true']")
@@ -1033,14 +1003,155 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     refute has_element?(lv, ~s([data-role="local-hwp-editor"]))
   end
 
+  test "FUSE semantic edits replay into the visible active office WASM editor", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "drafts/reference.docx")
+
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="office-wasm-viewer"][data-document-path="drafts/reference.docx"])
+    )
+
+    assert_push_event(lv, "office_wasm_load", %{url: initial_url}, 1_000)
+    refute initial_url =~ "&v="
+
+    op = %{"op" => "replace_text", "query" => "개인신청", "replacement" => "개인 신청"}
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "drafts/reference.docx"),
+         doc: "reference.docx",
+         applied: 1,
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "replace_text",
+             "ref" => "p1",
+             "text" => "개인 신청"
+           }
+         ],
+         ops: [op]
+       }}
+    )
+
+    assert_push_event(
+      lv,
+      "doc.apply_edit",
+      %{document_id: document_id, verb: "edit", payload: %{ops: [pushed_op]}},
+      1_000
+    )
+
+    assert is_binary(document_id)
+    assert pushed_op == op
+    refute_push_event(lv, "office_wasm_load", %{document_id: ^document_id}, 200)
+
+    sync_liveview(lv)
+
+    bytes_url =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="office-wasm-viewer"]))
+      |> LazyHTML.attribute("data-bytes-url")
+      |> List.first()
+
+    assert bytes_url == initial_url
+  end
+
+  test "FUSE edits without semantic ops reload the visible active office WASM editor", %{
+    conn: conn
+  } do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "drafts/reference.docx")
+
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="office-wasm-viewer"][data-document-path="drafts/reference.docx"])
+    )
+
+    assert_push_event(lv, "office_wasm_load", %{url: initial_url}, 1_000)
+    refute initial_url =~ "&v="
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "drafts/reference.docx"),
+         doc: "reference.docx",
+         applied: 1,
+         highlights: []
+       }}
+    )
+
+    assert_push_event(
+      lv,
+      "office_wasm_load",
+      %{document_id: document_id, url: url},
+      1_000
+    )
+
+    assert is_binary(document_id)
+    assert url =~ "/local/document-bytes?"
+    assert url =~ "document=drafts%2Freference.docx"
+    assert url =~ "&v="
+
+    sync_liveview(lv)
+
+    bytes_url =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="office-wasm-viewer"]))
+      |> LazyHTML.attribute("data-bytes-url")
+      |> List.first()
+
+    assert bytes_url == url
+  end
+
+  test "workspace session restores open document tabs and persisted viewport on remount", %{
+    conn: conn
+  } do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "document-restore-session", root)
+
+    {:ok, lv, _html} = open_workspace(conn, root, document: "drafts/reference.docx")
+
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="office-wasm-viewer"][data-document-path="drafts/reference.docx"])
+    )
+
+    render_hook(lv, "local_document.viewport_changed", %{
+      "document_path" => "drafts/reference.docx",
+      "top" => "321",
+      "left" => "7"
+    })
+
+    sync_workspace_session(root)
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, restored_lv, _html} = open_workspace(conn, root)
+    render_async(restored_lv, 2_000)
+    sync_liveview(restored_lv)
+
+    assert has_element?(
+             restored_lv,
+             "#studio-document-tab-drafts-reference-docx[data-active='true']"
+           )
+
+    assert has_element?(
+             restored_lv,
+             ~s([data-role="office-wasm-viewer"][data-document-path="drafts/reference.docx"][data-scroll-top="321"][data-scroll-left="7"])
+           )
+  end
+
   test "document query opens a local XLSX through the client WASM office editor", %{
     conn: conn
   } do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/ledger.xlsx"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "drafts/ledger.xlsx")
 
     assert has_element?(lv, "#local-rhwp-shell")
     assert has_element?(lv, "#studio-document-tab-drafts-ledger-xlsx[data-active='true']")
@@ -1056,6 +1167,29 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     refute has_element?(lv, ~s([data-role="local-hwp-editor"]))
   end
 
+  test "file tree open event gives XLSX its own active document tab", %{conn: conn} do
+    {:ok, lv, _html} = open_workspace(conn, document: "drafts/reference.docx")
+
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="office-wasm-viewer"][data-local-document-format="docx"])
+    )
+
+    assert has_element?(lv, "#studio-document-tab-drafts-reference-docx[data-active='true']")
+
+    render_hook(lv, "open_file", %{"path" => "drafts/ledger.xlsx"})
+    render_async(lv)
+
+    assert has_element?(lv, "#studio-document-tab-drafts-reference-docx")
+    assert has_element?(lv, "#studio-document-tab-drafts-ledger-xlsx[data-active='true']")
+    assert has_element?(lv, "#studio-document-tab-drafts-ledger-xlsx", "ledger.xlsx")
+
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="office-wasm-viewer"][data-local-document-format="xlsx"])
+    )
+  end
+
   test "document query binds XLSX as the current doc MCP handle on send", %{conn: conn} do
     use_test_agent_adapter!(
       adapter_opts: [
@@ -1065,11 +1199,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/ledger.xlsx", provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "drafts/ledger.xlsx")
 
     sync_liveview(lv)
 
@@ -1106,7 +1236,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     refute File.exists?(upload_path)
 
-    {:ok, lv, _html} = live(conn, ~p"/workspace?#{[path: root, provider: "codex"]}")
+    {:ok, lv, _html} = open_workspace(conn, root)
 
     upload =
       file_input(lv, "#local-agent-provider-options", :local_document_import, [
@@ -1121,11 +1251,6 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     render_upload(upload, upload_name)
 
-    assert_patch(
-      lv,
-      ~p"/workspace?#{[path: root, document: upload_name, provider: "codex", model: "gpt-5.5"]}"
-    )
-
     assert File.read!(upload_path) == upload_bytes
     assert has_element?(lv, "#local-rhwp-shell")
 
@@ -1139,11 +1264,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   end
 
   test "document query opens a local HWP with the same Studio editor surface", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "template.hwp")
 
     assert_has_element_after_open_sync(
       lv,
@@ -1172,11 +1293,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "header picker + fullscreen buttons are desktop controls without responsive gates", %{
     conn: conn
   } do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "template.hwp")
 
     html = render(lv)
 
@@ -1202,6 +1319,31 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     refute fullscreen_click =~ "lg:col-span-3"
   end
 
+  test "document element picker mode is stored in the workspace session", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
+
+    assert has_element?(lv, "#local-document-element-picker[aria-pressed='false']")
+
+    lv
+    |> element("#local-document-element-picker")
+    |> render_click()
+
+    assert_push_event(lv, "document_element_picker:set", %{enabled: true}, 1_000)
+
+    assert has_element?(
+             lv,
+             "#local-document-element-picker[aria-pressed='true'][data-active='true']"
+           )
+
+    {:ok, lv2, _html} = open_workspace(conn, root)
+    render_async(lv2, 2_000)
+    sync_liveview(lv2)
+
+    assert_has_element_after_open_sync(lv2, "#local-document-element-picker[aria-pressed='true']")
+    assert has_element?(lv2, "#local-document-element-picker[data-active='true']")
+  end
+
   defp header_action_class(html, selector) do
     html
     |> LazyHTML.from_fragment()
@@ -1211,11 +1353,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   end
 
   test "local employment standard HWP exposes editable specs to the editor", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "employment_v1.hwp"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "employment_v1.hwp")
 
     assert has_element?(
              lv,
@@ -1228,11 +1366,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "copied local employment standard HWP does not expose editable specs to the editor", %{
     conn: conn
   } do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "employment_v1 (1).hwp"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "employment_v1 (1).hwp")
 
     assert has_element?(
              lv,
@@ -1248,8 +1382,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     path = Path.join(root, relative_path)
     original = File.read!(path)
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: root, document: relative_path]}")
+    {:ok, lv, _html} = open_workspace(conn, root, document: relative_path)
 
     render_async(lv, 2_000)
     _ = render_local_hwp_editor_html(lv)
@@ -1279,8 +1412,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert File.read!(path) == saved
     assert has_element?(lv, "#local-rhwp-save-state", "Saved -")
 
-    {:ok, reloaded_lv, _html} =
-      live(conn, ~p"/workspace?#{[path: root, document: relative_path]}")
+    {:ok, reloaded_lv, _html} = open_workspace(conn, root, document: relative_path)
 
     render_async(reloaded_lv, 2_000)
     _ = render_local_hwp_editor_html(reloaded_lv)
@@ -1294,8 +1426,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "local rhwp text mutation is acknowledged and does not remount", %{conn: conn} do
     root = LocalWorkspaceAdapterStub.valid_path()
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: root, document: "drafts/service.hwpx"]}")
+    {:ok, lv, _html} = open_workspace(conn, root, document: "drafts/service.hwpx")
 
     assert_has_element_after_open_sync(
       lv,
@@ -1341,11 +1472,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -1390,11 +1517,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     root = LocalWorkspaceAdapterStub.valid_path()
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
 
     session_id = subscribe_agent(lv)
     session_pid = AcpAgent.whereis(session_id)
@@ -1428,11 +1551,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     root = LocalWorkspaceAdapterStub.valid_path()
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
 
     session_id = subscribe_agent(lv)
 
@@ -1443,6 +1562,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert_receive {:fake_acp_prompt, _sid, prompt}, 1_000
     mount_status = Ecrits.Fuse.DocMount.status()
     mounted? = Ecrits.Fuse.DocMount.mounted?(root)
+    normalized_prompt = String.replace(prompt, ~r/\s+/, " ")
 
     cond do
       mount_status.enabled? and mounted? ->
@@ -1459,14 +1579,22 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         assert prompt =~ "Never treat a missing `mounted_at` field inside"
         assert prompt =~ "NEVER create, copy, or edit a JSONL projection anywhere else"
         assert prompt =~ "/tmp/<name>.jsonl"
-        assert prompt =~ "do NOT route to the document"
+        assert prompt =~ "does NOT route to the document"
         assert prompt =~ "[ [ [ payload_node"
         assert prompt =~ "Positional HWPX refs are NOT payload fields"
         assert prompt =~ "The nested list position"
         assert prompt =~ "inside an existing paragraph list"
         assert prompt =~ "not as a metadata object"
-        assert prompt =~ "create the temp file inside the same\n   `.ecrits/mount/` directory"
-        assert prompt =~ "Do NOT use\n   `mktemp`, `dd`, or any temp path outside the mount"
+
+        assert normalized_prompt =~
+                 "create the temp file inside the same `.ecrits/mount/` directory"
+
+        assert prompt =~ "validate the temp with `jq -c . \"$tmp\"`"
+        assert prompt =~ "only if JSON validation succeeds"
+
+        assert normalized_prompt =~
+                 "Do NOT use `mktemp`, `dd`, or any temp path outside the mount"
+
         assert prompt =~ "VFS `create`/`write`/`rename` path"
         assert prompt =~ ~s({"type":"table","cells":[["H1","H2"],["A","B"]],"header":true})
 
@@ -1477,6 +1605,18 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         assert prompt =~ "Move an existing picture by editing"
         assert prompt =~ "resize by editing `width`/`height`"
         assert prompt =~ "Delete a picture by removing that picture payload"
+        assert prompt =~ "immediately AFTER that cell payload"
+        assert prompt =~ "Do not edit/reuse an existing picture payload"
+        assert prompt =~ "Structural inserts are one-shot"
+        assert normalized_prompt =~ "picture appears at the intended nested position"
+        assert prompt =~ "ref.cellPath"
+        assert prompt =~ "`src` is only embed input"
+        assert prompt =~ "do not insert another copy"
+        assert prompt =~ "Verify with shell exactly once"
+
+        assert normalized_prompt =~
+                 "Do not reopen editor previews or poll `/local/document-bytes`"
+
         refute prompt =~ "Positional HWPX refs are lists"
         assert prompt =~ "READ with `cat`/`sed -n`"
         assert prompt =~ "FIND with `grep -n`/`rg`"
@@ -1488,7 +1628,6 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         refute prompt =~ "current_document.document"
 
       mount_status.enabled? ->
-        normalized_prompt = String.replace(prompt, ~r/\s+/, " ")
         assert prompt =~ "Doc VFS backend is available, but this workspace is not mounted"
         assert prompt =~ mount_status.message
         assert prompt =~ "doc.open_doc"
@@ -1544,11 +1683,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     root = LocalWorkspaceAdapterStub.valid_path()
     Application.put_env(:ecrits, :doc_vfs, enabled: false)
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
 
     assert has_element?(lv, ~s(#fuse-mode-toggle[aria-pressed="false"]))
 
@@ -1608,11 +1743,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "VFS property writes are pushed to the open HWP browser editor", %{conn: conn} do
     root = LocalWorkspaceAdapterStub.valid_path()
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
 
     assert_has_element_after_open_sync(
       lv,
@@ -1659,7 +1790,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     assert set_payload["props"]["BackgroundColor"] == "#CFFAFE"
   end
 
-  test "hydrated full workspace access reapplies VFS write policy", %{conn: conn} do
+  test "reselecting full workspace access reapplies VFS write policy", %{conn: conn} do
     previous_vfs = Application.get_env(:ecrits, :doc_vfs)
     root = LocalWorkspaceAdapterStub.valid_path()
 
@@ -1678,8 +1809,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         IO.puts("\n[skip] FUSE mount failed; skipping VFS write-policy hydration check")
 
       true ->
-        {:ok, lv, _html} =
-          live(conn, ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}")
+        {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
 
         lv
         |> element("#local-agent-inline-access-full-workspace")
@@ -1691,10 +1821,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         Ecrits.Fuse.OpenDocs.set_writable(root, false)
         refute Ecrits.Fuse.OpenDocs.writable?(root)
 
-        render_patch(
-          lv,
-          ~p"/workspace?#{[path: root, document: "template.hwp", provider: "codex"]}"
-        )
+        lv
+        |> element("#local-agent-inline-access-full-workspace")
+        |> render_click()
 
         sync_liveview(lv)
         assert has_element?(lv, ~s([data-selected-access="full-workspace"]))
@@ -1709,11 +1838,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     # — exactly like the #54 access-change decoupling.
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "streaming reply"}]])
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "template.hwp")
 
     session_id = subscribe_agent(lv)
     session_pid = AcpAgent.whereis(session_id)
@@ -1741,10 +1866,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     |> render_click()
 
     # Select a DIFFERENT document — the path that previously reset the chat.
-    render_patch(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx", provider: "codex", model: "gpt-5.5"]}"
-    )
+    open_document(lv, "drafts/service.hwpx")
 
     sync_liveview(lv)
 
@@ -1761,10 +1883,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     # Select a SECOND, different document (back to the HWP top-level one) —
     # still preserved.
-    render_patch(
-      lv,
-      ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "template.hwp", provider: "codex", model: "gpt-5.5"]}"
-    )
+    open_document(lv, "template.hwp")
 
     sync_liveview(lv)
 
@@ -1788,14 +1907,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "a browser refresh starts a fresh rail and keeps the old chat in recents",
        %{conn: conn} do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "ack reply"}]])
-    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "refresh-session"})
     root = LocalWorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "refresh-session", root)
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: root, provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, root)
 
     session_id = subscribe_agent(lv)
     agent_pid = AcpAgent.whereis(session_id)
@@ -1820,11 +1935,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     stop_pid(lv.pid)
     sync_workspace_session(root)
 
-    {:ok, lv2, _html2} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: root, provider: "codex"]}"
-      )
+    {:ok, lv2, _html2} = open_workspace(conn, root)
 
     sync_liveview(lv2)
 
@@ -1884,10 +1995,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "isolated reply"}]])
 
     root = LocalWorkspaceAdapterStub.valid_path()
-    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "same-browser-tabs"})
+    conn = init_workspace_session(conn, "same-browser-tabs", root)
 
-    {:ok, lv_a, _html} = live(conn, ~p"/workspace?#{[path: root, provider: "codex"]}")
-    {:ok, lv_b, _html} = live(conn, ~p"/workspace?#{[path: root, provider: "codex"]}")
+    {:ok, lv_a, _html} = open_workspace(conn, root)
+    {:ok, lv_b, _html} = open_workspace(conn, root)
 
     session_id_a = subscribe_agent(lv_a)
     session_id_b = subscribe_agent(lv_b)
@@ -1924,13 +2035,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   test "refresh on an empty chat reuses the active rail instead of adding another blank",
        %{conn: conn} do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "unused"}]])
-    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "empty-refresh"})
+    conn = init_workspace_session(conn, "empty-refresh")
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
     old_pid = AcpAgent.whereis(session_id)
@@ -1969,13 +2076,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "picks-refresh"})
+    conn = init_workspace_session(conn, "picks-refresh")
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/service.hwpx", provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "drafts/service.hwpx")
 
     on_exit(fn -> stop_workspace_session(LocalWorkspaceAdapterStub.valid_path()) end)
 
@@ -2073,11 +2176,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     stop_pid(lv.pid)
     sync_workspace_session(LocalWorkspaceAdapterStub.valid_path())
 
-    {:ok, lv2, _html2} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv2, _html2} = open_workspace(conn)
 
     sync_liveview(lv2)
     new_session_id = subscribe_agent(lv2)
@@ -2131,13 +2230,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "tool-refresh"})
+    conn = init_workspace_session(conn, "tool-refresh")
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
     agent_pid = AcpAgent.whereis(session_id)
@@ -2205,11 +2300,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     stop_pid(lv.pid)
     sync_workspace_session(LocalWorkspaceAdapterStub.valid_path())
 
-    {:ok, lv2, _html2} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv2, _html2} = open_workspace(conn)
 
     sync_liveview(lv2)
     new_session_id = subscribe_agent(lv2)
@@ -2240,11 +2331,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   end
 
   test "agent rail shows provider logo in model selector for codex route display", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     assert has_element?(
              lv,
@@ -2279,11 +2366,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   end
 
   test "agent rail title is manually editable through the title form", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     lv
     |> form("#local-agent-title-form", local_agent_title: %{title: "Pricing review"})
@@ -2314,11 +2397,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   end
 
   test "agent generated title replaces the untouched default title", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = local_agent_session_id(lv)
 
@@ -2349,13 +2428,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     conn: conn
   } do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "ack reply"}]])
-    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "rail-drawer"})
+    conn = init_workspace_session(conn, "rail-drawer")
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     old_session_id = subscribe_agent(lv)
     old_pid = AcpAgent.whereis(old_session_id)
@@ -2465,13 +2540,9 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     conn: conn
   } do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "ack reply"}]])
-    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: "rail-stream"})
+    conn = init_workspace_session(conn, "rail-stream")
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     old_session_id = subscribe_agent(lv)
 
@@ -2518,11 +2589,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   end
 
   test "agent selector supports codex route favicon without provider badge", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn)
 
     assert has_element?(lv, "#local-agent-sidebar[data-provider-key='codex']")
 
@@ -2536,23 +2603,18 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     refute has_element?(lv, "#local-agent-provider-icon")
   end
 
-  test "unsupported provider coerces to codex", %{conn: conn} do
-    assert {:error, {:live_redirect, %{to: to}}} =
-             live(
-               conn,
-               ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "bogus"]}"
-             )
-
-    assert to =~ "provider=codex"
-    refute to =~ "provider=fake"
-  end
-
-  test "agent status is internal and has no icon or provider badge structure", %{conn: conn} do
+  test "unsupported provider URL state is ignored", %{conn: conn} do
     {:ok, lv, _html} =
       live(
         conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "codex"]}"
+        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), provider: "bogus"]}"
       )
+
+    assert has_element?(lv, "#local-agent-provider-options[data-selected-provider='codex']")
+  end
+
+  test "agent status is internal and has no icon or provider badge structure", %{conn: conn} do
+    {:ok, lv, _html} = open_workspace(conn)
 
     fragment =
       lv
@@ -2588,8 +2650,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   end
 
   test "agent body uses chat rail stream and composer structure", %{conn: conn} do
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     assert has_element?(lv, "#local-agent-thread[data-role='chat-stream'][phx-update='stream']")
     assert has_element?(lv, "#local-agent-thread[class*='overflow-x-hidden']")
@@ -2646,8 +2707,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -2803,8 +2863,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -2867,8 +2926,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     lv
     |> form("#local-agent-form", agent: %{message: "stream"})
@@ -2918,11 +2976,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
   } do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "draft"}]])
 
-    {:ok, lv, _html} =
-      live(
-        conn,
-        ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path(), document: "drafts/ledger.xlsx", provider: "codex"]}"
-      )
+    {:ok, lv, _html} = open_workspace(conn, document: "drafts/ledger.xlsx")
 
     assert_has_element_after_open_sync(
       lv,
@@ -2968,8 +3022,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -3019,8 +3072,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -3090,8 +3142,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -3147,8 +3198,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -3193,8 +3243,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     lv
     |> form("#local-agent-form", agent: %{message: "markdown"})
@@ -3238,8 +3287,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -3291,8 +3339,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -3397,8 +3444,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -3462,8 +3508,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
       ]
     )
 
-    {:ok, lv, _html} =
-      live(conn, ~p"/workspace?#{[path: LocalWorkspaceAdapterStub.valid_path()]}")
+    {:ok, lv, _html} = open_workspace(conn)
 
     session_id = subscribe_agent(lv)
 
@@ -3577,6 +3622,49 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     ]
   end
 
+  defp open_workspace(conn), do: open_workspace(conn, LocalWorkspaceAdapterStub.valid_path(), [])
+
+  defp open_workspace(conn, opts) when is_list(opts),
+    do: open_workspace(conn, LocalWorkspaceAdapterStub.valid_path(), opts)
+
+  defp open_workspace(conn, path) when is_binary(path), do: open_workspace(conn, path, [])
+
+  defp open_workspace(conn, path, opts) do
+    conn = put_workspace_handoff(conn, path)
+    {:ok, lv, html} = live(conn, ~p"/workspace")
+
+    case Keyword.get(opts, :document) do
+      nil ->
+        {:ok, lv, html}
+
+      document_path ->
+        open_document(lv, document_path)
+        {:ok, lv, render(lv)}
+    end
+  end
+
+  defp open_document(lv, document_path) do
+    render_hook(lv, "open_file", %{"path" => document_path})
+    render_async(lv, 2_000)
+    sync_liveview(lv)
+    lv
+  end
+
+  defp put_workspace_handoff(conn, path) do
+    live_session_id = Plug.Conn.get_session(conn, :local_live_session_id)
+    :ok = WorkspaceHandoff.put_workspace_path(live_session_id, path)
+    conn
+  end
+
+  defp init_workspace_session(
+         conn,
+         live_session_id,
+         path \\ LocalWorkspaceAdapterStub.valid_path()
+       ) do
+    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: live_session_id})
+    put_workspace_handoff(conn, path)
+  end
+
   defp subscribe_agent(lv) do
     session_id = local_agent_session_id(lv)
     :ok = AcpAgent.subscribe(session_id)
@@ -3660,7 +3748,10 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
   defp assert_has_element_after_open_sync(lv, selector) do
     unless has_element?(lv, selector) do
-      sync_workspace_session(LocalWorkspaceAdapterStub.valid_path())
+      sync_workspace_session(
+        liveview_assign(lv, :workspace_path) || LocalWorkspaceAdapterStub.valid_path()
+      )
+
       sync_liveview(lv)
     end
 

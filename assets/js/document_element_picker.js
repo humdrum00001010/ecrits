@@ -1,10 +1,14 @@
-const EVENT_TOGGLE = "ecrits:document-element-picker.toggle"
-const EVENT_STATE = "ecrits:document-element-picker.state"
-const EVENT_PICKS = "ecrits:document-element-picker.picks"
-const BUTTON_SELECTOR = "[data-role='document-element-picker-toggle']"
+import {SEL} from "./selectors.ts"
+import {
+  PICKER_TOGGLE_EVENT as EVENT_TOGGLE,
+  PICKER_STATE_EVENT as EVENT_STATE,
+  PICKER_PICKS_EVENT as EVENT_PICKS,
+  PICKER_SERVER_STATE_EVENT as EVENT_SERVER_STATE,
+} from "./editor_events.ts"
+const BUTTON_SELECTOR = SEL.pickerToggle
 // The chips strip above the composer textarea. LiveView renders the (empty)
 // container with phx-update="ignore"; this module owns its children.
-const PICKS_CONTAINER_SELECTOR = "#local-agent-picks"
+const PICKS_CONTAINER_SELECTOR = SEL.composerPicks
 
 const state = {
   enabled: false,
@@ -13,13 +17,18 @@ const state = {
   picks: [],
 }
 
-function setEnabled(enabled) {
-  state.enabled = !!enabled
+function applyEnabled(enabled) {
+  const next = !!enabled
+  const changed = state.enabled !== next
+  state.enabled = next
   document.body.dataset.documentElementPicker = String(state.enabled)
 
   for (const button of document.querySelectorAll(BUTTON_SELECTOR)) {
-    button.setAttribute("aria-pressed", String(state.enabled))
-    button.dataset.active = String(state.enabled)
+    if (!button.getAttribute("phx-click")) {
+      const value = String(state.enabled)
+      if (button.getAttribute("aria-pressed") !== value) button.setAttribute("aria-pressed", value)
+      if (button.dataset.active !== value) button.dataset.active = value
+    }
   }
 
   // Deactivating the picker KEEPS the picks: the chips stay above the composer
@@ -27,11 +36,38 @@ function setEnabled(enabled) {
   // consumed when the message is sent (the ChatInput hook pushes them as
   // structured data and calls clearPicks), or removed via a chip's × button.
   renderComposerChips()
-  document.dispatchEvent(new CustomEvent(EVENT_STATE, { detail: { enabled: state.enabled } }))
+  if (changed) {
+    document.dispatchEvent(new CustomEvent(EVENT_STATE, { detail: { enabled: state.enabled } }))
+  }
+}
+
+function setEnabled(enabled) {
+  applyEnabled(enabled)
+}
+
+function serverToggleButton() {
+  const button = document.querySelector(BUTTON_SELECTOR)
+  return button && button.getAttribute("phx-click") ? button : null
+}
+
+function requestEnabled(enabled) {
+  const next = !!enabled
+  if (state.enabled === next) return
+
+  const button = serverToggleButton()
+  if (button) button.click()
+  else applyEnabled(next)
 }
 
 function toggle() {
-  setEnabled(!state.enabled)
+  requestEnabled(!state.enabled)
+}
+
+function syncFromServerButton() {
+  const button = document.querySelector(BUTTON_SELECTOR)
+  if (!button) return
+
+  applyEnabled(button.dataset.active === "true" || button.getAttribute("aria-pressed") === "true")
 }
 
 function pickKey(pick) {
@@ -123,11 +159,13 @@ function compactPick(pick) {
 }
 
 function implicitAgentPicks() {
-  const editors = document.querySelectorAll("[data-role='local-hwp-editor']")
+  const editors = document.querySelectorAll(SEL.hwpEditor)
   const picks = []
 
   for (const el of editors) {
+    if (el.dataset && el.dataset.editorMirror === "true") continue
     const editor = el.__wasmHwpEditor
+    if (editor && editor.mirror) continue
     if (!editor || typeof editor.agentSelectionPicks !== "function") continue
     for (const pick of editor.agentSelectionPicks() || []) picks.push(pick)
   }
@@ -228,16 +266,28 @@ document.addEventListener(EVENT_TOGGLE, event => {
   toggle()
 })
 
+if (window.addEventListener) {
+  window.addEventListener(EVENT_SERVER_STATE, event => {
+    applyEnabled(event.detail && event.detail.enabled)
+  })
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", syncFromServerButton, { once: true })
+} else {
+  syncFromServerButton()
+}
+
 document.addEventListener("keydown", event => {
   if (event.key === "Escape" && state.enabled) {
     if (state.picks.length > 0) clearPicks()
-    else setEnabled(false)
+    else requestEnabled(false)
   }
 })
 
 // A chip's × button removes that pick (works in or out of picker mode).
 document.addEventListener("click", event => {
-  const button = event.target.closest?.('[data-role="composer-pick-remove"]')
+  const button = event.target.closest?.(SEL.composerPickRemove)
   if (!button) return
   event.preventDefault()
 

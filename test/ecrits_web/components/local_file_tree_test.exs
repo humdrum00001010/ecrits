@@ -5,7 +5,7 @@ defmodule EcritsWeb.Components.LocalFileTreeTest do
 
   alias EcritsWeb.Components.LocalFileTree
 
-  test "renders openable file rows as plain href fallbacks" do
+  test "renders openable file rows as LiveView event controls" do
     html =
       render_component(&LocalFileTree.tree/1,
         id: "local-file-tree",
@@ -14,16 +14,20 @@ defmodule EcritsWeb.Components.LocalFileTreeTest do
         ],
         expanded_paths: MapSet.new(),
         selected_path: nil,
-        open_paths: %{"template.hwp" => "/workspace?path=/tmp/ecrits&document=template.hwp"}
+        bytes_urls: %{
+          "template.hwp" => "/local/document-bytes?path=/tmp/ecrits&document=template.hwp"
+        }
       )
 
     fragment = LazyHTML.from_fragment(html)
     rows = fragment |> LazyHTML.query(~s([data-role="repo-browser-row"])) |> Enum.to_list()
 
     assert [row] = rows
-    assert row |> LazyHTML.attribute("href") |> List.first() =~ "/workspace?"
+    assert row |> LazyHTML.attribute("phx-click") == ["open_file"]
+    assert row |> LazyHTML.attribute("phx-value-path") == ["template.hwp"]
+    assert row |> LazyHTML.attribute("data-bytes-url") |> List.first() =~ "/local/document-bytes?"
     refute row |> LazyHTML.attribute("data-phx-link") |> Enum.any?()
-    refute row |> LazyHTML.attribute("phx-click") |> Enum.any?()
+    refute row |> LazyHTML.attribute("href") |> Enum.any?()
   end
 
   test "renders unique Korean document rows with document icons" do

@@ -22,6 +22,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
   attr :document_path, :string, default: nil
   attr :local_document_format, :string, required: true
   attr :bytes_url, :string, default: nil
+  attr :scroll_top, :any, default: nil
+  attr :scroll_left, :any, default: nil
   attr :mirror?, :boolean, default: false
   attr :preview_turn_id, :string, default: nil
   attr :preview_text, :string, default: ""
@@ -42,6 +44,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
       data-role="office-wasm-viewer"
       data-document-id={@document_id}
       data-document-path={@document_path}
+      data-scroll-top={@scroll_top}
+      data-scroll-left={@scroll_left}
       data-local-document-format={@local_document_format}
       data-office-asset-version={office_asset_version()}
       data-bytes-url={@bytes_url}
@@ -91,7 +95,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
     """
   end
 
-  defp office_asset_version do
+  def office_asset_version do
     # Hash the matched LibreOffice WASM set from the canonical dep priv dir so
     # glue, engine, metadata, or data-only redeploys all bust the browser cache.
     stats =

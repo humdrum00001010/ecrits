@@ -18,8 +18,11 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages do
   attr :page_count, :integer, default: 0
   attr :spec, :map, required: true
   attr :document_id, :string, required: true
+  attr :document_path, :string, default: nil
   attr :bytes_url, :string, default: nil
   attr :local_document_format, :string, required: true
+  attr :scroll_top, :any, default: nil
+  attr :scroll_left, :any, default: nil
   attr :mirror?, :boolean, default: false
   attr :preview_turn_id, :string, default: nil
   attr :preview_text, :string, default: ""
@@ -40,7 +43,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages do
       data-renderer="rhwp-wasm"
       data-role="local-hwp-editor"
       data-document-id={@document_id}
-      data-document-path={template_path(@spec)}
+      data-document-path={@document_path || template_path(@spec)}
+      data-scroll-top={@scroll_top}
+      data-scroll-left={@scroll_left}
       data-document-name={template_name(@spec)}
       data-contract-type-key={@spec.key}
       data-local-document-id={@document_id}

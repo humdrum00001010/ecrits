@@ -9,7 +9,7 @@ defmodule EcritsWeb.Components.LocalFileTree do
   attr :nodes, :list, required: true
   attr :expanded_paths, :any, required: true
   attr :selected_path, :string, default: nil
-  attr :open_paths, :map, default: %{}
+  attr :bytes_urls, :map, default: %{}
 
   @open_extensions ~w(hwp hwpx doc docx docm dot dotx dotm xls xlsx xlsm xlt xltx xltm ppt pptx pptm pps ppsx ppsm pot potx potm rtf)
 
@@ -22,7 +22,7 @@ defmodule EcritsWeb.Components.LocalFileTree do
           node={node}
           expanded_paths={@expanded_paths}
           selected_path={@selected_path}
-          open_paths={@open_paths}
+          bytes_urls={@bytes_urls}
           depth={0}
         />
       </ul>
@@ -33,7 +33,7 @@ defmodule EcritsWeb.Components.LocalFileTree do
   attr :node, :map, required: true
   attr :expanded_paths, :any, required: true
   attr :selected_path, :string, default: nil
-  attr :open_paths, :map, default: %{}
+  attr :bytes_urls, :map, default: %{}
   attr :depth, :integer, required: true
 
   def tree_node(assigns) do
@@ -49,18 +49,18 @@ defmodule EcritsWeb.Components.LocalFileTree do
       |> assign(:capability, capability(assigns.node))
       |> assign(:extension, extension(assigns.node))
       |> assign(
-        :open_path,
-        open_path(assigns.open_paths, node_path(assigns.node), capability(assigns.node))
+        :bytes_url,
+        bytes_url(assigns.bytes_urls, node_path(assigns.node), capability(assigns.node))
       )
       |> assign(:visible_children, visible_nodes(node_children(assigns.node)))
       |> assign(:padding_style, "padding-left: #{8 + assigns.depth * 16}px")
 
     ~H"""
     <li role="none">
-      <a
-        :if={!@directory? && @open_path}
+      <button
+        :if={!@directory? && @capability == :open}
         id={@node_dom_id}
-        href={@open_path}
+        type="button"
         role="treeitem"
         aria-label={@node_name}
         data-role="repo-browser-row"
@@ -71,8 +71,11 @@ defmodule EcritsWeb.Components.LocalFileTree do
         data-metadata={to_string(@metadata?)}
         data-file-extension={@extension}
         data-openable="true"
+        data-bytes-url={@bytes_url}
+        phx-click="open_file"
+        phx-value-path={@node_path}
         class={[
-          "flex h-8 min-w-0 cursor-pointer items-center gap-1 pr-2 text-base-content no-underline transition-colors",
+          "flex h-8 w-full min-w-0 cursor-pointer items-center gap-1 pr-2 text-left text-base-content transition-colors",
           @selected? && "bg-base-300/70",
           @metadata? && "opacity-45",
           !@selected? && "hover:bg-base-200"
@@ -95,10 +98,10 @@ defmodule EcritsWeb.Components.LocalFileTree do
           </span>
           <span class="truncate">{@node_name}</span>
         </span>
-      </a>
+      </button>
 
       <div
-        :if={@directory? || is_nil(@open_path)}
+        :if={@directory? || @capability != :open}
         id={@node_dom_id}
         role="treeitem"
         aria-label={@node_name}
@@ -184,7 +187,7 @@ defmodule EcritsWeb.Components.LocalFileTree do
           node={child}
           expanded_paths={@expanded_paths}
           selected_path={@selected_path}
-          open_paths={@open_paths}
+          bytes_urls={@bytes_urls}
           depth={@depth + 1}
         />
       </ul>
@@ -220,8 +223,8 @@ defmodule EcritsWeb.Components.LocalFileTree do
   defp row_click_path(false, capability, path) when capability in [:open, :select], do: path
   defp row_click_path(_directory?, _capability, _path), do: nil
 
-  defp open_path(open_paths, path, :open) when is_map(open_paths), do: Map.get(open_paths, path)
-  defp open_path(_open_paths, _path, _capability), do: nil
+  defp bytes_url(bytes_urls, path, :open) when is_map(bytes_urls), do: Map.get(bytes_urls, path)
+  defp bytes_url(_bytes_urls, _path, _capability), do: nil
 
   defp expanded?(node, expanded_paths) do
     directory?(node) and MapSet.member?(expanded_paths, node_path(node))

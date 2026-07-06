@@ -16,11 +16,15 @@ defmodule EcritsWeb.LocalRootTest do
              )
 
       assert has_element?(lv, "#local-mount-choose[type='button']", "Open folder")
-      assert has_element?(lv, "#local-native-directory-picker #local-path-form[method='get']")
 
       assert has_element?(
                lv,
-               "#local-path-input[name='path']"
+               "#local-native-directory-picker #local-path-form[phx-submit='open_path']"
+             )
+
+      assert has_element?(
+               lv,
+               "#local-path-input[name='local_path[path]']"
              )
 
       assert has_element?(
@@ -53,11 +57,15 @@ defmodule EcritsWeb.LocalRootTest do
              )
 
       assert has_element?(lv, "#local-mount-choose[type='button']", "Open folder")
-      assert has_element?(lv, "#local-native-directory-picker #local-path-form[method='get']")
 
       assert has_element?(
                lv,
-               "#local-path-input[name='path']"
+               "#local-native-directory-picker #local-path-form[phx-submit='open_path']"
+             )
+
+      assert has_element?(
+               lv,
+               "#local-path-input[name='local_path[path]']"
              )
 
       assert has_element?(

@@ -15,11 +15,14 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   alias Ecrits.Local.Document.RhwpAdapter
   alias Ecrits.Local.Path, as: LocalPath
   alias Ecrits.Local.Workspace
+  alias Ecrits.Local.WorkspaceHandoff
   alias Ecrits.Workspace.Session, as: WorkspaceSession
+  alias Ecrits.Workspace.Session.Document, as: SessionDocument
   alias EcritsWeb.Components.LocalFileTree
   alias EcritsWeb.Local.LocalAgentConfig
   alias EcritsWeb.Live.Studio.Components.ChatRail
   alias EcritsWeb.Live.Studio.Components.EditorSurface
+  alias EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm
   alias EcritsWeb.Local.WorkspaceAdapter
 
   @local_document_upload_max_size 50_000_000
@@ -143,8 +146,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:selected_path, nil)
      |> assign(:active_document_path, nil)
      |> assign(:active_document, nil)
+     |> assign(:active_document_viewport, nil)
+     |> assign(:local_document_bytes_version, nil)
      |> assign(:open_documents, [])
      |> assign(:active_document_id, nil)
+     |> assign(:document_element_picker_enabled?, false)
      |> assign(:pending_document_open_ref, nil)
      |> assign(:pending_document_path, nil)
      |> assign(:pool_document_id, nil)
@@ -187,8 +193,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      # The chat thread (title / status / streamed transcript / composer + queue)
      # is rendered INLINE in this single LiveView (the only LiveView for the
      # workspace). `local_agent_session_id` is the bound durable foreground-agent
-     # id (set synchronously by attach_workspace_session in handle_params); it
-     # both dedupes a doc-switch re-attach AND gates the chat send path here.
+     # id (set synchronously by attach_workspace_session from the server-side
+     # workspace handoff); it gates the chat send path here.
      |> assign(:local_agent_session_id, nil)
      |> assign(:local_agent_status, :starting)
      |> assign(:local_agent_error, nil)
@@ -236,52 +242,28 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   @impl true
-  def handle_params(%{"path" => path} = params, _uri, socket) do
-    {provider, provider_warning, model} = resolve_provider_and_model(params)
-
-    # Classify the agent-session transition from the CURRENTLY bound provider/
-    # model — this MUST happen before the assigns below overwrite them.
-    transition = agent_transition(socket, provider, model)
-
-    socket =
-      socket
-      |> put_local_agent(
-        provider: provider,
-        provider_warning: provider_warning,
-        model: model.id,
-        integrations: local_agent_integrations()
-      )
-      |> mount_workspace(path)
-      # Attach the durable per-path workspace Session and bind this LiveView pid's
-      # foreground agent BEFORE opening the document. A browser refresh gets a new
-      # LiveView pid and therefore a fresh active rail; prior rails remain in the
-      # same browser session's recent-chat list.
-      # reasoning_effort / access_control are NOT read from URL params — they live
-      # in the durable session (adapter_opts) and are hydrated in snapshot_local_agent.
-      |> attach_workspace_session()
-      |> maybe_open_local_document(params)
-      |> apply_agent_transition(transition)
-      |> canonicalize_provider_path(params, provider)
-
-    {:noreply, socket}
-  end
-
   def handle_params(_params, _uri, socket) do
-    # No workspace path in the URL — there is no cookie/store to restore from
-    # (the path keys everything now), so send to the folder picker ("/").
-    {:noreply, push_navigate(socket, to: ~p"/")}
+    case WorkspaceHandoff.fetch_workspace_path(socket.assigns.local_live_session_id) do
+      {:ok, path} ->
+        socket =
+          socket
+          |> mount_workspace(path)
+          # Attach the durable per-path workspace Session and bind this LiveView pid's
+          # foreground agent. A browser refresh gets a new LiveView pid and therefore
+          # a fresh active rail; prior rails remain in this browser session's recents.
+          # The route query string is deliberately ignored; workspace/document/provider
+          # state is owned by LiveView/session state, not by the URL.
+          |> attach_workspace_session()
+
+        {:noreply, socket}
+
+      _missing_or_unavailable ->
+        {:noreply, push_navigate(socket, to: ~p"/")}
+    end
   end
 
-  # Resolve the provider + model from the URL params. `model.provider` is
-  # authoritative — a cross-provider model selection re-derives the provider —
-  # so the returned provider comes from the resolved model, not the raw param.
-  defp resolve_provider_and_model(params) do
-    {provider, provider_warning} = local_agent_provider_from_params(Map.get(params, "provider"))
-    model = local_agent_model_from_params(Map.get(params, "model"), provider.key)
-    {local_agent_provider_display(model.provider), provider_warning, model}
-  end
-
-  # The transition this navigation implies, as a tag `apply_agent_transition/2`
+  # The transition this provider/model selection implies, as a tag
+  # `apply_agent_transition/2`
   # matches on:
   #   :restart_provider — a provider change (codex<->claude, or a cross-provider
   #       model pick) rebinds the ACP adapter, which can't be swapped on a live
@@ -317,20 +299,21 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp agent_bound?(socket), do: is_binary(socket.assigns.local_agent_session_id)
 
-  # Rewrite the URL to the resolved provider when the requested provider/model
-  # param was invalid (so a bad `?provider=foo` becomes the canonical one),
-  # unless a workspace error already needs surfacing.
-  defp canonicalize_provider_path(socket, params, provider) do
-    invalid? =
-      provider_param_invalid?(Map.get(params, "provider")) or
-        model_param_invalid?(Map.get(params, "model"))
+  defp apply_local_agent_model(socket, %{id: model_id, provider: provider_id} = _model) do
+    provider = local_agent_provider_display(provider_id)
+    transition = agent_transition(socket, provider, %{id: model_id})
 
-    if invalid? and is_nil(socket.assigns.workspace_error) do
-      push_patch(socket, to: workspace_provider_path(socket, provider.key))
-    else
-      socket
-    end
+    socket
+    |> put_local_agent(
+      provider: provider,
+      provider_warning: nil,
+      model: model_id,
+      integrations: local_agent_integrations()
+    )
+    |> apply_agent_transition(transition)
   end
+
+  defp apply_local_agent_model(socket, _model), do: socket
 
   @impl true
   def handle_event("local_agent_model_modal.open", _params, socket) do
@@ -353,10 +336,18 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   def handle_event("open_file", %{"path" => path}, socket) do
-    {:noreply,
-     socket
-     |> schedule_local_document_open(path)
-     |> push_patch(to: workspace_document_path(socket, path))}
+    {:noreply, schedule_local_document_open(socket, path)}
+  end
+
+  def handle_event("document_element_picker.toggle", _params, socket) do
+    enabled? = !socket.assigns.document_element_picker_enabled?
+
+    socket =
+      socket
+      |> persist_document_element_picker_enabled(enabled?)
+      |> push_document_element_picker_state()
+
+    {:noreply, socket}
   end
 
   def handle_event("tab_switch", %{"id" => id}, socket) do
@@ -365,10 +356,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         {:noreply, socket}
 
       %{path: path} ->
-        {:noreply,
-         socket
-         |> schedule_local_document_open(path)
-         |> push_patch(to: workspace_document_path(socket, path))}
+        {:noreply, schedule_local_document_open(socket, path)}
     end
   end
 
@@ -504,6 +492,36 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   def handle_event("local_document.viewer_failed", _params, socket), do: {:noreply, socket}
 
+  def handle_event(
+        "local_document.viewport_changed",
+        %{"document_path" => document_path} = params,
+        socket
+      ) do
+    if open_document_path?(socket, document_path) do
+      viewport = %{
+        scroll_top: scroll_coordinate(params["top"] || params["scroll_top"]),
+        scroll_left: scroll_coordinate(params["left"] || params["scroll_left"])
+      }
+
+      if ws = ws(socket) do
+        _ = WorkspaceSession.update_document_scroll(ws, document_path, viewport)
+      end
+
+      socket =
+        if socket.assigns[:active_document_path] == document_path do
+          assign(socket, :active_document_viewport, viewport)
+        else
+          socket
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("local_document.viewport_changed", _params, socket), do: {:noreply, socket}
+
   # --- Markdown (.md/.markdown) editor events (from the MarkdownEditor hook) ----
   # Debounced source changes re-render the live preview; Ctrl/Cmd+S persists the
   # current source to the canonical workspace file via the file-based Document
@@ -598,13 +616,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         {:noreply, socket}
 
       provider_id ->
-        {:noreply,
-         push_patch(socket,
-           to:
-             workspace_provider_path(socket, provider_id,
-               model: default_agent_model_id(provider_id)
-             )
-         )}
+        model = local_agent_model(default_agent_model_id(provider_id))
+
+        {:noreply, apply_local_agent_model(socket, model)}
     end
   end
 
@@ -619,8 +633,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         {:noreply, socket}
 
       model ->
-        {:noreply,
-         push_patch(socket, to: workspace_provider_path(socket, model.provider, model: model.id))}
+        {:noreply, apply_local_agent_model(socket, model)}
     end
   end
 
@@ -956,11 +969,12 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   # A VFS write edits the SERVER document model + saves to disk. This function is
   # not the FUSE write path; it only keeps an already-open browser viewer in sync
-  # after the file-level write-back has committed. For HWP viewers we can reuse
-  # the semantic non-mirror browser hook (`doc.apply_edit` -> patch the WASM model
-  # -> repaint just the affected page); that is a post-commit UI resync layer, not
-  # the authoring route. (Match by PATH: `local_hwp_stream_document_id` is the
-  # Document struct id "local-…", the edit keys the Pool "d_hwpx_…".)
+  # after the file-level write-back has committed. When write-back produced exact
+  # semantic ops/sets, reuse the non-mirror browser hook (`doc.apply_edit` ->
+  # patch the WASM model -> repaint the affected page); that is a post-commit UI
+  # resync layer, not the authoring route. (Match by PATH:
+  # `local_hwp_stream_document_id` is the Document struct id "local-…", while the
+  # write-back keys the Pool document id.)
   defp resync_open_editor_after_vfs_edit(socket, %{path: edited_abs} = info)
        when is_binary(edited_abs) do
     workspace_path = socket.assigns[:workspace_path]
@@ -981,23 +995,24 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           canonical_path_for_compare(Path.join(workspace_path, open_rel)) ->
         socket
 
-      # HWP: incremental live apply (the browser-arm path). request_id is
-      # synthetic — there is no MCP waiter, so the editor's reply lands on an
-      # unknown id and is harmlessly ignored by `doc.browser_reply`.
-      renderer == :rhwp_wasm and (ops != [] or sets != []) ->
+      # Incremental live apply (the browser-arm path). request_id is synthetic —
+      # there is no MCP waiter, so the editor's reply lands on an unknown id and
+      # is harmlessly ignored by `doc.browser_reply`.
+      renderer in [:rhwp_wasm, :office_wasm] and (ops != [] or sets != []) ->
         socket
         |> push_vfs_browser_edit(open_id, ops)
         |> push_vfs_browser_set(open_id, sets)
 
-      # Office (no incremental op path here) or no ops: re-fetch saved bytes.
+      # No semantic ops, or a structural edit that cannot be replayed: re-fetch
+      # saved bytes.
       true ->
-        case local_document_bytes_url(workspace_path, open_rel) do
-          base when is_binary(base) ->
-            url =
-              base <> "&v=" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+        version = System.unique_integer([:positive, :monotonic])
+        socket = assign(socket, :local_document_bytes_version, version)
 
+        case local_document_bytes_url(workspace_path, open_rel, version) do
+          base when is_binary(base) ->
             event = if renderer == :rhwp_wasm, do: "hwp_wasm_load", else: "office_wasm_load"
-            push_event(socket, event, %{url: url, document_id: open_id})
+            push_event(socket, event, %{url: base, document_id: open_id})
 
           _ ->
             socket
@@ -1080,10 +1095,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :local_file_tree_open_paths, local_file_tree_open_paths(assigns))
+    assigns = assign(assigns, :local_file_tree_bytes_urls, local_file_tree_bytes_urls(assigns))
 
     ~H"""
-    <Layouts.app flash={@flash} variant="split" fuse_mode={@fuse_mode}>
+    <Layouts.app flash={@flash} variant="split" fuse_mode={@fuse_mode} brand_href={~p"/workspace"}>
       <main
         id="local-workspace-root"
         class="h-[calc(100dvh-60px)] min-h-0 min-w-[1024px] overflow-hidden bg-[var(--cs-bg)] text-[var(--cs-ink)]"
@@ -1104,6 +1119,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           id="local-workspace-grid"
           phx-hook="LocalChatRailResizer"
           data-mobile-pane="desktop"
+          data-office-asset-version={LocalOfficeWasm.office_asset_version()}
           style="--local-editor-z: 0; --local-agent-rail-z: 30"
           class="isolate grid h-full min-h-0 grid-cols-[var(--local-file-tree-width,260px)_minmax(0,1fr)_var(--local-chat-rail-width,340px)] overflow-hidden"
         >
@@ -1161,7 +1177,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                   nodes={@tree}
                   expanded_paths={@expanded_paths}
                   selected_path={@selected_path}
-                  open_paths={@local_file_tree_open_paths}
+                  bytes_urls={@local_file_tree_bytes_urls}
                 />
               </div>
             </div>
@@ -1212,16 +1228,22 @@ defmodule EcritsWeb.Local.WorkspaceLive do
               frame_id="local-rhwp-editor-frame"
               document={@active_document}
               document_path={@active_document_path}
+              document_viewport={@active_document_viewport}
               document_loading?={@local_document_status == :loading}
               document_spec={@active_document && local_document_spec(@active_document)}
               canvas_id={@active_document && local_rhwp_dom_id(@active_document)}
               hwp_bytes_url={
                 @active_document &&
-                  local_document_bytes_url(@workspace_path, @active_document.relative_path)
+                  local_document_bytes_url(
+                    @workspace_path,
+                    @active_document.relative_path,
+                    @local_document_bytes_version
+                  )
               }
               open_documents={@open_documents}
               active_document_id={@active_document_id}
               dirty_document_ids={@dirty_document_ids}
+              document_element_picker_enabled={@document_element_picker_enabled?}
               hwp_pages={@streams.local_hwp_pages}
               hwp_page_count={@local_hwp_page_count}
               markdown_source={@local_markdown_source}
@@ -1550,7 +1572,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                           document_spec={agent_editor_preview_spec(item)}
                           canvas_id={agent_editor_preview_canvas_id(item)}
                           hwp_bytes_url={agent_editor_preview_bytes_url(item)}
-                          href={agent_editor_preview_href(item)}
                           status={agent_editor_preview_status(item)}
                           turn_id={Map.get(item, :turn_id)}
                           preview_text={agent_editor_preview_text(item)}
@@ -2501,7 +2522,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           workspace_path
           |> local_document_bytes_url(relative_path)
           |> cache_bust_url(),
-        href: workspace_document_path(socket, document_path),
         text: "",
         delta_count: info[:applied] || 1,
         highlights: vfs_preview_highlights(info),
@@ -2570,45 +2590,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  defp maybe_open_local_document(%{assigns: %{workspace_error: error}} = socket, _params)
-       when is_binary(error),
-       do: socket
-
-  defp maybe_open_local_document(socket, %{"document" => path})
-       when is_binary(path) and path != "" do
-    cond do
-      socket.assigns.active_document_path == path and socket.assigns.active_document ->
-        socket
-        |> upsert_open_document_tab(path)
-        |> assign(:selected_path, path)
-
-      socket.assigns.pending_document_path == path and
-          socket.assigns.local_document_status == :loading ->
-        socket
-
-      true ->
-        schedule_local_document_open(socket, path)
-    end
-  end
-
-  defp maybe_open_local_document(socket, _params) do
-    previous_document_id = active_document_id(socket)
-    _ = unregister_local_rhwp_materializer_editor(previous_document_id)
-
-    socket
-    |> cancel_local_document_open()
-    |> unsubscribe_local_hwp_stream()
-    |> clear_pool_document()
-    |> assign(:active_document_path, nil)
-    |> assign(:active_document, nil)
-    |> assign(:active_document_id, nil)
-    |> assign(:pending_document_open_ref, nil)
-    |> assign(:pending_document_path, nil)
-    |> assign(:local_document_status, :none)
-    |> assign(:local_document_snapshot, nil)
-    |> clear_local_hwp_pages()
-  end
-
   defp schedule_local_document_open(%{assigns: %{workspace: nil}} = socket, _path), do: socket
 
   defp schedule_local_document_open(socket, path) do
@@ -2640,6 +2621,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:selected_path, path)
     |> assign(:active_document_path, path)
     |> assign(:active_document, nil)
+    |> assign(:active_document_viewport, session_document_viewport(socket, path))
+    |> assign(:local_document_bytes_version, nil)
     |> assign(:local_document_status, :loading)
     |> assign(:local_document_snapshot, nil)
     |> assign(:local_document_error, nil)
@@ -2665,6 +2648,149 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:active_document_id, id)
   end
 
+  defp maybe_restore_session_documents(
+         %{assigns: %{open_documents: [], active_document_path: nil}} = socket,
+         ws
+       ) do
+    snapshot = safe_document_snapshot(ws)
+    documents = Map.get(snapshot, :documents, [])
+    tabs = Enum.map(documents, &session_document_tab/1)
+    active_document_path = Map.get(snapshot, :active_document_path)
+
+    socket =
+      socket
+      |> restore_document_element_picker_enabled(snapshot)
+      |> assign(:open_documents, tabs)
+
+    if is_binary(active_document_path) and Enum.any?(tabs, &(&1.path == active_document_path)) do
+      schedule_local_document_open(socket, active_document_path)
+    else
+      socket
+    end
+  end
+
+  defp maybe_restore_session_documents(socket, ws) do
+    restore_document_element_picker_enabled(socket, safe_document_snapshot(ws))
+  end
+
+  defp safe_document_snapshot(ws) do
+    WorkspaceSession.document_snapshot(ws)
+  rescue
+    _ -> empty_document_snapshot()
+  catch
+    :exit, _ -> empty_document_snapshot()
+  end
+
+  defp empty_document_snapshot,
+    do: %{documents: [], active_document_path: nil, document_element_picker_enabled?: false}
+
+  defp restore_document_element_picker_enabled(socket, snapshot) do
+    enabled? = Map.get(snapshot, :document_element_picker_enabled?, false)
+
+    socket = assign(socket, :document_element_picker_enabled?, enabled? == true)
+
+    if connected?(socket), do: push_document_element_picker_state(socket), else: socket
+  end
+
+  defp session_document_tab(%SessionDocument{path: path}) when is_binary(path) do
+    %{id: tab_id(path), name: Path.basename(path), path: path}
+  end
+
+  defp session_document_tab(%{path: path}) when is_binary(path) do
+    %{id: tab_id(path), name: Path.basename(path), path: path}
+  end
+
+  defp session_document_viewport(socket, path) when is_binary(path) do
+    with %{} = ws <- ws(socket),
+         %{documents: documents} <- safe_document_snapshot(ws),
+         %SessionDocument{} = document <- Enum.find(documents, &(&1.path == path)) do
+      document_viewport(document)
+    else
+      %{scroll_top: _top, scroll_left: _left} = document -> document_viewport(document)
+      _ -> nil
+    end
+  end
+
+  defp session_document_viewport(_socket, _path), do: nil
+
+  defp persist_session_open_document(socket, %Document{} = document) do
+    attrs = %{
+      path: document.relative_path,
+      id: document.id,
+      pool_document_id: socket.assigns[:pool_document_id]
+    }
+
+    with %{} = ws <- ws(socket),
+         {:ok, session_document} <- WorkspaceSession.open_document(ws, attrs) do
+      assign(socket, :active_document_viewport, document_viewport(session_document))
+    else
+      _ ->
+        assign(
+          socket,
+          :active_document_viewport,
+          session_document_viewport(socket, document.relative_path)
+        )
+    end
+  end
+
+  defp persist_session_closed_document(socket, %{path: path}) when is_binary(path) do
+    if ws = ws(socket) do
+      _ = WorkspaceSession.close_document(ws, path)
+    end
+
+    socket
+  end
+
+  defp persist_session_closed_document(socket, _tab), do: socket
+
+  defp persist_document_element_picker_enabled(socket, enabled?) do
+    if ws = ws(socket) do
+      _ = WorkspaceSession.set_document_element_picker_enabled(ws, enabled?)
+    end
+
+    assign(socket, :document_element_picker_enabled?, enabled?)
+  end
+
+  defp push_document_element_picker_state(socket) do
+    push_event(socket, "document_element_picker:set", %{
+      enabled: socket.assigns.document_element_picker_enabled?
+    })
+  end
+
+  defp open_document_path?(socket, path) when is_binary(path) do
+    Enum.any?(socket.assigns[:open_documents] || [], &(&1.path == path))
+  end
+
+  defp open_document_path?(_socket, _path), do: false
+
+  defp document_viewport(%SessionDocument{} = document) do
+    %{
+      scroll_top: scroll_coordinate(document.scroll_top),
+      scroll_left: scroll_coordinate(document.scroll_left)
+    }
+  end
+
+  defp document_viewport(%{scroll_top: scroll_top, scroll_left: scroll_left}) do
+    %{scroll_top: scroll_coordinate(scroll_top), scroll_left: scroll_coordinate(scroll_left)}
+  end
+
+  defp document_viewport(_document), do: %{scroll_top: 0, scroll_left: 0}
+
+  defp scroll_coordinate(value) when is_integer(value) and value >= 0, do: value
+
+  defp scroll_coordinate(value) when is_float(value) and value >= 0 do
+    value |> Float.round() |> trunc()
+  end
+
+  defp scroll_coordinate(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, _rest} when integer >= 0 -> integer
+      _ -> 0
+    end
+  end
+
+  defp scroll_coordinate(_value), do: 0
+
   defp tab_id(path), do: dom_token(path)
 
   # Drop a tab. When it was the active tab we tear down the live document
@@ -2685,6 +2811,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         socket =
           socket
           |> assign(:open_documents, remaining)
+          |> persist_session_closed_document(closed_tab)
           # A closed doc must never linger as dirty (and its auto-save timer
           # would otherwise fire against a doc with no open tab).
           |> mark_doc_clean(id)
@@ -2709,15 +2836,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             |> tear_down_active_local_document()
             |> assign(:active_document_id, nil)
             |> assign(:selected_path, nil)
-            |> push_patch(to: workspace_no_document_path(socket))
 
           true ->
             neighbor = Enum.at(remaining, min(index, length(remaining) - 1))
 
-            socket
-            |> assign(:active_document_id, neighbor.id)
-            |> assign(:selected_path, neighbor.path)
-            |> push_patch(to: workspace_document_path(socket, neighbor.path))
+            schedule_local_document_open(socket, neighbor.path)
         end
     end
   end
@@ -2757,6 +2880,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> clear_pool_document()
     |> assign(:active_document_path, nil)
     |> assign(:active_document, nil)
+    |> assign(:active_document_viewport, nil)
+    |> assign(:local_document_bytes_version, nil)
     |> assign(:local_document_status, :none)
     |> assign(:local_document_snapshot, nil)
     |> assign(:local_document_error, nil)
@@ -2791,6 +2916,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
           |> assign(:local_document_snapshot, nil)
           |> assign(:local_document_error, nil)
           |> register_pool_document(document)
+          |> persist_session_open_document(document)
           |> render_local_document_pages(document)
 
         socket
@@ -2804,6 +2930,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         |> assign(:selected_path, path)
         |> assign(:active_document_path, nil)
         |> assign(:active_document, nil)
+        |> assign(:active_document_viewport, nil)
+        |> assign(:local_document_bytes_version, nil)
         |> assign(:pending_document_open_ref, nil)
         |> assign(:pending_document_path, nil)
         |> assign(:local_document_status, :error)
@@ -2937,9 +3065,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # agent. This is the
   # ONLY LiveView for the workspace: it holds the provider/model/access +
   # open-document seed, starts the agent, subscribes to it, and renders the chat
-  # inline. Re-running handle_params in the same LiveView pid reuses the same
-  # agent; a browser refresh mounts a new pid and starts a fresh active rail. The
-  # static (disconnected) render spawns nothing.
+  # inline. Re-attaching in the same LiveView pid reuses the same agent; a browser
+  # refresh mounts a new pid and starts a fresh active rail. The static
+  # (disconnected) render spawns nothing.
   defp attach_workspace_session(%{assigns: %{workspace_error: error}} = socket)
        when is_binary(error),
        do: socket
@@ -2965,19 +3093,24 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         # Subscribe + snapshot ONCE per foreground agent. This LiveView is the
         # ONLY LiveView for the workspace and renders the chat inline, so it both
         # drives the document-side turn-end hook AND repaints the chat transcript.
-        # A doc switch re-runs handle_params with the SAME agent — don't
-        # double-subscribe (it would deliver every event twice) or re-snapshot
-        # (it would wipe the live transcript). Snapshot only on a FRESH bind (the
+        # A same-agent re-attach must not double-subscribe (it would deliver every
+        # event twice) or re-snapshot (it would wipe the live transcript). Snapshot
+        # only on a FRESH bind (the
         # initial mount or selecting an older recent rail), which repaints that
         # rail's transcript + title + status + pending count.
         if socket.assigns.local_agent_session_id != agent_id do
           :ok = WorkspaceSession.subscribe(ws)
-          snapshot_local_agent(socket, ws, agent_id)
+
+          socket
+          |> assign(:workspace_session, ws)
+          |> maybe_restore_session_documents(ws)
+          |> snapshot_local_agent(ws, agent_id)
         else
           socket
           |> assign(:workspace_session, ws)
           |> assign(:local_agent_session_id, agent_id)
           |> assign(:local_agent_rail_key, Map.get(ws, :rail_key))
+          |> maybe_restore_session_documents(ws)
           |> refresh_local_agent_rails()
           |> apply_vfs_write_policy()
         end
@@ -3019,7 +3152,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_queue_index, 0)
     |> restore_agent_title(snapshot.title, Map.get(snapshot, :title_user_edited?, false))
     # Hydrate reasoning/access from the selected rail's stored adapter_opts — not
-    # the URL param (which is no longer written for these settings).
+    # route params (which are deliberately ignored for these settings).
     |> hydrate_agent_options_from_session(stored_opts)
     |> apply_vfs_write_policy()
     |> stream(:local_agent_items, [], reset: true)
@@ -3358,13 +3491,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
            {:ok, import_local_document_file(root, path, entry.client_name)}
          end) do
       {:ok, relative_path} ->
-        to = workspace_document_path(socket, relative_path)
-
         socket =
           socket
           |> assign(:local_document_error, nil)
           |> refresh_tree(socket.assigns.expanded_paths)
-          |> push_patch(to: to)
+          |> schedule_local_document_open(relative_path)
 
         {:ok, socket}
 
@@ -3648,7 +3779,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         socket =
           Enum.reduce(dropped, socket, fn tab, acc -> mark_doc_clean(acc, tab.id) end)
 
-        socket = assign(socket, :open_documents, kept)
+        socket =
+          dropped
+          |> Enum.reduce(assign(socket, :open_documents, kept), fn tab, acc ->
+            persist_session_closed_document(acc, tab)
+          end)
 
         cond do
           not active_dropped? ->
@@ -3668,10 +3803,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             neighbor =
               Enum.at(kept, min(dropped_index, length(kept) - 1)) || List.first(kept)
 
-            socket
-            |> assign(:active_document_id, neighbor.id)
-            |> assign(:selected_path, neighbor.path)
-            |> push_patch(to: workspace_document_path(socket, neighbor.path))
+            schedule_local_document_open(socket, neighbor.path)
         end
     end
   end
@@ -3706,48 +3838,10 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp workspace_root_path(nil), do: ""
   defp workspace_root_path(workspace), do: Map.get(workspace, :root_path) || ""
 
-  defp workspace_document_path(%{assigns: assigns}, relative_path) do
-    workspace_document_path(assigns, relative_path)
-  end
-
-  defp workspace_document_path(assigns, relative_path) do
-    ~p"/workspace?#{workspace_query(assigns, document: relative_path, provider: assigns.local_agent.provider.key)}"
-  end
-
-  defp workspace_no_document_path(socket) do
-    ~p"/workspace?#{workspace_query(socket, provider: socket.assigns.local_agent.provider.key)}"
-  end
-
-  defp workspace_provider_path(socket, provider_id, overrides \\ []) do
-    overrides = Keyword.put(overrides, :provider, provider_id)
-
-    case socket.assigns.active_document_path do
-      nil ->
-        ~p"/workspace?#{workspace_query(socket, overrides)}"
-
-      "" ->
-        ~p"/workspace?#{workspace_query(socket, overrides)}"
-
-      document ->
-        ~p"/workspace?#{workspace_query(socket, Keyword.put(overrides, :document, document))}"
-    end
-  end
-
-  defp workspace_query(%{assigns: assigns}, overrides), do: workspace_query(assigns, overrides)
-
-  defp workspace_query(assigns, overrides) do
-    [
-      path: workspace_root_path(assigns.workspace),
-      provider: assigns.local_agent.provider.key,
-      model: assigns.local_agent.model
-    ]
-    |> Keyword.merge(overrides)
-  end
-
-  defp local_file_tree_open_paths(assigns) do
+  defp local_file_tree_bytes_urls(assigns) do
     assigns.tree
     |> local_file_tree_paths()
-    |> Map.new(&{&1, workspace_document_path(assigns, &1)})
+    |> Map.new(&{&1, local_document_bytes_url(assigns.workspace_path, &1)})
   end
 
   defp local_file_tree_paths(nodes) do
@@ -4153,6 +4247,16 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp local_document_bytes_url(_workspace_path, _relative_path), do: nil
 
+  defp local_document_bytes_url(workspace_path, relative_path, nil),
+    do: local_document_bytes_url(workspace_path, relative_path)
+
+  defp local_document_bytes_url(workspace_path, relative_path, version) do
+    case local_document_bytes_url(workspace_path, relative_path) do
+      base when is_binary(base) -> base <> "&v=" <> URI.encode_www_form(to_string(version))
+      _ -> nil
+    end
+  end
+
   # Office (docx/pptx/xlsx) rendering. Office documents render SOLELY through the
   # in-browser LibreOffice WASM editor (the `WasmOfficeEditor` hook): the server
   # only tells the hook where to fetch the raw bytes — all open/render happens
@@ -4378,12 +4482,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     }
   end
 
-  defp local_agent_model_from_params(model_id, provider_id) do
-    local_agent_model(model_id) ||
-      local_agent_model(default_agent_model_id(provider_id)) ||
-      local_agent_model(default_agent_model_id("codex"))
-  end
-
   defp local_agent_model(model_id) when is_binary(model_id) do
     Enum.find(@local_agent_models, &(&1.id == model_id))
   end
@@ -4396,21 +4494,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp default_agent_model_id("claude"), do: "default"
   defp default_agent_model_id(_provider), do: "gpt-5.5"
-
-  # The model id forwarded to the adapter (→ `--model <id>` on the provider CLI).
-  defp local_agent_provider_from_params(nil), do: {local_agent_provider_display(), nil}
-
-  defp local_agent_provider_from_params(provider) do
-    case normalize_allowed_provider_id(provider) do
-      nil ->
-        fallback = local_agent_provider_display()
-
-        {fallback, "Selected provider is unavailable in workspace chat. Using #{fallback.label}."}
-
-      provider_id ->
-        {local_agent_provider_display(provider_id), nil}
-    end
-  end
 
   defp local_agent_config(key) do
     local_agent_ui = Application.get_env(:ecrits, :local_agent_ui, [])
@@ -4520,20 +4603,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp provider_setup_required?(%{status: :ready}), do: false
   defp provider_setup_required?(_provider), do: true
 
-  defp local_agent_provider_setup_href(assigns, provider_id) do
-    return_to =
-      workspace_provider_path(%{assigns: assigns}, provider_id,
-        model: default_agent_model_id(provider_id)
-      )
-
-    ~p"/local/agent-providers/#{provider_id}/setup?#{[return_to: return_to]}"
+  defp local_agent_provider_setup_href(_assigns, provider_id) do
+    ~p"/local/agent-providers/#{provider_id}/setup?#{[return_to: ~p"/workspace"]}"
   end
-
-  defp provider_param_invalid?(nil), do: false
-  defp provider_param_invalid?(provider), do: is_nil(normalize_allowed_provider_id(provider))
-
-  defp model_param_invalid?(nil), do: false
-  defp model_param_invalid?(model_id), do: is_nil(local_agent_model(model_id))
 
   defp local_agent_selected_model_label(model_id) do
     case Enum.find(@local_agent_models, &(&1.id == model_id)) do
@@ -5558,8 +5630,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         document_spec: local_document_spec(document),
         canvas_id:
           "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-canvas",
-        bytes_url: local_document_bytes_url(socket.assigns.workspace_path, relative_path),
-        href: workspace_document_path(socket, path || relative_path)
+        bytes_url: local_document_bytes_url(socket.assigns.workspace_path, relative_path)
       }
     else
       _other -> nil
@@ -5795,7 +5866,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       document_spec: state.document_spec,
       canvas_id: state.canvas_id,
       bytes_url: state.bytes_url,
-      href: state.href,
       body: state.text,
       delta_count: state.delta_count,
       highlights: Map.get(state, :highlights, [])
@@ -6006,9 +6076,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp agent_editor_preview_bytes_url(%{bytes_url: url}) when is_binary(url), do: url
   defp agent_editor_preview_bytes_url(_item), do: nil
-
-  defp agent_editor_preview_href(%{href: href}) when is_binary(href), do: href
-  defp agent_editor_preview_href(_item), do: nil
 
   defp agent_editor_preview_status(%{status: status}) when is_atom(status), do: status
   defp agent_editor_preview_status(_item), do: :running
