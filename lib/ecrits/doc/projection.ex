@@ -59,6 +59,7 @@ defmodule Ecrits.Doc.Projection do
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
   alias Ecrits.Fuse.DocMount
+  alias Libreofficex.LokBackend.Ir, as: OfficeIr
 
   @typedoc "A byte offset range `{start, length}` into the projected blob."
   @type byte_range :: {non_neg_integer(), non_neg_integer()}
@@ -246,7 +247,7 @@ defmodule Ecrits.Doc.Projection do
     with {:ok, kind} <- kind_for(abs_path),
          {:ok, document_id} <- Pool.open(abs_path, kind: kind),
          {:ok, nodes} <- elements(document_id) do
-      {:ok, render_elements(nodes)}
+      {:ok, render_elements(nodes, kind)}
     end
   end
 
@@ -303,11 +304,11 @@ defmodule Ecrits.Doc.Projection do
   # Rich/non-positional refs are kept because they carry semantic addressing.
   # Byte-stable (keys sorted recursively) so the same IR always yields the same
   # bytes.
-  @spec render_elements([map()]) :: projection()
-  defp render_elements(nodes) do
+  @spec render_elements([map()], Ecrits.Doc.kind()) :: projection()
+  defp render_elements(nodes, kind) do
     line =
       nodes
-      |> nested_payloads()
+      |> nested_for(kind)
       |> encode_ir_node()
       |> Kernel.<>("\n")
 
@@ -320,164 +321,19 @@ defmodule Ecrits.Doc.Projection do
     }
   end
 
+  # Office (libre) projects through its own engine IR policy in the dep — ref-
+  # addressed (no ref in the bytes), runs and derived fields dropped. rhwp keeps
+  # the positional-ref compaction below. The nested shape is the same
+  # `[section[paragraph[payload]]]` either way, so the parser/diff is shared.
+  defp nested_for(nodes, kind) do
+    if office_kind?(kind), do: OfficeIr.project(nodes), else: Ehwp.Ir.project(nodes)
+  end
+
   # Deterministic JSON for one JSONL value: keys sorted recursively (via
   # `Jason.OrderedObject`) so identical IR always serializes to identical bytes
   # (the fingerprint and the write-back round-trip both rely on this). Jason
   # escapes embedded newlines, so a node always occupies exactly one line.
   defp encode_ir_node(node), do: node |> deep_order() |> Jason.encode!()
-
-  defp nested_payloads(nodes) do
-    payload_entries =
-      nodes
-      |> Enum.with_index()
-      |> Enum.map(fn {node, fallback_index} ->
-        {section_id, paragraph_id} = node_position(node, fallback_index)
-        %{section_id: section_id, paragraph_id: paragraph_id, node: node}
-      end)
-
-    section_ids =
-      payload_entries
-      |> Enum.map(& &1.section_id)
-      |> uniq_preserving_order()
-
-    Enum.map(section_ids, fn section_id ->
-      section_payloads = Enum.filter(payload_entries, &(&1.section_id == section_id))
-
-      section_payloads
-      |> Enum.map(& &1.paragraph_id)
-      |> uniq_preserving_order()
-      |> Enum.map(fn paragraph_id ->
-        section_payloads
-        |> Enum.filter(&(&1.paragraph_id == paragraph_id))
-        |> Enum.map(fn entry -> projected_node(entry.node) end)
-      end)
-    end)
-  end
-
-  defp uniq_preserving_order(values) do
-    values
-    |> Enum.reduce({[], MapSet.new()}, fn value, {acc, seen} ->
-      if MapSet.member?(seen, value) do
-        {acc, seen}
-      else
-        {[value | acc], MapSet.put(seen, value)}
-      end
-    end)
-    |> elem(0)
-    |> Enum.reverse()
-  end
-
-  defp projected_node(node) do
-    node = normalize_ir_value(node)
-    type = Map.get(node, "type")
-
-    case compact_positional_ref(Map.get(node, "ref"), type) do
-      nil -> node
-      _positional_ref -> Map.delete(node, "ref")
-    end
-  end
-
-  # HWPX element refs often carry only monotonically increasing positional
-  # indexes. The mounted nested list already carries those positions, so these
-  # refs are omitted from payload JSON; keep richer refs as maps so no semantic
-  # addressing fields disappear.
-  defp compact_positional_ref(%{"cell" => %{} = cell} = ref, _type) do
-    with section when is_integer(section) <- Map.get(ref, "section", 0),
-         parent_para when is_integer(parent_para) <-
-           Map.get(cell, "parentParaIndex", Map.get(ref, "paragraph")),
-         control when is_integer(control) <- Map.get(cell, "controlIndex"),
-         cell_index when is_integer(cell_index) <- Map.get(cell, "cellIndex"),
-         cell_para when is_integer(cell_para) <- Map.get(cell, "cellParaIndex"),
-         offset when is_integer(offset) <- Map.get(ref, "offset", 0) do
-      [section, parent_para, control, cell_index, cell_para, offset]
-    else
-      _ -> nil
-    end
-  end
-
-  defp compact_positional_ref(%{} = ref, type) when type not in [nil, "", "paragraph"] do
-    allowed = MapSet.new(["section", "paragraph", "control", "type"])
-
-    with true <- ref_keys_subset?(ref, allowed),
-         section when is_integer(section) <- Map.get(ref, "section", 0),
-         paragraph when is_integer(paragraph) <- Map.get(ref, "paragraph"),
-         control when is_integer(control) <- Map.get(ref, "control") do
-      [section, paragraph, control]
-    else
-      _ -> nil
-    end
-  end
-
-  defp compact_positional_ref(%{} = ref, _type) do
-    allowed = MapSet.new(["section", "paragraph", "offset", "length"])
-
-    with true <- ref_keys_subset?(ref, allowed),
-         section when is_integer(section) <- Map.get(ref, "section", 0),
-         paragraph when is_integer(paragraph) <- Map.get(ref, "paragraph"),
-         offset when is_integer(offset) <- Map.get(ref, "offset", 0) do
-      case Map.get(ref, "length") do
-        length when is_integer(length) -> [section, paragraph, offset, length]
-        nil -> [section, paragraph, offset]
-        _other -> nil
-      end
-    else
-      _ -> compact_section_ref(ref)
-    end
-  end
-
-  defp compact_positional_ref(_ref, _type), do: nil
-
-  defp compact_section_ref(ref) do
-    allowed = MapSet.new(["section"])
-
-    with true <- ref_keys_subset?(ref, allowed),
-         section when is_integer(section) <- Map.get(ref, "section") do
-      [section]
-    else
-      _ -> nil
-    end
-  end
-
-  defp ref_keys_subset?(ref, allowed) do
-    ref
-    |> Map.keys()
-    |> Enum.all?(&MapSet.member?(allowed, &1))
-  end
-
-  defp node_position(node, fallback_index) do
-    ref =
-      node
-      |> node_field("ref")
-      |> normalize_ir_value()
-
-    cond do
-      is_map(ref) ->
-        section_id = integer_ref_field(ref, "section") || 0
-
-        paragraph_id =
-          integer_ref_field(ref, "paragraph") ||
-            nested_integer_ref(ref, ["cell", "parentParaIndex"])
-
-        {section_id, paragraph_id || fallback_index}
-
-      true ->
-        {0, fallback_index}
-    end
-  end
-
-  defp integer_ref_field(ref, key) do
-    case Map.get(ref, key) do
-      value when is_integer(value) -> value
-      _other -> nil
-    end
-  end
-
-  defp nested_integer_ref(ref, path) do
-    case get_in(ref, path) do
-      value when is_integer(value) -> value
-      _other -> nil
-    end
-  end
 
   defp deep_order(%{} = map) do
     map
@@ -520,9 +376,10 @@ defmodule Ecrits.Doc.Projection do
     abs_path = canonical_file_path(abs_path)
 
     result =
-      with {:ok, old_nodes} <- ir_nodes(abs_path),
+      with {:ok, kind} <- kind_for(abs_path),
+           {:ok, old_nodes} <- ir_nodes(abs_path),
            {:ok, new_nodes} <- parse_ir_jsonl(new_bytes) do
-        case compute_ir_changes(old_nodes, new_nodes) do
+        case ir_changes(kind, old_nodes, new_nodes) do
           {:error, reason} -> {:error, reason}
           [] -> {:ok, %{applied: 0, doc: Path.basename(abs_path)}}
           changes -> apply_changes(abs_path, changes, opts)
@@ -799,548 +656,104 @@ defmodule Ecrits.Doc.Projection do
   defp sort_key(value) when is_float(value), do: {1, value}
   defp sort_key(value), do: {2, inspect(value)}
 
-  defp expand_projected_node(node) do
-    node = normalize_ir_value(node)
-    type = Map.get(node, "type")
+  # Re-expand a parsed payload's compacted positional ref back to its JSON-object
+  # form. Delegated to the engine IR policy in the ehwp dep; a no-op for non-
+  # positional refs, so office payloads (string/absent refs) pass through unchanged.
+  defp expand_projected_node(node), do: Ehwp.Ir.expand_node(node)
 
-    case expand_positional_ref(Map.get(node, "ref"), type) do
-      nil -> node
-      ref -> Map.put(node, "ref", ref)
+  defp office_kind?(kind), do: kind in [:docx, :pptx, :xlsx]
+
+  # Dispatch the write-back diff by engine. Office (libre) refs are opaque strings
+  # mixing positional ordinals with stable names, so it uses its own ref-addressed
+  # diff (`office_changes/2`); the rhwp positional-tuple diff lives in the ehwp dep
+  # (`Ehwp.Ir.changes/2`) — both return the change tuples `apply_changes/3` runs.
+  defp ir_changes(kind, old_nodes, new_nodes) do
+    if office_kind?(kind),
+      do: office_changes(old_nodes, new_nodes),
+      else: Ehwp.Ir.changes(old_nodes, new_nodes)
+  end
+
+  # Office (libre) write-back diff. The projection dropped runs, the ref, and the
+  # derived fields, so we shape the live OLD nodes the SAME way (via the engine's
+  # IR policy in the dep) and diff position-by-position. The backend ref the
+  # projection omitted is recovered from the aligned live node (`old.ref`) — an
+  # ordinal `p<idx>` or a stable name `tbl[..]/cell[B2]` alike. Symmetric
+  # canonicalization keeps a stripped derived field from reading as a property
+  # edit. A changed node COUNT is a structural add/remove → `:structural_change`,
+  # matching the rhwp path (VFS structural inserts on office are out of scope here).
+  defp office_changes(old_nodes, new_nodes) do
+    old_shaped = OfficeIr.shape_old(old_nodes)
+    news = Enum.map(new_nodes, &OfficeIr.canonicalize/1)
+
+    if length(old_shaped) != length(news) do
+      {:error, :structural_change}
+    else
+      old_shaped
+      |> Enum.zip(news)
+      |> Enum.reduce_while({:ok, []}, fn {old, new_node}, {:ok, acc} ->
+        case office_node_changes(old, new_node) do
+          {:ok, node_changes} -> {:cont, {:ok, Enum.reverse(node_changes) ++ acc}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, acc} -> Enum.reverse(acc)
+        error -> error
+      end
     end
   end
 
-  defp expand_positional_ref([section], _type) when is_integer(section) do
-    %{"section" => section}
+  defp office_node_changes(old, new_node) do
+    old_node = normalize_ir_value(old.canon)
+    new_node = normalize_ir_value(new_node)
+
+    cond do
+      old_node == new_node -> {:ok, []}
+      old.type != Map.get(new_node, "type") -> {:error, :structural_change}
+      is_nil(old.ref) -> {:error, :unroutable}
+      true -> office_text_change(old_node, new_node, old.ref, old.type)
+    end
   end
 
-  defp expand_positional_ref([section, paragraph, offset], "paragraph")
-       when is_integer(section) and is_integer(paragraph) and is_integer(offset) do
-    %{"section" => section, "paragraph" => paragraph, "offset" => offset}
-  end
+  # The office projection is text-only (canonicalize keeps just type/text), so a
+  # changed node is a single text edit: set_cell for a table cell, insert_text into
+  # an empty paragraph, else replace_text. The rhwp arm's richer node diff (text +
+  # property writes) lives in `Ehwp.Ir.changes/2`.
+  defp office_text_change(old_node, new_node, ref, type) do
+    old_text = Map.get(old_node, "text")
+    new_text = Map.get(new_node, "text")
 
-  defp expand_positional_ref([section, paragraph, offset, length], "paragraph")
-       when is_integer(section) and is_integer(paragraph) and is_integer(offset) and
-              is_integer(length) do
-    %{"section" => section, "paragraph" => paragraph, "offset" => offset, "length" => length}
-  end
+    cond do
+      old_text == new_text ->
+        {:ok, []}
 
-  defp expand_positional_ref(
-         [section, parent_para, control, cell_index, cell_para, offset],
-         "cell"
-       )
-       when is_integer(section) and is_integer(parent_para) and is_integer(control) and
-              is_integer(cell_index) and is_integer(cell_para) and is_integer(offset) do
-    %{
-      "section" => section,
-      "paragraph" => parent_para,
-      "offset" => offset,
-      "cell" => %{
-        "parentParaIndex" => parent_para,
-        "controlIndex" => control,
-        "cellIndex" => cell_index,
-        "cellParaIndex" => cell_para
-      }
-    }
-  end
+      not (is_binary(old_text) and is_binary(new_text)) ->
+        {:error, :unroutable}
 
-  defp expand_positional_ref([section, paragraph, control], type)
-       when is_integer(section) and is_integer(paragraph) and is_integer(control) and
-              is_binary(type) and type not in ["", "paragraph", "cell"] do
-    %{"section" => section, "paragraph" => paragraph, "control" => control, "type" => type}
-  end
+      type == "cell" ->
+        {:ok, [{:text, %{"op" => "set_cell", "ref" => ref, "text" => new_text}, new_text}]}
 
-  defp expand_positional_ref(_ref, _type), do: nil
+      old_text == "" ->
+        {:ok, [{:text, %{"op" => "insert_text", "ref" => ref, "text" => new_text}, new_text}]}
 
-  # Diff old vs new IR node-by-node. Nested positional projections intentionally
-  # omit `"ref"` from edited payloads; in that case the payload's list position is
-  # the identity and the old live node supplies the hidden backend ref. Legacy
-  # projections that still include a `"ref"` must keep it unchanged.
-  # `"text"` changes become edit ops; other changed fields become backend
-  # property writes. Nothing is silently ignored: unsupported fields are allowed
-  # to reach the backend and fail there, while identity/shape edits are a
-  # structural change.
-  defp compute_ir_changes(old_nodes, new_nodes) do
-    case scan_ir_changes(old_nodes, new_nodes, 0, 0, []) do
-      {:ok, changes} -> changes |> Enum.reverse() |> dedup_office_runs()
-      {:error, reason} -> {:error, reason}
+      true ->
+        {:ok,
+         [
+           {:text,
+            %{
+              "op" => "replace_text",
+              "ref" => ref,
+              "query" => old_text,
+              "replacement" => new_text
+            }, new_text}
+         ]}
     end
   end
 
   if Mix.env() == :test do
     @doc false
     def __compute_ir_changes_for_test__(old_nodes, new_nodes),
-      do: compute_ir_changes(old_nodes, new_nodes)
-  end
-
-  defp scan_ir_changes(old_nodes, new_nodes, old_index, new_index, acc) do
-    old_done? = old_index >= length(old_nodes)
-    new_done? = new_index >= length(new_nodes)
-
-    cond do
-      old_done? and new_done? ->
-        {:ok, acc}
-
-      new_done? ->
-        with {:ok, delete} <- payload_delete_change(Enum.at(old_nodes, old_index)) do
-          scan_ir_changes(old_nodes, new_nodes, old_index + 1, new_index, [delete | acc])
-        end
-
-      old_done? ->
-        with {:ok, insert} <-
-               payload_insert_change(
-                 Enum.at(new_nodes, new_index),
-                 insertion_anchor(old_nodes, old_index)
-               ) do
-          scan_ir_changes(old_nodes, new_nodes, old_index, new_index + 1, [insert | acc])
-        end
-
-      true ->
-        old = Enum.at(old_nodes, old_index)
-        new = Enum.at(new_nodes, new_index)
-
-        cond do
-          inserted_payload?(new) and not existing_insert_payload_match?(old, new) ->
-            with {:ok, insert} <-
-                   payload_insert_change(new, insertion_anchor(old_nodes, old_index)) do
-              scan_ir_changes(old_nodes, new_nodes, old_index, new_index + 1, [insert | acc])
-            end
-
-          deletable_payload?(old) and not same_payload_identity?(old, new) and
-              aligns_after_deleted_payload?(old_nodes, old_index, new) ->
-            with {:ok, delete} <- payload_delete_change(old) do
-              scan_ir_changes(old_nodes, new_nodes, old_index + 1, new_index, [delete | acc])
-            end
-
-          true ->
-            case existing_node_changes(old, new) do
-              {:ok, node_changes} ->
-                scan_ir_changes(
-                  old_nodes,
-                  new_nodes,
-                  old_index + 1,
-                  new_index + 1,
-                  Enum.reverse(node_changes) ++ acc
-                )
-
-              {:error, reason} ->
-                {:error, reason}
-            end
-        end
-    end
-  end
-
-  defp existing_node_changes(old, new) do
-    old_node = normalize_ir_value(old)
-    new_node = normalize_ir_value(new)
-    old_ref = Map.get(old_node, "ref")
-    new_ref = Map.get(new_node, "ref")
-    old_type = Map.get(old_node, "type")
-    new_type = Map.get(new_node, "type")
-    raw_ref = node_field(old, "ref") || old_ref
-
-    cond do
-      Map.has_key?(new_node, "ref") and old_ref != new_ref ->
-        {:error, :structural_change}
-
-      old_type != new_type ->
-        {:error, :structural_change}
-
-      old_node == new_node ->
-        {:ok, []}
-
-      is_nil(raw_ref) ->
-        {:error, :unroutable}
-
-      true ->
-        changes_for_node(old_node, new_node, raw_ref, old_type)
-    end
-  end
-
-  defp inserted_table_payload?(node) do
-    node = normalize_ir_value(node)
-
-    Map.get(node, "type") == "table" and
-      (is_list(Map.get(node, "cells")) or positive_int?(Map.get(node, "rows")) or
-         positive_int?(Map.get(node, "cols")))
-  end
-
-  defp inserted_picture_payload?(node) do
-    node = normalize_ir_value(node)
-
-    Map.get(node, "type") == "picture" and
-      (present_string?(Map.get(node, "src")) or present_string?(Map.get(node, "path")) or
-         present_string?(Map.get(node, "image_base64")) or nonempty_list?(Map.get(node, "bins")))
-  end
-
-  defp inserted_payload?(node),
-    do: inserted_table_payload?(node) or inserted_picture_payload?(node)
-
-  defp existing_table_payload_match?(old, new) do
-    old = normalize_ir_value(old)
-    new = normalize_ir_value(new)
-
-    Map.get(old, "type") == "table" and Map.get(new, "type") == "table" and
-      not Map.has_key?(new, "cells")
-  end
-
-  defp existing_picture_payload_match?(old, new) do
-    old = normalize_ir_value(old)
-    new = normalize_ir_value(new)
-
-    Map.get(old, "type") == "picture" and Map.get(new, "type") == "picture"
-  end
-
-  defp existing_insert_payload_match?(old, new),
-    do: existing_table_payload_match?(old, new) or existing_picture_payload_match?(old, new)
-
-  defp deletable_payload?(node) do
-    node = normalize_ir_value(node)
-    Map.get(node, "type") == "picture" and not is_nil(node_field(node, "ref"))
-  end
-
-  defp aligns_after_deleted_payload?(old_nodes, old_index, new) do
-    case Enum.at(old_nodes, old_index + 1) do
-      nil ->
-        false
-
-      next_old ->
-        same_payload_identity?(next_old, new)
-    end
-  end
-
-  defp same_payload_identity?(old, new) do
-    old = normalize_ir_value(old)
-    new = normalize_ir_value(new)
-
-    cond do
-      Map.get(old, "type") != Map.get(new, "type") ->
-        false
-
-      Map.get(old, "type") == "picture" ->
-        same_picture_identity?(old, new)
-
-      true ->
-        strip_ref(old) == strip_ref(new)
-    end
-  end
-
-  defp same_picture_identity?(old, new) do
-    case {picture_identity_marker(old), picture_identity_marker(new)} do
-      {old_marker, new_marker} when is_binary(old_marker) and is_binary(new_marker) ->
-        old_marker == new_marker
-
-      _ ->
-        strip_ref(old) == strip_ref(new)
-    end
-  end
-
-  defp picture_identity_marker(node) do
-    Enum.find_value(["description", "alt", "src", "path"], fn key ->
-      value = Map.get(node, key)
-      if is_binary(value) and value != "", do: value
-    end)
-  end
-
-  defp strip_ref(node), do: node |> normalize_ir_value() |> Map.delete("ref")
-
-  defp payload_insert_change(node, anchor) do
-    cond do
-      inserted_table_payload?(node) -> table_insert_change(node, anchor)
-      inserted_picture_payload?(node) -> picture_insert_change(node, anchor)
-      true -> {:error, :structural_change}
-    end
-  end
-
-  defp payload_delete_change(node) do
-    node = normalize_ir_value(node)
-
-    cond do
-      not deletable_payload?(node) ->
-        {:error, :structural_change}
-
-      true ->
-        marker = picture_marker(node)
-        {:ok, {:delete_node, %{"op" => "delete_node", "ref" => node_field(node, "ref")}, marker}}
-    end
-  end
-
-  defp positive_int?(value), do: is_integer(value) and value > 0
-  defp nonempty_list?(value), do: is_list(value) and value != []
-  defp present_string?(value), do: is_binary(value) and value != ""
-
-  defp table_insert_change(node, anchor) do
-    node = normalize_ir_value(node)
-    cells = coerce_table_cells(Map.get(node, "cells", []))
-    rows = table_rows(node, cells)
-    cols = table_cols(node, cells)
-
-    cond do
-      Map.get(node, "type") != "table" ->
-        {:error, :structural_change}
-
-      not (rows > 0 and cols > 0) ->
-        {:error, {:invalid_table_payload, "table payload needs cells or positive rows/cols"}}
-
-      true ->
-        op =
-          %{
-            "op" => "insert_table",
-            "ref" => anchor,
-            "rows" => rows,
-            "cols" => cols
-          }
-          |> maybe_put_nonempty("cells", cells)
-          |> maybe_put_bool("header", Map.get(node, "header"))
-          |> maybe_put_string("header_color", Map.get(node, "header_color"))
-
-        {:ok, {:insert_table, op, first_table_marker(cells)}}
-    end
-  end
-
-  defp picture_insert_change(node, anchor) do
-    node = normalize_ir_value(node)
-    src = Map.get(node, "src") || Map.get(node, "path")
-    bins = picture_bins(node)
-
-    cond do
-      Map.get(node, "type") != "picture" ->
-        {:error, :structural_change}
-
-      not (present_string?(src) or nonempty_list?(bins)) ->
-        {:error, {:invalid_picture_payload, "picture payload needs src/path/image_base64/bins"}}
-
-      true ->
-        op =
-          %{"op" => "insert_picture", "ref" => anchor}
-          |> maybe_put_string("src", src)
-          |> maybe_put_nonempty("bins", bins)
-          |> maybe_put_string("extension", Map.get(node, "extension"))
-          |> maybe_put_integer("width", Map.get(node, "width") || Map.get(node, "Width"))
-          |> maybe_put_integer("height", Map.get(node, "height") || Map.get(node, "Height"))
-          |> maybe_put_integer("natural_width_px", Map.get(node, "natural_width_px"))
-          |> maybe_put_integer("natural_height_px", Map.get(node, "natural_height_px"))
-          |> maybe_put_string("description", Map.get(node, "description") || Map.get(node, "alt"))
-
-        {:ok, {:insert_picture, op, picture_marker(node), picture_insert_props(node)}}
-    end
-  end
-
-  defp picture_bins(node) do
-    cond do
-      nonempty_list?(Map.get(node, "bins")) -> Map.get(node, "bins")
-      present_string?(Map.get(node, "image_base64")) -> [Map.get(node, "image_base64")]
-      true -> []
-    end
-  end
-
-  @picture_insert_only_fields ~w(type text src path image_base64 bins extension description alt
-                                 natural_width_px natural_height_px)
-  @picture_insert_property_fields ~w(width height Width Height x y PosX PosY horzOffset
-                                     vertOffset TreatAsChar treatAsChar Caption caption
-                                     horzRelTo vertRelTo horzAlign vertAlign textWrap)
-  @picture_insert_position_fields ~w(x y PosX PosY horzOffset vertOffset
-                                     horzRelTo vertRelTo horzAlign vertAlign)
-
-  defp picture_insert_props(node) do
-    node = normalize_ir_value(node)
-
-    node
-    |> Map.take(picture_insert_property_fields(node))
-    |> Enum.reject(fn {key, value} ->
-      key in @picture_insert_only_fields or is_nil(value)
-    end)
-    |> Map.new()
-  end
-
-  defp picture_insert_property_fields(node) do
-    if picture_insert_floating?(node) do
-      @picture_insert_property_fields
-    else
-      @picture_insert_property_fields -- @picture_insert_position_fields
-    end
-  end
-
-  defp picture_insert_floating?(node) do
-    Map.get(node, "treatAsChar") == false or Map.get(node, "TreatAsChar") == false
-  end
-
-  defp picture_marker(node) do
-    Enum.find_value(["description", "alt", "src", "path", "text"], fn key ->
-      value = Map.get(node, key)
-
-      cond do
-        is_binary(value) and value != "" -> value
-        true -> nil
-      end
-    end)
-  end
-
-  defp coerce_table_cells(cells) when is_list(cells) do
-    Enum.map(cells, fn
-      row when is_list(row) -> Enum.map(row, &to_string/1)
-      value -> [to_string(value)]
-    end)
-  end
-
-  defp coerce_table_cells(_cells), do: []
-
-  defp table_rows(node, cells) do
-    case Map.get(node, "rows") do
-      rows when is_integer(rows) and rows > 0 -> rows
-      _ -> length(cells)
-    end
-  end
-
-  defp table_cols(node, cells) do
-    case Map.get(node, "cols") do
-      cols when is_integer(cols) and cols > 0 ->
-        cols
-
-      _ ->
-        cells
-        |> Enum.map(&length/1)
-        |> Enum.max(fn -> 0 end)
-    end
-  end
-
-  defp first_table_marker(cells) do
-    cells
-    |> List.flatten()
-    |> Enum.find(&(is_binary(&1) and &1 != ""))
-  end
-
-  defp maybe_put_nonempty(map, _key, []), do: map
-  defp maybe_put_nonempty(map, key, value), do: Map.put(map, key, value)
-
-  defp maybe_put_bool(map, key, value) when is_boolean(value), do: Map.put(map, key, value)
-  defp maybe_put_bool(map, _key, _value), do: map
-
-  defp maybe_put_integer(map, key, value) when is_integer(value), do: Map.put(map, key, value)
-  defp maybe_put_integer(map, _key, _value), do: map
-
-  defp maybe_put_string(map, key, value) when is_binary(value) and value != "",
-    do: Map.put(map, key, value)
-
-  defp maybe_put_string(map, _key, _value), do: map
-
-  defp insertion_anchor(old_nodes, old_index) do
-    unsafe_paragraphs = unsafe_insert_anchor_paragraphs(old_nodes)
-
-    previous =
-      old_nodes
-      |> Enum.take(old_index)
-      |> Enum.reverse()
-      |> Enum.find_value(&body_ref_at_end(&1, unsafe_paragraphs))
-
-    next =
-      old_nodes
-      |> Enum.drop(old_index)
-      |> Enum.find_value(&body_ref_at_end(&1, unsafe_paragraphs))
-
-    previous || next || "end"
-  end
-
-  defp unsafe_insert_anchor_paragraphs(nodes) do
-    Enum.reduce(nodes, MapSet.new(), fn node, acc ->
-      node = normalize_ir_value(node)
-      type = Map.get(node, "type")
-      ref = node_field(node, "ref") |> normalize_ir_value()
-
-      if unsafe_insert_anchor_type?(type) and is_map(ref) and
-           is_integer(Map.get(ref, "paragraph")) do
-        MapSet.put(acc, {Map.get(ref, "section", 0), Map.get(ref, "paragraph")})
-      else
-        acc
-      end
-    end)
-  end
-
-  defp unsafe_insert_anchor_type?(type),
-    do: type in ["section_def", "column_def", "page_number_pos", "table", "picture"]
-
-  defp body_ref_at_end(node, unsafe_paragraphs) do
-    node = normalize_ir_value(node)
-
-    with true <- Map.get(node, "type") == "paragraph",
-         %{} = ref <- node_field(node, "ref") |> normalize_ir_value(),
-         true <- body_paragraph_ref?(ref),
-         false <- unsafe_insert_anchor_paragraph?(ref, unsafe_paragraphs),
-         text when is_binary(text) <- node |> normalize_ir_value() |> Map.get("text") do
-      %{
-        "section" => Map.get(ref, "section", 0),
-        "paragraph" => Map.get(ref, "paragraph"),
-        "offset" => String.length(text)
-      }
-    else
-      _ -> nil
-    end
-  end
-
-  defp unsafe_insert_anchor_paragraph?(ref, unsafe_paragraphs) do
-    MapSet.member?(unsafe_paragraphs, {Map.get(ref, "section", 0), Map.get(ref, "paragraph")})
-  end
-
-  defp body_paragraph_ref?(ref) do
-    is_integer(Map.get(ref, "paragraph")) and is_nil(Map.get(ref, "cell")) and
-      is_nil(Map.get(ref, "control")) and is_nil(Map.get(ref, "note"))
-  end
-
-  defp changes_for_node(old_node, new_node, raw_ref, type) do
-    with {:ok, text_change} <- text_change_for_node(old_node, new_node, raw_ref, type),
-         {:ok, prop_change} <- prop_change_for_node(old_node, new_node, raw_ref, type) do
-      {:ok, Enum.reject([text_change, prop_change], &is_nil/1)}
-    end
-  end
-
-  defp text_change_for_node(old_node, new_node, raw_ref, type) do
-    old_text = Map.get(old_node, "text")
-    new_text = Map.get(new_node, "text")
-
-    cond do
-      old_text == new_text ->
-        {:ok, nil}
-
-      not (is_binary(old_text) and is_binary(new_text)) ->
-        {:error, :unroutable}
-
-      type == "cell" ->
-        {:ok, {:text, %{"op" => "set_cell", "ref" => raw_ref, "text" => new_text}, new_text}}
-
-      old_text == "" ->
-        {:ok, {:text, %{"op" => "insert_text", "ref" => raw_ref, "text" => new_text}, new_text}}
-
-      true ->
-        {:ok,
-         {:text,
-          %{
-            "op" => "replace_text",
-            "ref" => raw_ref,
-            "query" => old_text,
-            "replacement" => new_text
-          }, new_text}}
-    end
-  end
-
-  defp prop_change_for_node(old_node, new_node, raw_ref, type) do
-    props =
-      old_node
-      |> changed_property_keys(new_node)
-      |> Map.new(fn key -> {key, Map.get(new_node, key)} end)
-
-    if props == %{} do
-      {:ok, nil}
-    else
-      {:ok, {:set, raw_ref, type, props}}
-    end
-  end
-
-  defp changed_property_keys(old_node, new_node) do
-    old_node
-    |> Map.keys()
-    |> Kernel.++(Map.keys(new_node))
-    |> Enum.uniq()
-    |> Enum.reject(&(&1 in ["ref", "type", "text"]))
-    |> Enum.filter(&(Map.get(old_node, &1) != Map.get(new_node, &1)))
+      do: Ehwp.Ir.changes(old_nodes, new_nodes)
   end
 
   defp normalize_ir_value(%{} = map) do
@@ -1350,30 +763,13 @@ defmodule Ecrits.Doc.Projection do
   defp normalize_ir_value(list) when is_list(list), do: Enum.map(list, &normalize_ir_value/1)
   defp normalize_ir_value(other), do: other
 
-  # Office emits both a paragraph (`p1`) and its child run (`p1/r0`) carrying the
-  # same text; an edit touching both (e.g. `sed` over the JSONL) yields two
-  # changes. Keep only the parent — one paragraph-level `replace_text` suffices;
-  # applying the child too would no-op or fail. rhwp emits no run nodes, so this
-  # only affects office string refs.
-  defp dedup_office_runs(changes) do
-    refs =
-      changes
-      |> Enum.flat_map(fn
-        {:text, %{"ref" => ref}, _marker} -> [ref]
-        _other -> []
-      end)
-      |> MapSet.new()
-
-    Enum.reject(changes, fn
-      {:text, %{"ref" => ref}, _marker} ->
-        is_binary(ref) and
-          Enum.any?(refs, fn parent ->
-            is_binary(parent) and parent != ref and String.starts_with?(ref, parent <> "/")
-          end)
-
-      _other ->
-        false
-    end)
+  # The rhwp insert_table op-builder (and its `first_table_marker`) moved to
+  # `Ehwp.Ir`, but `broadcast_edit` still surfaces a table-insert highlight marker
+  # for the chat rail — so this tiny marker helper stays on the ecrits side.
+  defp first_table_marker(cells) do
+    cells
+    |> List.flatten()
+    |> Enum.find(&(is_binary(&1) and &1 != ""))
   end
 
   # A FUSE write is a FILE-LEVEL modification of the document, NOT a `doc.edit`.
@@ -1667,17 +1063,84 @@ defmodule Ecrits.Doc.Projection do
            Map.get(applied, :native) || Map.get(applied, "native"),
          section <- table_insert_section(op),
          true <- is_integer(control) and is_integer(paragraph) do
-      {:ok,
-       %{
-         "section" => section,
-         "paragraph" => paragraph,
-         "control" => control,
-         "type" => "picture"
-       }}
+      case inserted_cell_picture_ref(op, section, paragraph, control) do
+        {:ok, ref} ->
+          {:ok, ref}
+
+        :error ->
+          {:ok,
+           %{
+             "section" => section,
+             "paragraph" => paragraph,
+             "control" => control,
+             "type" => "picture"
+           }}
+      end
     else
       _ -> {:error, :missing_inserted_control_ref}
     end
   end
+
+  defp inserted_cell_picture_ref(op, section, paragraph, control) do
+    ref = op |> Map.get("ref") |> normalize_ir_value()
+    cell = ref |> Map.get("cell") |> normalize_ir_value()
+    cell_path = normalize_cell_path(Map.get(ref, "cellPath") || Map.get(cell || %{}, "cellPath"))
+
+    with true <- Map.get(op, "inline_in_cell") == true,
+         %{} <- cell,
+         parent_para when is_integer(parent_para) <-
+           Map.get(cell, "parentParaIndex") || paragraph,
+         table_control when is_integer(table_control) <- Map.get(cell, "controlIndex"),
+         cell_index when is_integer(cell_index) <- Map.get(cell, "cellIndex"),
+         cell_para when is_integer(cell_para) <- Map.get(cell, "cellParaIndex") do
+      cell_path =
+        cell_path ||
+          [
+            %{
+              "controlIndex" => table_control,
+              "cellIndex" => cell_index,
+              "cellParaIndex" => cell_para
+            }
+          ]
+
+      cell = Map.put(cell, "cellPath", cell_path)
+
+      {:ok,
+       %{
+         "section" => section,
+         "paragraph" => parent_para,
+         "offset" => Map.get(ref, "offset", 0),
+         "control" => control,
+         "type" => "picture",
+         "cell" => cell,
+         "cellPath" => cell_path
+       }}
+    else
+      _ -> :error
+    end
+  end
+
+  defp normalize_cell_path([_ | _] = path) do
+    path
+    |> Enum.map(&normalize_ir_value/1)
+    |> Enum.map(fn step ->
+      %{
+        "controlIndex" => Map.get(step, "controlIndex") || Map.get(step, "control"),
+        "cellIndex" => Map.get(step, "cellIndex") || Map.get(step, "cell"),
+        "cellParaIndex" => Map.get(step, "cellParaIndex") || Map.get(step, "cell_para")
+      }
+    end)
+    |> Enum.filter(fn step ->
+      is_integer(Map.get(step, "controlIndex")) and is_integer(Map.get(step, "cellIndex")) and
+        is_integer(Map.get(step, "cellParaIndex"))
+    end)
+    |> case do
+      [] -> nil
+      path -> path
+    end
+  end
+
+  defp normalize_cell_path(_other), do: nil
 
   defp browser_edit_op(%{"op" => "insert_picture"} = op) do
     atom_op =
@@ -1692,7 +1155,8 @@ defmodule Ecrits.Doc.Projection do
         height: Map.get(op, "height"),
         natural_width_px: Map.get(op, "natural_width_px"),
         natural_height_px: Map.get(op, "natural_height_px"),
-        description: Map.get(op, "description")
+        description: Map.get(op, "description"),
+        inline_in_cell: Map.get(op, "inline_in_cell")
       }
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
       |> Map.new()
@@ -1710,16 +1174,5 @@ defmodule Ecrits.Doc.Projection do
       %{"section" => section} when is_integer(section) -> section
       _ -> 0
     end
-  end
-
-  # The decoded IR uses string keys; tolerate an atom key as a fallback so a
-  # backend that returns atom-keyed nodes still projects.
-  defp node_field(node, key) when is_map_key(node, key), do: Map.get(node, key)
-
-  defp node_field(node, key) do
-    atom = String.to_existing_atom(key)
-    Map.get(node, atom)
-  rescue
-    ArgumentError -> nil
   end
 end

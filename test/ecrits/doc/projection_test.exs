@@ -331,6 +331,50 @@ defmodule Ecrits.Doc.ProjectionTest do
       end
     end
 
+    test "routes picture inserts after a table cell through a cell native anchor", %{
+      ehwp: ehwp
+    } do
+      if not ehwp do
+        IO.puts(
+          "\n[skip] ehwp NIF unavailable; skipping Projection write_back HWPX cell picture insert e2e"
+        )
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_picture_cell_anchor", ".hwpx")
+        on_exit(fn -> cleanup_tmp(path) end)
+
+        {:ok, bytes} = Projection.project_file(path)
+        {_lines, doc} = decode_projection(bytes)
+        original_count = picture_count(doc)
+        {cell_path, _cell} = first_text_cell(doc)
+
+        picture = %{
+          "type" => "picture",
+          "src" => @image_fixture,
+          "width" => 3200,
+          "height" => 2400,
+          "description" => "JSONL_CELL_ANCHOR_PICTURE"
+        }
+
+        new_bytes =
+          doc
+          |> insert_payload_node(insert_after(cell_path), picture)
+          |> encode_projection()
+
+        assert {:ok, %{applied: 1}} = Projection.write_back(path, new_bytes)
+        assert {:ok, after_bytes} = Projection.project_file(path)
+        {_lines, after_doc} = decode_projection(after_bytes)
+        assert picture_count(after_doc) == original_count + 1
+
+        {picture_path, picture} =
+          first_payload(after_doc, fn node ->
+            node["type"] == "picture" and match?([_ | _], get_in(node, ["ref", "cellPath"]))
+          end)
+
+        assert get_in(picture, ["ref", "type"]) == "picture"
+        assert payload_node(after_doc, previous_payload_path(picture_path))["type"] == "cell"
+      end
+    end
+
     test "routes picture inserts at the start of the first paragraph list safely", %{
       ehwp: ehwp
     } do
@@ -493,6 +537,94 @@ defmodule Ecrits.Doc.ProjectionTest do
 
       assert [
                {:insert_picture, %{"description" => "DBG_BIRD_INSERT"}, "DBG_BIRD_INSERT", %{}}
+             ] = Projection.__compute_ir_changes_for_test__(old_nodes, new_nodes)
+    end
+
+    test "anchors a picture inserted after a table cell to that cell" do
+      cell_ref = %{
+        "section" => 0,
+        "paragraph" => 4,
+        "offset" => 0,
+        "cell" => %{
+          "parentParaIndex" => 4,
+          "controlIndex" => 1,
+          "cellIndex" => 2,
+          "cellParaIndex" => 0
+        }
+      }
+
+      old_nodes = [
+        %{
+          "ref" => %{"section" => 0, "paragraph" => 4, "offset" => 0},
+          "text" => "",
+          "type" => "paragraph"
+        },
+        %{
+          "ref" => %{"section" => 0, "paragraph" => 4, "control" => 1, "type" => "table"},
+          "text" => "AUTH_TBL",
+          "type" => "table"
+        },
+        %{
+          "col" => 2,
+          "ref" => cell_ref,
+          "row" => 0,
+          "text" => "AUTH_TBL_R1C3",
+          "type" => "cell"
+        }
+      ]
+
+      new_nodes = [
+        %{"text" => "", "type" => "paragraph"},
+        %{"text" => "AUTH_TBL", "type" => "table"},
+        %{"col" => 2, "row" => 0, "text" => "AUTH_TBL_R1C3", "type" => "cell"},
+        %{
+          "description" => "JSONL_CELL_IMAGE",
+          "src" => "/tmp/ecrits-fuse-hwpx-tidewave/bird_song_sparrow.jpg",
+          "type" => "picture"
+        }
+      ]
+
+      assert [
+               {:insert_picture, %{"ref" => ref, "inline_in_cell" => true}, "JSONL_CELL_IMAGE",
+                %{}}
+             ] = Projection.__compute_ir_changes_for_test__(old_nodes, new_nodes)
+
+      assert ref == %{
+               "section" => 0,
+               "paragraph" => 4,
+               "offset" => String.length("AUTH_TBL_R1C3"),
+               "cell" => %{
+                 "parentParaIndex" => 4,
+                 "controlIndex" => 1,
+                 "cellIndex" => 2,
+                 "cellParaIndex" => 0
+               }
+             }
+    end
+
+    test "uses the source basename as a fallback picture description" do
+      old_nodes = [
+        %{
+          "ref" => %{"section" => 0, "paragraph" => 1, "offset" => 0},
+          "text" => "before",
+          "type" => "paragraph"
+        }
+      ]
+
+      new_nodes = [
+        %{"text" => "before", "type" => "paragraph"},
+        %{
+          "src" => "/tmp/ecrits-fuse-hwpx-tidewave/bird_song_sparrow.jpg",
+          "type" => "picture"
+        }
+      ]
+
+      assert [
+               {:insert_picture,
+                %{
+                  "description" => "bird_song_sparrow.jpg",
+                  "src" => "/tmp/ecrits-fuse-hwpx-tidewave/bird_song_sparrow.jpg"
+                }, "/tmp/ecrits-fuse-hwpx-tidewave/bird_song_sparrow.jpg", %{}}
              ] = Projection.__compute_ir_changes_for_test__(old_nodes, new_nodes)
     end
 
@@ -749,6 +881,16 @@ defmodule Ecrits.Doc.ProjectionTest do
 
   defp insert_after({section_index, paragraph_index, payload_index}),
     do: {section_index, paragraph_index, payload_index + 1}
+
+  defp previous_payload_path({section_index, paragraph_index, payload_index}),
+    do: {section_index, paragraph_index, payload_index - 1}
+
+  defp payload_node(doc, {section_index, paragraph_index, payload_index}) do
+    doc
+    |> Enum.at(section_index)
+    |> Enum.at(paragraph_index)
+    |> Enum.at(payload_index)
+  end
 
   defp insert_payload_node(doc, {section_index, paragraph_index, payload_index}, node) do
     section = Enum.at(doc, section_index)
