@@ -18,18 +18,17 @@ defmodule Ecrits.Fuse.DocMount do
   the server normally, so `teardown/1` just trusts it.
 
   Gated by `enabled?/0`: the `:doc_vfs` config flag (default ON) and a usable
-  native backend. macOS auto mode is FSKit ONLY — when FSKit is not mountable
-  the status explains why instead of silently falling back to the legacy
-  macFUSE kext; FUSE on macOS is opt-in via `backend: :fuse` config or
-  `EXFUSE_BACKEND=fuse`. Linux/other Unix defaults to the FUSE/libfuse Rust
-  port. See `docs/plans/2026-06-23-exfuse-doc-vfs-migration.md`.
+  native backend. The backend is determined by the OS alone — macOS mounts
+  through FSKit and every other Unix through the FUSE/libfuse Rust port.
+  There is no macFUSE path: when FSKit is not mountable the status explains
+  why instead of falling back. See
+  `docs/plans/2026-06-23-exfuse-doc-vfs-migration.md`.
   """
 
   require Logger
 
   @fskit_extension_id "org.exfuse.fskit.extension"
   @fskit_settings_url "x-apple.systempreferences:com.apple.ExtensionsPreferences?extension-points"
-  @macfuse_marker "/Library/Filesystems/macfuse.fs"
 
   @doc "The mount point for a workspace root: `<root>/.ecrits/mount` (root realpathed)."
   @spec mount_point(String.t()) :: String.t()
@@ -66,12 +65,10 @@ defmodule Ecrits.Fuse.DocMount do
           settings_url: String.t() | nil
         }
   def status do
-    {mode, selected} = backend_choice()
-
     if config_enabled?() do
-      status_for_choice(mode, selected)
+      backend_status(backend())
     else
-      unavailable(selected, :config_disabled)
+      unavailable(backend(), :config_disabled)
     end
   end
 
@@ -103,9 +100,6 @@ defmodule Ecrits.Fuse.DocMount do
 
   def status_message(%{reason: :fuse_port_unavailable}),
     do: "FUSE backend port executable is unavailable."
-
-  def status_message(%{reason: :fuse_backend_missing}),
-    do: "FUSE backend is unavailable on this machine."
 
   def status_message(%{reason: reason}), do: "Doc VFS unavailable: #{inspect(reason)}."
 
@@ -337,47 +331,18 @@ defmodule Ecrits.Fuse.DocMount do
     |> Keyword.get(:enabled, true) != false
   end
 
+  # The backend is determined by the OS alone: macOS mounts through FSKit,
+  # every other Unix through the FUSE/libfuse port. There is no macFUSE path
+  # and no config/env override — when FSKit is not mountable the status
+  # explains why (with the settings URL) instead of reaching for a fallback.
   @doc false
   @spec backend() :: :fskit | :fuse
   def backend do
-    {_mode, backend} = backend_choice()
-    backend
-  end
-
-  defp backend_choice do
-    config =
-      :ecrits
-      |> Application.get_env(:doc_vfs, [])
-      |> Keyword.get(:backend, :auto)
-
-    case normalize_backend(config) || normalize_backend(System.get_env("EXFUSE_BACKEND")) do
-      :fskit -> {:explicit, :fskit}
-      :fuse -> {:explicit, :fuse}
-      _auto -> {:auto, default_backend()}
-    end
-  end
-
-  defp normalize_backend(value) when value in [:fskit, :fuse], do: value
-
-  defp normalize_backend(value) when value in ["fskit", "fuse"],
-    do: String.to_existing_atom(value)
-
-  defp normalize_backend(_value), do: nil
-
-  defp default_backend do
     case :os.type() do
       {:unix, :darwin} -> :fskit
       _ -> :fuse
     end
   end
-
-  # No silent macFUSE fallback: on macOS, auto means FSKit or nothing. When
-  # FSKit is not mountable, the status carries the FSKit reason (and settings
-  # URL) so the user can fix the extension, instead of quietly landing on the
-  # legacy kext backend. FUSE on macOS is strictly opt-in via
-  # `config :ecrits, :doc_vfs, backend: :fuse` or `EXFUSE_BACKEND=fuse`.
-  defp status_for_choice(:explicit, backend), do: backend_status(backend)
-  defp status_for_choice(:auto, backend), do: backend_status(backend)
 
   defp backend_status(:fskit) do
     cond do
@@ -391,10 +356,10 @@ defmodule Ecrits.Fuse.DocMount do
   end
 
   defp backend_status(:fuse) do
-    cond do
-      not port_available?() -> unavailable(:fuse, :fuse_port_unavailable)
-      not fuse_present?() -> unavailable(:fuse, :fuse_backend_missing)
-      true -> available(:fuse)
+    if port_available?() do
+      available(:fuse)
+    else
+      unavailable(:fuse, :fuse_port_unavailable)
     end
   end
 
@@ -430,13 +395,6 @@ defmodule Ecrits.Fuse.DocMount do
     match?({:ok, _}, Exfuse.App.find_port!())
   rescue
     _ -> false
-  end
-
-  defp fuse_present? do
-    case :os.type() do
-      {:unix, :darwin} -> File.dir?(@macfuse_marker)
-      _ -> true
-    end
   end
 
   defp fskit_extension_enabled? do

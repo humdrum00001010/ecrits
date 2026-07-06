@@ -15,8 +15,8 @@ defmodule Ecrits.Fuse.DocMountTest do
     :ok
   end
 
-  test "defaults to FSKit on macOS and FUSE elsewhere" do
-    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :auto)
+  test "backend is determined by the OS alone" do
+    Application.put_env(:ecrits, :doc_vfs, enabled: true)
     System.delete_env("EXFUSE_BACKEND")
 
     expected =
@@ -28,18 +28,18 @@ defmodule Ecrits.Fuse.DocMountTest do
     assert DocMount.backend() == expected
   end
 
-  test "explicit doc_vfs backend overrides the environment" do
-    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :fskit)
+  test "there is no macFUSE path: config and env cannot select FUSE on macOS" do
+    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :fuse)
     System.put_env("EXFUSE_BACKEND", "fuse")
 
-    assert DocMount.backend() == :fskit
-  end
+    case :os.type() do
+      {:unix, :darwin} ->
+        assert DocMount.backend() == :fskit
+        assert DocMount.status().backend == :fskit
 
-  test "auto backend honours EXFUSE_BACKEND override" do
-    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :auto)
-    System.put_env("EXFUSE_BACKEND", "fuse")
-
-    assert DocMount.backend() == :fuse
+      _ ->
+        assert DocMount.backend() == :fuse
+    end
   end
 
   test "FSKit availability gate requires the FSKit extension, not macFUSE" do
@@ -51,23 +51,6 @@ defmodule Ecrits.Fuse.DocMountTest do
         fskit_extension_launch_signed_for_test?()
 
     assert DocMount.enabled?() == expected
-  end
-
-  test "auto mode never selects the macFUSE backend on macOS" do
-    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :auto)
-    System.delete_env("EXFUSE_BACKEND")
-
-    status = DocMount.status()
-
-    case :os.type() do
-      {:unix, :darwin} ->
-        # FSKit or nothing: an unmountable FSKit reports its own reason
-        # instead of silently falling back to the legacy kext backend.
-        assert status.backend == :fskit
-
-      _ ->
-        assert status.backend == :fuse
-    end
   end
 
   test "status explains selected backend availability" do

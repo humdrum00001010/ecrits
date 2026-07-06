@@ -96,9 +96,10 @@ defmodule Ecrits.MixProject do
       # (served at /observex/) renders the islands with MathJax/TikZJax client-side.
       {:observex, git: "git@code.cloudxyz.org:IlYoung/observex.git", branch: "main"},
       # Elixir-over-FUSE library backing the document VFS (Ecrits.Fuse.*). Pure
-      # source over https; its `:exfuse_rust` mix compiler cargo-builds the
-      # `priv/exfuse_port` locally (needs cargo + macFUSE). See AGENTS.md
-      # "exfuse dep" + docs/plans/2026-06-23-exfuse-doc-vfs-migration.md.
+      # source over https. On macOS it mounts through the FSKit extension and
+      # builds nothing native; on other Unix its `:exfuse_rust` mix compiler
+      # cargo-builds the FUSE `priv/exfuse_port`. See AGENTS.md "exfuse dep" +
+      # docs/plans/2026-06-23-exfuse-doc-vfs-migration.md.
       {:exfuse, git: "https://github.com/humdrum00001010/exfuse", branch: "main"},
       # ecrits extra deps.
       {:openai_ex, "~> 0.9"},
