@@ -30,12 +30,41 @@ defmodule Ecrits.Workspace.Session do
 
   alias Ecrits.Doc.Pool
   alias Ecrits.Local.AcpAgent
+  alias Ecrits.Workspace.Session.{Agent, Document}
 
   @registry Ecrits.Workspace.SessionRegistry
   @supervisor Ecrits.Workspace.SessionSupervisor
   @pubsub Ecrits.PubSub
   @default_live_session_id "__default__"
   @max_recent_foregrounds 12
+
+  @type agent :: Agent.t()
+  @type agent_ref :: Agent.ref()
+  @type document :: Document.t()
+
+  @typedoc "Internal persisted workspace-session state."
+  @type t :: %{
+          required(:path) => String.t(),
+          optional(:agents) => %{optional(Agent.id()) => agent_ref() | agent()},
+          optional(:foregrounds) => %{
+            optional(String.t()) => %{
+              agent_id: Agent.id(),
+              provider: Agent.provider_id() | nil,
+              owner_session_id: String.t()
+            }
+          },
+          optional(:active_foregrounds) => %{optional(String.t()) => String.t()},
+          optional(:foreground_order) => [String.t()],
+          optional(:foreground_id) => Agent.id() | nil,
+          optional(:foreground_provider) => Agent.provider_id() | nil,
+          optional(:documents) => %{optional(Document.path()) => document()},
+          optional(:open_document_paths) => [Document.path()],
+          optional(:active_document_path) => Document.path() | nil,
+          optional(:document_element_picker_enabled?) => boolean(),
+          optional(:owners) => %{optional(String.t()) => Agent.id()},
+          optional(:viewers) => %{optional(String.t()) => pid()},
+          optional(:fs_watcher_pid) => pid() | nil
+        }
 
   @typedoc "Opaque handle the LiveView holds for a workspace Session."
   @type ws :: %{
@@ -328,6 +357,66 @@ defmodule Ecrits.Workspace.Session do
 
   def update_options(_ws, _opts), do: {:error, :no_agent}
 
+  @doc "Session-owned document UI snapshot used to restore tabs, active document, and scroll."
+  @spec document_snapshot(ws()) :: %{
+          documents: [Document.t()],
+          active_document_path: Document.path() | nil,
+          document_element_picker_enabled?: boolean()
+        }
+  def document_snapshot(%{path: path}) when is_binary(path) do
+    call_if_alive(path, :document_snapshot, %{
+      documents: [],
+      active_document_path: nil,
+      document_element_picker_enabled?: false
+    })
+  end
+
+  def document_snapshot(_ws),
+    do: %{documents: [], active_document_path: nil, document_element_picker_enabled?: false}
+
+  @doc "Persist whether the document element picker is enabled for this workspace session."
+  @spec set_document_element_picker_enabled(ws(), boolean()) :: :ok | {:error, term()}
+  def set_document_element_picker_enabled(%{path: path}, enabled?) when is_binary(path) do
+    call_if_alive(path, {:set_document_element_picker_enabled, enabled?}, {:error, :no_session})
+  end
+
+  def set_document_element_picker_enabled(_ws, _enabled?), do: {:error, :no_session}
+
+  @doc "Record or update an opened document and make it active unless `:active?` is false."
+  @spec open_document(ws(), map() | keyword()) :: {:ok, Document.t()} | {:error, term()}
+  def open_document(%{path: path}, attrs) when is_binary(path) do
+    call_if_alive(path, {:open_document, attrs}, {:error, :no_session})
+  end
+
+  def open_document(_ws, _attrs), do: {:error, :no_session}
+
+  @doc "Activate an already-open document by path."
+  @spec activate_document(ws(), Document.path()) :: :ok | {:error, term()}
+  def activate_document(%{path: path}, document_path)
+      when is_binary(path) and is_binary(document_path) do
+    call_if_alive(path, {:activate_document, document_path}, {:error, :no_session})
+  end
+
+  def activate_document(_ws, _document_path), do: {:error, :no_session}
+
+  @doc "Remove an opened document from the session-owned document UI state."
+  @spec close_document(ws(), Document.path()) :: :ok | {:error, term()}
+  def close_document(%{path: path}, document_path)
+      when is_binary(path) and is_binary(document_path) do
+    call_if_alive(path, {:close_document, document_path}, {:error, :no_session})
+  end
+
+  def close_document(_ws, _document_path), do: {:error, :no_session}
+
+  @doc "Persist browser-measured scroll for an opened document."
+  @spec update_document_scroll(ws(), Document.path(), map() | keyword()) :: :ok | {:error, term()}
+  def update_document_scroll(%{path: path}, document_path, attrs)
+      when is_binary(path) and is_binary(document_path) do
+    call_if_alive(path, {:update_document_scroll, document_path, attrs}, {:error, :no_session})
+  end
+
+  def update_document_scroll(_ws, _document_path, _attrs), do: {:error, :no_session}
+
   @doc """
   GENUINE restart of the foreground agent for a PROVIDER change (codex<->claude,
   or a cross-provider model selection). The ACP adapter (`exmcp_adapter`) is bound
@@ -562,6 +651,12 @@ defmodule Ecrits.Workspace.Session do
        # Per-doc human viewers (browser WASM authority): %{document_id => lv_pid}.
        # A viewer here makes `route/2` return `{:browser, lv}` for that doc.
        viewers: %{},
+       # Session-owned document UI state: open tabs, active document, and browser
+       # scroll positions keyed by workspace-relative document path.
+       documents: %{},
+       open_document_paths: [],
+       active_document_path: nil,
+       document_element_picker_enabled?: false,
        # Shared file-system watcher for this workspace root. LiveViews subscribe to
        # this Session's PubSub topic instead of each starting their own watcher.
        fs_watcher_pid: nil
@@ -726,6 +821,105 @@ defmodule Ecrits.Workspace.Session do
     {:reply, role, state}
   end
 
+  # ── document UI state ─────────────────────────────────────────────────
+
+  def handle_call(:document_snapshot, _from, state) do
+    state = ensure_document_state(state)
+    {:reply, document_snapshot_payload(state), state}
+  end
+
+  def handle_call({:set_document_element_picker_enabled, enabled?}, _from, state) do
+    state =
+      state
+      |> ensure_document_state()
+      |> Map.put(:document_element_picker_enabled?, enabled? == true)
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:open_document, attrs}, _from, state) do
+    state = ensure_document_state(state)
+
+    case session_document(attrs, Map.get(state, :documents, %{})) do
+      {:ok, %Document{} = document} ->
+        active? = attr_value(attrs, :active?) != false
+
+        state =
+          state
+          |> put_session_document(document)
+          |> maybe_activate_session_document(document.path, active?)
+
+        {:reply, {:ok, document}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:activate_document, document_path}, _from, state) do
+    state = ensure_document_state(state)
+
+    case normalize_document_path(document_path) do
+      {:ok, path} ->
+        if Map.has_key?(state.documents, path) do
+          {:reply, :ok, %{state | active_document_path: path}}
+        else
+          {:reply, {:error, :not_open}, state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:close_document, document_path}, _from, state) do
+    state = ensure_document_state(state)
+
+    case normalize_document_path(document_path) do
+      {:ok, path} ->
+        documents = Map.delete(state.documents, path)
+        open_document_paths = Enum.reject(state.open_document_paths, &(&1 == path))
+
+        active_document_path =
+          if state.active_document_path == path do
+            List.first(open_document_paths)
+          else
+            state.active_document_path
+          end
+
+        {:reply, :ok,
+         %{
+           state
+           | documents: documents,
+             open_document_paths: open_document_paths,
+             active_document_path: active_document_path
+         }}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:update_document_scroll, document_path, attrs}, _from, state) do
+    state = ensure_document_state(state)
+
+    with {:ok, path} <- normalize_document_path(document_path),
+         %Document{} = document <- Map.get(state.documents, path) do
+      document = %{
+        document
+        | scroll_top:
+            scroll_coordinate(attr_value(attrs, :top) || attr_value(attrs, :scroll_top)),
+          scroll_left:
+            scroll_coordinate(attr_value(attrs, :left) || attr_value(attrs, :scroll_left))
+      }
+
+      {:reply, :ok, %{state | documents: Map.put(state.documents, path, document)}}
+    else
+      nil -> {:reply, {:error, :not_open}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   # ── routing + viewers + ownership ──────────────────────────────────
   #
   # Each handler normalises the state first so a HOT-RELOADED Session started
@@ -857,7 +1051,152 @@ defmodule Ecrits.Workspace.Session do
     |> Map.put_new(:owners, %{})
     |> Map.put_new(:viewers, %{})
     |> Map.put_new(:fs_watcher_pid, nil)
+    |> ensure_document_state()
   end
+
+  defp ensure_document_state(state) do
+    documents =
+      state
+      |> Map.get(:documents, %{})
+      |> normalize_session_documents()
+
+    open_document_paths =
+      state
+      |> Map.get(:open_document_paths, Map.keys(documents))
+      |> Enum.filter(&Map.has_key?(documents, &1))
+
+    active_document_path =
+      case Map.get(state, :active_document_path) do
+        path when is_binary(path) and is_map_key(documents, path) -> path
+        _ -> List.first(open_document_paths)
+      end
+
+    state
+    |> Map.put(:documents, documents)
+    |> Map.put(:open_document_paths, open_document_paths)
+    |> Map.put(:active_document_path, active_document_path)
+    |> Map.put_new(:document_element_picker_enabled?, false)
+  end
+
+  defp normalize_session_documents(documents) when is_map(documents) do
+    documents
+    |> Enum.flat_map(fn
+      {path, %Document{} = document} ->
+        case normalize_document_path(document.path || path) do
+          {:ok, normalized} -> [{normalized, %{document | path: normalized}}]
+          {:error, _} -> []
+        end
+
+      {path, document} when is_map(document) ->
+        attrs = Map.put_new(document, :path, path)
+
+        case session_document(attrs, %{}) do
+          {:ok, %Document{} = normalized} -> [{normalized.path, normalized}]
+          {:error, _} -> []
+        end
+
+      _other ->
+        []
+    end)
+    |> Map.new()
+  end
+
+  defp normalize_session_documents(_documents), do: %{}
+
+  defp document_snapshot_payload(state) do
+    %{
+      documents:
+        state.open_document_paths
+        |> Enum.flat_map(fn path ->
+          case Map.get(state.documents, path) do
+            %Document{} = document -> [document]
+            _ -> []
+          end
+        end),
+      active_document_path: state.active_document_path,
+      document_element_picker_enabled?: Map.get(state, :document_element_picker_enabled?, false)
+    }
+  end
+
+  defp session_document(attrs, existing_documents) do
+    with {:ok, path} <- normalize_document_path(attr_value(attrs, :path)) do
+      existing = Map.get(existing_documents, path, %Document{path: path})
+
+      {:ok,
+       %{
+         existing
+         | path: path,
+           id: attr_value(attrs, :id) || existing.id,
+           pool_document_id: attr_value(attrs, :pool_document_id) || existing.pool_document_id,
+           scroll_top:
+             scroll_coordinate(
+               attr_value(attrs, :top) || attr_value(attrs, :scroll_top) || existing.scroll_top
+             ),
+           scroll_left:
+             scroll_coordinate(
+               attr_value(attrs, :left) || attr_value(attrs, :scroll_left) || existing.scroll_left
+             )
+       }}
+    end
+  end
+
+  defp put_session_document(state, %Document{} = document) do
+    documents = Map.put(state.documents, document.path, document)
+
+    open_document_paths =
+      Enum.reject(state.open_document_paths, &(&1 == document.path)) ++ [document.path]
+
+    %{state | documents: documents, open_document_paths: open_document_paths}
+  end
+
+  defp maybe_activate_session_document(state, path, true),
+    do: %{state | active_document_path: path}
+
+  defp maybe_activate_session_document(state, _path, _active?), do: state
+
+  defp normalize_document_path(path) when is_binary(path) do
+    path = String.trim(path)
+    segments = Path.split(path)
+
+    if path == "" or Path.type(path) == :absolute or Enum.any?(segments, &(&1 in [".", ".."])) do
+      {:error, :invalid_path}
+    else
+      {:ok, Path.join(segments)}
+    end
+  end
+
+  defp normalize_document_path(_path), do: {:error, :invalid_path}
+
+  defp attr_value(attrs, key) when is_list(attrs), do: Keyword.get(attrs, key)
+
+  defp attr_value(attrs, key) when is_map(attrs) do
+    string_key = Atom.to_string(key)
+
+    cond do
+      Map.has_key?(attrs, key) -> Map.get(attrs, key)
+      Map.has_key?(attrs, string_key) -> Map.get(attrs, string_key)
+      true -> nil
+    end
+  end
+
+  defp attr_value(_attrs, _key), do: nil
+
+  defp scroll_coordinate(value) when is_integer(value) and value >= 0, do: value
+
+  defp scroll_coordinate(value) when is_float(value) and value >= 0 do
+    value
+    |> Float.round()
+    |> trunc()
+  end
+
+  defp scroll_coordinate(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, _rest} when integer >= 0 -> integer
+      _ -> 0
+    end
+  end
+
+  defp scroll_coordinate(_value), do: 0
 
   defp ensure_file_watcher(state) do
     state = ensure_maps(state)

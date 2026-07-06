@@ -109,6 +109,7 @@ defmodule Ecrits.Supervision do
 
   defp local_agent_runtime_children do
     [
+      Ecrits.Local.WorkspaceHandoff,
       {Registry, keys: :unique, name: Ecrits.Local.AcpAgent.SessionRegistry},
       Ecrits.Local.AcpAgent.SessionSupervisor,
       # Per-workspace Session directory (keyed by canonical path, cookieless).
