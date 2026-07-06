@@ -41,7 +41,7 @@ defmodule Ecrits.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
-      {:tidewave, "~> 0.5", only: [:dev]},
+      {:tidewave, "~> 0.6", only: [:dev]},
       {:bcrypt_elixir, "~> 3.0"},
       {:phoenix, "~> 1.8.7"},
       {:ecto, "~> 3.13"},
@@ -172,7 +172,13 @@ defmodule Ecrits.MixProject do
         "phx.digest"
       ],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test test"],
-      "test.pure": ["test --no-start"]
+      "test.pure": ["test --no-start"],
+      # Auto-advance our own branch-pinned fork (`exfuse`) to its HEAD on every
+      # `mix deps.get`. A plain deps.get honors the SHA in `mix.lock`, so it would
+      # silently keep an old commit after we push the fork; `deps.update` first
+      # re-resolves the branch. The trailing `deps.get` is the real task (Mix runs
+      # the underlying task, not this alias, so there is no recursion).
+      "deps.get": ["deps.update exfuse", "deps.get"]
     ]
   end
 end
