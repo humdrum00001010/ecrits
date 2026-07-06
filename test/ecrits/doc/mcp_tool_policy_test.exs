@@ -34,5 +34,14 @@ defmodule Ecrits.Doc.MCPToolPolicyTest do
     assert message["message"] =~ "Only doc.open_doc is available"
     assert message["message"] =~ "do not call doc.close_doc during edits"
     assert message["message"] =~ ".ecrits/mount/<name>.jsonl"
+    assert message["message"] =~ "validate it with `jq -c .`"
+    assert message["message"] =~ "only if JSON validation succeeds"
+    assert message["message"] =~ "immediately after the target cell payload"
+    assert message["message"] =~ "do not edit/reuse an existing picture"
+    assert message["message"] =~ "Structural inserts are one-shot"
+    assert message["message"] =~ "picture appears at the intended nested position"
+    assert message["message"] =~ "ref.cellPath"
+    assert message["message"] =~ "Picture src is embed input"
+    assert message["message"] =~ "never insert another copy"
   end
 end

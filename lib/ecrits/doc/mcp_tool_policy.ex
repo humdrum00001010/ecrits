@@ -31,14 +31,24 @@ defmodule Ecrits.Doc.MCPToolPolicy do
           "<name>.jsonl are fake scratch files that do not route to the document. " <>
           "If `.ecrits/mount/<name>.jsonl` is missing after `doc.open_doc`, stop " <>
           "and report that blocker. For whole-file rewrites, create the temp file " <>
-          "inside `.ecrits/mount` and mv it over the target; do not use mktemp " <>
+          "inside `.ecrits/mount`, validate it with `jq -c .`, and mv it over " <>
+          "the target only if JSON validation succeeds; do not use mktemp " <>
           "outside the mount or dd over the target. Insert pictures as a payload node inside an " <>
           "existing paragraph list such as " <>
           "{\"type\":\"picture\",\"src\":\"/abs/img.png\"}; ecrits chooses a readable " <>
           "default size from the image aspect, so width/height are only needed for " <>
           "intentional HWPUNIT resizing. Move by editing x/y/treatAsChar; resize by " <>
           "editing width/height; delete by removing that " <>
-          "payload from its paragraph list. Only doc.open_doc is available as an " <>
+          "payload from its paragraph list. To put a new picture inside a table cell, " <>
+          "insert the picture payload immediately after the target cell payload in " <>
+          "the same paragraph list; do not edit/reuse an existing picture and do not " <>
+          "invent ref. Structural inserts are one-shot: " <>
+          "after writing one requested table/picture payload, re-read the mount once " <>
+          "and stop when the requested table marker exists or the picture appears at " <>
+          "the intended nested position (for table-cell pictures, immediately after " <>
+          "the cell payload with a ref.cellPath). Picture src is embed input and may " <>
+          "normalize away after write-back; never insert another copy when the target " <>
+          "position already has that picture node. Only doc.open_doc is available as an " <>
           "MCP tool in VFS mode; do not call doc.close_doc during edits."
     }
   end

@@ -138,7 +138,8 @@ defmodule Ecrits.Doc.Tools do
           "scratch files that do not route to the document. If mounted_at is null " <>
           "or the .ecrits/mount/<name>.jsonl file is missing, report the blocker " <>
           "instead of editing. For whole-file rewrites, write a temp file inside the same " <>
-          ".ecrits/mount directory and mv it over the target; do not use mktemp " <>
+          ".ecrits/mount directory, validate it with `jq -c .`, then mv it over " <>
+          "the target only if JSON validation succeeds; do not use mktemp " <>
           "outside the mount or dd over the target. Never replace it with one payload object. Insert a " <>
           "picture by adding a payload node inside an existing paragraph list " <>
           "like " <>
@@ -148,7 +149,16 @@ defmodule Ecrits.Doc.Tools do
           "payload explicitly sets treatAsChar:false with x/y; move an existing " <>
           "picture by editing x/y/treatAsChar, resize by editing width/height, " <>
           "and delete one by removing its " <>
-          "payload from the paragraph list. Returns {opened, " <>
+          "payload from the paragraph list. To put a new picture inside a table cell, " <>
+          "insert the picture payload immediately after the target cell payload in " <>
+          "the same paragraph list; do not edit/reuse an existing picture and do not " <>
+          "invent ref. Structural inserts are one-shot: " <>
+          "after writing one requested table/picture payload, re-read the mount once " <>
+          "and stop when the requested table marker exists or the picture appears at " <>
+          "the intended nested position (for table-cell pictures, immediately after " <>
+          "the cell payload with a ref.cellPath). Picture src is embed input and may " <>
+          "normalize away after write-back; never insert another copy when the target " <>
+          "position already has that picture node. Returns {opened, " <>
           "path, mounted_at, mount_status}; when " <>
           "mounted_at is null, mount_status/mount_error explain the FSKit/FUSE blocker. " <>
           "Keep the document open while editing and verifying the mounted file; " <>

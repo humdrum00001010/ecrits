@@ -49,7 +49,8 @@ defmodule Ecrits.Doc.Rhwp.Image do
             height: height,
             natural_width_px: nw,
             natural_height_px: nh,
-            description: op[:description] || ""
+            description: op[:description] || "",
+            inline_in_cell: op[:inline_in_cell] == true
           }
 
           {:ok, pic, [bytes]}

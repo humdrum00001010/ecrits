@@ -76,9 +76,18 @@ defmodule Ecrits.Doc.ToolsTest do
       assert open_doc_tool["description"] =~ "/tmp/<name>.jsonl"
       assert open_doc_tool["description"] =~ "do not route to the document"
       assert open_doc_tool["description"] =~ "temp file inside the same .ecrits/mount"
+      assert open_doc_tool["description"] =~ "validate it with `jq -c .`"
+      assert open_doc_tool["description"] =~ "only if JSON validation succeeds"
       assert open_doc_tool["description"] =~ "do not use mktemp"
       assert open_doc_tool["description"] =~ "or dd over the target"
       assert open_doc_tool["description"] =~ "inside an existing paragraph list"
+      assert open_doc_tool["description"] =~ "immediately after the target cell payload"
+      assert open_doc_tool["description"] =~ "do not edit/reuse an existing picture"
+      assert open_doc_tool["description"] =~ "Structural inserts are one-shot"
+      assert open_doc_tool["description"] =~ "picture appears at the intended nested position"
+      assert open_doc_tool["description"] =~ "ref.cellPath"
+      assert open_doc_tool["description"] =~ "Picture src is embed input"
+      assert open_doc_tool["description"] =~ "never insert another copy"
 
       close_doc_tool = Enum.find(Tools.tools(), &(&1["name"] == "close_doc"))
       assert close_doc_tool["description"] =~ "explicit unmount requests only"

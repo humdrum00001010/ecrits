@@ -860,9 +860,10 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
        order stable unless you are intentionally inserting or deleting one
        supported native payload.
       For whole-file rewrites, create the temp file inside the same
-      `.ecrits/mount/` directory, then rename it over the target. Do NOT use
-      `mktemp`, `dd`, or any temp path outside the mount. Example:
-       `tmp=".ecrits/mount/<name>.jsonl.tmp"; jq -c '...' "$target" > "$tmp" && mv "$tmp" "$target"`
+      `.ecrits/mount/` directory, validate the temp with `jq -c . "$tmp"`,
+      then rename it over the target only if JSON validation succeeds. Do NOT
+      use `mktemp`, `dd`, or any temp path outside the mount. Example:
+       `tmp=".ecrits/mount/<name>.jsonl.tmp"; jq -c '...' "$target" > "$tmp" && jq -c . "$tmp" >/dev/null && mv "$tmp" "$target"`
        This keeps the write on the VFS `create`/`write`/`rename` path.
        To CREATE a native table, insert one new payload object at the desired
        nested-list position inside an existing paragraph list (the innermost
@@ -883,15 +884,28 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
        position. Move an existing picture by editing that payload's `x`, `y`,
        and `treatAsChar` fields in place; resize by editing `width`/`height`.
        Delete a picture by removing that picture payload from its paragraph list.
+       To put a new picture inside a table cell, find the target `"type":"cell"`
+       payload and insert the picture payload immediately AFTER that cell payload
+       in the same paragraph list. Do not edit/reuse an existing picture payload
+       and do not invent `"ref"`; the preceding cell payload is the anchor.
        If the user asks for an image from the internet, download it to a normal
        workspace file first and use that absolute local path as `src`; do not
        put remote URLs into the JSONL. Other add/remove/reorder/ref/type edits
        are structural and rejected in this VFS write-back.
+       Structural inserts are one-shot. After adding one requested table or
+      picture payload, write once, re-read the mounted JSONL once, and stop when
+      the requested table marker exists or the picture appears at the intended
+      nested position. For table-cell pictures, that means a `"type":"picture"`
+      node immediately after the target cell payload, normally with
+      `ref.cellPath` after write-back. `src` is only embed input and may
+      normalize away after write-back; do not insert another copy just because
+      `src` normalized away. Repeated insertion is a failed edit.
        `"text"` changes route as scoped text edits; other payload node field
        changes route through the native property setter when the backend supports
        them. Unsupported/derived fields fail loudly. The write routes onto the
        live document and auto-saves — there is no doc.save.
-    4. Verify with shell (re-`grep` the mount file).
+    4. Verify with shell exactly once (re-`grep` the mount file). Do not reopen
+       editor previews or poll `/local/document-bytes` to verify a VFS write.
 
     Voice: caveman. Short answer, no filler; report result/blockers only.
     Read-only questions: cat/grep and answer, do not edit. No fabrication.
