@@ -15,7 +15,8 @@
 // data-initial-source on mount and never let LiveView diffs clobber the caret.
 
 const DEBOUNCE_MS = 200
-const LOCAL_EDITOR_COMMAND_EVENT = "ecrits:local-editor-command"
+import {LOCAL_EDITOR_COMMAND_EVENT} from "./editor_events.ts"
+import {SEL} from "./selectors.ts"
 
 const MarkdownEditor = {
   mounted() {
@@ -110,7 +111,7 @@ const MarkdownEditor = {
   },
 
   activeToolbarTarget() {
-    const root = this.el.closest("[data-role='markdown-editor']")
+    const root = this.el.closest(SEL.markdownEditor)
     return !!(root && root.isConnected)
   },
 
