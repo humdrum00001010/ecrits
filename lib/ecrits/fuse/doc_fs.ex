@@ -16,7 +16,9 @@ defmodule Ecrits.Fuse.DocFs do
   The mount behaves like a real file that an in-place editor / linter
   (`sed -i`, a formatter) can rewrite. Two write patterns are supported:
 
-    * **in-place** — `open`/`truncate`/`write` the projected file, commit on `release`;
+    * **in-place** — `open`/`truncate`/`write` the projected file, commit as soon
+      as the buffered projected JSON becomes valid, with `release` as the final
+      safety commit;
     * **atomic temp+rename** (what most linters do) — `create` a transient file
       inside this mounted directory, `write` it, then `rename` it over the
       projected `<doc>.jsonl`; the `rename` commits the temp's bytes via
@@ -83,6 +85,8 @@ defmodule Ecrits.Fuse.DocFs do
                 "[DocFs] staged write_back still pending for #{Path.join(root, name)}: #{inspect(reason)}"
               )
 
+              if discard_staged_error?(reason), do: OpenDocs.unstage(root, name)
+
               Map.update!(acc, :pending, &[{name, reason} | &1])
           end
       end
@@ -107,16 +111,20 @@ defmodule Ecrits.Fuse.DocFs do
   end
 
   getattr "/" do
-    {:reply, dir(), socket}
+    {mtime, socket} = content_mtime(socket, "/", Enum.sort(OpenDocs.list(state.root)))
+    {:reply, dir(mtime: mtime), socket}
   end
 
   getattr "/:name" do
     cond do
       is_binary(name_buffer(socket, name)) ->
-        {:reply, file(size: byte_size(name_buffer(socket, name))), socket}
+        buf = name_buffer(socket, name)
+        {mtime, socket} = content_mtime(socket, name, buf)
+        {:reply, file(size: byte_size(buf), mtime: mtime), socket}
 
       match?({:ok, _}, source_path(state.root, name)) ->
-        {:reply, file(size: projected_attr_size(state.root, name)), socket}
+        {size, mtime, socket} = projected_attrs(socket, state.root, name)
+        {:reply, file(size: size, mtime: mtime), socket}
 
       true ->
         {:error, :enoent, socket}
@@ -178,10 +186,13 @@ defmodule Ecrits.Fuse.DocFs do
         key = event_key(event, name)
         {buf, socket} = ensure_buf(socket, state.root, name, key)
 
+        next_buf = splice(buf, event.offset, event.data)
+
         socket =
           socket
-          |> put_buf(key, splice(buf, event.offset, event.data))
+          |> put_buf(key, next_buf)
           |> mark_dirty(key)
+          |> maybe_commit_live_buffer(state.root, name, key, next_buf)
 
         {:reply, byte_size(event.data), socket}
     end
@@ -278,10 +289,13 @@ defmodule Ecrits.Fuse.DocFs do
         socket =
           case buffer(socket, key) do
             buf when is_binary(buf) ->
+              # FSKit volume ops carry no file handle, so `key` may BE the
+              # path key — clearing it after the move would drop the buffer
+              # a later rename commits.
               socket
               |> put_buf(path_key(name), buf)
               |> maybe_mark_path_dirty(name, key)
-              |> clear_key(key)
+              |> then(&if key == path_key(name), do: &1, else: clear_key(&1, key))
               |> delete_handle(event)
 
             _ ->
@@ -301,6 +315,9 @@ defmodule Ecrits.Fuse.DocFs do
 
   defp mark_dirty(socket, key),
     do: Exfuse.Socket.assign(socket, :dirty, MapSet.put(dirties(socket), key))
+
+  defp mark_clean(socket, key),
+    do: Exfuse.Socket.assign(socket, :dirty, MapSet.delete(dirties(socket), key))
 
   defp ensure_buf(socket, root, name, key) do
     case buffer(socket, key) do
@@ -459,6 +476,22 @@ defmodule Ecrits.Fuse.DocFs do
     end
   end
 
+  defp maybe_commit_live_buffer(socket, root, name, key, buf) do
+    case source_path(root, name) do
+      {:ok, source} ->
+        source_name = Path.basename(source)
+
+        case commit_buffer(root, source, source_name, buf) do
+          {:ok, {:staged, _reason}} -> socket
+          {:ok, _info} -> mark_clean(socket, key)
+          {:error, _reason} -> socket
+        end
+
+      {:error, _reason} ->
+        socket
+    end
+  end
+
   defp commit_buffer(root, source, source_name, buf) do
     case Projection.write_back(source, buf, root: root) do
       {:ok, _info} = ok ->
@@ -479,18 +512,17 @@ defmodule Ecrits.Fuse.DocFs do
   defp retryable_commit_error?(:structural_change), do: true
   defp retryable_commit_error?(_reason), do: false
 
+  defp discard_staged_error?({:invalid_ir_json, _line}), do: true
+  defp discard_staged_error?(_reason), do: false
+
   defp projected_bytes(root, name) do
     with {:ok, source} <- source_path(root, name) do
       source_name = Path.basename(source)
 
       case OpenDocs.staged(root, source_name) do
-        {:ok, bytes, reason} ->
-          if staged_bytes_visible?(reason) do
-            {:ok, bytes}
-          else
-            OpenDocs.unstage(root, source_name)
-            Projection.project_file(source)
-          end
+        {:ok, _bytes, _reason} ->
+          OpenDocs.unstage(root, source_name)
+          Projection.project_file(source)
 
         :error ->
           Projection.project_file(source)
@@ -498,40 +530,43 @@ defmodule Ecrits.Fuse.DocFs do
     end
   end
 
-  # `getattr` is kernel metadata, not document truth. Rendering the whole
-  # projection here can block the single exfuse GenServer during atomic
-  # temp+rename workflows. Return a cheap, safe over-estimate for clean files;
-  # `read` is still the only place that materializes authoritative JSONL bytes.
-  defp projected_attr_size(root, name) do
-    with {:ok, source} <- source_path(root, name) do
-      source_name = Path.basename(source)
-
-      case OpenDocs.staged(root, source_name) do
-        {:ok, bytes, reason} ->
-          if staged_bytes_visible?(reason),
-            do: byte_size(bytes),
-            else: cheap_projected_size(source)
-
-        :error ->
-          cheap_projected_size(source)
-      end
+  # `getattr` must report the REAL projected size plus an mtime that advances
+  # when the projection changes. The FUSE-era 64MB over-estimate floor is
+  # fatal under FSKit: the kernel believes the file is huge, the first `read`
+  # comes back short mid-file, and UserFS turns that short read into EIO
+  # (macFUSE tolerated it). The moving mtime makes the kernel drop cached
+  # pages and pick up the new size after the live document was edited
+  # (browser UI, doc.* tools, write-back). Rendering the projection here
+  # costs the same as one `read` op — which already re-projects per call.
+  defp projected_attrs(socket, root, name) do
+    with {:ok, source} <- source_path(root, name),
+         {:ok, bytes} <- Projection.project_file(source) do
+      {mtime, socket} = content_mtime(socket, name, bytes)
+      {byte_size(bytes), mtime, socket}
     else
-      _ -> @projected_attr_size_floor
+      _ -> {@projected_attr_size_floor, nil, socket}
     end
   end
 
-  defp cheap_projected_size(source) do
-    case File.stat(source) do
-      {:ok, %{size: size}} when is_integer(size) and size > 0 ->
-        max(size, @projected_attr_size_floor)
+  # A monotonic per-name pseudo-time that advances exactly when the content
+  # changes. Monotonic (not content-hashed) because the kernel only honors
+  # size updates for attributes NEWER than what it cached.
+  @mtime_base 1_700_000_000
+  defp content_mtime(socket, name, content) do
+    gens = Exfuse.Socket.get_assign(socket, :content_gens, %{})
+    hash = :erlang.phash2(content)
+    clock = Map.get(gens, :clock, 0)
 
-      _ ->
-        @projected_attr_size_floor
+    case Map.get(gens, name) do
+      {^hash, at} ->
+        {@mtime_base + at, socket}
+
+      _other ->
+        clock = clock + 1
+        gens = gens |> Map.put(name, {hash, clock}) |> Map.put(:clock, clock)
+        {@mtime_base + clock, Exfuse.Socket.assign(socket, :content_gens, gens)}
     end
   end
-
-  defp staged_bytes_visible?({:invalid_ir_json, _line}), do: true
-  defp staged_bytes_visible?(_reason), do: false
 
   # Splice `data` into `buf` at `offset` (append when offset == size; zero-pad a
   # gap past EOF, which a normal editor never produces).

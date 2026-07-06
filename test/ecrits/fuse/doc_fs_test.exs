@@ -52,7 +52,7 @@ defmodule Ecrits.Fuse.DocFsTest do
     assert names == ["doc.hwpx.jsonl"]
   end
 
-  test "chunked rewrite commits on release, not partial flush" do
+  test "chunked in-place rewrite commits once the buffer is valid" do
     if not ehwp_available?(@hwpx_fixture) do
       IO.puts("\n[skip] ehwp NIF unavailable; skipping DocFs HWPX write-back e2e")
     else
@@ -91,6 +91,11 @@ defmodule Ecrits.Fuse.DocFsTest do
           socket
         )
 
+      {:ok, visible_before_complete} = Projection.project_file(path)
+      refute visible_before_complete =~ "DOCFS_CHUNKED_RELEASE_OK"
+      left_error = String.slice(left, 0, 80)
+      assert {:ok, ^left, {:invalid_ir_json, ^left_error}} = OpenDocs.staged(root, "doc.hwpx")
+
       assert {:noreply, socket} =
                DocFs.handle_event(
                  :flush,
@@ -98,12 +103,19 @@ defmodule Ecrits.Fuse.DocFsTest do
                  socket
                )
 
+      {:ok, visible_after_flush} = Projection.project_file(path)
+      refute visible_after_flush =~ "DOCFS_CHUNKED_RELEASE_OK"
+
       {:reply, ^right_size, socket} =
         DocFs.handle_event(
           :write,
           %{path: "/" <> projected, handle: handle, offset: left_size, data: right},
           socket
         )
+
+      assert {:ok, after_live_write_bytes} = Projection.project_file(path)
+      assert after_live_write_bytes =~ "DOCFS_CHUNKED_RELEASE_OK"
+      assert OpenDocs.staged(root, "doc.hwpx") == :error
 
       assert {:noreply, _socket} =
                DocFs.handle_event(
@@ -159,8 +171,13 @@ defmodule Ecrits.Fuse.DocFsTest do
 
       assert {:ok, "[", {:invalid_ir_json, "["}} = OpenDocs.staged(root, "doc.hwpx")
 
-      {:reply, "[", socket} =
+      {:ok, projected_bytes} = Projection.project_file(path)
+
+      {:reply, visible, socket} =
         DocFs.handle_event(:read, %{path: "/" <> projected, offset: 0, size: 64}, socket)
+
+      assert visible == binary_part(projected_bytes, 0, 64)
+      refute visible == "["
 
       {:reply, handle, socket} =
         DocFs.handle_event(:open, %{path: "/" <> projected, flags: 0}, socket)
@@ -238,6 +255,14 @@ defmodule Ecrits.Fuse.DocFsTest do
                )
 
       assert {:ok, "[", {:invalid_ir_json, "["}} = OpenDocs.staged(root, "doc.hwpx")
+
+      {:ok, projected_bytes} = Projection.project_file(path)
+
+      {:reply, visible, socket} =
+        DocFs.handle_event(:read, %{path: "/" <> projected, offset: 0, size: 64}, socket)
+
+      assert visible == binary_part(projected_bytes, 0, 64)
+      refute visible == "["
 
       {:reply, temp_handle, socket} =
         DocFs.handle_event(:create, %{path: "/doc.hwpx.jsonl.new", flags: 0}, socket)
@@ -375,6 +400,41 @@ defmodule Ecrits.Fuse.DocFsTest do
                )
 
       assert {:ok, "[", {:invalid_ir_json, "["}} = OpenDocs.staged(root, "doc.hwpx")
+
+      {:ok, projected_bytes} = Projection.project_file(path)
+
+      {:reply, visible, _socket} =
+        DocFs.handle_event(:read, %{path: "/" <> projected, offset: 0, size: 64}, socket)
+
+      assert visible == binary_part(projected_bytes, 0, 64)
+      refute visible == "["
+    end
+  end
+
+  test "turn-completion flush rolls back invalid staged JSONL to projected truth" do
+    if not ehwp_available?(@hwpx_fixture) do
+      IO.puts("\n[skip] ehwp NIF unavailable; skipping DocFs invalid staged flush e2e")
+    else
+      root = tmp_root("doc_fs_invalid_staged_flush")
+      path = Path.join(root, "doc.hwpx")
+      File.cp!(@hwpx_fixture, path)
+
+      on_exit(fn ->
+        _ = Pool.close_by_path(path)
+        OpenDocs.close(root, "doc.hwpx")
+        File.rm_rf(root)
+      end)
+
+      OpenDocs.open(root, "doc.hwpx")
+      OpenDocs.set_writable(root, true)
+      OpenDocs.stage(root, "doc.hwpx", "[", {:invalid_ir_json, "["})
+
+      assert %{committed: [], pending: [{"doc.hwpx", {:invalid_ir_json, "["}}]} =
+               DocFs.flush_staged(root)
+
+      assert OpenDocs.staged(root, "doc.hwpx") == :error
+      assert {:ok, bytes} = Projection.project_file(path)
+      assert bytes =~ "[[["
     end
   end
 

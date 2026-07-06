@@ -89,9 +89,6 @@ defmodule Ecrits.Fuse.DocMount do
   def status_message(%{reason: :missing_mount}),
     do: "FSKit backend requires the macOS mount executable."
 
-  def status_message(%{reason: :missing_hdiutil}),
-    do: "FSKit backend requires the macOS hdiutil executable."
-
   def status_message(%{reason: :fskit_extension_not_registered}),
     do:
       "FSKit extension #{@fskit_extension_id} is not registered. Run exfuse.fskit.install first."
@@ -399,7 +396,6 @@ defmodule Ecrits.Fuse.DocMount do
     cond do
       :os.type() != {:unix, :darwin} -> unavailable(:fskit, :fskit_requires_macos)
       not executable?("mount") -> unavailable(:fskit, :missing_mount)
-      not executable?("hdiutil") -> unavailable(:fskit, :missing_hdiutil)
       not fskit_extension_registered?() -> unavailable(:fskit, :fskit_extension_not_registered)
       not fskit_extension_enabled?() -> unavailable(:fskit, :fskit_extension_disabled)
       not fskit_extension_launch_signed?() -> unavailable(:fskit, :fskit_extension_unsigned)
