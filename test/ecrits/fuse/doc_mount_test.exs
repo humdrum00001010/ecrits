@@ -47,10 +47,27 @@ defmodule Ecrits.Fuse.DocMountTest do
 
     expected =
       :os.type() == {:unix, :darwin} and is_binary(System.find_executable("mount")) and
-        is_binary(System.find_executable("hdiutil")) and fskit_extension_enabled_for_test?() and
+        fskit_extension_enabled_for_test?() and
         fskit_extension_launch_signed_for_test?()
 
     assert DocMount.enabled?() == expected
+  end
+
+  test "auto mode never selects the macFUSE backend on macOS" do
+    Application.put_env(:ecrits, :doc_vfs, enabled: true, backend: :auto)
+    System.delete_env("EXFUSE_BACKEND")
+
+    status = DocMount.status()
+
+    case :os.type() do
+      {:unix, :darwin} ->
+        # FSKit or nothing: an unmountable FSKit reports its own reason
+        # instead of silently falling back to the legacy kext backend.
+        assert status.backend == :fskit
+
+      _ ->
+        assert status.backend == :fuse
+    end
   end
 
   test "status explains selected backend availability" do

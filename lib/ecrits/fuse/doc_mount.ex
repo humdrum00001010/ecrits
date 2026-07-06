@@ -18,10 +18,11 @@ defmodule Ecrits.Fuse.DocMount do
   the server normally, so `teardown/1` just trusts it.
 
   Gated by `enabled?/0`: the `:doc_vfs` config flag (default ON) and a usable
-  native backend. macOS auto mode prefers FSKit and falls back to FUSE only when
-  FSKit is not locally mountable but the legacy FUSE backend is. Linux/other Unix
-  defaults to the FUSE/libfuse Rust port. See
-  `docs/plans/2026-06-23-exfuse-doc-vfs-migration.md`.
+  native backend. macOS auto mode is FSKit ONLY — when FSKit is not mountable
+  the status explains why instead of silently falling back to the legacy
+  macFUSE kext; FUSE on macOS is opt-in via `backend: :fuse` config or
+  `EXFUSE_BACKEND=fuse`. Linux/other Unix defaults to the FUSE/libfuse Rust
+  port. See `docs/plans/2026-06-23-exfuse-doc-vfs-migration.md`.
   """
 
   require Logger
@@ -62,8 +63,7 @@ defmodule Ecrits.Fuse.DocMount do
           backend: :fskit | :fuse,
           reason: atom() | nil,
           message: String.t() | nil,
-          settings_url: String.t() | nil,
-          fallback_from: map() | nil
+          settings_url: String.t() | nil
         }
   def status do
     {mode, selected} = backend_choice()
@@ -371,26 +371,13 @@ defmodule Ecrits.Fuse.DocMount do
     end
   end
 
+  # No silent macFUSE fallback: on macOS, auto means FSKit or nothing. When
+  # FSKit is not mountable, the status carries the FSKit reason (and settings
+  # URL) so the user can fix the extension, instead of quietly landing on the
+  # legacy kext backend. FUSE on macOS is strictly opt-in via
+  # `config :ecrits, :doc_vfs, backend: :fuse` or `EXFUSE_BACKEND=fuse`.
   defp status_for_choice(:explicit, backend), do: backend_status(backend)
-  defp status_for_choice(:auto, :fuse), do: backend_status(:fuse)
-
-  defp status_for_choice(:auto, :fskit) do
-    fskit_status = backend_status(:fskit)
-
-    if fskit_status.enabled? do
-      fskit_status
-    else
-      fuse_status = backend_status(:fuse)
-
-      if fuse_status.enabled? do
-        fuse_status
-        |> Map.put(:message, auto_fallback_message(fskit_status))
-        |> Map.put(:fallback_from, fallback_summary(fskit_status))
-      else
-        fskit_status
-      end
-    end
-  end
+  defp status_for_choice(:auto, backend), do: backend_status(backend)
 
   defp backend_status(:fskit) do
     cond do
@@ -417,8 +404,7 @@ defmodule Ecrits.Fuse.DocMount do
       backend: backend,
       reason: nil,
       message: status_message(%{reason: nil, backend: backend}),
-      settings_url: nil,
-      fallback_from: nil
+      settings_url: nil
     }
   end
 
@@ -430,21 +416,7 @@ defmodule Ecrits.Fuse.DocMount do
       backend: backend,
       reason: reason,
       message: status_message(status),
-      settings_url: settings_url_for(reason),
-      fallback_from: nil
-    }
-  end
-
-  defp auto_fallback_message(fskit_status) do
-    "Doc VFS fuse backend is available; using FUSE because FSKit is not mountable: #{fskit_status.message}"
-  end
-
-  defp fallback_summary(fskit_status) do
-    %{
-      backend: fskit_status.backend,
-      reason: fskit_status.reason,
-      message: fskit_status.message,
-      settings_url: fskit_status.settings_url
+      settings_url: settings_url_for(reason)
     }
   end
 
