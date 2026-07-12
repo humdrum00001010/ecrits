@@ -156,6 +156,40 @@ describe("WasmHwpEditor view_state carrier boundary", () => {
   })
 })
 
+describe("WasmHwpEditor text hover cursor", () => {
+  it("uses an I-beam only when the pointer is near the engine text cursor rect", () => {
+    const editor = Object.create(WasmHwpEditor)
+
+    assert.equal(editor.hitIsText({
+      x: 108,
+      y: 214,
+      cursorRect: { pageIndex: 0, x: 100, y: 200, height: 20 },
+    }), true)
+    assert.equal(editor.hitIsText({
+      x: 180,
+      y: 214,
+      cursorRect: { pageIndex: 0, x: 100, y: 200, height: 20 },
+    }), false)
+    assert.equal(editor.hitIsText({ x: 108, y: 214 }), false)
+  })
+
+  it("clears the prior canvas cursor when hover moves away", () => {
+    const editor = hwpViewStateEditor()
+    const first = { style: { cursor: "" } }
+    const second = { style: { cursor: "" } }
+
+    editor.setTextCursorCanvas(first)
+    assert.equal(first.style.cursor, "text")
+
+    editor.setTextCursorCanvas(second)
+    assert.equal(first.style.cursor, "")
+    assert.equal(second.style.cursor, "text")
+
+    editor.setTextCursorCanvas(null)
+    assert.equal(second.style.cursor, "")
+  })
+})
+
 describe("WasmHwpEditor scroll preservation", () => {
   it("restores a document scroll offset across hook remounts", () => {
     const win = (globalThis as any).window
@@ -2433,8 +2467,9 @@ describe("WasmHwpEditor picker hover preview", () => {
     assert.equal(queued, pageEvent)
   })
 
-  it("leaves selection alone when the picker is off", () => {
-    let queued = false
+  it("routes a normal mousemove to the text-cursor probe when the picker is off", () => {
+    let pickerQueued = false
+    let textQueued: any = null
     const editor = {
       ...WasmHwpEditor,
       doc: {},
@@ -2442,12 +2477,16 @@ describe("WasmHwpEditor picker hover preview", () => {
       dragSelect: null,
       elementPickerEnabled: false,
       queuePickerHover() {
-        queued = true
+        pickerQueued = true
+      },
+      queueTextCursorHover(event: any) {
+        textQueued = event
       },
     } as any
 
     editor.onCanvasMouseMove(pageEvent)
-    assert.equal(queued, false)
+    assert.equal(pickerQueued, false)
+    assert.equal(textQueued, pageEvent)
   })
 
   it("resolves the element under the cursor into a hover preview", () => {

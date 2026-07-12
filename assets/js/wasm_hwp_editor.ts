@@ -241,6 +241,9 @@ export const HWP_VIEW_STATE_KEYS = [
   "pickerHover",
   "pickerHoverEvent",
   "pickerHoverRaf",
+  "textCursorEvent",
+  "textCursorRaf",
+  "textCursorCanvas",
   "agentOpQueue",
   "agentOpProcessing",
   "previewPatchText",
@@ -549,6 +552,8 @@ const WasmHwpEditor = {
       try { this.pushSnapshot() } catch (_) { /* socket gone — nothing to flush to */ }
     }
     if (this.pickerHoverRaf) cancelAnimationFrame(this.pickerHoverRaf)
+    if (this.textCursorRaf) cancelAnimationFrame(this.textCursorRaf)
+    this.setTextCursorCanvas(null)
     if (this.authoritativePreviewObjectUrl) {
       try { URL.revokeObjectURL(this.authoritativePreviewObjectUrl) } catch (_) {}
       this.authoritativePreviewObjectUrl = null
@@ -2038,7 +2043,12 @@ const WasmHwpEditor = {
     if (!this.dragSelect) {
       // Picker mode (no drag in flight): track a DOM-inspector-style hover
       // preview of the element under the cursor instead of extending a selection.
-      if (this.elementPickerEnabled) this.queuePickerHover(event)
+      if (this.elementPickerEnabled) {
+        this.setTextCursorCanvas(null)
+        this.queuePickerHover(event)
+      } else {
+        this.queueTextCursorHover(event)
+      }
       return
     }
     // Only react while the primary button is still pressed (defensive: a mouseup
@@ -2183,6 +2193,58 @@ const WasmHwpEditor = {
       console.error("[wasm-hwp] hitTest failed", error)
       return null
     }
+  },
+
+  // rAF-throttle ordinary hover hit-testing. The engine's cursorRect describes
+  // the nearest real text insertion point; requiring the pointer to remain near
+  // that rect prevents page whitespace from receiving an I-beam cursor.
+  queueTextCursorHover(event) {
+    this.textCursorEvent = event
+    if (this.textCursorRaf) return
+    this.textCursorRaf = requestAnimationFrame(() => {
+      this.textCursorRaf = null
+      this.updateTextCursorHover(this.textCursorEvent)
+    })
+  },
+
+  updateTextCursorHover(event) {
+    if (this.elementPickerEnabled || !this.doc || !event) {
+      this.setTextCursorCanvas(null)
+      return
+    }
+    const page = event.target && event.target.closest
+      ? event.target.closest(SEL.hwpPage)
+      : null
+    const canvas = page ? page.querySelector(SEL.ehwpCanvas) : null
+    if (!canvas) {
+      this.setTextCursorCanvas(null)
+      return
+    }
+    const hitInfo = this.hitTestEvent(event)
+    this.setTextCursorCanvas(hitInfo && this.hitIsText(hitInfo.hit) ? canvas : null)
+  },
+
+  hitIsText(hit) {
+    const pointX = Number(hit && hit.x)
+    const pointY = Number(hit && hit.y)
+    const rect = hit && hit.cursorRect
+    const x = Number(rect && rect.x)
+    const y = Number(rect && rect.y)
+    const height = Number(rect && rect.height)
+    if (![pointX, pointY, x, y, height].every(Number.isFinite) || height <= 0) return false
+
+    const horizontalTolerance = Math.max(3, height * 0.65)
+    const verticalTolerance = Math.max(2, height * 0.15)
+    return Math.abs(pointX - x) <= horizontalTolerance &&
+      pointY >= y - verticalTolerance &&
+      pointY <= y + height + verticalTolerance
+  },
+
+  setTextCursorCanvas(canvas) {
+    if (this.textCursorCanvas === canvas) return
+    if (this.textCursorCanvas) this.textCursorCanvas.style.cursor = ""
+    this.textCursorCanvas = canvas
+    if (canvas) canvas.style.cursor = "text"
   },
 
   // ─── Selection rendering ─────────────────────────────────────────────────
@@ -3706,6 +3768,12 @@ const WasmHwpEditor = {
   // bindElementPickerTarget calls this on picker mode changes: every transition
   // starts with a blank hover preview. Picks persist independently.
   onElementPickerState(enabled) {
+    if (this.textCursorRaf) {
+      cancelAnimationFrame(this.textCursorRaf)
+      this.textCursorRaf = null
+    }
+    this.textCursorEvent = null
+    this.setTextCursorCanvas(null)
     if (this.pickerHoverRaf) {
       cancelAnimationFrame(this.pickerHoverRaf)
       this.pickerHoverRaf = null
