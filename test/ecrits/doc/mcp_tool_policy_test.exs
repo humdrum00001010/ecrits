@@ -33,7 +33,7 @@ defmodule Ecrits.Doc.MCPToolPolicyTest do
     assert message["tool"] == "doc.close_doc"
     assert message["message"] =~ "Only doc.open_doc is available"
     assert message["message"] =~ "do not call doc.close_doc during edits"
-    assert message["message"] =~ ".ecrits/mount/<name>.jsonl"
+    assert message["message"] =~ "exact `mounted_at` path"
     assert message["message"] =~ "validate it with `jq -c .`"
     assert message["message"] =~ "only if JSON validation succeeds"
     assert message["message"] =~ "immediately after the target cell payload"

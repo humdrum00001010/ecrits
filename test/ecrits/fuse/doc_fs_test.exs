@@ -52,6 +52,26 @@ defmodule Ecrits.Fuse.DocFsTest do
     assert names == ["doc.hwpx.jsonl"]
   end
 
+  test "readdir projects opened nested documents through a flat mount name" do
+    root = tmp_root("doc_fs_nested_readdir")
+    source = Path.join(root, "drafts/doc.hwpx")
+    mount_name = "drafts%2Fdoc.hwpx"
+
+    on_exit(fn ->
+      OpenDocs.close(root, mount_name)
+      File.rm_rf(root)
+    end)
+
+    File.mkdir_p!(Path.dirname(source))
+    File.write!(source, "fake-hwpx")
+    OpenDocs.open(root, mount_name, source_path: source)
+
+    socket = Exfuse.Socket.new(DocMount.mount_point(root), %{root: root})
+
+    assert {:reply, names, _socket} = DocFs.handle_event(:readdir, %{path: "/"}, socket)
+    assert names == ["drafts%2Fdoc.hwpx.jsonl"]
+  end
+
   test "chunked in-place rewrite commits once the buffer is valid" do
     if not ehwp_available?(@hwpx_fixture) do
       IO.puts("\n[skip] ehwp NIF unavailable; skipping DocFs HWPX write-back e2e")

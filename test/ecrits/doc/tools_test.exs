@@ -3,6 +3,7 @@ defmodule Ecrits.Doc.ToolsTest do
 
   alias Ecrits.Doc.Pool
   alias Ecrits.Doc.Tools
+  alias Ecrits.Fuse.OpenDocs
   alias Ecrits.Test.FakeEhwpRuntime
   alias Ecrits.Workspace.Session
 
@@ -73,11 +74,13 @@ defmodule Ecrits.Doc.ToolsTest do
       assert open_doc_tool["description"] =~ "JSONL is IR-only"
       assert open_doc_tool["description"] =~ "does not contain mounted_at"
       assert open_doc_tool["description"] =~ "Never create, copy, or edit fallback JSONL outside"
-      assert open_doc_tool["description"] =~ "/tmp/<name>.jsonl"
+      assert open_doc_tool["description"] =~ "always use the returned `mounted_at` path"
+      assert open_doc_tool["description"] =~ "/tmp/<mount>.jsonl"
       assert open_doc_tool["description"] =~ "do not route to the document"
-      assert open_doc_tool["description"] =~ "temp file inside the same .ecrits/mount"
+      assert open_doc_tool["description"] =~ "For whole-file rewrites on FSKit"
+      assert open_doc_tool["description"] =~ "plain redirection"
       assert open_doc_tool["description"] =~ "validate it with `jq -c .`"
-      assert open_doc_tool["description"] =~ "only if JSON validation succeeds"
+      assert open_doc_tool["description"] =~ "mv -f"
       assert open_doc_tool["description"] =~ "do not use mktemp"
       assert open_doc_tool["description"] =~ "or dd over the target"
       assert open_doc_tool["description"] =~ "inside an existing paragraph list"
@@ -1211,6 +1214,59 @@ defmodule Ecrits.Doc.ToolsTest do
 
       assert {:error, %{"error" => "outside_workspace"}} =
                Tools.call(ws_ctx(pool, root), "doc.open", %{"path" => outside})
+    end
+
+    test "doc.open_doc accepts nested workspace-relative documents", %{pool: pool, root: root} do
+      previous_vfs = Application.get_env(:ecrits, :doc_vfs)
+      Application.put_env(:ecrits, :doc_vfs, enabled: false)
+
+      on_exit(fn ->
+        restore(:ecrits, :doc_vfs, previous_vfs)
+        OpenDocs.close(root, "drafts%2Fnested.hwp")
+      end)
+
+      File.mkdir_p!(Path.join(root, "drafts"))
+      abs = Path.join(root, "drafts/nested.hwp")
+      File.write!(abs, "fake-hwp-bytes")
+
+      assert {:ok,
+              %{
+                "opened" => "drafts/nested.hwp",
+                "mount_name" => "drafts%2Fnested.hwp",
+                "projected" => "drafts%2Fnested.hwp.jsonl",
+                "path" => ^abs,
+                "mounted_at" => nil,
+                "vfs_enabled" => false
+              }} =
+               Tools.call(ws_ctx(pool, root), "doc.open_doc", %{"path" => "drafts/nested.hwp"})
+
+      assert OpenDocs.source_path(root, "drafts%2Fnested.hwp") == {:ok, abs}
+    end
+
+    test "doc.open_doc resolves a bare filename to the active nested document",
+         %{pool: pool, root: root} do
+      previous_vfs = Application.get_env(:ecrits, :doc_vfs)
+      Application.put_env(:ecrits, :doc_vfs, enabled: false)
+
+      on_exit(fn ->
+        restore(:ecrits, :doc_vfs, previous_vfs)
+        OpenDocs.close(root, "drafts%2Factive.hwp")
+      end)
+
+      File.mkdir_p!(Path.join(root, "drafts"))
+      abs = Path.join(root, "drafts/active.hwp")
+      File.write!(abs, "fake-hwp-bytes")
+
+      ctx = ws_ctx(pool, root) |> Map.put(:document_path, "drafts/active.hwp")
+
+      assert {:ok,
+              %{
+                "opened" => "drafts/active.hwp",
+                "mount_name" => "drafts%2Factive.hwp",
+                "path" => ^abs
+              }} = Tools.call(ctx, "doc.open_doc", %{"path" => "active.hwp"})
+
+      assert OpenDocs.source_path(root, "drafts%2Factive.hwp") == {:ok, abs}
     end
 
     test "doc.create/open INSIDE the workspace root works (incl. nested dirs)",

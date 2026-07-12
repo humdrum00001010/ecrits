@@ -24,16 +24,20 @@ defmodule Ecrits.Doc.MCPToolPolicy do
       "message" =>
         "VFS mode: the document is a nested JSONL IR file " <>
           "([[[payload_node]]]). Read/find/edit payload node fields with native shell " <>
-          "tools over `.ecrits/mount/<name>.jsonl` (cat/grep/sed). Never replace " <>
+          "tools over the exact `mounted_at` path returned by doc.open_doc " <>
+          "(cat/grep/sed). Never replace " <>
           "the file with one payload object and never look for mounted_at inside " <>
           "the JSONL; it is IR-only. Never create, copy, or edit fallback JSONL " <>
-          "outside `.ecrits/mount`; `/tmp/<name>.jsonl` and workspace-root " <>
-          "<name>.jsonl are fake scratch files that do not route to the document. " <>
-          "If `.ecrits/mount/<name>.jsonl` is missing after `doc.open_doc`, stop " <>
-          "and report that blocker. For whole-file rewrites, create the temp file " <>
-          "inside `.ecrits/mount`, validate it with `jq -c .`, and mv it over " <>
-          "the target only if JSON validation succeeds; do not use mktemp " <>
-          "outside the mount or dd over the target. Insert pictures as a payload node inside an " <>
+          "outside `.ecrits/mount`; `/tmp/<mount>.jsonl` and workspace-root " <>
+          "<mount>.jsonl are fake scratch files that do not route to the document. " <>
+          "If the returned `mounted_at` file is missing after `doc.open_doc`, stop " <>
+          "and report that blocker. For whole-file rewrites on FSKit, never write " <>
+          "directly to the target projection and never use `cp` to seed a temp file " <>
+          "because FSKit may reject chmod/fchmod on virtual files. Seed a temp file " <>
+          "inside `.ecrits/mount` with plain redirection (`cat \"$target\" > " <>
+          "\"$tmp\"`), edit only that temp file, validate it with `jq -c .`, and " <>
+          "`mv -f \"$tmp\" \"$target\"` only if JSON validation succeeds; do not " <>
+          "use mktemp outside the mount or dd over the target. Insert pictures as a payload node inside an " <>
           "existing paragraph list such as " <>
           "{\"type\":\"picture\",\"src\":\"/abs/img.png\"}; ecrits chooses a readable " <>
           "default size from the image aspect, so width/height are only needed for " <>

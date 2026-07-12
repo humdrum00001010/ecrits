@@ -29,6 +29,9 @@ defmodule Ecrits.Fuse.DocMount do
 
   @fskit_extension_id "org.exfuse.fskit.extension"
   @fskit_settings_url "x-apple.systempreferences:com.apple.ExtensionsPreferences?extension-points"
+  @fskit_port_base 49_152
+  @fskit_port_count 16_384
+  @mount_retries 12
 
   @doc "The mount point for a workspace root: `<root>/.ecrits/mount` (root realpathed)."
   @spec mount_point(String.t()) :: String.t()
@@ -165,8 +168,21 @@ defmodule Ecrits.Fuse.DocMount do
   @spec teardown(String.t()) :: :ok | {:error, term()}
   def teardown(root) do
     root = canonical_root(root)
-    _ = Exfuse.umount(mount_point(root))
-    :ok
+    point = mount_point(root)
+
+    with_mount_lock(fn ->
+      _ = Exfuse.umount(point)
+
+      case wait_until_unmounted(point) do
+        :ok ->
+          :ok
+
+        :timeout ->
+          clean_leaf(point)
+          _ = wait_until_unmounted(point, 4)
+          :ok
+      end
+    end)
   rescue
     error ->
       Logger.error("[DocMount] teardown crashed for #{inspect(root)}: #{inspect(error)}")
@@ -179,9 +195,9 @@ defmodule Ecrits.Fuse.DocMount do
 
   # ── helpers ───────────────────────────────────────────────────────
 
-  # FSKit currently uses a single backend listener port, and several LiveViews or
-  # tests can ask for the same workspace mount concurrently. Serialize mount
-  # attempts so failed FSKit startups do not race into :eaddrinuse.
+  # Several LiveViews or tests can ask for the same workspace mount concurrently.
+  # Serialize mount attempts so half-started FSKit/exfuse lifecycles do not race
+  # each other while we decide whether the existing mount can be shared.
   defp with_mount_lock(fun) when is_function(fun, 0) do
     :global.trans({__MODULE__, :mount}, fun)
   end
@@ -195,11 +211,11 @@ defmodule Ecrits.Fuse.DocMount do
     clean_dead_mount(point)
     ensure_clean_dir(point)
 
-    mount_once(root, point, backend, 2)
+    mount_once(root, point, backend, @mount_retries, 0)
   end
 
-  defp mount_once(root, point, backend, retries) do
-    case Exfuse.mount(point, Ecrits.Fuse.DocFs, %{root: root}, backend: backend) do
+  defp mount_once(root, point, backend, retries, attempt) do
+    case Exfuse.mount(point, Ecrits.Fuse.DocFs, %{root: root}, mount_opts(root, backend, attempt)) do
       {:ok, _pid} ->
         if mount_serving?(point) do
           Logger.info("[DocMount] mounted doc VFS at #{point}")
@@ -219,7 +235,18 @@ defmodule Ecrits.Fuse.DocMount do
       {:error, :eaddrinuse} when retries > 0 ->
         rollback_failed_mount(point)
         Process.sleep(100)
-        mount_once(root, point, backend, retries - 1)
+        mount_once(root, point, backend, retries - 1, attempt + 1)
+
+      {:error, reason} when retries > 0 ->
+        if retryable_mount_error?(reason) do
+          rollback_failed_mount(point)
+          Process.sleep(300)
+          mount_once(root, point, backend, retries - 1, attempt)
+        else
+          rollback_failed_mount(point)
+          Logger.error("[DocMount] mount failed at #{point}: #{inspect(reason)}")
+          {:error, reason}
+        end
 
       {:error, reason} ->
         rollback_failed_mount(point)
@@ -232,6 +259,27 @@ defmodule Ecrits.Fuse.DocMount do
         {:error, other}
     end
   end
+
+  defp mount_opts(root, :fskit, attempt) do
+    [backend: :fskit, wire_port: fskit_wire_port(root, attempt)]
+  end
+
+  defp mount_opts(_root, backend, _attempt), do: [backend: backend]
+
+  @doc false
+  @spec fskit_wire_port(String.t(), non_neg_integer()) :: :inet.port_number()
+  def fskit_wire_port(root, attempt \\ 0) when is_binary(root) and is_integer(attempt) do
+    offset = root |> canonical_root() |> :erlang.phash2(@fskit_port_count)
+    @fskit_port_base + rem(offset + max(attempt, 0), @fskit_port_count)
+  end
+
+  @doc false
+  @spec retryable_mount_error?(term()) :: boolean()
+  def retryable_mount_error?({:fskit_mount_failed, _status, out}) when is_binary(out) do
+    String.contains?(out, "Resource busy")
+  end
+
+  def retryable_mount_error?(_reason), do: false
 
   # Authoritative "is this point mounted?" — the OS mount table. macOS resolves
   # /tmp -> /private/tmp, so match the realpath too.
@@ -263,6 +311,18 @@ defmodule Ecrits.Fuse.DocMount do
   end
 
   defp mounted_point_live?(point), do: in_mount_table?(point) and live?(point)
+
+  defp wait_until_unmounted(point, tries \\ 10)
+  defp wait_until_unmounted(_point, 0), do: :timeout
+
+  defp wait_until_unmounted(point, tries) do
+    if in_mount_table?(point) do
+      Process.sleep(100)
+      wait_until_unmounted(point, tries - 1)
+    else
+      :ok
+    end
+  end
 
   defp clean_dead_mount(point) do
     if in_mount_table?(point) and not live?(point), do: clean_leaf(point)

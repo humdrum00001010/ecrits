@@ -765,7 +765,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     [System] Doc VFS backend is available, but this workspace is not mounted right now:
     #{status.message}
 
-    Do not claim `.ecrits/mount/<name>.jsonl` exists until `doc.open_doc` returns
+    Do not claim a mounted `.jsonl` exists until `doc.open_doc` returns
     a non-null `mounted_at`. Do not use `.md`, and do not shell-read the raw
     binary document. For this/current/open document, call `doc.open_doc`; if it
     returns `mounted_at: null`, report the `mount_status` / `mount_error` blocker
@@ -798,7 +798,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
     [System] FSKit/VFS is configured but not mountable right now:
     #{status.message}
     #{settings_line}
-    Do not claim `.ecrits/mount/<name>.jsonl` exists until `doc.open_doc` returns
+    Do not claim a mounted `.jsonl` exists until `doc.open_doc` returns
     a non-null `mounted_at`. Do not use `.md`. Use the normal doc MCP tools for
     this turn unless the user enables FSKit first; `doc.open_doc` will report the
     same `mount_status` blocker.
@@ -826,18 +826,21 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
 
     Workflow:
     1. First action for this/current/open-document file work: call
-       `doc.open_doc {path}` (path = the workspace document name). It mounts the doc
-      and returns a `.ecrits/mount/<name>.jsonl` path under the workspace root.
+       `doc.open_doc {path}` (path = current/active, a workspace-relative path,
+      or a filename for the current document). It mounts the doc and returns a
+      `mounted_at` path under `.ecrits/mount/`. Nested workspace documents may use
+      a flat disambiguated mount filename, so use the returned `mounted_at`
+      exactly.
       The JSONL file itself is IR-only; it does NOT contain `mounted_at`,
       `mount_status`, or other tool metadata. If the MCP tool is hidden but the
-      mounted file already exists at `.ecrits/mount/<name>.jsonl`, use that
-      path as the VFS target. Never treat a missing `mounted_at` field inside
+      returned `mounted_at` file already exists, use that path as the VFS target.
+      Never treat a missing `mounted_at` field inside
       the JSONL as a blocker. Keep the document open through edit and
       verification; do not use `doc.close_doc` as cleanup.
       NEVER create, copy, or edit a JSONL projection anywhere else. A file like
-      `/tmp/<name>.jsonl`, `<workspace>/<name>.jsonl`, or any scratch/staged JSONL
+      `/tmp/<mount>.jsonl`, `<workspace>/<mount>.jsonl`, or any scratch/staged JSONL
       outside `.ecrits/mount/` is fake and does NOT route to the document. If
-      `.ecrits/mount/<name>.jsonl` is missing after `doc.open_doc`, stop and
+      the returned `mounted_at` file is missing after `doc.open_doc`, stop and
       report that exact blocker; do not invent a fallback JSONL file.
     2. That file is the document's IR as one compact nested JSON value, not
        Markdown and not a flat positional stream:
@@ -863,7 +866,7 @@ defmodule Ecrits.Local.AcpAgent.AcpStream do
       `.ecrits/mount/` directory, validate the temp with `jq -c . "$tmp"`,
       then rename it over the target only if JSON validation succeeds. Do NOT
       use `mktemp`, `dd`, or any temp path outside the mount. Example:
-       `tmp=".ecrits/mount/<name>.jsonl.tmp"; jq -c '...' "$target" > "$tmp" && jq -c . "$tmp" >/dev/null && mv "$tmp" "$target"`
+       `target="$mounted_at"; tmp="$target.tmp"; jq -c '...' "$target" > "$tmp" && jq -c . "$tmp" >/dev/null && mv "$tmp" "$target"`
        This keeps the write on the VFS `create`/`write`/`rename` path.
        To CREATE a native table, insert one new payload object at the desired
        nested-list position inside an existing paragraph list (the innermost

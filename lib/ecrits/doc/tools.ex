@@ -128,19 +128,26 @@ defmodule Ecrits.Doc.Tools do
       "name" => "open_doc",
       "description" =>
         "Expose a workspace document as an editable JSONL IR file in the doc VFS, " <>
-          "mounted at <workspace>/.ecrits/mount/<name>.jsonl. Call this to make a " <>
+          "mounted at the returned `mounted_at` path under " <>
+          "<workspace>/.ecrits/mount/. Call this to make a " <>
           "document readable/greppable as a normal file (cat, rg, sed, grep) from " <>
           "the shell; the projected JSONL is the whole document IR as one nested " <>
-          "list value: sections -> paragraphs -> payload nodes. Root-level " <>
-          "documents only. The JSONL is IR-only and does not contain mounted_at " <>
+          "list value: sections -> paragraphs -> payload nodes. Paths may be " <>
+          "workspace-relative, nested, current/active, or the basename of the " <>
+          "current document. Nested documents are projected with a flat " <>
+          "disambiguated mount name; always use the returned `mounted_at` path. " <>
+          "The JSONL is IR-only and does not contain mounted_at " <>
           "metadata. Never create, copy, or edit fallback JSONL outside " <>
-          ".ecrits/mount; /tmp/<name>.jsonl and workspace-root <name>.jsonl are fake " <>
+          ".ecrits/mount; /tmp/<mount>.jsonl and workspace-root <mount>.jsonl are fake " <>
           "scratch files that do not route to the document. If mounted_at is null " <>
-          "or the .ecrits/mount/<name>.jsonl file is missing, report the blocker " <>
-          "instead of editing. For whole-file rewrites, write a temp file inside the same " <>
-          ".ecrits/mount directory, validate it with `jq -c .`, then mv it over " <>
-          "the target only if JSON validation succeeds; do not use mktemp " <>
-          "outside the mount or dd over the target. Never replace it with one payload object. Insert a " <>
+          "or the returned mounted_at file is missing, report the blocker " <>
+          "instead of editing. For whole-file rewrites on FSKit, never write directly " <>
+          "to the target projection and never use `cp` to seed a temp file because " <>
+          "FSKit may reject chmod/fchmod on virtual files. Seed a temp file inside " <>
+          ".ecrits/mount with plain redirection (`cat \"$target\" > \"$tmp\"`), " <>
+          "edit only that temp file, validate it with `jq -c .`, then `mv -f " <>
+          "\"$tmp\" \"$target\"` only if JSON validation succeeds; do not use " <>
+          "mktemp outside the mount or dd over the target. Never replace it with one payload object. Insert a " <>
           "picture by adding a payload node inside an existing paragraph list " <>
           "like " <>
           "{\"type\":\"picture\",\"src\":\"/abs/img.png\"}; ecrits chooses a readable " <>
@@ -741,12 +748,15 @@ defmodule Ecrits.Doc.Tools do
 
   def call(ctx, "doc.open_doc", args) do
     with {:ok, path} <- require_string(args, "path"),
-         {:ok, abs} <- confine_path(ctx, path),
          {:ok, root} <- vfs_root(ctx),
-         :ok <- ensure_root_level(root, abs),
+         {:ok, abs} <- resolve_vfs_document_path(ctx, path),
          :ok <- ensure_projectable(abs) do
-      name = Path.basename(abs)
-      Ecrits.Fuse.OpenDocs.open(root, name)
+      name = vfs_mount_source_name(root, abs)
+
+      Ecrits.Fuse.OpenDocs.open(root, name,
+        agent_id: Map.get(ctx, :agent_id),
+        source_path: abs
+      )
 
       mount_status = Ecrits.Fuse.DocMount.status()
 
@@ -770,7 +780,9 @@ defmodule Ecrits.Doc.Tools do
 
       {:ok,
        %{
-         "opened" => name,
+         "opened" => vfs_relative_path(root, abs),
+         "mount_name" => name,
+         "projected" => Ecrits.Doc.Projection.projected_name(name),
          "path" => abs,
          "mounted_at" => mounted_at,
          "mount_error" => mount_error,
@@ -784,11 +796,11 @@ defmodule Ecrits.Doc.Tools do
 
   def call(ctx, "doc.close_doc", args) do
     with {:ok, path} <- require_string(args, "path"),
-         {:ok, abs} <- confine_path(ctx, path),
-         {:ok, root} <- vfs_root(ctx) do
-      name = Path.basename(abs)
+         {:ok, root} <- vfs_root(ctx),
+         {:ok, abs} <- resolve_vfs_document_path(ctx, path) do
+      name = vfs_mount_source_name(root, abs)
       Ecrits.Fuse.OpenDocs.close(root, name)
-      {:ok, %{"closed" => name}}
+      {:ok, %{"closed" => vfs_relative_path(root, abs), "mount_name" => name}}
     else
       {:error, reason} -> {:error, error_json(reason)}
     end
@@ -3358,6 +3370,7 @@ defmodule Ecrits.Doc.Tools do
       "interfaces" => meta["interfaces"],
       "values" => values,
       "properties" => values,
+      "property_types" => meta["property_types"] || %{},
       "settable" => meta["properties"],
       "children" => meta["children"] || []
     }
@@ -3561,14 +3574,109 @@ defmodule Ecrits.Doc.Tools do
     end
   end
 
-  # The flat doc VFS projects root-level documents only (basename keyed).
-  defp ensure_root_level(root, abs) do
-    if DocMount.canonical_root(Path.dirname(abs)) == root,
-      do: :ok,
-      else: {:error, {:invalid_params, "doc.open_doc supports workspace-root documents only"}}
+  defp resolve_vfs_document_path(ctx, path) when is_binary(path) do
+    path = String.trim(path)
+
+    result =
+      path
+      |> vfs_document_path_candidates(ctx)
+      |> Enum.reduce_while(nil, fn candidate, first_error ->
+        case resolve_vfs_document_candidate(ctx, candidate) do
+          {:ok, abs} -> {:halt, {:ok, abs}}
+          {:error, reason} -> {:cont, first_error || {:error, reason}}
+        end
+      end)
+
+    case result do
+      {:ok, abs} -> {:ok, abs}
+      {:error, reason} -> {:error, reason}
+      nil -> {:error, {:invalid_params, "path is required"}}
+    end
+  end
+
+  defp vfs_document_path_candidates(path, ctx) do
+    ([path] ++ active_document_path_candidates(ctx, path))
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.map(&String.trim/1)
+    |> Enum.uniq()
+  end
+
+  defp active_document_path_candidates(ctx, path) do
+    active = Map.get(ctx, :document_path)
+    normalized = String.trim_leading(path, "./")
+
+    cond do
+      not is_binary(active) or active == "" ->
+        []
+
+      path in ["active", "current"] ->
+        [active]
+
+      active == path or active == normalized ->
+        [active]
+
+      Path.basename(active) == normalized ->
+        [active]
+
+      String.ends_with?(active, "/" <> normalized) ->
+        [active]
+
+      true ->
+        []
+    end
+  end
+
+  defp resolve_vfs_document_candidate(ctx, candidate) do
+    with {:ok, abs} <- confine_path(ctx, candidate),
+         :ok <- ensure_projectable(abs) do
+      {:ok, abs}
+    end
+  end
+
+  defp vfs_mount_source_name(root, abs) do
+    root = DocMount.canonical_root(root)
+    rel = vfs_relative_path(root, abs)
+    name = flat_vfs_source_name(rel)
+
+    case Ecrits.Fuse.OpenDocs.source_path(root, name) do
+      {:ok, existing} ->
+        if canonical_file_path(existing) == canonical_file_path(abs) do
+          name
+        else
+          disambiguated_vfs_source_name(name, rel)
+        end
+
+      :error ->
+        name
+    end
+  end
+
+  defp vfs_relative_path(root, abs) do
+    Path.relative_to(canonical_file_path(abs), DocMount.canonical_root(root))
+  end
+
+  defp flat_vfs_source_name(rel) do
+    if Path.dirname(rel) == "." do
+      rel
+    else
+      rel
+      |> String.replace("%", "%25")
+      |> String.replace("/", "%2F")
+    end
+  end
+
+  defp disambiguated_vfs_source_name(name, rel) do
+    ext = Path.extname(name)
+    stem = String.replace_suffix(name, ext, "")
+    hash = :crypto.hash(:sha256, rel) |> Base.encode16(case: :lower) |> binary_part(0, 12)
+    stem <> "--" <> hash <> ext
   end
 
   defp canonical_path_for_compare(path) when is_binary(path) do
+    canonical_file_path(path)
+  end
+
+  defp canonical_file_path(path) when is_binary(path) do
     path = Path.expand(path)
     Path.join(DocMount.canonical_root(Path.dirname(path)), Path.basename(path))
   end

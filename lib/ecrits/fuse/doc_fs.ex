@@ -3,7 +3,7 @@ defmodule Ecrits.Fuse.DocFs do
   `exfuse` filesystem that projects the workspace documents the agent has OPENED
   (via the `doc.open_doc` MCP tool) as a flat directory of JSONL IR files. The
   open set lives in `Ecrits.Fuse.OpenDocs` (per-workspace ETS); a doc appears as
-  `<docname>.jsonl` only while it is open, and the projection bytes come from
+  `<mount-name>.jsonl` only while it is open, and the projection bytes come from
   `Ecrits.Doc.Projection.project_file/1`. Each projected file is one nested JSONL
   value: sections -> paragraphs -> editable native IR payload nodes.
 
@@ -63,18 +63,22 @@ defmodule Ecrits.Fuse.DocFs do
     root
     |> OpenDocs.staged()
     |> Enum.reduce(%{committed: [], pending: []}, fn {name, bytes, _previous_reason}, acc ->
-      source = Path.join(root, name)
-
       cond do
         not OpenDocs.member?(root, name) ->
           OpenDocs.unstage(root, name)
           acc
 
-        not Projection.supported?(source) ->
+        not match?({:ok, _source}, OpenDocs.source_path(root, name)) ->
+          OpenDocs.unstage(root, name)
+          acc
+
+        not source_supported?(root, name) ->
           OpenDocs.unstage(root, name)
           acc
 
         true ->
+          {:ok, source} = OpenDocs.source_path(root, name)
+
           case Projection.write_back(source, bytes, root: root) do
             {:ok, _info} ->
               OpenDocs.unstage(root, name)
@@ -104,7 +108,7 @@ defmodule Ecrits.Fuse.DocFs do
 
     names =
       opened
-      |> Enum.filter(fn name -> Projection.supported?(Path.join(state.root, name)) end)
+      |> Enum.filter(&source_supported?(state.root, &1))
       |> Enum.map(&Projection.projected_name/1)
 
     {:reply, names, socket}
@@ -232,7 +236,7 @@ defmodule Ecrits.Fuse.DocFs do
 
       match?({:ok, _}, source_path(state.root, target)) ->
         {:ok, target_source} = source_path(state.root, target)
-        target_name = Path.basename(target_source)
+        target_name = mounted_source_name(target)
         buf = name_buffer(socket, name) || ""
         result = commit_buffer(state.root, target_source, target_name, buf)
         socket = socket |> clear_name(name) |> clear_name(target)
@@ -461,14 +465,15 @@ defmodule Ecrits.Fuse.DocFs do
   end
 
   defp commit_key(socket, source, name, key, root) do
+    source_name = mounted_source_name(name)
+
     cond do
       dirty?(socket, key) and is_binary(buffer(socket, key)) ->
-        result = commit_buffer(root, source, Path.basename(source), buffer(socket, key))
+        result = commit_buffer(root, source, source_name, buffer(socket, key))
         {result, socket}
 
       dirty?(socket, path_key(name)) and is_binary(buffer(socket, path_key(name))) ->
-        result =
-          commit_buffer(root, source, Path.basename(source), buffer(socket, path_key(name)))
+        result = commit_buffer(root, source, source_name, buffer(socket, path_key(name)))
 
         {result, socket}
 
@@ -480,9 +485,7 @@ defmodule Ecrits.Fuse.DocFs do
   defp maybe_commit_live_buffer(socket, root, name, key, buf) do
     case source_path(root, name) do
       {:ok, source} ->
-        source_name = Path.basename(source)
-
-        case commit_buffer(root, source, source_name, buf) do
+        case commit_buffer(root, source, mounted_source_name(name), buf) do
           {:ok, {:staged, _reason}} -> socket
           {:ok, _info} -> mark_clean(socket, key)
           {:error, _reason} -> socket
@@ -518,7 +521,7 @@ defmodule Ecrits.Fuse.DocFs do
 
   defp projected_bytes(root, name) do
     with {:ok, source} <- source_path(root, name) do
-      source_name = Path.basename(source)
+      source_name = mounted_source_name(name)
 
       case OpenDocs.staged(root, source_name) do
         {:ok, _bytes, _reason} ->
@@ -589,18 +592,30 @@ defmodule Ecrits.Fuse.DocFs do
     end
   end
 
-  # A projected name (`a.hwp.jsonl`) resolves to `<root>/a.hwp` ONLY if that doc is
-  # in the open set. Guards path escapes. Non-open / non-`.jsonl` names -> :enoent.
+  # A projected name (`a.hwp.jsonl`) resolves through `OpenDocs` ONLY if that doc
+  # is in the open set. Root-level docs map to `<root>/a.hwp`; nested workspace
+  # docs map through their stored `source_path`. Guards path escapes.
+  # Non-open / non-`.jsonl` names -> :enoent.
   defp source_path(root, name) do
     with false <- path_escape?(name),
          basename when is_binary(basename) <- Projection.source_basename(name),
          false <- path_escape?(basename),
-         true <- OpenDocs.member?(root, basename) do
-      {:ok, Path.join(root, basename)}
+         true <- OpenDocs.member?(root, basename),
+         {:ok, source} <- OpenDocs.source_path(root, basename) do
+      {:ok, source}
     else
       _ -> {:error, :enoent}
     end
   end
+
+  defp source_supported?(root, name) do
+    case OpenDocs.source_path(root, name) do
+      {:ok, source} -> Projection.supported?(source)
+      :error -> false
+    end
+  end
+
+  defp mounted_source_name(name), do: Projection.source_basename(name) || name
 
   defp path_escape?(name), do: String.contains?(name, "/") or String.contains?(name, "..")
 

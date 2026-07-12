@@ -75,6 +75,33 @@ defmodule Ecrits.Fuse.DocMountTest do
     end
   end
 
+  test "FSKit wire ports are stable per canonical workspace and retry in the dynamic range" do
+    root =
+      Path.join(System.tmp_dir!(), "ecrits-doc-mount-port-#{System.unique_integer([:positive])}")
+
+    same_root = Path.join(root, ".")
+
+    assert DocMount.fskit_wire_port(root, 0) == DocMount.fskit_wire_port(same_root, 0)
+    assert DocMount.fskit_wire_port(root, 1) == next_port(DocMount.fskit_wire_port(root, 0))
+
+    for attempt <- 0..32 do
+      port = DocMount.fskit_wire_port(root, attempt)
+      assert port >= 49_152
+      assert port <= 65_535
+    end
+  end
+
+  test "FSKit transient resource busy mount failures are retryable" do
+    assert DocMount.retryable_mount_error?(
+             {:fskit_mount_failed, 69,
+              "mount: Operation ended with error: The operation couldn’t be completed. Resource busy"}
+           )
+
+    refute DocMount.retryable_mount_error?(
+             {:fskit_mount_failed, 69, "mount: File system named exfuse not found"}
+           )
+  end
+
   defp fskit_extension_enabled_for_test? do
     case System.cmd(
            "pluginkit",
@@ -159,4 +186,7 @@ defmodule Ecrits.Fuse.DocMountTest do
 
   defp restore_backend_env(nil), do: System.delete_env("EXFUSE_BACKEND")
   defp restore_backend_env(value), do: System.put_env("EXFUSE_BACKEND", value)
+
+  defp next_port(65_535), do: 49_152
+  defp next_port(port), do: port + 1
 end

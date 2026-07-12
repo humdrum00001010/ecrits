@@ -7,9 +7,11 @@ defmodule Ecrits.Fuse.OpenDocs do
 
   Backed by a single public, named ETS set owned by this GenServer (started in
   the supervision tree). Keys are `{canonical_root, name}` where `name` is the
-  document's basename (the flat VFS is root-level). Reads/writes hit ETS directly
-  from any process (the VFS handler, the MCP tool) — no GenServer call on the
-  hot path — and degrade to empty/no-op if the table is somehow absent.
+  flat mounted source name. Root-level documents keep their basename; nested
+  workspace documents use a flat, collision-safe mount name and carry their real
+  `source_path` in metadata. Reads/writes hit ETS directly from any process (the
+  VFS handler, the MCP tool) — no GenServer call on the hot path — and degrade to
+  empty/no-op if the table is somehow absent.
   """
 
   use GenServer
@@ -26,13 +28,36 @@ defmodule Ecrits.Fuse.OpenDocs do
     {:ok, %{}}
   end
 
-  @doc "Register `name` (basename) as open under `root`."
-  @spec open(String.t(), String.t()) :: :ok
-  def open(root, name) do
-    :ets.insert(@table, {{expand(root), name}, true})
+  @doc "Register `name` as open under `root`."
+  @spec open(String.t(), String.t(), keyword()) :: :ok
+  def open(root, name, opts \\ []) do
+    :ets.insert(@table, {{expand(root), name}, open_metadata(opts)})
     :ok
   rescue
     ArgumentError -> :ok
+  end
+
+  @doc "The agent that opened `name` under `root`, when known."
+  @spec owner_agent_id(String.t(), String.t()) :: String.t() | nil
+  def owner_agent_id(root, name) do
+    case :ets.lookup(@table, {expand(root), name}) do
+      [{_key, %{agent_id: agent_id}}] when is_binary(agent_id) and agent_id != "" -> agent_id
+      [{_key, %{"agent_id" => agent_id}}] when is_binary(agent_id) and agent_id != "" -> agent_id
+      _ -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @doc "The agent that opened `source_path` under `root`, when known."
+  @spec owner_agent_id_for_source(String.t(), String.t()) :: String.t() | nil
+  def owner_agent_id_for_source(root, source_path) do
+    case name_for_source(root, source_path) do
+      {:ok, name} -> owner_agent_id(root, name)
+      :error -> nil
+    end
+  rescue
+    ArgumentError -> nil
   end
 
   @doc "Unregister `name` under `root`."
@@ -53,6 +78,34 @@ defmodule Ecrits.Fuse.OpenDocs do
     :ets.select(@table, [{{{r, :"$1"}, :_}, [], [:"$1"]}])
   rescue
     ArgumentError -> []
+  end
+
+  @doc "The mounted source name for an opened `source_path` under `root`."
+  @spec name_for_source(String.t(), String.t()) :: {:ok, String.t()} | :error
+  def name_for_source(root, source_path) do
+    r = expand(root)
+    source = canonical_file_path(source_path)
+
+    @table
+    |> :ets.select([{{{r, :"$1"}, :"$2"}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.find_value(:error, fn {name, metadata} ->
+      if metadata_source_path(r, name, metadata) == source, do: {:ok, name}, else: false
+    end)
+  rescue
+    ArgumentError -> :error
+  end
+
+  @doc "The real source path for mounted `name` under `root`."
+  @spec source_path(String.t(), String.t()) :: {:ok, String.t()} | :error
+  def source_path(root, name) when is_binary(name) do
+    r = expand(root)
+
+    case :ets.lookup(@table, {r, name}) do
+      [{_key, metadata}] -> {:ok, metadata_source_path(r, name, metadata)}
+      [] -> :error
+    end
+  rescue
+    ArgumentError -> :error
   end
 
   @doc "Whether `name` is open under `root`."
@@ -129,5 +182,41 @@ defmodule Ecrits.Fuse.OpenDocs do
     ArgumentError -> :ok
   end
 
+  defp open_metadata(opts) do
+    %{}
+    |> maybe_put_agent_id(Keyword.get(opts, :agent_id))
+    |> maybe_put_source_path(Keyword.get(opts, :source_path))
+    |> case do
+      metadata when metadata == %{} -> true
+      metadata -> metadata
+    end
+  end
+
   defp expand(root), do: Ecrits.Fuse.DocMount.canonical_root(root)
+
+  defp maybe_put_agent_id(metadata, agent_id) when is_binary(agent_id) and agent_id != "",
+    do: Map.put(metadata, :agent_id, agent_id)
+
+  defp maybe_put_agent_id(metadata, _agent_id), do: metadata
+
+  defp maybe_put_source_path(metadata, source_path)
+       when is_binary(source_path) and source_path != "",
+       do: Map.put(metadata, :source_path, canonical_file_path(source_path))
+
+  defp maybe_put_source_path(metadata, _source_path), do: metadata
+
+  defp metadata_source_path(_root, _name, %{source_path: source_path})
+       when is_binary(source_path),
+       do: canonical_file_path(source_path)
+
+  defp metadata_source_path(_root, _name, %{"source_path" => source_path})
+       when is_binary(source_path),
+       do: canonical_file_path(source_path)
+
+  defp metadata_source_path(root, name, _metadata), do: Path.join(root, name)
+
+  defp canonical_file_path(path) when is_binary(path) do
+    path = Path.expand(path)
+    Path.join(Ecrits.Fuse.DocMount.canonical_root(Path.dirname(path)), Path.basename(path))
+  end
 end
