@@ -7,7 +7,7 @@
 // saveLocalDocument, moveHorizontal, hasSelection, ...) directly. Covers the
 // IME proxy binding, composition (Korean) input, plain-text input, the
 // keydown dispatch (Backspace/Delete/Enter/arrows/Tab), the edit actions
-// (delete/merge/split at caret), and the Ctrl/Cmd+S save shortcut.
+// (delete/merge/split at caret), and the Ctrl/Cmd+S / undo / redo shortcuts.
 export const keyboardSubsystem = {
   bindEditing() {
     if (!this.imeProxy) return
@@ -17,6 +17,7 @@ export const keyboardSubsystem = {
     this.onCompositionUpdate = e => this.handleCompositionUpdate(e)
     this.onCompositionEnd = e => this.handleCompositionEnd(e)
     this.onKeyDown = e => this.handleKeyDown(e)
+    this.onProxyFocus = () => this.activateKeyboardShortcuts()
     this.onCopy = e => this.handleCopy(e)
     this.onPaste = e => this.handlePaste(e)
 
@@ -26,6 +27,7 @@ export const keyboardSubsystem = {
     this.imeProxy.addEventListener("compositionupdate", this.onCompositionUpdate)
     this.imeProxy.addEventListener("compositionend", this.onCompositionEnd)
     this.imeProxy.addEventListener("keydown", this.onKeyDown)
+    this.imeProxy.addEventListener("focus", this.onProxyFocus)
     this.imeProxy.addEventListener("copy", this.onCopy)
     this.imeProxy.addEventListener("paste", this.onPaste)
   },
@@ -38,8 +40,53 @@ export const keyboardSubsystem = {
     this.imeProxy.removeEventListener("compositionupdate", this.onCompositionUpdate)
     this.imeProxy.removeEventListener("compositionend", this.onCompositionEnd)
     this.imeProxy.removeEventListener("keydown", this.onKeyDown)
+    this.imeProxy.removeEventListener("focus", this.onProxyFocus)
     this.imeProxy.removeEventListener("copy", this.onCopy)
     this.imeProxy.removeEventListener("paste", this.onPaste)
+    this.shortcutActive = false
+  },
+
+  activateKeyboardShortcuts() {
+    if (!this.mirror) this.shortcutActive = true
+  },
+
+  handleDocumentPointerDown(event) {
+    if (this.mirror) return
+    const target = event && event.target
+    if (target && this.el && this.el.contains && this.el.contains(target)) {
+      this.activateKeyboardShortcuts()
+      return
+    }
+    if (target !== this.imeProxy) this.shortcutActive = false
+  },
+
+  handleDocumentKeyDown(event) {
+    if (event.defaultPrevented || !this.documentShortcutTarget(event)) return
+    if (this.saveShortcut(event)) {
+      event.preventDefault()
+      event.stopPropagation()
+      this.saveLocalDocument({})
+      return
+    }
+    this.handleHwpEditShortcut(event)
+  },
+
+  documentShortcutTarget(event) {
+    if (!this.shortcutActive) return false
+    if (!this.doc) return false
+    const target = event && event.target
+    if (target === this.imeProxy) return false
+    if (this.eventTargetIsEditable(target)) return false
+    if (target && this.el && this.el.contains && this.el.contains(target)) return true
+
+    const active = document.activeElement
+    if (active && this.el && this.el.contains && this.el.contains(active)) return true
+    return !active || active === document.body || active === document.documentElement
+  },
+
+  eventTargetIsEditable(target) {
+    if (!target || target === this.imeProxy || !target.closest) return false
+    return !!target.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']")
   },
 
   // beforeinput lets us swallow the proxy's own echo (we never want the textarea
@@ -51,24 +98,185 @@ export const keyboardSubsystem = {
     // (preventing it would also block compositionupdate on some IMEs).
   },
 
+  hwpNativeImeAvailable() {
+    return !!(this.doc &&
+      typeof this.doc.beginImeComposition === "function" &&
+      typeof this.doc.updateImeComposition === "function" &&
+      typeof this.doc.commitImeComposition === "function" &&
+      typeof this.doc.cancelImeComposition === "function")
+  },
+
+  hwpImeAnchor() {
+    const c = this.caret
+    if (!c || c.note) return null
+
+    if (c.cell) {
+      if (Array.isArray(c.cell.cellPath) && c.cell.cellPath.length > 1) {
+        return {
+          kind: "cellPath",
+          sectionIdx: c.section,
+          parentParaIdx: c.cell.parentParaIndex,
+          cellPath: c.cell.cellPath,
+          charOffset: c.offset,
+        }
+      }
+
+      return {
+        kind: "cell",
+        sectionIdx: c.section,
+        parentParaIdx: c.cell.parentParaIndex,
+        controlIdx: c.cell.controlIndex,
+        cellIdx: c.cell.cellIndex,
+        cellParaIdx: c.cell.cellParaIndex,
+        charOffset: c.offset,
+      }
+    }
+
+    return {
+      kind: "body",
+      sectionIdx: c.section,
+      paraIdx: c.paragraph,
+      charOffset: c.offset,
+    }
+  },
+
+  hwpCompositionText(event) {
+    const normalize = (text) => {
+      const value = String(text || "")
+      try { return value.normalize("NFC") } catch (_) { return value }
+    }
+
+    if (event && event.data != null) return normalize(event.data)
+
+    return normalize(this.imeProxy ? this.imeProxy.value : "")
+  },
+
+  hwpCharCount(text) {
+    return [...String(text || "")].length
+  },
+
+  hwpParseNativeJson(raw) {
+    if (!raw) return {}
+    if (typeof raw === "object") return raw
+    try {
+      return JSON.parse(String(raw))
+    } catch (_) {
+      return {}
+    }
+  },
+
+  hwpRenderImePages(info, options = {}) {
+    const parsed = this.hwpParseNativeJson(info)
+    const pages = Array.isArray(parsed.invalidatedPages)
+      ? parsed.invalidatedPages.map(Number).filter(Number.isInteger)
+      : []
+    if (Number.isInteger(Number(parsed.pageIndex))) pages.push(Number(parsed.pageIndex))
+    const unique = [...new Set(pages)]
+    if (unique.length) {
+      unique.forEach(page => this.renderPage(page))
+      return unique
+    }
+    if (options.fallbackCaret !== false) this.renderCaretPage()
+    return []
+  },
+
+  hwpApplyImeCaret(info) {
+    const result = this.hwpParseNativeJson(info)
+    const offset = Number(result?.edit?.charOffset ?? result?.charOffset)
+    if (!this.caret || !Number.isInteger(offset)) return result
+    this.caret.offset = offset
+    this.caret.preferredX = -1
+    this.refreshCursorRect()
+    if (this.caret) this.drawCaret(this.caret)
+    this.anchorProxy()
+    return result
+  },
+
+  hwpNativeImeInfo() {
+    if (!this.hwpNativeImeAvailable() || typeof this.doc.getImeCompositionRenderInfo !== "function") {
+      return {}
+    }
+    try {
+      return this.hwpParseNativeJson(this.doc.getImeCompositionRenderInfo())
+    } catch (_) {
+      return {}
+    }
+  },
+
+  hwpNativeImeActive() {
+    return this.hwpNativeImeInfo().active === true
+  },
+
+  hwpClearNativeIme() {
+    if (!this.hwpNativeImeAvailable()) return
+    const before = this.hwpNativeImeInfo()
+    if (before.active !== true) return
+    try {
+      const raw = this.doc.cancelImeComposition()
+      this.hwpApplyImeCaret(raw)
+      const rendered = this.hwpRenderImePages(raw, { fallbackCaret: false })
+      if (Number.isInteger(Number(before.pageIndex)) && !rendered.includes(Number(before.pageIndex))) {
+        this.renderPage(Number(before.pageIndex))
+      }
+    } catch (error) {
+      console.error("[wasm-hwp] cancelImeComposition failed", error)
+    }
+  },
+
+  hwpCommitNativeIme(text) {
+    const before = this.hwpNativeImeInfo()
+    const raw = this.doc.commitImeComposition(text)
+    this.hwpFinishImeCommit(raw, text, before)
+  },
+
+  hwpFinishImeCommit(raw, text, before = null) {
+    const result = this.hwpParseNativeJson(raw)
+    const c = this.caret
+    if (c && result && result.committed !== false) {
+      const edit = result.edit && typeof result.edit === "object" ? result.edit : {}
+      const offset = Number(edit.charOffset ?? edit.offset)
+      c.offset = Number.isInteger(offset) ? offset : c.offset + this.hwpCharCount(text)
+      c.preferredX = -1
+      this.refreshCursorRect()
+    }
+    const rendered = this.hwpRenderImePages(result)
+    if (before && before.active === true && Number.isInteger(Number(before.pageIndex)) &&
+        !rendered.includes(Number(before.pageIndex))) {
+      this.renderPage(Number(before.pageIndex))
+    }
+    if (this.caret) this.drawCaret(this.caret)
+    this.anchorProxy()
+    if (result.committed !== false) {
+      this.recordOp("TextInserted", { text })
+      this.scheduleSnapshot()
+    }
+  },
+
   // Plain text (ASCII / paste) — fires for non-composing input. Korean text is
-  // handled by the composition* path and must be skipped here.
+  // routed to the native IME carrier through composition events and must be
+  // skipped here so the browser textarea never becomes the document model.
   handleInput(event) {
     if (!this.doc || !this.caret) return
 
     const type = event.inputType || ""
     const compositionInput = type === "insertCompositionText" || type === "insertReplacementText"
-    if (this.composing) {
-      if (compositionInput || event.isComposing) {
-        const str = this.currentCompositionText(event)
-        this.showCompositionPreview(str)
-        this.queueCompositionModelSync(str)
+    if (compositionInput || event.isComposing) {
+      if (this.hwpNativeImeAvailable() && this.hwpNativeImeActive()) {
+        const str = this.hwpCompositionText(event)
+        try {
+          if (event.isComposing) {
+            const raw = this.doc.updateImeComposition(str, this.hwpCharCount(str))
+            this.hwpApplyImeCaret(raw)
+            this.hwpRenderImePages(raw)
+          } else {
+            this.hwpCommitNativeIme(str)
+          }
+        } catch (error) {
+          console.error("[wasm-hwp] composition input fallback failed", error)
+          this.hwpClearNativeIme()
+        }
       }
-      return
-    }
-    if (event.isComposing) return
-    if (this.swallowTrailingCompositionInput(event)) {
-      this.imeProxy.value = ""
+      if (!event.isComposing) this.imeProxy.value = ""
       return
     }
 
@@ -77,6 +285,7 @@ export const keyboardSubsystem = {
       const data = event.data != null ? event.data : this.imeProxy.value
       // Typing over a selection replaces it: delete the range, then insert.
       if (data) {
+        this.pushHwpUndoCheckpoint("input")
         if (this.hasSelection()) this.deleteSelection()
         this.insertPlainTextAtCaret(data)
       }
@@ -85,140 +294,57 @@ export const keyboardSubsystem = {
     this.imeProxy.value = ""
   },
 
-  // Korean IME — compositionstart arms a provisional (empty) region at the caret.
+  // Korean IME — composition events are routed to rhwp_core. JS owns neither
+  // the live composition text nor its document position; it only forwards the
+  // event text and follows the native edit cursor.
   handleCompositionStart(_event) {
     if (!this.doc || !this.caret) return
-    // Composing over a selection replaces it first.
+    if (!this.hwpNativeImeAvailable()) return
+    this.hwpClearNativeIme()
+    const anchor = this.hwpImeAnchor()
+    if (!anchor) return
+    this.pushHwpUndoCheckpoint("composition")
     if (this.hasSelection()) this.deleteSelection()
-    this.skipNextCompositionInput = null
-    this.pendingCompositionText = null
-    this.compositionSyncQueued = false
-    this.composing = { start: this.caret.offset, length: 0 }
-    this.showCompositionPreview(this.currentCompositionText(_event))
+    try {
+      const raw = this.doc.beginImeComposition(JSON.stringify(this.hwpImeAnchor() || anchor))
+      this.hwpRenderImePages(raw, { fallbackCaret: false })
+    } catch (error) {
+      console.error("[wasm-hwp] beginImeComposition failed", error)
+    }
   },
 
-  // compositionupdate — paint the text immediately in a transient DOM preview,
-  // then sync the WASM document/canvas after a paint. The preview is the fast
-  // path users feel; the model remains the source of truth and catches up.
   handleCompositionUpdate(event) {
-    if (!this.doc || !this.caret || !this.composing) return
-    const str = this.currentCompositionText(event)
-    this.showCompositionPreview(str)
-    this.queueCompositionModelSync(str)
+    if (!this.doc || !this.caret || !this.hwpNativeImeAvailable()) return
+    const str = this.hwpCompositionText(event)
+    try {
+      const raw = this.doc.updateImeComposition(str, this.hwpCharCount(str))
+      this.hwpApplyImeCaret(raw)
+      this.hwpRenderImePages(raw)
+    } catch (error) {
+      console.error("[wasm-hwp] updateImeComposition failed", error)
+    }
   },
 
-  // compositionend — commit. The final string is already in the document from
-  // the latest queued/synchronous composition replacement; flush once more with
-  // the resolved string, then clear the preview/proxy.
   handleCompositionEnd(event) {
     if (!this.doc || !this.caret) return
-    if (this.composing) {
-      const str = this.currentCompositionText(event)
-      // Ensure the committed string matches the final composition (some IMEs
-      // send a final compositionend with the resolved text).
-      this.flushCompositionModelSync(str)
-      this.composing = null
-      this.hideCompositionPreview()
-      this.armTrailingCompositionInputGuard(str)
+    const str = this.hwpCompositionText(event)
+    if (this.hwpNativeImeAvailable()) {
+      try {
+        this.hwpCommitNativeIme(str)
+      } catch (error) {
+        console.error("[wasm-hwp] commitImeComposition failed", error)
+        this.hwpClearNativeIme()
+      }
+      this.imeProxy.value = ""
+      return
+    }
+
+    if (str) {
+      this.pushHwpUndoCheckpoint("composition")
+      if (this.hasSelection()) this.deleteSelection()
+      this.insertPlainTextAtCaret(str)
     }
     this.imeProxy.value = ""
-    this.scheduleSnapshot()
-  },
-
-  currentCompositionText(event) {
-    const data = event && event.data != null ? String(event.data) : ""
-    const value = this.imeProxy ? String(this.imeProxy.value || "") : ""
-    const normalize = (text) => {
-      try { return text.normalize("NFC") } catch (_) { return text }
-    }
-    const dataText = normalize(data)
-    const valueText = normalize(value)
-    if (!dataText) return valueText
-    if (!valueText) return dataText
-    if (dataText === valueText) return dataText
-
-    const jamoOnly = (text) => /^[\u3130-\u318F]+$/u.test(text)
-    const hasHangulSyllable = (text) => /[\uAC00-\uD7AF]/u.test(text)
-    if (hasHangulSyllable(valueText) && jamoOnly(dataText)) return valueText
-    if (hasHangulSyllable(dataText) && jamoOnly(valueText)) return dataText
-
-    return [...valueText].length >= [...dataText].length ? valueText : dataText
-  },
-
-  // Delete the current provisional composing run (if any) then insert `str` as
-  // the new provisional run, leaving the caret AFTER it. Keeps the in-document
-  // composing region in sync with the OS IME buffer on every keystroke.
-  replaceComposing(str) {
-    const c = this.caret
-    const start = this.composing.start
-    const prevLen = this.composing.length
-
-    if (prevLen > 0) {
-      this.applyDelete(c.section, c.paragraph, start, prevLen)
-    }
-    if (str.length > 0) {
-      this.applyInsert(c.section, c.paragraph, start, str)
-    }
-    this.composing.length = [...str].length
-    // Caret sits at the end of the provisional run.
-    c.offset = start + this.composing.length
-    this.refreshCursorRect()
-    this.renderCaretPage()
-    this.drawCaret(c)
-    this.anchorProxy()
-  },
-
-  queueCompositionModelSync(str) {
-    this.pendingCompositionText = String(str || "")
-    if (this.compositionSyncQueued) return
-    this.compositionSyncQueued = true
-
-    const run = () => {
-      this.compositionSyncQueued = false
-      if (!this.composing) {
-        this.pendingCompositionText = null
-        return
-      }
-      const next = this.pendingCompositionText != null ? this.pendingCompositionText : ""
-      this.pendingCompositionText = null
-      this.replaceComposing(next)
-    }
-
-    const win = typeof window !== "undefined" ? window : null
-    const timeout = (fn) => {
-      if (win && typeof win.setTimeout === "function") win.setTimeout(fn, 0)
-      else setTimeout(fn, 0)
-    }
-    if (win && typeof win.requestAnimationFrame === "function") {
-      win.requestAnimationFrame(() => timeout(run))
-    } else {
-      timeout(run)
-    }
-  },
-
-  flushCompositionModelSync(str) {
-    this.pendingCompositionText = null
-    this.compositionSyncQueued = false
-    this.replaceComposing(String(str || ""))
-  },
-
-  armTrailingCompositionInputGuard(text) {
-    const value = String(text || "")
-    this.skipNextCompositionInput = value ? { value, at: performance.now() } : null
-  },
-
-  swallowTrailingCompositionInput(event) {
-    const pending = this.skipNextCompositionInput
-    if (!pending) return false
-
-    const type = event.inputType || ""
-    const data = String(event.data != null ? event.data : (this.imeProxy && this.imeProxy.value) || "")
-    const age = performance.now() - pending.at
-    const compositionInput = type === "insertCompositionText" || type === "insertReplacementText"
-    const sameImmediateText = data === pending.value && age >= 0 && age < 500
-
-    this.skipNextCompositionInput = null
-    return compositionInput || sameImmediateText
   },
 
   // Insert plain text at the caret, route to cell when inside a table cell.
@@ -291,6 +417,8 @@ export const keyboardSubsystem = {
     }
     if (!this.doc) return
     if (event.isComposing) return // IME owns the keystroke
+    if (this.hwpClearNativeIme) this.hwpClearNativeIme()
+    if (this.handleHwpEditShortcut(event)) return
     if (this.handleSelectedImageDeleteKey(event)) return
     if (!this.caret) return
     if (event.metaKey || event.ctrlKey || event.altKey) return // unhandled shortcuts pass through
@@ -306,6 +434,7 @@ export const keyboardSubsystem = {
     if (this.hasSelection() &&
         (event.key === "Backspace" || event.key === "Delete" || event.key === "Enter")) {
       event.preventDefault()
+      this.pushHwpUndoCheckpoint(event.key === "Enter" ? "selection-enter" : "selection-delete")
       this.deleteSelection()
       if (event.key === "Enter") this.splitAtCaret()
       return
@@ -314,14 +443,17 @@ export const keyboardSubsystem = {
     switch (event.key) {
       case "Backspace":
         event.preventDefault()
+        this.pushHwpUndoCheckpoint("backspace")
         this.deleteBackward()
         break
       case "Delete":
         event.preventDefault()
+        this.pushHwpUndoCheckpoint("delete")
         this.deleteForward()
         break
       case "Enter":
         event.preventDefault()
+        this.pushHwpUndoCheckpoint("enter")
         this.splitAtCaret()
         break
       case "ArrowLeft":
@@ -385,6 +517,7 @@ export const keyboardSubsystem = {
     const target = this.selectedImageTarget()
     if (!target || !this.doc) return false
 
+    this.pushHwpUndoCheckpoint("image-delete")
     try {
       this.doc.deletePictureControl(target.section, target.paragraph, target.control)
     } catch (error) {
@@ -417,6 +550,7 @@ export const keyboardSubsystem = {
     const text = event.clipboardData && event.clipboardData.getData("text/plain")
     if (!text) return
     event.preventDefault()
+    this.pushHwpUndoCheckpoint("paste")
     if (this.hasSelection()) this.deleteSelection()
     this.insertPlainTextAtCaret(text)
   },
@@ -494,7 +628,7 @@ export const keyboardSubsystem = {
     }
     c.preferredX = -1
     this.refreshCursorRect()
-    this.renderCaretPage()
+    this.renderCaretPage({ refreshVisible: true })
     this.drawCaret(c)
     this.anchorProxy()
     this.scheduleSnapshot()
@@ -524,13 +658,36 @@ export const keyboardSubsystem = {
     }
     c.preferredX = -1
     this.refreshCursorRect()
-    this.renderCaretPage()
+    this.renderCaretPage({ refreshVisible: true })
     this.drawCaret(c)
     this.anchorProxy()
     this.scheduleSnapshot()
   },
 
   saveShortcut(event) {
-    return (event.metaKey || event.ctrlKey) && (event.key === "s" || event.key === "S")
+    return (event.metaKey || event.ctrlKey) && this.shortcutKey(event) === "s"
+  },
+
+  shortcutKey(event) {
+    const key = String(event && event.key || "").toLowerCase()
+    if (/^[a-z]$/.test(key)) return key
+
+    const code = String(event && event.code || "")
+    const match = /^Key([A-Z])$/.exec(code)
+    return match ? match[1].toLowerCase() : key
+  },
+
+  handleHwpEditShortcut(event) {
+    if (event.altKey || !(event.metaKey || event.ctrlKey)) return false
+    const key = this.shortcutKey(event)
+    const undo = key === "z" && !event.shiftKey
+    const redo = (key === "z" && event.shiftKey) || (key === "y" && event.ctrlKey && !event.metaKey)
+    if (!undo && !redo) return false
+
+    event.preventDefault()
+    event.stopPropagation()
+    if (undo) this.runHwpUndo()
+    else this.runHwpRedo()
+    return true
   },
 }

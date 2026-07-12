@@ -1,5 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 
 const documentStub: any = {
   body: { dataset: {} },
@@ -21,7 +22,139 @@ const documentStub: any = {
 ;(globalThis as any).document = (globalThis as any).document || documentStub
 ;(globalThis as any).window = (globalThis as any).window || {}
 
-const { WasmHwpEditor } = await import("../js/wasm_hwp_editor.ts")
+const { WasmHwpEditor, HWP_VIEW_STATE_KEYS, installHwpViewState, unexpectedHwpLooseOwnStateKeys } =
+  await import("../js/wasm_hwp_editor.ts")
+
+function fakeCanvas(width = 100, height = 100) {
+  const ctx = {
+    fillStyle: "",
+    fillRect() {},
+    clearRect() {},
+    save() {},
+    restore() {},
+    strokeRect() {},
+    setLineDash() {},
+  }
+  return {
+    width,
+    height,
+    dataset: {},
+    style: {},
+    getContext: () => ctx,
+    getBoundingClientRect: () => ({ left: 0, top: 0, right: width, bottom: height, width, height }),
+  } as any
+}
+
+function fakeHwpSection(index: number, canvas = fakeCanvas(), overlay = fakeCanvas()) {
+  return {
+    dataset: { pageIndex: String(index) },
+    offsetTop: index * 1000,
+    querySelector(selector: string) {
+      if (selector.includes("ehwp-canvas")) return canvas
+      if (selector.includes("ehwp-caret-overlay")) return overlay
+      return null
+    },
+    getBoundingClientRect: () => ({ height: 100, width: 100, top: 0, bottom: 100 }),
+  } as any
+}
+
+function directHookStateAssignments() {
+  const sources = [
+    new URL("../js/wasm_hwp_editor.ts", import.meta.url),
+    new URL("../js/wasm_hwp_keys.ts", import.meta.url),
+  ]
+  const assigned = new Set<string>()
+
+  for (const source of sources) {
+    const text = readFileSync(source, "utf8")
+    for (const match of text.matchAll(/\bthis\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g)) {
+      assigned.add(match[1])
+    }
+  }
+
+  return [...assigned].sort()
+}
+
+function withMountedHook(fn: (editor: any) => void) {
+  const win = (globalThis as any).window
+  const oldWindowAdd = win.addEventListener
+  const oldWindowRemove = win.removeEventListener
+  const oldIntersectionObserver = (globalThis as any).IntersectionObserver
+
+  win.addEventListener = win.addEventListener || (() => {})
+  win.removeEventListener = win.removeEventListener || (() => {})
+  ;(globalThis as any).IntersectionObserver = class {
+    observe() {}
+    disconnect() {}
+  }
+
+  const imeProxy = {
+    addEventListener() {},
+    removeEventListener() {},
+  }
+  const pageStack = {}
+  const editor = Object.create(WasmHwpEditor)
+  editor.el = {
+    dataset: {
+      documentId: "hwp-state-guard-doc",
+      localDocumentFormat: "hwp",
+      editorMirror: "true",
+    },
+    addEventListener() {},
+    removeEventListener() {},
+    querySelector(selector: string) {
+      if (selector === "[data-role='local-hwp-ime-proxy']") return imeProxy
+      if (selector === "[data-role='local-hwp-pages']") return pageStack
+      return null
+    },
+  }
+  editor.handleEvent = () => {}
+
+  try {
+    editor.mounted()
+    fn(editor)
+  } finally {
+    if (editor.blink) clearInterval(editor.blink)
+    if (oldWindowAdd) win.addEventListener = oldWindowAdd
+    else delete win.addEventListener
+    if (oldWindowRemove) win.removeEventListener = oldWindowRemove
+    else delete win.removeEventListener
+    if (oldIntersectionObserver) {
+      ;(globalThis as any).IntersectionObserver = oldIntersectionObserver
+    } else {
+      delete (globalThis as any).IntersectionObserver
+    }
+  }
+}
+
+function hwpViewStateEditor() {
+  const editor = Object.create(WasmHwpEditor)
+  installHwpViewState(editor)
+  return editor
+}
+
+describe("WasmHwpEditor view_state carrier boundary", () => {
+  it("keeps every direct HWP hook state write in the view_state key list", () => {
+    assert.deepEqual(directHookStateAssignments(), [...HWP_VIEW_STATE_KEYS].sort())
+  })
+
+  it("does not create loose mutable hook state during mount and keyboard binding", () => {
+    withMountedHook((editor) => {
+      const allowedFrameworkKeys = ["el", "handleEvent"]
+      assert.deepEqual(unexpectedHwpLooseOwnStateKeys(editor, allowedFrameworkKeys), [])
+
+      for (const key of HWP_VIEW_STATE_KEYS) {
+        const descriptor = Object.getOwnPropertyDescriptor(editor, key)
+        assert.equal(typeof descriptor?.get, "function", `${key} must read through view_state`)
+        assert.equal(typeof descriptor?.set, "function", `${key} must write through view_state`)
+        assert.equal("value" in (descriptor || {}), false, `${key} must not be loose own data`)
+      }
+
+      assert.equal(editor.view_state.shortcutActive, false)
+      assert.equal(editor.view_state.scrollPositions instanceof Map, true)
+    })
+  })
+})
 
 describe("WasmHwpEditor scroll preservation", () => {
   it("restores a document scroll offset across hook remounts", () => {
@@ -33,7 +166,9 @@ describe("WasmHwpEditor scroll preservation", () => {
     }
 
     try {
-      const first = Object.create(WasmHwpEditor)
+      const scrollPositions = new Map()
+      const first = hwpViewStateEditor()
+      first.scrollPositions = scrollPositions
       first.mirror = false
       first.documentId = "hwp-scroll-doc"
       first.loadedUrl = "/bytes/hwp-scroll-doc"
@@ -46,7 +181,8 @@ describe("WasmHwpEditor scroll preservation", () => {
       first.rememberScrollPosition()
 
       let rendered = 0
-      const second = Object.create(WasmHwpEditor)
+      const second = hwpViewStateEditor()
+      second.scrollPositions = scrollPositions
       second.mirror = false
       second.documentId = "hwp-scroll-doc"
       second.loadedUrl = "/bytes/hwp-scroll-doc"
@@ -81,7 +217,8 @@ describe("WasmHwpEditor scroll preservation", () => {
 
     try {
       let rendered = 0
-      const editor = Object.create(WasmHwpEditor)
+      const editor = hwpViewStateEditor()
+      editor.scrollPositions = new Map()
       editor.mirror = false
       editor.documentId = "hwp-server-scroll-doc"
       editor.loadedUrl = "/bytes/hwp-server-scroll-doc"
@@ -113,7 +250,8 @@ describe("WasmHwpEditor scroll preservation", () => {
 
   it("pushes document scroll with the document path", () => {
     const pushed: any[] = []
-    const editor = Object.create(WasmHwpEditor)
+    const editor = hwpViewStateEditor()
+    editor.scrollPositions = new Map()
     editor.mirror = false
     editor.documentId = "hwp-persist-scroll-doc"
     editor.loadedUrl = "/bytes/hwp-persist-scroll-doc"
@@ -144,33 +282,215 @@ describe("WasmHwpEditor scroll preservation", () => {
   })
 })
 
-describe("WasmHwpEditor IME composition preview", () => {
-  function withElementFactory(fn: (created: any[]) => void) {
-    const doc = (globalThis as any).document
-    const oldCreateElement = doc.createElement
-    const created: any[] = []
-    doc.createElement = (_tag: string) => {
-      const el = {
+describe("WasmHwpEditor renderer memory policy", () => {
+  it("builds only saved-highlight pages for mirror previews", () => {
+    const observed: string[] = []
+    const stack = {
+      replaceChildren() {
+        observed.length = 0
+      },
+      appendChild(section: any) {
+        observed.push(section.dataset.pageIndex)
+      },
+    }
+
+    const oldDocument = (globalThis as any).document
+    ;(globalThis as any).document = {
+      ...documentStub,
+      createElement: (tag: string) => ({
         dataset: {},
         style: {},
-        hidden: false,
-        textContent: "",
-        isConnected: true,
-        remove() {
-          this.isConnected = false
+        className: "",
+        appendChild() {},
+        querySelector() {
+          return null
+        },
+        getContext: tag === "canvas" ? () => ({ fillStyle: "", fillRect() {} }) : undefined,
+      }),
+    }
+
+    try {
+      const editor = Object.create(WasmHwpEditor)
+      editor.mirror = true
+      editor.pageCount = 4
+      editor.pageStack = stack
+      editor.rendered = new Map()
+      editor.renderedPageOrder = new Map()
+      editor.pageScales = new Map()
+      editor.visible = new Set()
+      editor.io = { disconnect() {}, observe() {} }
+      editor.el = { dataset: {} }
+      editor.doc = {
+        getPageInfo() {
+          return JSON.stringify({ width: 100, height: 120 })
         },
       }
-      created.push(el)
-      return el
-    }
-    try {
-      fn(created)
-    } finally {
-      doc.createElement = oldCreateElement
-    }
-  }
+      editor.previewPageFilter = [2]
 
-  function baseEditor() {
+      editor.buildPageStack()
+
+      assert.deepEqual(observed, ["2"])
+      assert.equal(editor.el.dataset.previewPageFilter, "2")
+      assert.deepEqual(editor.pageStackIndexes(), [2])
+    } finally {
+      ;(globalThis as any).document = oldDocument
+    }
+  })
+
+  it("shrinks offscreen page canvases and forgets their render state", () => {
+    const canvas = fakeCanvas(1984, 2806)
+    const overlay = fakeCanvas(1984, 2806)
+    const section = fakeHwpSection(3, canvas, overlay)
+    const editor = {
+      ...WasmHwpEditor,
+      pageCount: 8,
+      rendered: new Map([[3, true]]),
+      renderedPageOrder: new Map([[3, 42]]),
+      pageScales: new Map([[3, 2]]),
+      visible: new Set(),
+      caret: null,
+      pageSection: () => section,
+      documentAdornmentPicks: () => [],
+    } as any
+
+    assert.equal(editor.releasePageCanvas(3), true)
+
+    assert.equal(canvas.width, 1)
+    assert.equal(canvas.height, 1)
+    assert.equal(overlay.width, 1)
+    assert.equal(overlay.height, 1)
+    assert.equal(editor.rendered.has(3), false)
+    assert.equal(editor.renderedPageOrder.has(3), false)
+    assert.equal(editor.pageScales.has(3), false)
+  })
+
+  it("keeps active caret pages when an offscreen release is requested", () => {
+    const canvas = fakeCanvas(1984, 2806)
+    const overlay = fakeCanvas(1984, 2806)
+    const section = fakeHwpSection(2, canvas, overlay)
+    const editor = {
+      ...WasmHwpEditor,
+      pageCount: 8,
+      rendered: new Map([[2, true]]),
+      renderedPageOrder: new Map([[2, 1]]),
+      pageScales: new Map([[2, 2]]),
+      visible: new Set(),
+      caret: { cursorRect: { pageIndex: 2 } },
+      pageSection: () => section,
+      documentAdornmentPicks: () => [],
+    } as any
+
+    assert.equal(editor.releasePageCanvas(2), false)
+    assert.equal(canvas.width, 1984)
+    assert.equal(overlay.width, 1984)
+    assert.equal(editor.rendered.has(2), true)
+  })
+
+  it("caps HWP render scale on low-memory devices", () => {
+    const win = (globalThis as any).window
+    const oldDpr = win.devicePixelRatio
+    const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator")
+    win.devicePixelRatio = 2
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { deviceMemory: 8 },
+    })
+
+    try {
+      let usedScale = 0
+      const canvas = fakeCanvas(1, 1)
+      const overlay = fakeCanvas(1, 1)
+      const section = fakeHwpSection(0, canvas, overlay)
+      const editor = {
+        ...WasmHwpEditor,
+        mirror: false,
+        pageCount: 1,
+        rendered: new Map(),
+        renderedPageOrder: new Map(),
+        pageScales: new Map(),
+        visible: new Set([0]),
+        caret: null,
+        previewPatchHighlight: null,
+        previewSavedHighlight: null,
+        documentAdornmentPicks: () => [],
+        pageSection: () => section,
+        pageInfo: () => ({ w: 1000, h: 1400 }),
+        doc: {
+          renderPageToCanvas(_index: number, target: any, scale: number) {
+            usedScale = scale
+            target.width = Math.round(1000 * scale)
+            target.height = Math.round(1400 * scale)
+          },
+        },
+      } as any
+
+      editor.renderPage(0)
+
+      assert.ok(usedScale < 2)
+      assert.ok(usedScale <= 1.2)
+      assert.equal(canvas.width, Math.round(1000 * usedScale))
+      assert.equal(overlay.width, canvas.width)
+      assert.equal(editor.pageScales.get(0), usedScale)
+    } finally {
+      if (oldDpr === undefined) delete win.devicePixelRatio
+      else win.devicePixelRatio = oldDpr
+      if (oldNavigator) Object.defineProperty(globalThis, "navigator", oldNavigator)
+      else delete (globalThis as any).navigator
+    }
+  })
+
+  it("sweeps rendered pages outside the visible, caret, and highlight retention set", () => {
+    const sections = new Map<number, any>()
+    for (let i = 0; i < 12; i++) sections.set(i, fakeHwpSection(i, fakeCanvas(100, 100), fakeCanvas(100, 100)))
+    const renderedEntries = Array.from({ length: 12 }, (_value, index) => [index, true] as [number, boolean])
+    const orderEntries = Array.from({ length: 12 }, (_value, index) => [index, index] as [number, number])
+    const editor = {
+      ...WasmHwpEditor,
+      pageCount: 12,
+      rendered: new Map(renderedEntries),
+      renderedPageOrder: new Map(orderEntries),
+      pageScales: new Map(orderEntries.map(([index]) => [index, 1])),
+      visible: new Set([5]),
+      caret: { cursorRect: { pageIndex: 2 } },
+      previewSavedHighlight: { rects: [{ pageIndex: 9, x: 0, y: 0, width: 1, height: 1 }] },
+      pageSection: (index: number) => sections.get(index),
+      documentAdornmentPicks: () => [],
+    } as any
+
+    editor.enforcePageMemoryBudget()
+
+    assert.equal(editor.rendered.has(0), false)
+    assert.equal(editor.rendered.has(2), true)
+    assert.equal(editor.rendered.has(4), true)
+    assert.equal(editor.rendered.has(5), true)
+    assert.equal(editor.rendered.has(6), true)
+    assert.equal(editor.rendered.has(9), true)
+    assert.equal(sections.get(0).querySelector("[data-role='ehwp-canvas']").width, 1)
+    assert.equal(sections.get(2).querySelector("[data-role='ehwp-canvas']").width, 100)
+  })
+
+  it("renders only the caret page for plain typing unless visible refresh is requested", () => {
+    const rendered: number[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      caret: { cursorRect: { pageIndex: 2 } },
+      visible: new Set([1, 2, 3]),
+      renderPage(index: number) {
+        rendered.push(index)
+      },
+    } as any
+
+    editor.renderCaretPage()
+    assert.deepEqual(rendered, [2])
+
+    rendered.length = 0
+    editor.renderCaretPage({ refreshVisible: true })
+    assert.deepEqual(rendered, [2, 1, 3])
+  })
+})
+
+describe("WasmHwpEditor native IME routing", () => {
+  function baseEditor(overrides = {}) {
     return {
       ...WasmHwpEditor,
       doc: {},
@@ -183,7 +503,6 @@ describe("WasmHwpEditor IME composition preview", () => {
         note: null,
         cursorRect: { pageIndex: 0, x: 12, y: 20, height: 18 },
       },
-      composing: { start: 0, length: 0 },
       imeProxy: {
         value: "",
         style: { left: "0px", top: "0px", height: "16px" },
@@ -214,90 +533,531 @@ describe("WasmHwpEditor IME composition preview", () => {
       refreshCursorRect() {},
       drawCaret() {},
       recordOp() {},
+      scheduleSnapshot() {},
+      anchorProxy() {},
+      renderPage() {},
+      renderCaretPage() {},
+      hasSelection: () => false,
+      deleteSelection() {},
+      pushHwpUndoCheckpoint() {},
+      ...overrides,
     } as any
   }
 
-  it("shows composition text immediately and defers the WASM render sync", () => {
-    withElementFactory((created) => {
-      let queued = ""
-      let rendered = 0
-      const editor = {
-        ...baseEditor(),
-        imeProxy: {
-          value: "ㅎ",
-          style: { left: "0px", top: "0px", height: "16px" },
-          dataset: {},
+  it("begins native composition at the current caret anchor without clearing browser composition", () => {
+    let checkpointed = 0
+    const rendered: number[] = []
+    let anchor: any = null
+    const editor = baseEditor({
+      imeProxy: { value: "stale", style: {}, dataset: {} },
+      doc: {
+        beginImeComposition(raw: string) {
+          anchor = JSON.parse(raw)
+          return JSON.stringify({ active: true })
         },
-        queueCompositionModelSync(text: string) {
-          queued = text
-        },
-        renderCaretPage() {
-          rendered += 1
-        },
-      } as any
-
-      editor.handleCompositionUpdate({ data: "하" })
-
-      assert.equal(queued, "하")
-      assert.equal(rendered, 0)
-      assert.equal(created.length, 1)
-      assert.equal(created[0].hidden, false)
-      assert.equal(created[0].textContent, "하")
-      assert.equal(created[0].style.left, "12px")
-      assert.equal(created[0].style.top, "20px")
+        updateImeComposition() {},
+        commitImeComposition() {},
+        cancelImeComposition() {},
+      },
+      pushHwpUndoCheckpoint() {
+        checkpointed += 1
+      },
+      renderPage(index: number) {
+        rendered.push(index)
+      },
     })
+
+    editor.handleCompositionStart({ data: "" })
+
+    assert.deepEqual(anchor, { kind: "body", sectionIdx: 0, paraIdx: 0, charOffset: 0 })
+    assert.equal(checkpointed, 1)
+    assert.deepEqual(rendered, [])
+    assert.equal(editor.imeProxy.value, "stale")
   })
 
-  it("flushes the final composition into the document and hides the preview", () => {
-    const inserted: any[] = []
-    const deleted: any[] = []
-    let rendered = 0
-    let snapshots = 0
-    const preview = {
-      hidden: false,
-      textContent: "ㅎ",
-      style: {},
-    }
-    const editor = {
-      ...baseEditor(),
-      composing: { start: 0, length: 1 },
-      pendingCompositionText: "ㅎ",
-      compositionSyncQueued: true,
-      compositionPreviewEl: preview,
-      imeProxy: {
-        value: "하",
-        style: { left: "0px", top: "0px", height: "16px" },
-        dataset: {},
-      },
+  it("updates native composition as document text without clearing browser composition", () => {
+    const updates: any[] = []
+    const rendered: number[] = []
+    let refreshed = 0
+    let drawn = 0
+    let anchored = 0
+    const editor = baseEditor({
+      imeProxy: { value: "ㅎ", style: {}, dataset: {} },
       doc: {
-        deleteText(...args: any[]) {
-          deleted.push(args)
+        beginImeComposition() {},
+        updateImeComposition(text: string, cursorOffset: number) {
+          updates.push([text, cursorOffset])
+          return JSON.stringify({ active: true, pageIndex: 2, invalidatedPages: [2], edit: { charOffset: 4 } })
         },
-        insertText(...args: any[]) {
-          inserted.push(args)
+        commitImeComposition() {},
+        cancelImeComposition() {},
+      },
+      renderPage(index: number) {
+        rendered.push(index)
+      },
+      refreshCursorRect() {
+        refreshed += 1
+      },
+      drawCaret() {
+        drawn += 1
+      },
+      anchorProxy() {
+        anchored += 1
+      },
+    })
+
+    editor.handleCompositionUpdate({ data: "하" })
+
+    assert.deepEqual(updates, [["하", 1]])
+    assert.equal(editor.caret.offset, 4)
+    assert.equal(refreshed, 1)
+    assert.equal(drawn, 1)
+    assert.equal(anchored, 1)
+    assert.deepEqual(rendered, [2])
+    assert.equal(editor.imeProxy.value, "ㅎ")
+  })
+
+  it("routes empty composition data immediately instead of stale proxy text", () => {
+    const updates: any[] = []
+    const rendered: number[] = []
+    const editor = baseEditor({
+      caret: {
+        section: 0,
+        paragraph: 0,
+        offset: 1,
+        cell: null,
+        note: null,
+        cursorRect: { pageIndex: 2, x: 12, y: 20, height: 18 },
+      },
+      imeProxy: { value: "하", style: {}, dataset: {} },
+      doc: {
+        beginImeComposition() {},
+        updateImeComposition(text: string, cursorOffset: number) {
+          updates.push([text, cursorOffset])
+          return JSON.stringify({ active: true, pageIndex: 2, invalidatedPages: [2], edit: { charOffset: 1 } })
         },
+        commitImeComposition() {},
+        cancelImeComposition() {},
       },
-      renderCaretPage() {
-        rendered += 1
+      renderPage(index: number) {
+        rendered.push(index)
       },
-      anchorProxy() {},
+    })
+
+    editor.handleCompositionUpdate({ data: "" })
+
+    assert.deepEqual(updates, [["", 0]])
+    assert.equal(editor.caret.offset, 1)
+    assert.deepEqual(rendered, [2])
+    assert.equal(editor.imeProxy.value, "하")
+  })
+
+  it("swallows textarea composition echoes without mutating the document", () => {
+    const inserted: string[] = []
+    const editor = baseEditor({
+      imeProxy: { value: "안", style: {}, dataset: {} },
+      insertPlainTextAtCaret(text: string) {
+        inserted.push(text)
+      },
+    })
+
+    editor.handleInput({ inputType: "insertCompositionText", data: "안", isComposing: true })
+
+    assert.deepEqual(inserted, [])
+    assert.equal(editor.imeProxy.value, "안")
+  })
+
+  it("commits final IME text through native and advances the caret from the native edit result", () => {
+    const commits: string[] = []
+    const rendered: number[] = []
+    const ops: any[] = []
+    let snapshots = 0
+    let refreshed = 0
+    const editor = baseEditor({
+      caret: {
+        section: 0,
+        paragraph: 0,
+        offset: 1,
+        cell: null,
+        note: null,
+        cursorRect: { pageIndex: 1, x: 12, y: 20, height: 18 },
+      },
+      imeProxy: { value: "하", style: {}, dataset: {} },
+      doc: {
+        beginImeComposition() {},
+        updateImeComposition() {},
+        commitImeComposition(text: string) {
+          commits.push(text)
+          return JSON.stringify({
+            ok: true,
+            committed: true,
+            active: false,
+            invalidatedPages: [1],
+            edit: { charOffset: 3 },
+          })
+        },
+        cancelImeComposition() {},
+      },
+      refreshCursorRect() {
+        refreshed += 1
+      },
+      renderPage(index: number) {
+        rendered.push(index)
+      },
+      recordOp(type: string, payload: any) {
+        ops.push([type, payload])
+      },
       scheduleSnapshot() {
         snapshots += 1
       },
-    } as any
+    })
 
     editor.handleCompositionEnd({ data: "하" })
 
-    assert.deepEqual(deleted[0], [0, 0, 0, 1])
-    assert.deepEqual(inserted[0], [0, 0, 0, "하"])
-    assert.equal(editor.caret.offset, 1)
-    assert.equal(editor.composing, null)
-    assert.equal(editor.pendingCompositionText, null)
-    assert.equal(editor.compositionSyncQueued, false)
-    assert.equal(preview.hidden, true)
-    assert.equal(preview.textContent, "")
-    assert.equal(rendered, 1)
+    assert.deepEqual(commits, ["하"])
+    assert.equal(editor.caret.offset, 3)
+    assert.equal(refreshed, 1)
+    assert.deepEqual(rendered, [1])
+    assert.deepEqual(ops, [["TextInserted", { text: "하" }]])
     assert.equal(snapshots, 1)
+    assert.equal(editor.imeProxy.value, "")
+  })
+
+  it("commits native IME from final insertCompositionText when compositionend is missed", () => {
+    const commits: string[] = []
+    const rendered: number[] = []
+    const inserted: string[] = []
+    let active = true
+    const editor = baseEditor({
+      caret: {
+        section: 0,
+        paragraph: 0,
+        offset: 1,
+        cell: null,
+        note: null,
+        cursorRect: { pageIndex: 4, x: 12, y: 20, height: 18 },
+      },
+      imeProxy: { value: "하", style: {}, dataset: {} },
+      doc: {
+        beginImeComposition() {},
+        updateImeComposition() {},
+        getImeCompositionRenderInfo() {
+          return JSON.stringify({ active, pageIndex: 4 })
+        },
+        commitImeComposition(text: string) {
+          commits.push(text)
+          active = false
+          return JSON.stringify({
+            ok: true,
+            committed: true,
+            active: false,
+            invalidatedPages: [4],
+            edit: { charOffset: 2 },
+          })
+        },
+        cancelImeComposition() {},
+      },
+      insertPlainTextAtCaret(text: string) {
+        inserted.push(text)
+      },
+      renderPage(index: number) {
+        rendered.push(index)
+      },
+    })
+
+    editor.handleInput({ inputType: "insertCompositionText", data: "하", isComposing: false })
+
+    assert.deepEqual(commits, ["하"])
+    assert.deepEqual(inserted, [])
+    assert.equal(editor.caret.offset, 2)
+    assert.deepEqual(rendered, [4])
+    assert.equal(editor.imeProxy.value, "")
+  })
+
+  it("cancels and repaints stale native composition text before non-composing keys", () => {
+    const rendered: number[] = []
+    let cancelled = 0
+    const eventCalls: string[] = []
+    const editor = baseEditor({
+      doc: {
+        beginImeComposition() {},
+        updateImeComposition() {},
+        commitImeComposition() {},
+        getImeCompositionRenderInfo() {
+          return JSON.stringify({ active: true, pageIndex: 7 })
+        },
+        cancelImeComposition() {
+          cancelled += 1
+          return JSON.stringify({ ok: true, active: false, invalidatedPages: [7] })
+        },
+      },
+      renderPage(index: number) {
+        rendered.push(index)
+      },
+      collapseSelection() {},
+      moveHorizontal() {},
+    })
+
+    editor.handleKeyDown({
+      key: "ArrowRight",
+      isComposing: false,
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      defaultPrevented: false,
+      preventDefault: () => eventCalls.push("preventDefault"),
+      stopPropagation: () => eventCalls.push("stopPropagation"),
+    })
+
+    assert.equal(cancelled, 1)
+    assert.deepEqual(rendered, [7])
+    assert.deepEqual(eventCalls, ["preventDefault"])
+  })
+
+  it("cancels and repaints stale native composition text before pointer caret moves", () => {
+    const rendered: number[] = []
+    let cancelled = 0
+    const editor = baseEditor({
+      doc: {
+        beginImeComposition() {},
+        updateImeComposition() {},
+        commitImeComposition() {},
+        getImeCompositionRenderInfo() {
+          return JSON.stringify({ active: true, pageIndex: 5 })
+        },
+        cancelImeComposition() {
+          cancelled += 1
+          return JSON.stringify({ ok: true, active: false, invalidatedPages: [5] })
+        },
+      },
+      renderPage(index: number) {
+        rendered.push(index)
+      },
+      scheduleToolbarStateSync() {},
+    })
+
+    editor.setCaretFromHit({ sectionIndex: 0, paragraphIndex: 1, charOffset: 3 }, 0)
+
+    assert.equal(cancelled, 1)
+    assert.deepEqual(rendered, [5])
+    assert.equal(editor.caret.paragraph, 1)
+    assert.equal(editor.caret.offset, 3)
+  })
+
+  it("parks the browser IME proxy offscreen so browser marked text is not visible", () => {
+    const proxy = { style: {} }
+    const editor = baseEditor({
+      imeProxy: proxy,
+      anchorProxy: WasmHwpEditor.anchorProxy,
+    })
+
+    editor.anchorProxy()
+
+    assert.equal(proxy.style.position, "fixed")
+    assert.equal(proxy.style.left, "-10000px")
+    assert.equal(proxy.style.top, "-10000px")
+    assert.equal(proxy.style.width, "1px")
+    assert.equal(proxy.style.height, "1px")
+    assert.equal(proxy.style.maxWidth, "1px")
+    assert.equal(proxy.style.maxHeight, "1px")
+    assert.equal(proxy.style.fontSize, "1px")
+    assert.equal(proxy.style.lineHeight, "1px")
+    assert.equal(proxy.style.opacity, "0")
+    assert.equal(proxy.style.color, "transparent")
+    assert.equal(proxy.style.webkitTextFillColor, "transparent")
+    assert.equal(proxy.style.caretColor, "transparent")
+    assert.equal(proxy.style.clipPath, "inset(50%)")
+    assert.equal(proxy.style.zIndex, "-1")
+  })
+})
+
+describe("WasmHwpEditor undo/redo history", () => {
+  function historyEditor() {
+    let nextSnapshot = 0
+    const restored: number[] = []
+    const discarded: number[] = []
+    const finishes: any[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      mirror: false,
+      pageCount: 1,
+      undoStack: [],
+      redoStack: [],
+      imeProxy: { value: "stale" },
+      doc: {
+        saveSnapshot() {
+          nextSnapshot += 1
+          return nextSnapshot
+        },
+        restoreSnapshot(id: number) {
+          restored.push(id)
+          return "{}"
+        },
+        discardSnapshot(id: number) {
+          discarded.push(id)
+        },
+        pageCount() {
+          return 1
+        },
+      },
+      finishAgentEdit(extra: any) {
+        finishes.push(extra)
+        return { ok: true, result: { ok: true, ...extra } }
+      },
+      scheduleToolbarStateSync() {},
+      clearSelection() {},
+      clearSelectionOverlays() {},
+    } as any
+
+    return { editor, restored, discarded, finishes }
+  }
+
+  function keyEvent(key: string, modifiers: any = {}) {
+    const calls: string[] = []
+    return {
+      event: {
+        key,
+        ctrlKey: false,
+        metaKey: false,
+        altKey: false,
+        shiftKey: false,
+        isComposing: false,
+        preventDefault: () => calls.push("preventDefault"),
+        stopPropagation: () => calls.push("stopPropagation"),
+        ...modifiers,
+      } as any,
+      calls,
+    }
+  }
+
+  it("moves current and target snapshots across undo and redo stacks", () => {
+    const { editor, restored, discarded, finishes } = historyEditor()
+
+    assert.equal(editor.pushHwpUndoCheckpoint("typing"), true)
+    assert.equal(editor.undoStack.length, 1)
+    assert.equal(editor.undoStack[0].id, 1)
+
+    assert.equal(editor.runHwpUndo(), true)
+    assert.deepEqual(restored, [1])
+    assert.deepEqual(discarded, [1])
+    assert.equal(editor.undoStack.length, 0)
+    assert.equal(editor.redoStack.length, 1)
+    assert.equal(editor.redoStack[0].id, 2)
+    assert.equal(editor.imeProxy.value, "")
+    assert.deepEqual(finishes[0], { history_direction: "undo" })
+
+    assert.equal(editor.runHwpRedo(), true)
+    assert.deepEqual(restored, [1, 2])
+    assert.deepEqual(discarded, [1, 2])
+    assert.equal(editor.undoStack.length, 1)
+    assert.equal(editor.undoStack[0].id, 3)
+    assert.equal(editor.redoStack.length, 0)
+    assert.deepEqual(finishes[1], { history_direction: "redo" })
+  })
+
+  it("handles Ctrl+Z through the HWP keydown path before caret checks", () => {
+    const { editor, restored } = historyEditor()
+    editor.pushHwpUndoCheckpoint("typing")
+    editor.caret = null
+    const { event, calls } = keyEvent("z", { ctrlKey: true })
+
+    editor.handleKeyDown(event)
+
+    assert.deepEqual(calls, ["preventDefault", "stopPropagation"])
+    assert.deepEqual(restored, [1])
+  })
+
+  it("uses physical key codes for localized editor shortcuts", () => {
+    const { editor, restored } = historyEditor()
+    editor.pushHwpUndoCheckpoint("typing")
+
+    const undo = keyEvent("ㅋ", { code: "KeyZ", ctrlKey: true })
+    editor.handleKeyDown(undo.event)
+
+    assert.deepEqual(undo.calls, ["preventDefault", "stopPropagation"])
+    assert.deepEqual(restored, [1])
+    assert.equal(editor.undoStack.length, 0)
+    assert.equal(editor.redoStack.length, 1)
+
+    const redo = keyEvent("ㅛ", { code: "KeyY", ctrlKey: true })
+    editor.handleKeyDown(redo.event)
+
+    assert.deepEqual(redo.calls, ["preventDefault", "stopPropagation"])
+    assert.deepEqual(restored, [1, 2])
+    assert.equal(editor.redoStack.length, 0)
+    assert.equal(editor.saveShortcut({ key: "ㄴ", code: "KeyS", ctrlKey: true, metaKey: false }), true)
+  })
+
+  it("reactivates document-level undo when a checkpoint is recorded", () => {
+    const { editor, restored } = historyEditor()
+    editor.el = { contains: () => false }
+    const doc = (globalThis as any).document
+    const previousActive = doc.activeElement
+    doc.activeElement = doc.body
+
+    try {
+      editor.pushHwpUndoCheckpoint("toolbar-format")
+      const { event, calls } = keyEvent("z", { code: "KeyZ", ctrlKey: true, target: doc.body })
+
+      editor.handleDocumentKeyDown(event)
+
+      assert.deepEqual(calls, ["preventDefault", "stopPropagation"])
+      assert.deepEqual(restored, [1])
+      assert.equal(editor.undoStack.length, 0)
+      assert.equal(editor.redoStack.length, 1)
+    } finally {
+      doc.activeElement = previousActive
+      editor.handleDocumentPointerDown({ target: {} } as any)
+    }
+  })
+
+  it("handles document-level redo shortcuts for the active HWP editor", () => {
+    const { editor, restored } = historyEditor()
+    editor.el = { contains: () => false }
+    editor.redoStack = [{ id: 42 }]
+    editor.activateKeyboardShortcuts()
+    const doc = (globalThis as any).document
+    const previousActive = doc.activeElement
+    doc.activeElement = doc.body
+
+    try {
+      const { event, calls } = keyEvent("y", { ctrlKey: true, target: doc.body })
+      editor.handleDocumentKeyDown(event)
+
+      assert.deepEqual(calls, ["preventDefault", "stopPropagation"])
+      assert.deepEqual(restored, [42])
+    } finally {
+      doc.activeElement = previousActive
+      editor.handleDocumentPointerDown({ target: {} } as any)
+    }
+  })
+
+  it("records a typing checkpoint and clears stale redo history", () => {
+    const discarded: number[] = []
+    const inserted: string[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      mirror: false,
+      caret: { section: 0, paragraph: 0, offset: 0, cell: null, note: null },
+      undoStack: [],
+      redoStack: [{ id: 9 }],
+      imeProxy: { value: "" },
+      doc: {
+        saveSnapshot: () => 7,
+        restoreSnapshot: () => "{}",
+        discardSnapshot: (id: number) => discarded.push(id),
+      },
+      hasSelection: () => false,
+      insertPlainTextAtCaret: (text: string) => inserted.push(text),
+    } as any
+
+    editor.handleInput({ inputType: "insertText", data: "A", isComposing: false })
+
+    assert.deepEqual(inserted, ["A"])
+    assert.equal(editor.undoStack.length, 1)
+    assert.equal(editor.undoStack[0].id, 7)
+    assert.equal(editor.redoStack.length, 0)
+    assert.deepEqual(discarded, [9])
   })
 })
 
@@ -489,6 +1249,225 @@ describe("WasmHwpEditor preview patch safety", () => {
     assert.equal(editor.el.dataset.previewFramePage, "2")
     assert.equal(editor.el.scrollTop, 2016)
     assert.equal(fills.length, 3)
+  })
+
+  it("uses explicit saved VFS replace_text ranges instead of the whole paragraph", () => {
+    const calls: any[] = []
+    const title = "범용(용역[지식ㆍ정보성과물]업 분야) 표준하도급계약서 "
+    const marker = "CHATRAIL_FSKIT_HWP_OK"
+    const fills: any[] = []
+
+    const editor = {
+      ...WasmHwpEditor,
+      mirror: true,
+      previewPatchText: "",
+      previewPatchCursor: null,
+      previewPatchAnchor: null,
+      previewSavedHighlight: null,
+      rendered: new Map([[0, true]]),
+      scale: 1,
+      el: {
+        scrollTop: 0,
+        dataset: {
+          previewHighlights: JSON.stringify([
+            {
+              kind: "text",
+              op: "replace_text",
+              ref: { section: 0, paragraph: 0, offset: 0 },
+              offset: title.length,
+              length: marker.length,
+              text: marker
+            }
+          ])
+        }
+      },
+      doc: {
+        getParagraphLength() {
+          return title.length + marker.length
+        },
+        getSelectionRects(...args: any[]) {
+          calls.push(args)
+          return JSON.stringify([{ pageIndex: 0, x: 1, y: 2, width: 3, height: 4 }])
+        },
+      },
+      pageInfo() {
+        return { w: 100, h: 100 }
+      },
+      pageSection() {
+        return {
+          offsetTop: 0,
+          getBoundingClientRect() {
+            return { height: 100 }
+          },
+        }
+      },
+      pageOverlay() {
+        return {
+          getContext() {
+            return {
+              fillStyle: "",
+              fillRect(...args: any[]) {
+                fills.push(args)
+              },
+            }
+          },
+        }
+      },
+    } as any
+
+    editor.renderSavedEditHighlights()
+
+    assert.deepEqual(calls, [[0, 0, title.length, 0, title.length + marker.length]])
+    assert.equal(editor.el.dataset.previewHighlightCount, "1")
+    assert.equal(fills.length, 1)
+  })
+
+  it("frames saved VFS edits from cursor geometry when HWP selection rects are empty", () => {
+    const fills: any[] = []
+
+    const editor = {
+      ...WasmHwpEditor,
+      mirror: true,
+      previewSavedHighlight: null,
+      rendered: new Map([[4, true]]),
+      scale: 1,
+      pageCount: 8,
+      el: {
+        scrollTop: 0,
+        dataset: {
+          previewHighlights: JSON.stringify([
+            {
+              kind: "text",
+              op: "replace_text",
+              ref: { section: 0, paragraph: 42, offset: 0 },
+              offset: 13,
+              length: 11,
+              text: "EDITED_LINE"
+            }
+          ])
+        }
+      },
+      doc: {
+        getParagraphLength() {
+          return 80
+        },
+        getSelectionRects() {
+          return JSON.stringify([])
+        },
+        getCursorRect() {
+          return JSON.stringify({ pageIndex: 4, x: 120, y: 620, height: 18 })
+        },
+      },
+      pageInfo() {
+        return { w: 700, h: 1000 }
+      },
+      pageSection() {
+        return {
+          offsetTop: 0,
+          getBoundingClientRect() {
+            return { height: 1000 }
+          },
+        }
+      },
+      pageOverlay() {
+        return {
+          getContext() {
+            return {
+              fillStyle: "",
+              fillRect(...args: any[]) {
+                fills.push(args)
+              },
+            }
+          },
+        }
+      },
+    } as any
+
+    assert.deepEqual(editor.previewPageIndexesForSavedHighlights(), [4])
+
+    editor.renderSavedEditHighlights()
+
+    assert.equal(editor.el.dataset.previewHighlightCount, "1")
+    assert.equal(editor.el.dataset.previewFrameMode, "saved-text")
+    assert.equal(editor.el.dataset.previewFramePage, "4")
+    assert.equal(editor.el.scrollTop, 596)
+    assert.equal(fills.length, 1)
+  })
+
+  it("estimates the saved VFS edit frame from HWP ref order when geometry is unavailable", () => {
+    const fills: any[] = []
+    const elements = Array.from({ length: 12 }, (_value, index) => ({
+      type: "paragraph",
+      ref: { section: 0, paragraph: index, offset: 0 },
+      text: `paragraph ${index}`
+    }))
+
+    const editor = {
+      ...WasmHwpEditor,
+      mirror: true,
+      previewSavedHighlight: null,
+      rendered: new Map([[2, true]]),
+      scale: 1,
+      pageCount: 3,
+      el: {
+        scrollTop: 0,
+        dataset: {
+          previewHighlights: JSON.stringify([
+            {
+              kind: "text",
+              op: "replace_text",
+              ref: { section: 0, paragraph: 9, offset: 0 },
+              text: "ESTIMATED_LINE"
+            }
+          ])
+        }
+      },
+      doc: {
+        getParagraphLength() {
+          return 50
+        },
+        getSelectionRects() {
+          return JSON.stringify([])
+        },
+        getCursorRect() {
+          return ""
+        },
+      },
+      collectElements() {
+        return elements
+      },
+      pageInfo() {
+        return { w: 700, h: 1000 }
+      },
+      pageSection() {
+        return {
+          offsetTop: 0,
+          getBoundingClientRect() {
+            return { height: 1000 }
+          },
+        }
+      },
+      pageOverlay() {
+        return {
+          getContext() {
+            return {
+              fillStyle: "",
+              fillRect(...args: any[]) {
+                fills.push(args)
+              },
+            }
+          },
+        }
+      },
+    } as any
+
+    editor.renderSavedEditHighlights()
+
+    assert.equal(editor.el.dataset.previewHighlightCount, "1")
+    assert.equal(editor.el.dataset.previewFrameMode, "saved-text")
+    assert.equal(editor.el.dataset.previewFramePage, "2")
+    assert.equal(editor.el.scrollTop, 376)
+    assert.equal(fills.length, 1)
   })
 
   it("fills insert_table cell payloads in the authoritative browser editor", () => {
@@ -988,6 +1967,196 @@ describe("WasmHwpEditor preview patch safety", () => {
     assert.equal(editor.handleLoadedPreviewHighlights(true, { document_id: "doc-1" }), true)
     assert.equal(requested, 0)
     assert.equal(rendered, 1)
+  })
+
+  it("uses native saved-edit highlight rects before TS coordinate fallbacks", () => {
+    let nativeInput = ""
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        getSavedEditHighlightRects(input: string) {
+          nativeInput = input
+          return JSON.stringify([{ pageIndex: 2, x: 210, y: 320, width: 48, height: 17 }])
+        },
+        getSelectionRectsInCell() {
+          throw new Error("legacy selection rects must not run when native preview rects exist")
+        },
+      },
+    } as any
+
+    const highlight = {
+      op: "set_cell",
+      ref: {
+        section: 0,
+        paragraph: 5,
+        offset: 0,
+        cell: { parentParaIndex: 5, controlIndex: 0, cellIndex: 0, cellParaIndex: 0 },
+      },
+      text: "AI 내부 편집 데모",
+    }
+    const rects = editor.rectsForSavedEditHighlight(highlight)
+
+    assert.deepEqual(rects, [
+      { pageIndex: 2, x: 210, y: 320, width: 48, height: 17, savedHighlightNative: true },
+    ])
+    assert.deepEqual(JSON.parse(nativeInput), highlight)
+  })
+
+  it("does not inflate precise native saved-edit rects with fallback minimums", () => {
+    const fills: any[] = []
+    const editor = {
+      ...WasmHwpEditor,
+    } as any
+    const overlay = {
+      width: 200,
+      height: 100,
+      getBoundingClientRect() {
+        return { width: 100, height: 50 }
+      },
+    }
+    const ctx = {
+      fillStyle: "",
+      strokeStyle: "",
+      lineWidth: 0,
+      fillRect(...args: any[]) {
+        fills.push(args)
+      },
+      strokeRect() {},
+    }
+
+    editor.paintEditHighlightRect(
+      ctx,
+      overlay,
+      { pageIndex: 0, x: 10, y: 20, width: 6, height: 8, savedHighlightNative: true },
+      1
+    )
+    editor.paintEditHighlightRect(
+      ctx,
+      overlay,
+      { pageIndex: 0, x: 10, y: 20, width: 6, height: 8 },
+      1
+    )
+
+    assert.deepEqual(fills[0], [10, 20, 6, 8])
+    assert.deepEqual(fills[1], [0, 10, 56, 28])
+  })
+
+  it("uses a bounded text estimate when a saved cell edit only has degenerate rects", () => {
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        getSelectionRectsInCell() {
+          return JSON.stringify([
+            { pageIndex: 10, x: 98.3, y: 264.3, width: 3.8, height: 1.3 },
+            { pageIndex: 10, x: 98.3, y: 266.4, width: 3.8, height: 1.3 },
+          ])
+        },
+        getCellParagraphLength() {
+          return 8
+        },
+        getTableCellBboxes() {
+          return JSON.stringify([
+            { cellIdx: 0, row: 0, col: 0, pageIndex: 10, x: 98.3, y: 264.3, w: 3.8, h: 5.6 },
+            { cellIdx: 1, row: 0, col: 1, pageIndex: 10, x: 102.1, y: 264.3, w: 44.9, h: 5.6 },
+            { cellIdx: 2, row: 0, col: 2, pageIndex: 10, x: 147, y: 264.3, w: 473.4, h: 5.6 },
+          ])
+        },
+      },
+    } as any
+
+    const rects = editor.rectsForSavedEditHighlight({
+      op: "set_cell",
+      ref: {
+        section: 1,
+        paragraph: 5,
+        offset: 0,
+        cell: { parentParaIndex: 5, controlIndex: 0, cellIndex: 0, cellParaIndex: 0 },
+      },
+      text: "최종 내부 편집",
+    })
+
+    assert.equal(rects.length, 1)
+    assert.deepEqual(
+      {
+        ...rects[0],
+        width: Math.round(rects[0].width * 10) / 10,
+        height: Math.round(rects[0].height * 10) / 10,
+      },
+      { pageIndex: 10, x: 98.3, y: 264.3, width: 93, height: 17 }
+    )
+  })
+
+  it("uses a bounded text estimate before cursor fallback when saved cell rects are empty", () => {
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        getSelectionRectsInCell() {
+          return "[]"
+        },
+        getCellParagraphLength() {
+          return 8
+        },
+        getTableCellBboxes() {
+          return JSON.stringify([
+            { cellIdx: 0, row: 0, col: 0, pageIndex: 10, x: 98.3, y: 264.3, w: 3.8, h: 3.8 },
+            { cellIdx: 1, row: 0, col: 1, pageIndex: 10, x: 102.1, y: 264.3, w: 44.9, h: 3.8 },
+            { cellIdx: 2, row: 0, col: 2, pageIndex: 10, x: 147, y: 264.3, w: 473.4, h: 3.8 },
+            { cellIdx: 3, row: 0, col: 3, pageIndex: 10, x: 620.4, y: 264.3, w: 3.8, h: 3.8 },
+          ])
+        },
+        getCursorRectInCell() {
+          return JSON.stringify({ pageIndex: 10, x: 98, y: 266, width: 72, height: 1 })
+        },
+      },
+    } as any
+
+    const rects = editor.rectsForSavedEditHighlight({
+      op: "set_cell",
+      ref: {
+        section: 1,
+        paragraph: 5,
+        offset: 0,
+        cell: { parentParaIndex: 5, controlIndex: 0, cellIndex: 0, cellParaIndex: 0 },
+      },
+      text: "최종 내부 편집",
+    })
+
+    assert.equal(rects.length, 1)
+    assert.equal(rects[0].pageIndex, 10)
+    assert.equal(Math.round(rects[0].width * 10) / 10, 93)
+    assert.equal(Math.round(rects[0].height * 10) / 10, 17)
+  })
+
+  it("keeps precise saved cell text rects when the engine returns usable geometry", () => {
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        getSelectionRectsInCell() {
+          return JSON.stringify([
+            { pageIndex: 2, x: 120, y: 210, width: 64, height: 18 },
+          ])
+        },
+        getCellParagraphLength() {
+          return 8
+        },
+        getTableCellBboxes() {
+          throw new Error("usable text rects should not fall back to table bboxes")
+        },
+      },
+    } as any
+
+    const rects = editor.rectsForSavedEditHighlight({
+      op: "set_cell",
+      ref: {
+        section: 0,
+        paragraph: 5,
+        offset: 0,
+        cell: { parentParaIndex: 5, controlIndex: 0, cellIndex: 0, cellParaIndex: 0 },
+      },
+      text: "정상 셀",
+    })
+
+    assert.deepEqual(rects, [{ pageIndex: 2, x: 120, y: 210, width: 64, height: 18 }])
   })
 
   it("restores saved VFS edit highlights when caret blink clears the overlay", () => {

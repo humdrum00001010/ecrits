@@ -19,9 +19,9 @@
 //   server so a browser close doesn't lose work.
 //
 // IME: the hidden <textarea> proxy stays the OS IME target. Plain text arrives
-// via its `input` event (non-composing). Korean composition gets an immediate
-// transient DOM preview at the caret, then the WASM document/canvas is synced
-// after a paint; compositionend commits the final text into the model.
+// via its `input` event (non-composing). Korean composition is forwarded to
+// rhwp_core's native IME carrier, which replaces ordinary document text at the
+// anchor while composition is active.
 //
 // The wasm-bindgen `--target web` glue exposes `init(wasmUrl)` plus the
 // `HwpDocument` class. The generated ES module is served directly from the
@@ -33,8 +33,9 @@ import { OPS } from "./wasm_ops.ts"
 // into the hook below so `this` is the editor instance (same pattern as OPS).
 import { keyboardSubsystem } from "./wasm_hwp_keys.ts"
 
-const WASM_URL = "/assets/rhwp/rhwp_bg.wasm"
-const RHWP_JS_URL = "/assets/rhwp/rhwp.js"
+const RHWP_ASSET_VERSION = "20260710-hancom-geometry-r19"
+const WASM_URL = `/assets/rhwp/rhwp_bg.wasm?v=${RHWP_ASSET_VERSION}`
+const RHWP_JS_URL = `/assets/rhwp/rhwp.js?v=${RHWP_ASSET_VERSION}`
 import {SEL} from "./selectors.ts"
 import {
   LOCAL_EDITOR_COMMAND_EVENT,
@@ -44,6 +45,18 @@ import {
 } from "./editor_events.ts"
 const HWP_IMAGE_DEFAULT_MAX_UNIT = 22_000
 const HWP_PICK_POINT_RECT_SIZE = 48
+const HWP_RENDER_MAX_PX = 4_000_000
+const HWP_LOW_MEMORY_RENDER_MAX_PX = 2_000_000
+const HWP_MIRROR_RENDER_MAX_PX = 1_500_000
+const HWP_RENDERED_PAGE_SOFT_LIMIT = 10
+const HWP_RETAINED_PAGE_MARGIN = 1
+const HWP_HISTORY_LIMIT = 64
+const HWP_SAVED_EDIT_MIN_TEXT_RECT_WIDTH = 8
+const HWP_SAVED_EDIT_MIN_TEXT_RECT_HEIGHT = 8
+const HWP_SAVED_EDIT_CJK_CHAR_WIDTH = 13.5
+const HWP_SAVED_EDIT_LATIN_CHAR_WIDTH = 7
+const HWP_SAVED_EDIT_SPACE_WIDTH = 6
+const HWP_SAVED_EDIT_TEXT_HEIGHT = 17
 
 // How long the doc must stay idle (no edits) before we export+snapshot bytes
 // to the server. Each edit is instant locally; persistence is debounced so we
@@ -54,7 +67,6 @@ const SNAPSHOT_IDLE_MS = 1500
 // load (every hook instance shares the same wasm memory + HwpDocument class).
 let wasmReady = null
 let HwpDocument = null
-const hwpScrollPositions = new Map<string, { top: number; left: number }>()
 function ensureWasm() {
   if (!wasmReady) {
     wasmReady = import(RHWP_JS_URL).then((module) => {
@@ -205,18 +217,145 @@ const translatePictureProps = (props) => {
 //
 // A handler is `(editor, op, ref, verb) => { ok, extra } | { error }`.
 
+export const HWP_VIEW_STATE_KEYS = [
+  "doc",
+  "pageCount",
+  "scale",
+  "rendered",
+  "renderedPageOrder",
+  "pageScales",
+  "renderSeq",
+  "visible",
+  "caret",
+  "sel",
+  "localImagePick",
+  "imageDrag",
+  "dragSelect",
+  "lamport",
+  "snapshotTimer",
+  "snapshotSeq",
+  "undoStack",
+  "redoStack",
+  "caretBlinkOn",
+  "elementPickerEnabled",
+  "pickerHover",
+  "pickerHoverEvent",
+  "pickerHoverRaf",
+  "agentOpQueue",
+  "agentOpProcessing",
+  "previewPatchText",
+  "previewPatchCursor",
+  "previewPatchAnchor",
+  "previewPatchTarget",
+  "previewPatchCount",
+  "previewPatchHighlight",
+  "previewSavedHighlights",
+  "previewSavedHighlight",
+  "previewPageFilter",
+  "previewPatchTurnId",
+  "previewHookEventCount",
+  "previewAuthorityPublishCount",
+  "previewAuthorityRequestCount",
+  "previewAuthorityEventCount",
+  "previewAuthorityReloadCount",
+  "previewAuthorityDeferredCount",
+  "previewAuthorityLastPayload",
+  "authoritativePreviewObjectUrl",
+  "scrollPersistTimer",
+  "pendingScrollPosition",
+  "scrollPositions",
+  "shortcutActive",
+  "imeProxy",
+  "pageStack",
+  "documentId",
+  "format",
+  "mirror",
+  "unbindElementPicker",
+  "onScroll",
+  "onPreviewAuthority",
+  "onResize",
+  "onMouseDown",
+  "onMouseMove",
+  "onMouseUp",
+  "onDoubleClick",
+  "onToolbarCommand",
+  "onDocumentKeyDown",
+  "onDocumentPointerDown",
+  "blink",
+  "io",
+  "loadedUrl",
+  "toolbarStateSyncQueued",
+  "_elementsCache",
+  "onBeforeInput",
+  "onInput",
+  "onCompositionStart",
+  "onCompositionUpdate",
+  "onCompositionEnd",
+  "onKeyDown",
+  "onProxyFocus",
+  "onCopy",
+  "onPaste",
+]
+
+export function installHwpViewState(editor) {
+  if (editor.view_state) return
+
+  Object.defineProperty(editor, "view_state", {
+    value: Object.create(null),
+    writable: false,
+    enumerable: true,
+    configurable: false,
+  })
+
+  for (const key of HWP_VIEW_STATE_KEYS) {
+    Object.defineProperty(editor, key, {
+      get() {
+        return this.view_state[key]
+      },
+      set(value) {
+        this.view_state[key] = value
+      },
+      enumerable: false,
+      configurable: true,
+    })
+  }
+}
+
+function unexpectedHwpLooseOwnStateKeys(editor, allowedOwnKeys = []) {
+  const allowedDataKeys = new Set(["view_state", ...allowedOwnKeys])
+  const viewStateKeys = new Set(HWP_VIEW_STATE_KEYS)
+  const unexpected = []
+
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(editor))) {
+    if (viewStateKeys.has(key)) {
+      if ("value" in descriptor) unexpected.push(key)
+      continue
+    }
+    if (allowedDataKeys.has(key)) continue
+    if ("value" in descriptor) unexpected.push(key)
+  }
+
+  return unexpected.sort()
+}
+
 const WasmHwpEditor = {
   // Keyboard / IME / text-input methods (bindEditing, handleKeyDown, composition
-  // input, delete/merge/split at caret, Ctrl+S) live in wasm_hwp_keys.ts and are
-  // mixed in here — they run as hook methods with `this` = this editor instance.
+  // input, delete/merge/split at caret, editor shortcuts) live in
+  // wasm_hwp_keys.ts and are mixed in here — they run as hook methods with
+  // `this` = this editor instance.
   ...keyboardSubsystem,
 
   mounted() {
+    installHwpViewState(this)
+
     this.doc = null
     this.pageCount = 0
     this.scale = 1
     // page index -> true once rendered
     this.rendered = new Map()
+    this.renderedPageOrder = new Map()
+    this.pageScales = new Map()
+    this.renderSeq = 0
     // page indices currently near the viewport (IntersectionObserver)
     this.visible = new Set()
 
@@ -246,15 +385,10 @@ const WasmHwpEditor = {
     this.dragSelect = null
     // Lamport-ish monotonic counter for op-log event ids (recovery stream).
     this.lamport = 0
-    // Korean IME provisional composition region currently live in the document.
-    //   composing = { start, length }  (in the caret's paragraph/cell)
-    this.composing = null
-    this.pendingCompositionText = null
-    this.compositionSyncQueued = false
-    this.compositionPreviewEl = null
-    this.skipNextCompositionInput = null
     this.snapshotTimer = null
     this.snapshotSeq = 0
+    this.undoStack = []
+    this.redoStack = []
     this.caretBlinkOn = true
     this.elementPickerEnabled = false
     this.pickerHover = null
@@ -270,6 +404,7 @@ const WasmHwpEditor = {
     this.previewPatchHighlight = null
     this.previewSavedHighlights = []
     this.previewSavedHighlight = null
+    this.previewPageFilter = null
     this.previewPatchTurnId = null
     this.previewHookEventCount = 0
     this.previewAuthorityPublishCount = 0
@@ -281,6 +416,8 @@ const WasmHwpEditor = {
     this.authoritativePreviewObjectUrl = null
     this.scrollPersistTimer = null
     this.pendingScrollPosition = null
+    this.scrollPositions = new Map()
+    this.shortcutActive = false
 
     this.imeProxy = this.el.querySelector(SEL.hwpImeProxy)
     this.pageStack = this.el.querySelector(SEL.hwpPages)
@@ -354,8 +491,12 @@ const WasmHwpEditor = {
     this.onMouseUp = event => this.onCanvasMouseUp(event)
     this.onDoubleClick = event => this.onCanvasDoubleClick(event)
     this.onToolbarCommand = event => this.handleToolbarCommand(event.detail || {})
+    this.onDocumentKeyDown = event => this.handleDocumentKeyDown(event)
+    this.onDocumentPointerDown = event => this.handleDocumentPointerDown(event)
     this.el.addEventListener("mousedown", this.onMouseDown)
     this.el.addEventListener("dblclick", this.onDoubleClick)
+    document.addEventListener("keydown", this.onDocumentKeyDown, true)
+    document.addEventListener("mousedown", this.onDocumentPointerDown, true)
     document.addEventListener("mousemove", this.onMouseMove)
     document.addEventListener("mouseup", this.onMouseUp)
     document.addEventListener(LOCAL_EDITOR_COMMAND_EVENT, this.onToolbarCommand)
@@ -380,6 +521,8 @@ const WasmHwpEditor = {
             this.renderPage(idx)
           } else {
             this.visible.delete(idx)
+            this.releasePageCanvas(idx)
+            this.enforcePageMemoryBudget()
           }
         }
       },
@@ -406,10 +549,6 @@ const WasmHwpEditor = {
       try { this.pushSnapshot() } catch (_) { /* socket gone — nothing to flush to */ }
     }
     if (this.pickerHoverRaf) cancelAnimationFrame(this.pickerHoverRaf)
-    if (this.compositionPreviewEl) {
-      this.compositionPreviewEl.remove()
-      this.compositionPreviewEl = null
-    }
     if (this.authoritativePreviewObjectUrl) {
       try { URL.revokeObjectURL(this.authoritativePreviewObjectUrl) } catch (_) {}
       this.authoritativePreviewObjectUrl = null
@@ -419,13 +558,17 @@ const WasmHwpEditor = {
     this.el.removeEventListener("scroll", this.onScroll)
     this.el.removeEventListener("mousedown", this.onMouseDown)
     this.el.removeEventListener("dblclick", this.onDoubleClick)
+    document.removeEventListener("keydown", this.onDocumentKeyDown, true)
+    document.removeEventListener("mousedown", this.onDocumentPointerDown, true)
     document.removeEventListener("mousemove", this.onMouseMove)
     document.removeEventListener("mouseup", this.onMouseUp)
     document.removeEventListener(LOCAL_EDITOR_COMMAND_EVENT, this.onToolbarCommand)
     if (this.unbindElementPicker) this.unbindElementPicker()
     this.unbindEditing()
     if (this.el.__wasmHwpEditor === this) delete this.el.__wasmHwpEditor
+    this.releaseAllPageCanvases()
     if (this.doc) {
+      this.clearHwpHistory()
       try { this.doc.free() } catch (_) {}
       this.doc = null
     }
@@ -470,10 +613,10 @@ const WasmHwpEditor = {
       top: Math.max(0, Math.round(this.el.scrollTop || 0)),
       left: Math.max(0, Math.round(this.el.scrollLeft || 0))
     }
-    hwpScrollPositions.set(key, position)
-    if (hwpScrollPositions.size > 100) {
-      const oldest = hwpScrollPositions.keys().next().value
-      if (oldest) hwpScrollPositions.delete(oldest)
+    this.scrollPositions.set(key, position)
+    if (this.scrollPositions.size > 100) {
+      const oldest = this.scrollPositions.keys().next().value
+      if (oldest) this.scrollPositions.delete(oldest)
     }
     this.queueScrollPositionPersist(position)
   },
@@ -481,7 +624,7 @@ const WasmHwpEditor = {
   restoreScrollPosition(url = null) {
     if (this.mirror || !this.el) return
     const key = this.scrollPositionKey(url)
-    const position = (key && hwpScrollPositions.get(key)) || this.serverScrollPosition()
+    const position = (key && this.scrollPositions.get(key)) || this.serverScrollPosition()
     if (!position) return
 
     const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16))
@@ -945,11 +1088,10 @@ const WasmHwpEditor = {
     if (!overlay) return
     const ctx = overlay.getContext("2d")
     if (!ctx) return
-    const s = this.scale || (window.devicePixelRatio || 1)
-    ctx.fillStyle = "rgba(245, 158, 11, 0.30)"
+    const s = this.pageScale(pageIndex)
     for (const r of highlight.rects) {
       if (r.pageIndex !== pageIndex) continue
-      ctx.fillRect(r.x * s, r.y * s, Math.max(1, r.width) * s, Math.max(1, r.height) * s)
+      this.paintEditHighlightRect(ctx, overlay, r, s)
     }
   },
 
@@ -964,20 +1106,9 @@ const WasmHwpEditor = {
     }
   },
 
-  renderSavedEditHighlights() {
-    if (!this.mirror || !this.doc) return
+  savedEditHighlightRects() {
     const highlights = this.parsePreviewHighlights()
     this.previewSavedHighlights = highlights
-    if (highlights.length === 0) {
-      this.previewSavedHighlight = null
-      if (!this.previewPatchHighlight) {
-        this.el.dataset.previewHighlightMode = ""
-        this.el.dataset.previewHighlightCount = "0"
-        this.el.dataset.previewHighlightPages = ""
-        this.el.dataset.previewHighlightError = ""
-      }
-      return
-    }
 
     let rects = []
     const errors = []
@@ -993,6 +1124,31 @@ const WasmHwpEditor = {
       } catch (error) {
         errors.push(String(error && error.message ? error.message : error))
       }
+    }
+
+    return { highlights, rects, errors }
+  },
+
+  previewPageIndexesForSavedHighlights() {
+    if (!this.mirror || !this.doc) return null
+    const { highlights, rects } = this.savedEditHighlightRects()
+    if (!Array.isArray(highlights) || highlights.length === 0) return null
+    const pages = [...new Set(rects.map(r => r.pageIndex).filter(Number.isInteger))]
+    return pages.length > 0 ? pages : [0]
+  },
+
+  renderSavedEditHighlights() {
+    if (!this.mirror || !this.doc) return
+    const { highlights, rects, errors } = this.savedEditHighlightRects()
+    if (highlights.length === 0) {
+      this.previewSavedHighlight = null
+      if (!this.previewPatchHighlight) {
+        this.el.dataset.previewHighlightMode = ""
+        this.el.dataset.previewHighlightCount = "0"
+        this.el.dataset.previewHighlightPages = ""
+        this.el.dataset.previewHighlightError = ""
+      }
+      return
     }
 
     this.previewSavedHighlight = { rects }
@@ -1038,10 +1194,14 @@ const WasmHwpEditor = {
     const ref = this.parseRef(rawRef)
     if (!ref || !this.doc) return []
 
+    const nativeRects = this.nativeSavedEditHighlightRects(highlight)
+    if (nativeRects.length > 0) return nativeRects
+
     let raw = null
     if (ref.cell) {
       const cell = ref.cell
       const paragraph = Number.isInteger(cell.cellParaIndex) ? cell.cellParaIndex : 0
+      const start = this.savedEditCellHighlightStart(ref, highlight)
       const length = this.savedEditCellHighlightLength(ref, cell, paragraph, highlight)
       if (length <= 0) return []
       raw = this.doc.getSelectionRectsInCell(
@@ -1050,9 +1210,9 @@ const WasmHwpEditor = {
         cell.controlIndex,
         cell.cellIndex,
         paragraph,
-        0,
+        start,
         paragraph,
-        length
+        start + length
       )
     } else {
       const start = this.savedEditParagraphStart(ref, highlight)
@@ -1061,11 +1221,260 @@ const WasmHwpEditor = {
       raw = this.doc.getSelectionRects(ref.section, ref.paragraph, start, ref.paragraph, end)
     }
 
-    const rects = raw ? JSON.parse(raw) : []
-    return Array.isArray(rects) ? rects : []
+    let rects = []
+    try {
+      const parsed = raw ? JSON.parse(raw) : []
+      rects = Array.isArray(parsed) ? parsed : []
+    } catch (_) {
+      rects = []
+    }
+    if (rects.length > 0) {
+      if (!ref.cell || this.savedEditRectsUsable(rects)) return rects
+
+      const cellRect = this.fallbackSavedEditCellRect(ref, ref.cell, rects, highlight)
+      if (cellRect) return [cellRect]
+      return rects
+    }
+
+    if (ref.cell) {
+      const cellRect = this.fallbackSavedEditCellRect(ref, ref.cell, rects, highlight)
+      if (cellRect) return [cellRect]
+    }
+
+    const cursorRect = this.fallbackSavedEditCursorRect(ref, highlight)
+    if (cursorRect) return [cursorRect]
+
+    const estimatedRect = this.fallbackSavedEditElementRect(ref)
+    return estimatedRect ? [estimatedRect] : []
+  },
+
+  nativeSavedEditHighlightRects(highlight) {
+    if (!this.doc || typeof this.doc.getSavedEditHighlightRects !== "function") return []
+    try {
+      const raw = this.doc.getSavedEditHighlightRects(JSON.stringify(highlight || {}))
+      const rects = raw ? JSON.parse(raw) : []
+      return Array.isArray(rects)
+        ? rects
+          .filter(rect => rect && typeof rect === "object")
+          .map(rect => ({ ...rect, savedHighlightNative: true }))
+        : []
+    } catch (_) {
+      return []
+    }
+  },
+
+  savedEditRectsUsable(rects) {
+    if (!Array.isArray(rects) || rects.length === 0) return false
+    return rects.some((rect) => {
+      const width = Number(rect && (rect.width ?? rect.w))
+      const height = Number(rect && (rect.height ?? rect.h))
+      return width >= HWP_SAVED_EDIT_MIN_TEXT_RECT_WIDTH &&
+        height >= HWP_SAVED_EDIT_MIN_TEXT_RECT_HEIGHT
+    })
+  },
+
+  fallbackSavedEditCellRect(ref, cell, rects = [], highlight = null) {
+    if (!ref || !cell || !this.doc || typeof this.doc.getTableCellBboxes !== "function") return null
+    const pageHint = this.savedEditRectPageHint(rects)
+
+    let boxes = []
+    try {
+      const raw = this.doc.getTableCellBboxes(
+        ref.section,
+        cell.parentParaIndex,
+        cell.controlIndex,
+        Number.isInteger(pageHint) ? pageHint : undefined
+      )
+      boxes = JSON.parse(raw || "[]")
+    } catch (_) {
+      boxes = []
+    }
+    if (!Array.isArray(boxes) || boxes.length === 0) return null
+
+    const target = boxes.find((box) => Number(box.cellIdx ?? box.cellIndex) === Number(cell.cellIndex))
+    if (!target) return null
+
+    const normalized = this.normalizeSavedEditRect(target, target.pageIndex ?? pageHint)
+    if (!normalized) return null
+    if (this.savedEditRectsUsable([normalized])) return normalized
+
+    const row = Number(target.row)
+    const pageIndex = Number(target.pageIndex ?? normalized.pageIndex)
+    if (!Number.isInteger(row) || !Number.isInteger(pageIndex)) {
+      return this.estimatedSavedEditCellTextRect(normalized, null, highlight)
+    }
+
+    const rowRects =
+      boxes
+        .filter((box) => Number(box.row) === row && Number(box.pageIndex ?? pageIndex) === pageIndex)
+        .map((box) => this.normalizeSavedEditRect(box, pageIndex))
+        .filter(Boolean)
+
+    return this.estimatedSavedEditCellTextRect(normalized, rowRects, highlight)
+  },
+
+  savedEditRectPageHint(rects) {
+    if (!Array.isArray(rects)) return null
+    const page = rects.find((rect) => Number.isInteger(Number(rect && (rect.pageIndex ?? rect.page))))
+    if (!page) return null
+    const pageIndex = Number(page.pageIndex ?? page.page)
+    return Number.isInteger(pageIndex) ? pageIndex : null
+  },
+
+  normalizeSavedEditRect(rect, fallbackPageIndex = 0) {
+    if (!rect || typeof rect !== "object") return null
+    const pageIndex = Number(rect.pageIndex ?? rect.page ?? fallbackPageIndex)
+    const x = Number(rect.x ?? rect.left)
+    const y = Number(rect.y ?? rect.top)
+    const width = Number(rect.width ?? rect.w)
+    const height = Number(rect.height ?? rect.h)
+    if (![pageIndex, x, y, width, height].every(Number.isFinite)) return null
+    if (!(width > 0 && height > 0)) return null
+
+    return {
+      pageIndex: Math.max(0, Math.round(pageIndex)),
+      x,
+      y,
+      width,
+      height
+    }
+  },
+
+  estimatedSavedEditCellTextRect(anchor, rowRects, highlight) {
+    if (!anchor) return null
+    const text = highlight && typeof highlight.text === "string" ? highlight.text : ""
+    const estimatedWidth = this.estimatedSavedEditTextWidth(text)
+    const rowRight = Array.isArray(rowRects) && rowRects.length > 0
+      ? rowRects.reduce((max, rect) => Math.max(max, rect.x + rect.width), anchor.x + anchor.width)
+      : null
+    const maxWidth = Number.isFinite(rowRight) ? Math.max(1, rowRight - anchor.x) : Infinity
+    const width = Math.min(Math.max(anchor.width, estimatedWidth), maxWidth)
+
+    return {
+      pageIndex: anchor.pageIndex,
+      x: anchor.x,
+      y: anchor.y,
+      width: Math.max(1, width),
+      height: Math.max(anchor.height, HWP_SAVED_EDIT_TEXT_HEIGHT)
+    }
+  },
+
+  estimatedSavedEditTextWidth(text) {
+    if (typeof text !== "string" || text.length === 0) return 40
+    return Array.from(text).reduce((width, char) => {
+      if (/\s/.test(char)) return width + HWP_SAVED_EDIT_SPACE_WIDTH
+      if (/[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af\u3040-\u30ff\u3400-\u9fff]/.test(char)) {
+        return width + HWP_SAVED_EDIT_CJK_CHAR_WIDTH
+      }
+      return width + HWP_SAVED_EDIT_LATIN_CHAR_WIDTH
+    }, 0)
+  },
+
+  fallbackSavedEditCursorRect(ref, highlight) {
+    if (!ref || !this.doc) return null
+    try {
+      let raw = null
+      if (ref.cell) {
+        const cell = ref.cell
+        const paragraph = Number.isInteger(cell.cellParaIndex) ? cell.cellParaIndex : 0
+        const length = this.cellParagraphLength(ref, cell, paragraph)
+        const start = Math.min(Math.max(0, length), this.savedEditCellHighlightStart(ref, highlight))
+        raw = this.doc.getCursorRectInCell(
+          ref.section,
+          cell.parentParaIndex,
+          cell.controlIndex,
+          cell.cellIndex,
+          paragraph,
+          start
+        )
+      } else {
+        const length = this.paragraphLength(ref.section, ref.paragraph)
+        const start = Math.min(Math.max(0, length), this.savedEditParagraphStart(ref, highlight))
+        raw = this.doc.getCursorRect(ref.section, ref.paragraph, start)
+      }
+
+      const parsed = raw ? JSON.parse(raw) : null
+      return this.normalizeSavedEditCursorRect(parsed, highlight)
+    } catch (_) {
+      return null
+    }
+  },
+
+  normalizeSavedEditCursorRect(rect, highlight) {
+    if (!rect || typeof rect !== "object") return null
+    const pageIndex = Number(rect.pageIndex ?? rect.page ?? 0)
+    if (!Number.isInteger(pageIndex) || pageIndex < 0) return null
+
+    const info = this.pageInfo(pageIndex)
+    let x = Number(rect.x ?? rect.left)
+    let y = Number(rect.y ?? rect.top)
+    let width = Number(rect.width ?? rect.w)
+    let height = Number(rect.height ?? rect.h)
+    if (!Number.isFinite(x)) x = Math.round((info.w || 794) * 0.14)
+    if (!Number.isFinite(y)) return null
+    if (!Number.isFinite(height) || height <= 0) height = 22
+    if (!Number.isFinite(width) || width <= 0) {
+      const text = highlight && typeof highlight.text === "string" ? highlight.text : ""
+      width = Math.max(40, Math.min(Math.round((info.w || 794) * 0.72), text.length * 9))
+    }
+    const maxWidth = Math.max(1, (info.w || 794) - x - 8)
+    return {
+      pageIndex,
+      x: Math.max(0, Math.round(x)),
+      y: Math.max(0, Math.round(y)),
+      width: Math.max(1, Math.min(Math.round(width), maxWidth)),
+      height: Math.max(1, Math.round(height))
+    }
+  },
+
+  fallbackSavedEditElementRect(ref) {
+    if (!ref || !this.doc) return null
+    const pageCount = Math.max(1, this.pageCount || 1)
+    let elements = []
+    try {
+      elements = this.collectElements().filter(el => el && el.ref)
+    } catch (_) {
+      elements = []
+    }
+
+    const index = elements.findIndex(el => this.sameHwpElementRef(el.ref, ref))
+    const pageIndex = this.estimatedSavedEditPage(ref, elements, index, pageCount)
+    const info = this.pageInfo(pageIndex)
+    const perPage = Math.max(1, Math.ceil(Math.max(elements.length, 1) / pageCount))
+    const indexInPage = index >= 0 ? index % perPage : Math.max(0, Number(ref.paragraph || 0) % perPage)
+    const y = Math.max(32, Math.round((info.h * (indexInPage + 1)) / (perPage + 1)))
+
+    return {
+      pageIndex,
+      x: Math.round(info.w * 0.14),
+      y,
+      width: Math.round(info.w * 0.72),
+      height: 26
+    }
+  },
+
+  estimatedSavedEditPage(ref, elements, index, pageCount) {
+    if (index >= 0 && elements.length > 0) {
+      return Math.min(pageCount - 1, Math.max(0, Math.floor((index / elements.length) * pageCount)))
+    }
+
+    const section = Number(ref.section ?? 0)
+    const paragraph = Number(ref.paragraph ?? ref.cell?.parentParaIndex)
+    if (Number.isInteger(paragraph)) {
+      let paragraphCount = 0
+      try { paragraphCount = this.paragraphCount(section) } catch (_) { paragraphCount = 0 }
+      if (paragraphCount > 0) {
+        return Math.min(pageCount - 1, Math.max(0, Math.floor((paragraph / paragraphCount) * pageCount)))
+      }
+    }
+
+    return 0
   },
 
   savedEditCellHighlightLength(ref, cell, paragraph, highlight) {
+    const explicit = this.savedEditNumericField(highlight, null, ["length", "len"])
+    if (explicit !== null) return Math.max(0, explicit)
+
     let length = 0
     try {
       length = this.cellParagraphLength(ref, cell, paragraph)
@@ -1077,8 +1486,25 @@ const WasmHwpEditor = {
     return text.length
   },
 
+  savedEditCellHighlightStart(ref, highlight) {
+    const explicit = this.savedEditNumericField(highlight, null, [
+      "offset",
+      "start",
+      "startOffset",
+      "start_offset"
+    ])
+    return explicit !== null ? Math.max(0, explicit) : 0
+  },
+
   savedEditParagraphStart(ref, highlight) {
     const op = highlight && (highlight.op || highlight.kind)
+    const explicit = this.savedEditNumericField(highlight, null, [
+      "offset",
+      "start",
+      "startOffset",
+      "start_offset"
+    ])
+    if (explicit !== null) return Math.max(0, explicit)
     if (op === "insert_text" || op === "set_char") return Math.max(0, Number(ref.offset || 0))
     return 0
   },
@@ -1086,14 +1512,29 @@ const WasmHwpEditor = {
   savedEditParagraphEnd(ref, highlight, start) {
     const paragraphLength = this.paragraphLength(ref.section, ref.paragraph)
     const op = highlight && (highlight.op || highlight.kind)
-    const explicit = Number(ref.length || ref.len)
-    if ((op === "insert_text" || op === "set_char") && Number.isFinite(explicit) && explicit > 0) {
-      return Math.min(paragraphLength, start + explicit)
+    const explicit = this.savedEditNumericField(highlight, null, ["length", "len"])
+    if (explicit !== null) return Math.min(paragraphLength, start + Math.max(0, explicit))
+
+    const refExplicit = Number(ref.length || ref.len)
+    if ((op === "insert_text" || op === "set_char") && Number.isFinite(refExplicit) && refExplicit > 0) {
+      return Math.min(paragraphLength, start + refExplicit)
     }
 
     const text = highlight && typeof highlight.text === "string" ? highlight.text : ""
     if (op === "insert_text" && text.length > 0) return Math.min(paragraphLength, start + text.length)
     return paragraphLength
+  },
+
+  savedEditNumericField(highlight, ref, keys) {
+    for (const source of [highlight, ref]) {
+      if (!source || typeof source !== "object") continue
+      for (const key of keys) {
+        if (!Object.prototype.hasOwnProperty.call(source, key)) continue
+        const value = Number(source[key])
+        if (Number.isFinite(value)) return value
+      }
+    }
+    return null
   },
 
   paintSavedEditHighlightsOnPage(pageIndex) {
@@ -1103,11 +1544,46 @@ const WasmHwpEditor = {
     if (!overlay) return
     const ctx = overlay.getContext("2d")
     if (!ctx) return
-    const s = this.scale || (window.devicePixelRatio || 1)
-    ctx.fillStyle = "rgba(245, 158, 11, 0.30)"
+    const s = this.pageScale(pageIndex)
     for (const r of highlight.rects) {
       if (r.pageIndex !== pageIndex) continue
-      ctx.fillRect(r.x * s, r.y * s, Math.max(1, r.width) * s, Math.max(1, r.height) * s)
+      this.paintEditHighlightRect(ctx, overlay, r, s)
+    }
+  },
+
+  paintEditHighlightRect(ctx, overlay, rect, scale) {
+    if (!ctx || !overlay || !rect) return
+    const css = typeof overlay.getBoundingClientRect === "function"
+      ? overlay.getBoundingClientRect()
+      : { width: overlay.width || 1, height: overlay.height || 1 }
+    const overlayWidth = Number.isFinite(Number(overlay.width)) && Number(overlay.width) > 0
+      ? Number(overlay.width)
+      : Number(css && css.width) || 1
+    const overlayHeight = Number.isFinite(Number(overlay.height)) && Number(overlay.height) > 0
+      ? Number(overlay.height)
+      : Number(css && css.height) || 1
+    const backingPerCssX = css && css.width > 0 ? overlayWidth / css.width : 1
+    const backingPerCssY = css && css.height > 0 ? overlayHeight / css.height : backingPerCssX
+    const preciseNativeRect = rect.savedHighlightNative === true
+    const minWidth = preciseNativeRect ? 1 : Math.max(1, 28 * backingPerCssX)
+    const minHeight = preciseNativeRect ? 1 : Math.max(1, 14 * backingPerCssY)
+    const rawX = Number(rect.x || 0) * scale
+    const rawY = Number(rect.y || 0) * scale
+    const rawW = Math.max(1, Number(rect.width || rect.w || 1) * scale)
+    const rawH = Math.max(1, Number(rect.height || rect.h || 1) * scale)
+    const width = Math.max(rawW, minWidth)
+    const height = Math.max(rawH, minHeight)
+    const canvasWidth = Math.max(overlayWidth, rawX + width)
+    const canvasHeight = Math.max(overlayHeight, rawY + height)
+    const x = Math.max(0, Math.min(canvasWidth - width, rawX - Math.max(0, width - rawW) / 2))
+    const y = Math.max(0, Math.min(canvasHeight - height, rawY - Math.max(0, height - rawH) / 2))
+
+    ctx.fillStyle = "rgba(245, 158, 11, 0.30)"
+    ctx.fillRect(x, y, width, height)
+    if (typeof ctx.strokeRect === "function") {
+      ctx.strokeStyle = "rgba(180, 83, 9, 0.78)"
+      ctx.lineWidth = Math.max(1, Math.min(backingPerCssX, backingPerCssY))
+      ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1, width - 1), Math.max(1, height - 1))
     }
   },
 
@@ -1134,6 +1610,8 @@ const WasmHwpEditor = {
           this.snapshotTimer = null
           try { this.pushSnapshot() } catch (_) {}
         }
+        this.releaseAllPageCanvases()
+        this.clearHwpHistory()
         try { this.doc.free() } catch (_) {}
         this.doc = null
       }
@@ -1149,8 +1627,9 @@ const WasmHwpEditor = {
       this.caret = null
       this.sel = null
       this.localImagePick = null
-      this.composing = null
+      this.clearHwpHistory()
       this.previewPatchHighlight = null
+      this.previewPageFilter = this.previewPageIndexesForSavedHighlights()
       if (!this.mirror) window.__rhwpDoc = this.doc
 
       this.buildPageStack()
@@ -1198,16 +1677,27 @@ const WasmHwpEditor = {
   // owns this DOM (LiveView won't patch it), so we create the page nodes here.
   buildPageStack() {
     if (!this.pageStack) return
+    this.releaseAllPageCanvases()
     this.rendered.clear()
+    if (this.renderedPageOrder) this.renderedPageOrder.clear()
+    if (this.pageScales) this.pageScales.clear()
     this.visible.clear()
     this.pageStack.replaceChildren()
     if (this.io) this.io.disconnect()
 
-    for (let i = 0; i < this.pageCount; i++) {
+    const pageIndexes = this.pageStackIndexes()
+    if (this.el && this.el.dataset) {
+      this.el.dataset.previewPageFilter = this.mirror && this.previewPageFilter
+        ? this.previewPageFilter.join(",")
+        : ""
+    }
+
+    for (const i of pageIndexes) {
       const { w, h } = this.pageInfo(i)
 
       const section = document.createElement("section")
-      section.className = "ehwp-svg-page"
+      section.className =
+        "ehwp-svg-page relative border border-black/10 bg-white shadow-[0_2px_8px_rgba(15,23,42,0.08)]"
       section.dataset.role = "local-hwp-page"
       section.dataset.pageIndex = String(i)
       section.dataset.pageNumber = String(i + 1)
@@ -1215,18 +1705,33 @@ const WasmHwpEditor = {
 
       const canvas = document.createElement("canvas")
       canvas.dataset.role = "ehwp-canvas"
-      canvas.style.cssText = "display:block;width:100%;height:100%"
+      canvas.width = 1
+      canvas.height = 1
+      canvas.className = "block h-full w-full"
+      const ctx = canvas.getContext("2d")
+      if (ctx) {
+        ctx.fillStyle = "#ffffff"
+        ctx.fillRect(0, 0, 1, 1)
+      }
 
       const overlay = document.createElement("canvas")
       overlay.dataset.role = "ehwp-caret-overlay"
-      overlay.style.cssText =
-        "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none"
+      overlay.width = 1
+      overlay.height = 1
+      overlay.className = "pointer-events-none absolute left-0 top-0 h-full w-full"
 
       section.appendChild(canvas)
       section.appendChild(overlay)
       this.pageStack.appendChild(section)
       this.io.observe(section)
     }
+  },
+
+  pageStackIndexes() {
+    if (this.mirror && Array.isArray(this.previewPageFilter) && this.previewPageFilter.length > 0) {
+      return this.previewPageFilter.filter(index => Number.isInteger(index) && index >= 0 && index < this.pageCount)
+    }
+    return Array.from({ length: this.pageCount }, (_value, index) => index)
   },
 
   pageInfo(index) {
@@ -1242,7 +1747,137 @@ const WasmHwpEditor = {
 
   renderVisiblePages() {
     for (const idx of this.visible) this.renderPage(idx)
-    if (this.visible.size === 0 && this.pageCount > 0) this.renderPage(0)
+    if (this.visible.size === 0) {
+      const first = this.pageStackIndexes()[0]
+      if (Number.isInteger(first)) this.renderPage(first)
+    }
+    this.enforcePageMemoryBudget()
+  },
+
+  currentDeviceScale() {
+    return window.devicePixelRatio || 1
+  },
+
+  lowMemoryDevice() {
+    const memory = typeof navigator !== "undefined" ? Number(navigator.deviceMemory) : NaN
+    return Number.isFinite(memory) && memory > 0 && memory <= 8
+  },
+
+  renderPixelBudget() {
+    if (this.mirror) return HWP_MIRROR_RENDER_MAX_PX
+    return this.lowMemoryDevice() ? HWP_LOW_MEMORY_RENDER_MAX_PX : HWP_RENDER_MAX_PX
+  },
+
+  renderScaleFor(logical) {
+    const baseScale = this.currentDeviceScale()
+    const width = Math.max(1, Number(logical && logical.w) || Number(logical && logical.width) || 794)
+    const height = Math.max(1, Number(logical && logical.h) || Number(logical && logical.height) || 1123)
+    const wantPx = width * height * baseScale * baseScale
+    const maxPx = this.renderPixelBudget()
+    if (wantPx <= maxPx) return baseScale
+    return baseScale * Math.sqrt(maxPx / wantPx)
+  },
+
+  pageScale(index = null) {
+    if (Number.isInteger(index) && this.pageScales && this.pageScales.has(index)) {
+      return this.pageScales.get(index)
+    }
+    return Number.isFinite(this.scale) && this.scale > 0 ? this.scale : this.currentDeviceScale()
+  },
+
+  releaseAllPageCanvases() {
+    if (!this.pageStack) return
+    const sections = this.pageStack.querySelectorAll
+      ? this.pageStack.querySelectorAll(SEL.hwpPage)
+      : []
+    for (const section of sections) {
+      const index = Number(section.dataset && section.dataset.pageIndex)
+      if (Number.isInteger(index)) this.releasePageCanvas(index, { force: true })
+    }
+  },
+
+  releasePageCanvas(index, { force = false } = {}) {
+    if (!force && this.protectedPageIndexes().has(index)) return false
+    const section = this.pageSection(index)
+    if (!section) return false
+    const canvas = section.querySelector(SEL.ehwpCanvas)
+    const overlay = section.querySelector(SEL.ehwpCaretOverlay)
+    if (canvas && (canvas.width !== 1 || canvas.height !== 1)) {
+      canvas.width = 1
+      canvas.height = 1
+      const ctx = canvas.getContext("2d")
+      if (ctx) {
+        ctx.fillStyle = "#ffffff"
+        ctx.fillRect(0, 0, 1, 1)
+      }
+    }
+    if (overlay && (overlay.width !== 1 || overlay.height !== 1)) {
+      overlay.width = 1
+      overlay.height = 1
+    }
+    if (this.rendered && typeof this.rendered.delete === "function") this.rendered.delete(index)
+    if (this.renderedPageOrder && typeof this.renderedPageOrder.delete === "function") this.renderedPageOrder.delete(index)
+    if (this.pageScales && typeof this.pageScales.delete === "function") this.pageScales.delete(index)
+    return true
+  },
+
+  protectedPageIndexes() {
+    const pages = new Set()
+    for (const page of this.visible || []) this.addPageWithMargin(pages, page)
+    if (pages.size === 0 && this.pageCount > 0) this.addPageIndex(pages, 0)
+
+    const caretPage = this.caret && this.caret.cursorRect && this.caret.cursorRect.pageIndex
+    this.addPageIndex(pages, caretPage)
+
+    const dragPage = this.dragSelect && this.dragSelect.pageIndex
+    this.addPageIndex(pages, dragPage)
+    const imageDragPage = this.imageDrag && this.imageDrag.pageIndex
+    this.addPageIndex(pages, imageDragPage)
+
+    for (const rect of (this.previewPatchHighlight && this.previewPatchHighlight.rects) || []) {
+      this.addPageIndex(pages, rect && rect.pageIndex)
+    }
+    for (const rect of (this.previewSavedHighlight && this.previewSavedHighlight.rects) || []) {
+      this.addPageIndex(pages, rect && rect.pageIndex)
+    }
+    for (const pick of this.el && this.documentAdornmentPicks ? this.documentAdornmentPicks() : []) {
+      for (const rect of pick.rects || []) this.addPageIndex(pages, rect && (rect.pageIndex ?? 0))
+    }
+    if (this.pickerHover && Array.isArray(this.pickerHover.rects)) {
+      for (const rect of this.pickerHover.rects) this.addPageIndex(pages, rect && (rect.pageIndex ?? 0))
+    }
+    return pages
+  },
+
+  addPageWithMargin(pages, page) {
+    const index = Number(page)
+    if (!Number.isInteger(index)) return
+    for (let offset = -HWP_RETAINED_PAGE_MARGIN; offset <= HWP_RETAINED_PAGE_MARGIN; offset++) {
+      this.addPageIndex(pages, index + offset)
+    }
+  },
+
+  addPageIndex(pages, page) {
+    const index = Number(page)
+    if (!Number.isInteger(index)) return
+    if (index < 0 || (this.pageCount && index >= this.pageCount)) return
+    pages.add(index)
+  },
+
+  enforcePageMemoryBudget() {
+    if (!this.rendered || typeof this.rendered.keys !== "function") return
+    const protectedPages = this.protectedPageIndexes()
+    for (const index of Array.from(this.rendered.keys())) {
+      if (!protectedPages.has(index)) this.releasePageCanvas(index, { force: true })
+    }
+    if (this.rendered.size <= HWP_RENDERED_PAGE_SOFT_LIMIT) return
+    const ordered = this.renderedPageOrder && typeof this.renderedPageOrder.entries === "function"
+      ? Array.from(this.renderedPageOrder.entries()).sort((a, b) => a[1] - b[1]).map(([index]) => index)
+      : Array.from(this.rendered.keys())
+    for (const index of ordered) {
+      if (this.rendered.size <= HWP_RENDERED_PAGE_SOFT_LIMIT) break
+      if (!protectedPages.has(index)) this.releasePageCanvas(index, { force: true })
+    }
   },
 
   renderPage(index) {
@@ -1252,11 +1887,11 @@ const WasmHwpEditor = {
     const canvas = section.querySelector(SEL.ehwpCanvas)
     if (!canvas) return
 
-    // Render scale = devicePixelRatio so the canvas backing store matches
-    // physical pixels (crisp text, no interpolation). renderPageToCanvas sizes
-    // the backing store to pageWidth*scale x pageHeight*scale; CSS keeps it at
-    // 100% of the box (which already has the page's aspect-ratio).
-    const dpr = window.devicePixelRatio || 1
+    // Render scale is capped by a per-page pixel budget. The engine writes one
+    // page-sized backing store, and the overlay mirrors that size; unbounded DPR
+    // can retain hundreds of MB while scrolling long HWP files on 8GB machines.
+    const logical = this.pageInfo(index)
+    const dpr = this.renderScaleFor(logical)
     this.scale = dpr
     try {
       this.doc.renderPageToCanvas(index, canvas, dpr)
@@ -1267,12 +1902,18 @@ const WasmHwpEditor = {
         overlay.height = canvas.height
       }
       this.rendered.set(index, true)
+      if (this.pageScales) this.pageScales.set(index, dpr)
+      if (this.renderedPageOrder) {
+        this.renderSeq = (this.renderSeq || 0) + 1
+        this.renderedPageOrder.set(index, this.renderSeq)
+      }
       this.paintPreviewPatchHighlightOnPage(index)
       this.paintSavedEditHighlightsOnPage(index)
       // Redraw the caret if it lives on this page (a re-render clears it).
       if (this.caret && this.caret.cursorRect && this.caret.cursorRect.pageIndex === index) {
         this.drawCaret(this.caret)
       }
+      this.enforcePageMemoryBudget()
     } catch (error) {
       console.error(`[wasm-hwp] renderPage(${index}) failed`, error)
     }
@@ -1283,15 +1924,14 @@ const WasmHwpEditor = {
       this.pageStack.querySelector(`${SEL.hwpPage}[data-page-index='${index}']`)
   },
 
-  // Render whatever page the caret currently sits on. After an edit reflows the
-  // document, the affected glyph lives on `cursorRect.pageIndex`; we re-render
-  // exactly that page (plus any other visible page that changed by reflow).
-  renderCaretPage() {
+  // Render whatever page the caret currently sits on. Plain typing must stay
+  // single-page; structural edits can opt into refreshing the visible window.
+  renderCaretPage(options = {}) {
     const idx = this.caret && this.caret.cursorRect && this.caret.cursorRect.pageIndex
     if (typeof idx === "number") this.renderPage(idx)
-    // A split/merge/large insert can push content onto neighbouring visible
-    // pages; refresh the visible window so reflow is reflected immediately.
-    for (const v of this.visible) if (v !== idx) this.renderPage(v)
+    if (options.refreshVisible) {
+      for (const v of this.visible) if (v !== idx) this.renderPage(v)
+    }
   },
 
   // mousedown on a page canvas -> map canvas-rect coords to PAGE coords -> hitTest.
@@ -1516,15 +2156,18 @@ const WasmHwpEditor = {
     }
     const canvas = section.querySelector(SEL.ehwpCanvas)
     if (!canvas) return null
+    if ((!this.rendered || !this.rendered.get(pageIndex)) && this.doc) this.renderPage(pageIndex)
+    if (!canvas.width || canvas.width <= 1) return null
 
     const rect = canvas.getBoundingClientRect()
     const backingRatio = canvas.width / rect.width
+    const scale = this.pageScale(pageIndex)
     // Clamp the pointer into the canvas box so a drag that runs past the page
     // edge still resolves to the nearest in-page glyph.
     const clientX = Math.min(Math.max(event.clientX, rect.left), rect.right)
     const clientY = Math.min(Math.max(event.clientY, rect.top), rect.bottom)
-    const x = ((clientX - rect.left) * backingRatio) / this.scale
-    const y = ((clientY - rect.top) * backingRatio) / this.scale
+    const x = ((clientX - rect.left) * backingRatio) / scale
+    const y = ((clientY - rect.top) * backingRatio) / scale
 
     try {
       const raw = this.doc.hitTest(pageIndex, x, y)
@@ -1678,7 +2321,7 @@ const WasmHwpEditor = {
     const ctx = overlay.getContext("2d")
     if (!ctx) return
     const range = this.cellSelectRange()
-    const s = this.scale
+    const s = this.pageScale(pageIndex)
     ctx.fillStyle = "rgba(29, 78, 216, 0.28)" // matches the text-selection blue
     for (const b of cs.bboxes) {
       if (b.pageIndex !== pageIndex || !this.cellBboxInRange(b, range)) continue
@@ -1879,6 +2522,7 @@ const WasmHwpEditor = {
     })
     if (!refs.length) return
 
+    this.pushHwpUndoCheckpoint("toolbar-align")
     let applied = 0
     for (const ref of refs) {
       const result = this.applySetOne(ref, { kind: "para", Alignment: alignment })
@@ -1920,6 +2564,7 @@ const WasmHwpEditor = {
   hwpToolbarApplyPropsToRefs(refs, props) {
     if (!refs.length) return
 
+    this.pushHwpUndoCheckpoint("toolbar-format")
     let applied = 0
     for (const ref of refs) {
       const result = this.applySetOne(ref, { kind: "char", ...props })
@@ -1980,6 +2625,7 @@ const WasmHwpEditor = {
     if (!ref) return
 
     const size = this.hwpToolbarImageSize(detail, HWP_IMAGE_DEFAULT_MAX_UNIT)
+    this.pushHwpUndoCheckpoint("toolbar-image")
     const result = this.applyOneOp({
       op: "insert_picture",
       ref,
@@ -2066,13 +2712,16 @@ const WasmHwpEditor = {
       if (!canvas) continue
       const pageIndex = Number(pageEl.dataset.pageIndex)
       if (!Number.isFinite(pageIndex)) continue
+      if ((!this.rendered || !this.rendered.get(pageIndex)) && this.doc) this.renderPage(pageIndex)
+      if (!canvas.width || canvas.width <= 1) continue
       const rect = canvas.getBoundingClientRect()
       if (!rect.width || !rect.height) continue
       const backingRatio = canvas.width / rect.width
+      const scale = this.pageScale(pageIndex)
       const clientX = rect.left + rect.width / 2
       const clientY = Math.min(Math.max(hostRect.top + 12, rect.top), rect.bottom)
-      const x = ((clientX - rect.left) * backingRatio) / this.scale
-      const y = ((clientY - rect.top) * backingRatio) / this.scale
+      const x = ((clientX - rect.left) * backingRatio) / scale
+      const y = ((clientY - rect.top) * backingRatio) / scale
       const pick = this.hwpPick({ x, y }, pageIndex)
       if (pick && pick.ref) {
         if (/picture|image/i.test(pick.type || "")) {
@@ -2177,7 +2826,7 @@ const WasmHwpEditor = {
     c.preferredX = -1
     this.clearSelection()
     this.refreshCursorRect()
-    this.renderCaretPage()
+    this.renderCaretPage({ refreshVisible: true })
     this.clearSelectionOverlays()
     this.drawCaret(c)
     this.anchorProxy()
@@ -2186,6 +2835,7 @@ const WasmHwpEditor = {
 
   // Normalize a hitTest / moveVertical result into caret state.
   setCaretFromHit(hit, fallbackPage) {
+    if (this.hwpClearNativeIme) this.hwpClearNativeIme()
     const cell =
       hit.parentParaIndex !== undefined
         ? {
@@ -2622,6 +3272,7 @@ const WasmHwpEditor = {
         width: this.doc.pxToHwpUnit(drag.curW),
         height: this.doc.pxToHwpUnit(drag.curH)
       })
+      this.pushHwpUndoCheckpoint("image-resize")
       try {
         this.doc.setPictureProperties(drag.section, drag.paraIdx, drag.controlIdx, JSON.stringify(next))
       } catch (_) {
@@ -2668,6 +3319,7 @@ const WasmHwpEditor = {
       horzOffset: this.doc.pxToHwpUnit(drag.curX),
       vertOffset: this.doc.pxToHwpUnit(drag.curY)
     })
+    this.pushHwpUndoCheckpoint("image-move")
     try {
       this.doc.setPictureProperties(drag.section, drag.paraIdx, drag.controlIdx, JSON.stringify(floatProps))
     } catch (_) {
@@ -2697,7 +3349,7 @@ const WasmHwpEditor = {
     const overlay = this.pageOverlay(drag.pageIndex)
     const ctx = overlay && overlay.getContext("2d")
     if (!ctx) return
-    const s = this.scale
+    const s = this.pageScale(drag.pageIndex)
     ctx.clearRect(0, 0, overlay.width, overlay.height)
     ctx.save()
     ctx.fillStyle = "rgba(29, 78, 216, 0.10)"
@@ -2916,7 +3568,7 @@ const WasmHwpEditor = {
     if (!overlay) return
     const ctx = overlay.getContext("2d")
     if (!ctx) return
-    const s = this.scale
+    const s = this.pageScale(pageIndex)
 
     let layout // lazily-fetched live control layout for this page (rhwp geometry)
     for (const pick of this.documentAdornmentPicks()) {
@@ -3173,6 +3825,7 @@ const WasmHwpEditor = {
     if (!rect) return
     const section = this.pageSection(rect.pageIndex)
     if (!section) return
+    if ((!this.rendered || !this.rendered.get(rect.pageIndex)) && this.doc) this.renderPage(rect.pageIndex)
     const overlay = section.querySelector(SEL.ehwpCaretOverlay)
     if (!overlay) return
     const ctx = overlay.getContext("2d")
@@ -3190,7 +3843,7 @@ const WasmHwpEditor = {
     // selection); only its highlight is repainted above.
     if (this.cellSel()) return
     if (!this.caretBlinkOn) return
-    const s = this.scale
+    const s = this.pageScale(rect.pageIndex)
     ctx.fillStyle = "#1d4ed8"
     ctx.fillRect(rect.x * s, rect.y * s, 1.5 * s, (rect.height || 16) * s)
   },
@@ -3208,7 +3861,7 @@ const WasmHwpEditor = {
     if (!overlay) return
     const ctx = overlay.getContext("2d")
     if (!ctx) return
-    const s = this.scale
+    const s = this.pageScale(pageIndex)
     ctx.fillStyle = "rgba(29, 78, 216, 0.28)"
     for (const r of rects) {
       if (r.pageIndex !== pageIndex) continue
@@ -3216,84 +3869,27 @@ const WasmHwpEditor = {
     }
   },
 
-  // Position the hidden IME proxy textarea over the caret so the OS candidate
-  // window anchors there (Korean) and so the caret-row stays focused.
+  // Keep the browser-owned editable proxy away from the document. The visible
+  // composition is ordinary document text rendered by rhwp_core; letting the
+  // textarea sit at the caret lets Chromium/macOS paint cached marked text over
+  // glyphs.
   anchorProxy() {
-    if (!this.imeProxy || !this.caret || !this.caret.cursorRect) return
-    const rect = this.caret.cursorRect
-    const section = this.pageSection(rect.pageIndex)
-    if (!section) return
-    const canvas = section.querySelector(SEL.ehwpCanvas)
-    if (!canvas) return
-    const cr = canvas.getBoundingClientRect()
-    const hostRect = this.el.getBoundingClientRect()
-    // page units -> CSS px within the page box.
-    const scale = Number.isFinite(this.scale) && this.scale > 0 ? this.scale : 1
-    const cssPerPage = cr.width / (canvas.width / scale)
-    const left = cr.left - hostRect.left + this.el.scrollLeft + rect.x * cssPerPage
-    const top = cr.top - hostRect.top + this.el.scrollTop + rect.y * cssPerPage
-    this.imeProxy.style.left = `${Math.round(left)}px`
-    this.imeProxy.style.top = `${Math.round(top)}px`
-    this.imeProxy.style.height = `${Math.max(12, Math.round((rect.height || 16) * cssPerPage))}px`
-    this.syncCompositionPreviewPosition()
-  },
-
-  ensureCompositionPreviewEl() {
-    if (this.compositionPreviewEl && this.compositionPreviewEl.isConnected) {
-      return this.compositionPreviewEl
-    }
-    if (!this.el || typeof document === "undefined" || !document.createElement) return null
-    const el = document.createElement("span")
-    el.dataset.role = "local-hwp-ime-preview"
-    el.hidden = true
-    el.style.cssText = [
-      "position:absolute",
-      "left:0",
-      "top:0",
-      "z-index:35",
-      "pointer-events:none",
-      "white-space:pre",
-      "color:#111827",
-      "background:transparent",
-      "font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
-      "font-size:16px",
-      "line-height:16px",
-      "text-shadow:0 0 1px rgba(255,255,255,0.9)",
-    ].join(";")
-    this.el.appendChild(el)
-    this.compositionPreviewEl = el
-    return el
-  },
-
-  showCompositionPreview(text) {
-    const value = String(text || "")
-    if (!value) {
-      this.hideCompositionPreview()
-      return
-    }
-    const el = this.ensureCompositionPreviewEl()
-    if (!el) return
-    el.textContent = value
-    el.hidden = false
-    this.anchorProxy()
-    this.syncCompositionPreviewPosition()
-  },
-
-  hideCompositionPreview() {
-    if (!this.compositionPreviewEl) return
-    this.compositionPreviewEl.textContent = ""
-    this.compositionPreviewEl.hidden = true
-  },
-
-  syncCompositionPreviewPosition() {
-    const preview = this.compositionPreviewEl
-    if (!preview || preview.hidden || !this.imeProxy) return
-    const height = Number.parseFloat(this.imeProxy.style.height || "16") || 16
-    preview.style.left = this.imeProxy.style.left || "0px"
-    preview.style.top = this.imeProxy.style.top || "0px"
-    preview.style.height = `${height}px`
-    preview.style.fontSize = `${Math.max(12, Math.round(height * 0.86))}px`
-    preview.style.lineHeight = `${height}px`
+    if (!this.imeProxy) return
+    this.imeProxy.style.position = "fixed"
+    this.imeProxy.style.left = "-10000px"
+    this.imeProxy.style.top = "-10000px"
+    this.imeProxy.style.width = "1px"
+    this.imeProxy.style.height = "1px"
+    this.imeProxy.style.maxWidth = "1px"
+    this.imeProxy.style.maxHeight = "1px"
+    this.imeProxy.style.fontSize = "1px"
+    this.imeProxy.style.lineHeight = "1px"
+    this.imeProxy.style.opacity = "0"
+    this.imeProxy.style.color = "transparent"
+    this.imeProxy.style.webkitTextFillColor = "transparent"
+    this.imeProxy.style.caretColor = "transparent"
+    this.imeProxy.style.clipPath = "inset(50%)"
+    this.imeProxy.style.zIndex = "-1"
   },
 
   // Left/Right: move the caret offset by ±1. The engine's getCursorRect gives
@@ -3508,6 +4104,7 @@ const WasmHwpEditor = {
     // uncaught exception to the agent.
     let r
     try {
+      this.pushHwpUndoCheckpoint("agent-edit")
       r = this.applyOneOp(op)
     } catch (error) {
       return { error: String((error && error.message) || error) }
@@ -3867,6 +4464,7 @@ const WasmHwpEditor = {
   applyAgentEditBatch({ ops }) {
     const list = Array.isArray(ops) ? ops : []
     if (list.length === 0) return { error: "edit batch requires a non-empty 'ops' array" }
+    this.pushHwpUndoCheckpoint("agent-edit-batch")
 
     // Tag each op with its original index + whether it shifts body indices, then
     // order: order-independent ops first (original order), index-shifting body
@@ -3944,6 +4542,7 @@ const WasmHwpEditor = {
   // Bold/TextColor/FontSize for a char run). `ref` is doc.find's positional ref; a
   // cell ref carries {parentParaIndex,controlIndex,cellIndex,cellParaIndex}.
   applyAgentSet({ ref, props }) {
+    this.pushHwpUndoCheckpoint("agent-set")
     const r = this.applySetOne(ref, props)
     if (r.error) return { error: r.error }
     return this.finishAgentEdit({})
@@ -4076,6 +4675,7 @@ const WasmHwpEditor = {
   applyAgentSetBatch({ sets }) {
     const list = Array.isArray(sets) ? sets : []
     if (list.length === 0) return { error: "set batch requires a non-empty 'sets' array" }
+    this.pushHwpUndoCheckpoint("agent-set-batch")
 
     const results = []
     let applied = 0
@@ -4760,6 +5360,143 @@ const WasmHwpEditor = {
 
   // ─── Op-log + snapshot persistence ───────────────────────────────────────
 
+  hwpHistoryAvailable() {
+    return !!(
+      this.doc &&
+      !this.mirror &&
+      typeof this.doc.saveSnapshot === "function" &&
+      typeof this.doc.restoreSnapshot === "function"
+    )
+  },
+
+  saveHwpHistorySnapshot(reason = "") {
+    if (!this.hwpHistoryAvailable()) return null
+    try {
+      const id = this.doc.saveSnapshot()
+      return Number.isInteger(id) ? { id, reason: String(reason || ""), at: Date.now() } : null
+    } catch (error) {
+      console.warn("[wasm-hwp] saveSnapshot failed", error)
+      return null
+    }
+  },
+
+  discardHwpHistorySnapshot(snapshot) {
+    if (!snapshot || !this.doc || typeof this.doc.discardSnapshot !== "function") return
+    const id = Number(snapshot.id ?? snapshot)
+    if (!Number.isInteger(id)) return
+    try {
+      this.doc.discardSnapshot(id)
+    } catch (_) {}
+  },
+
+  discardHwpHistoryStack(stack) {
+    if (!Array.isArray(stack)) return
+    for (const snapshot of stack) this.discardHwpHistorySnapshot(snapshot)
+    stack.length = 0
+  },
+
+  clearHwpHistory() {
+    this.discardHwpHistoryStack(this.undoStack)
+    this.discardHwpHistoryStack(this.redoStack)
+    this.undoStack = []
+    this.redoStack = []
+  },
+
+  pushHwpHistoryStack(name, snapshot) {
+    if (!snapshot) return false
+    const stack = name === "redo" ? this.redoStack : this.undoStack
+    if (!Array.isArray(stack)) return false
+    stack.push(snapshot)
+    while (stack.length > HWP_HISTORY_LIMIT) {
+      this.discardHwpHistorySnapshot(stack.shift())
+    }
+    return true
+  },
+
+  clearHwpRedoHistory() {
+    this.discardHwpHistoryStack(this.redoStack)
+    this.redoStack = []
+  },
+
+  pushHwpUndoCheckpoint(reason = "") {
+    const snapshot = this.saveHwpHistorySnapshot(reason)
+    if (!snapshot) return false
+    if (!Array.isArray(this.undoStack)) this.undoStack = []
+    if (!Array.isArray(this.redoStack)) this.redoStack = []
+    this.pushHwpHistoryStack("undo", snapshot)
+    this.clearHwpRedoHistory()
+    if (this.activateKeyboardShortcuts) this.activateKeyboardShortcuts()
+    return true
+  },
+
+  runHwpUndo() {
+    return this.restoreHwpHistoryDirection("undo")
+  },
+
+  runHwpRedo() {
+    return this.restoreHwpHistoryDirection("redo")
+  },
+
+  restoreHwpHistoryDirection(direction) {
+    if (!this.hwpHistoryAvailable()) return false
+    if (!Array.isArray(this.undoStack)) this.undoStack = []
+    if (!Array.isArray(this.redoStack)) this.redoStack = []
+
+    const source = direction === "redo" ? this.redoStack : this.undoStack
+    if (!source.length) return false
+
+    const current = this.saveHwpHistorySnapshot(direction === "redo" ? "undo-current" : "redo-current")
+    const target = source.pop()
+    const destination = direction === "redo" ? "undo" : "redo"
+    if (current) this.pushHwpHistoryStack(destination, current)
+
+    const restored = this.restoreHwpHistorySnapshot(target, direction)
+    if (restored) {
+      this.discardHwpHistorySnapshot(target)
+      return true
+    }
+
+    if (current) {
+      const stack = destination === "redo" ? this.redoStack : this.undoStack
+      const last = stack && stack[stack.length - 1]
+      if (last && last.id === current.id) stack.pop()
+      this.discardHwpHistorySnapshot(current)
+    }
+    if (target) source.push(target)
+    return false
+  },
+
+  restoreHwpHistorySnapshot(snapshot, direction) {
+    if (!snapshot || !this.hwpHistoryAvailable()) return false
+    const id = Number(snapshot.id ?? snapshot)
+    if (!Number.isInteger(id)) return false
+
+    try {
+      this.doc.restoreSnapshot(id)
+    } catch (error) {
+      console.warn("[wasm-hwp] restoreSnapshot failed", error)
+      return false
+    }
+
+    this.caret = null
+    this.sel = null
+    this.localImagePick = null
+    if (this.imeProxy) this.imeProxy.value = ""
+    if (this.clearSelectionOverlays) this.clearSelectionOverlays()
+    this._elementsCache = null
+
+    let nextPageCount = this.pageCount
+    try { nextPageCount = this.doc.pageCount() } catch (_) {}
+    if (Number.isInteger(nextPageCount) && nextPageCount !== this.pageCount) {
+      this.pageCount = nextPageCount
+      this.buildPageStack()
+    }
+
+    this.finishAgentEdit({ history_direction: direction })
+    if (this.scheduleToolbarStateSync) this.scheduleToolbarStateSync()
+    return true
+  },
+
   // Push a single edit op to the server's op-log so edits are recoverable even
   // before the next byte snapshot lands. Body mirrors the rhwp DocumentEvent
   // shape the server's `rhwp.text.mutated` handler expects.
@@ -4912,4 +5649,4 @@ const WasmHwpEditor = {
 // (assets/js/wasm_ops.ts). `define` returns the builder for further chaining.
 WasmHwpEditor.define = (verb, handler) => OPS.define(verb, handler)
 
-export { WasmHwpEditor }
+export { WasmHwpEditor, unexpectedHwpLooseOwnStateKeys }
