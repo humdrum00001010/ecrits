@@ -127,7 +127,10 @@ export function togglePickedElement(pick) {
 export function bindElementPickerTarget(target) {
   const apply = enabled => {
     target.elementPickerEnabled = !!enabled
-    if (target.el) target.el.dataset.elementPicker = String(target.elementPickerEnabled)
+    if (target.el) {
+      target.el.dataset.elementPicker = String(target.elementPickerEnabled)
+      target.el.classList.toggle("[&_canvas]:cursor-crosshair", target.elementPickerEnabled)
+    }
     // Let the editor react to mode flips (e.g. clear its hover preview).
     if (typeof target.onElementPickerState === "function") {
       target.onElementPickerState(target.elementPickerEnabled)

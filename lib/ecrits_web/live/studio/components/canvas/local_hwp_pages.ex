@@ -34,6 +34,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages do
     <div
       id={@id}
       phx-hook="WasmHwpEditor"
+      role="region"
+      tabindex={if(@mirror?, do: "-1", else: "0")}
+      aria-label={if(@mirror?, do: "Document preview", else: "Document pages")}
       class={[
         "relative h-full min-h-0 bg-white",
         @mirror? && "overflow-hidden pointer-events-none",
@@ -58,8 +61,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages do
       data-preview-highlights={@preview_highlights}
     >
       <%!-- The OS IME needs an editable element to compose into (Korean editing,
-            a later phase). Kept TRULY INVISIBLE — transparent text AND caret —
-            and glued to the WASM caret so the OS candidate window anchors there.
+            a later phase). Parked offscreen because browser IME marked text
+            can paint outside normal DOM/CSS styling; the visible composition is
+            rendered by rhwp_core through the canvas render API.
             phx-update="ignore" so LiveView patches keep it. --%>
       <textarea
         id={"#{@id}-ime-proxy"}
@@ -72,8 +76,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages do
         tabindex="-1"
         rows="1"
         phx-update="ignore"
-        class="absolute left-0 top-0 m-0 p-0 border-0 outline-none bg-transparent resize-none overflow-hidden"
-        style="width:1.5em;height:1em;color:transparent;caret-color:transparent;white-space:pre;line-height:1;font-size:16px;z-index:20;pointer-events:none"
+        class="fixed m-0 p-0 border-0 outline-none bg-transparent resize-none overflow-hidden"
+        style="left:-10000px;top:-10000px;width:1px;height:1px;max-width:1px;max-height:1px;color:transparent;-webkit-text-fill-color:transparent;caret-color:transparent;opacity:0;clip-path:inset(50%);white-space:pre;line-height:1px;font-size:1px;z-index:-1;pointer-events:none"
       ></textarea>
       <%!-- The WASM hook owns this canvas stack: it creates one <canvas> per page
             (+ a caret overlay) and renders near-viewport pages on demand, so
@@ -82,7 +86,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages do
         id={"#{@id}-pages"}
         data-role="local-hwp-pages"
         data-editor-zoomable
-        class="ehwp-document-stack ehwp-document-stack--local"
+        class="ehwp-document-stack ehwp-document-stack--local flex min-h-full flex-col items-center overflow-auto bg-[#f4f4f5]"
         phx-update="ignore"
       >
       </div>

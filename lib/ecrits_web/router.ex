@@ -73,9 +73,12 @@ defmodule EcritsWeb.Router do
 
     live_session :local,
       on_mount: [EcritsWeb.Locale] do
-      live "/", Local.MountLive, :index
-      live "/local/agent-providers/:provider/setup", Local.AgentProviderSetupLive, :show
-      live "/workspace", Local.WorkspaceLive, :show
+      live "/", Local.MountLive, :index, container: {:div, class: "contents"}
+
+      live "/local/agent-providers/:provider/setup", Local.AgentProviderSetupLive, :show,
+        container: {:div, class: "contents"}
+
+      live "/workspace", Local.WorkspaceLive, :show, container: {:div, class: "contents"}
     end
 
     # Read-only raw bytes of a local workspace HWP/HWPX document, gated to the

@@ -56,7 +56,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
             >
               <div
                 id="studio-document-tabs"
-                role="tablist"
+                role="group"
                 aria-label="Open documents"
                 data-role="document-tabs"
                 class="flex min-w-0 flex-1 items-stretch overflow-hidden"
@@ -64,23 +64,24 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 <div
                   :for={tab <- @open_documents}
                   id={"studio-document-tab-#{tab.id}"}
-                  role="tab"
+                  role="presentation"
                   data-role="document-tab"
                   data-tab-id={tab.id}
                   data-active={to_string(tab.id == @active_document_id)}
-                  aria-selected={to_string(tab.id == @active_document_id)}
                   title={tab.path}
                   class={[
                     "group flex min-w-0 shrink items-stretch border-r border-base-300 max-w-[15rem] text-[13px] leading-none transition-colors border-b-2",
                     if(tab.id == @active_document_id,
                       do: "bg-base-100 text-base-content font-medium border-b-primary",
                       else:
-                        "bg-base-200/50 text-base-content/55 border-b-transparent hover:bg-base-100/70 hover:text-base-content"
+                        "bg-base-200/50 text-base-content/70 border-b-transparent hover:bg-base-100/70 hover:text-base-content"
                     )
                   ]}
                 >
                   <button
                     type="button"
+                    aria-pressed={to_string(tab.id == @active_document_id)}
+                    tabindex={if(tab.id == @active_document_id, do: "0", else: "-1")}
                     phx-click="tab_switch"
                     phx-value-id={tab.id}
                     data-role="document-tab-switch"
@@ -244,9 +245,11 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 </span>
               </button>
               <input
+                id="local-document-text-color-input"
                 type="color"
                 value="#e11d48"
                 data-role="text-color-input"
+                aria-label="Text color picker"
                 class="pointer-events-none absolute h-0 w-0 opacity-0"
                 tabindex="-1"
               />
@@ -266,9 +269,11 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 </span>
               </button>
               <input
+                id="local-document-highlight-color-input"
                 type="color"
                 value="#fde047"
                 data-role="highlight-color-input"
+                aria-label="Highlight color picker"
                 class="pointer-events-none absolute h-0 w-0 opacity-0"
                 tabindex="-1"
               />

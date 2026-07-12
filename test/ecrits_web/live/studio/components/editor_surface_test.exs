@@ -4,6 +4,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
   import Phoenix.LiveViewTest
 
   alias EcritsWeb.Live.Studio.Components.EditorSurface
+  alias EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages
 
   test "document tab close marks the tab hidden before pushing the LiveView close callback" do
     html =
@@ -39,6 +40,34 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     assert phx_click =~ "07-hwp"
 
     assert String.split(phx_click, "set_attr") |> List.last() =~ "push"
+
+    tab =
+      html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="document-tab-switch"]))
+      |> Enum.to_list()
+      |> List.first()
+
+    wrapper =
+      html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="document-tab"]))
+      |> Enum.to_list()
+      |> List.first()
+
+    assert wrapper |> LazyHTML.attribute("role") == ["presentation"]
+    assert tab |> LazyHTML.attribute("role") == []
+    assert tab |> LazyHTML.attribute("aria-pressed") == ["true"]
+    assert tab |> LazyHTML.attribute("tabindex") == ["0"]
+
+    document_controls =
+      html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query("#studio-document-tabs")
+      |> Enum.to_list()
+      |> List.first()
+
+    assert document_controls |> LazyHTML.attribute("role") == ["group"]
   end
 
   test "quick toolbar exposes bold/italic/underline commands with shortcut hints for hwp" do
@@ -82,10 +111,14 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     # The font row's value controls: a size input (Enter applies) and hidden
     # native color pickers the buttons open.
     for role <- ~w(font-size-input text-color-input highlight-color-input) do
-      assert fragment
-             |> LazyHTML.query(~s(#local-document-quick-toolbar [data-role="#{role}"]))
-             |> Enum.to_list() != [],
-             "missing [data-role=#{role}]"
+      input =
+        fragment
+        |> LazyHTML.query(~s(#local-document-quick-toolbar [data-role="#{role}"]))
+        |> Enum.to_list()
+        |> List.first()
+
+      assert input, "missing [data-role=#{role}]"
+      assert input |> LazyHTML.attribute("aria-label") != []
     end
 
     # The four align commands live in ONE dropdown: a menu button whose face
@@ -139,6 +172,30 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
       |> List.first()
 
     assert bold |> LazyHTML.attribute("title") == ["Bold (⌘B)"]
+  end
+
+  test "HWP page scroll host is keyboard focusable outside mirror previews" do
+    html =
+      render_component(&LocalHwpPages.render/1,
+        id: "local-hwp-pages",
+        pages: [],
+        page_count: 0,
+        spec: %{key: "local_hwp", name: "sample.hwp", template_hwp_path: "sample.hwp"},
+        document_id: "sample-hwp",
+        document_path: "sample.hwp",
+        local_document_format: "hwp"
+      )
+
+    editor =
+      html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="local-hwp-editor"]))
+      |> Enum.to_list()
+      |> List.first()
+
+    assert editor |> LazyHTML.attribute("tabindex") == ["0"]
+    assert editor |> LazyHTML.attribute("role") == ["region"]
+    assert editor |> LazyHTML.attribute("aria-label") == ["Document pages"]
   end
 
   test "quick toolbar hides underline and image for markdown documents" do

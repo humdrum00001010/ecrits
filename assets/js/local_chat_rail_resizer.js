@@ -13,6 +13,7 @@ const OFFICE_PREWARM_EXTENSIONS = new Set([
   "rtf",
 ])
 const OFFICE_FAST_OPEN_IMPORT_DELAY_MS = 80
+const BODY_DRAG_CLASSES = ["cursor-col-resize", "select-none"]
 
 function officeFileRow(row) {
   return OFFICE_PREWARM_EXTENSIONS.has(String(row?.dataset?.fileExtension || "").toLowerCase())
@@ -138,7 +139,7 @@ export const LocalChatRailResizer = {
     window.removeEventListener(AGENT_TEXT_APPEND_EVENT, this.onLocalAgentTextAppend)
     window.removeEventListener(AGENT_REASONING_APPEND_EVENT, this.onLocalAgentReasoningAppend)
     this.detachDragEvents()
-    document.body.removeAttribute("data-chat-rail-dragging")
+    document.body.classList.remove(...BODY_DRAG_CLASSES)
   },
 
   // Single-flight guard for the chat composer. Sending a new message while a turn
@@ -347,7 +348,7 @@ export const LocalChatRailResizer = {
     this.startX = event.clientX
     this.startWidth = target.panel.getBoundingClientRect().width
     target.handle.setAttribute("data-dragging", "true")
-    document.body.setAttribute("data-chat-rail-dragging", "true")
+    document.body.classList.add(...BODY_DRAG_CLASSES)
     window.addEventListener("pointermove", this.onPointerMove)
     window.addEventListener("pointerup", this.onPointerUp)
     window.addEventListener("pointercancel", this.onPointerUp)
@@ -377,7 +378,7 @@ export const LocalChatRailResizer = {
     this.dragging = false
     this.dragKind = null
     target.handle?.removeAttribute("data-dragging")
-    document.body.removeAttribute("data-chat-rail-dragging")
+    document.body.classList.remove(...BODY_DRAG_CLASSES)
 
     if (kind === "fileTree") {
       localStorage.setItem(this.fileTreeStorageKey, String(this.currentFileTreeWidth()))

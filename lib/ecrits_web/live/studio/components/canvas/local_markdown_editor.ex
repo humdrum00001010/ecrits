@@ -6,7 +6,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalMarkdownEditor do
   workspace `.md`/`.markdown` file is loaded as text into an editable `<textarea>`
   source pane, and a live preview shows the GFM render. The render reuses the
   shared MDEx helper (`EcritsWeb.Markdown.to_safe_html/1`) — the same renderer the
-  chat rail uses — and is styled with the existing `.chat-markdown` CSS.
+  chat rail uses — and is styled by the shared `<.markdown_prose>` wrapper.
 
   The surface is a SINGLE pane: a header toggle button switches between PREVIEW
   and SOURCE (mirroring the usual markdown-editor affordance) rather than showing
@@ -69,19 +69,18 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalMarkdownEditor do
       ></textarea>
 
       <%!-- Preview pane: live Observex render of the current source (GFM +
-            math/TikZ tex-islands). Styled with the shared .chat-markdown CSS
-            (full-width here). Visible by default. The ObservexPreview hook
+            math/TikZ tex-islands). Visible by default. The ObservexPreview hook
             re-renders the islands (MathJax/TikZJax) after every diff. --%>
-      <div
+      <.markdown_prose
         id={"#{@id}-preview"}
         data-role="markdown-editor-preview"
         phx-hook="ObservexPreview"
-        class="chat-markdown min-h-0 flex-1 overflow-auto p-6 text-[15px] leading-[1.7]"
+        class="min-h-0 flex-1 overflow-auto p-6 text-[15px] leading-[1.7]"
       >
         <div data-editor-zoomable>
           {@preview_html}
         </div>
-      </div>
+      </.markdown_prose>
     </div>
     """
   end

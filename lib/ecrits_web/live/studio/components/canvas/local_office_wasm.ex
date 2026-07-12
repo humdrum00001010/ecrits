@@ -57,7 +57,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
       phx-hook="WasmOfficeEditor"
     >
       <%!-- The OS IME needs an editable element to compose into (Korean editing).
-            Kept TRULY INVISIBLE — transparent text AND caret — and glued to the
+            Kept TRULY INVISIBLE at the compositing level — transparent
+            text/caret is not enough for some IME marked text — and glued to the
             WASM caret so the OS candidate window anchors there. phx-update="ignore"
             so LiveView patches keep it. Mirrors the HWP arm's ime-proxy. --%>
       <textarea
@@ -72,7 +73,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.LocalOfficeWasm do
         rows="1"
         phx-update="ignore"
         class="absolute left-0 top-0 m-0 p-0 border-0 outline-none bg-transparent resize-none overflow-hidden"
-        style="width:1.5em;height:1em;color:transparent;caret-color:transparent;white-space:pre;line-height:1;font-size:16px;z-index:20;pointer-events:none"
+        style="width:1.5em;height:1em;color:transparent;-webkit-text-fill-color:transparent;caret-color:transparent;opacity:0;white-space:pre;line-height:1;font-size:16px;z-index:20;pointer-events:none"
       ></textarea>
 
       <div

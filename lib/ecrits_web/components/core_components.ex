@@ -126,8 +126,8 @@ defmodule EcritsWeb.CoreComponents do
   @doc """
   Renders a v33 ecrits product button.
 
-  Use this for the landing/dashboard/studio product surfaces that rely on the
-  `button button--*` design tokens instead of daisyUI button classes.
+  Use this for product surfaces that should share the app chrome button
+  treatment without relying on global `.button--*` CSS.
   """
   attr :rest, :global, include: ~w(href navigate patch method download name value disabled type)
   attr :class, :any, default: nil
@@ -135,10 +135,23 @@ defmodule EcritsWeb.CoreComponents do
   slot :inner_block, required: true
 
   def cs_button(%{rest: rest} = assigns) do
+    variants = %{
+      "primary" => [
+        "border-transparent bg-[var(--cs-green)] text-[var(--cs-bg)]",
+        "hover:bg-[color-mix(in_oklab,var(--cs-green)_86%,white)]"
+      ],
+      "secondary" => [
+        "border-[color-mix(in_oklab,var(--cs-ink)_16%,transparent)] bg-transparent text-[var(--cs-ink)]",
+        "hover:bg-[color-mix(in_oklab,var(--cs-ink)_6%,transparent)]"
+      ]
+    }
+
     assigns =
       assign(assigns, :button_class, [
-        "button",
-        "button--#{assigns.variant}",
+        "inline-flex h-9 items-center justify-center gap-2 rounded-md border px-3 text-sm font-semibold",
+        "transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cs-blue)]",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        Map.fetch!(variants, assigns.variant),
         assigns.class
       ])
 
@@ -155,6 +168,75 @@ defmodule EcritsWeb.CoreComponents do
       </button>
       """
     end
+  end
+
+  @doc """
+  Wraps sanitized Markdown/Observex HTML with the shared prose treatment.
+
+  The descendants are raw renderer output, so their styling is expressed as
+  Tailwind arbitrary variants on the wrapper instead of global CSS selectors.
+  """
+  attr :class, :any, default: nil
+  attr :rest, :global
+  slot :inner_block, required: true
+
+  def markdown_prose(assigns) do
+    assigns = assign(assigns, :prose_class, markdown_prose_class(assigns.class))
+
+    ~H"""
+    <div class={@prose_class} {@rest}>
+      {render_slot(@inner_block)}
+    </div>
+    """
+  end
+
+  def markdown_prose_class(extra \\ nil) do
+    [
+      "min-w-0 max-w-full text-left break-words hyphens-auto",
+      "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+      "[&_p]:my-[0.4em] [&_ul]:my-[0.4em] [&_ol]:my-[0.4em]",
+      "[&_pre]:my-[0.4em] [&_table]:my-[0.4em] [&_blockquote]:my-[0.4em]",
+      "[&_p]:break-words [&_li]:break-words [&_blockquote]:break-words",
+      "[&_h1]:mt-[0.8em] [&_h1]:mb-[0.35em] [&_h1]:text-[1.25em]",
+      "[&_h2]:mt-[0.8em] [&_h2]:mb-[0.35em] [&_h2]:text-[1.15em]",
+      "[&_h3]:mt-[0.8em] [&_h3]:mb-[0.35em] [&_h3]:text-[1.05em]",
+      "[&_h4]:mt-[0.8em] [&_h4]:mb-[0.35em] [&_h4]:text-[1em]",
+      "[&_h5]:mt-[0.8em] [&_h5]:mb-[0.35em] [&_h5]:text-[1em]",
+      "[&_h6]:mt-[0.8em] [&_h6]:mb-[0.35em] [&_h6]:text-[1em]",
+      "[&_h1]:font-semibold [&_h2]:font-semibold [&_h3]:font-semibold",
+      "[&_h4]:font-semibold [&_h5]:font-semibold [&_h6]:font-semibold",
+      "[&_h1]:leading-[1.3] [&_h2]:leading-[1.3] [&_h3]:leading-[1.3]",
+      "[&_h4]:leading-[1.3] [&_h5]:leading-[1.3] [&_h6]:leading-[1.3]",
+      "[&_h1]:text-base-content [&_h2]:text-base-content [&_h3]:text-base-content",
+      "[&_h4]:text-base-content [&_h5]:text-base-content [&_h6]:text-base-content",
+      "[&_strong]:font-semibold [&_strong]:text-base-content [&_em]:italic",
+      "[&_del]:line-through [&_del]:opacity-75",
+      "[&_ul]:list-disc [&_ul]:pl-[1.35em] [&_ol]:list-decimal [&_ol]:pl-[1.35em]",
+      "[&_li]:my-[0.15em] [&_li>ul]:my-[0.15em] [&_li>ol]:my-[0.15em]",
+      "[&_input]:mr-[0.4em] [&_input]:align-middle",
+      "[&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2",
+      "[&_a]:decoration-current/45 [&_a:hover]:decoration-current",
+      "[&_:not(pre)>code]:break-words [&_:not(pre)>code]:whitespace-break-spaces",
+      "[&_:not(pre)>code]:rounded [&_:not(pre)>code]:bg-base-content/[0.09]",
+      "[&_:not(pre)>code]:px-[0.3em] [&_:not(pre)>code]:py-[0.1em]",
+      "[&_:not(pre)>code]:font-mono [&_:not(pre)>code]:text-[0.85em]",
+      "[&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:break-normal [&_pre]:rounded-md",
+      "[&_pre]:border [&_pre]:border-base-content/10 [&_pre]:px-[0.7em] [&_pre]:py-[0.6em]",
+      "[&_pre]:text-[0.8em] [&_pre]:leading-[1.45]",
+      "[&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:font-mono [&_pre_code]:whitespace-pre",
+      "[&_blockquote]:border-l-[3px] [&_blockquote]:border-base-content/25",
+      "[&_blockquote]:pl-[0.75em] [&_blockquote]:text-base-content/75",
+      "[&_blockquote>*:first-child]:mt-0 [&_blockquote>*:last-child]:mb-0",
+      "[&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:overflow-x-auto",
+      "[&_table]:border-collapse [&_table]:text-[0.85em]",
+      "[&_th]:border [&_th]:border-base-content/15 [&_td]:border [&_td]:border-base-content/15",
+      "[&_th]:px-[0.5em] [&_th]:py-[0.25em] [&_td]:px-[0.5em] [&_td]:py-[0.25em]",
+      "[&_th]:text-left [&_td]:text-left [&_th]:align-top [&_td]:align-top",
+      "[&_thead_th]:bg-base-content/[0.06] [&_thead_th]:font-semibold",
+      "[&_hr]:my-[0.8em] [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-base-content/15",
+      "[&_img]:h-auto [&_img]:max-w-full",
+      extra
+    ]
   end
 
   @doc """
@@ -217,6 +299,174 @@ defmodule EcritsWeb.CoreComponents do
   defp status_dot_bg(_), do: "bg-base-content/45"
 
   @doc """
+  Renders the local workspace mount panel.
+
+  The screen is page-specific, but the chrome, button, input row, and error
+  treatment are component-owned so the global stylesheet can stay focused on
+  fonts, theme tokens, and semantic rendered content.
+  """
+  attr :picker_busy?, :boolean, required: true
+  attr :path_form, :any, required: true
+  attr :mount_error, :string, default: nil
+
+  def workspace_mount_panel(assigns) do
+    ~H"""
+    <div
+      id="local-mount-root"
+      class="flex min-h-[calc(100vh-60px)] items-center justify-center px-5 py-8"
+    >
+      <section
+        id="local-native-directory-picker"
+        data-role="native-directory-picker"
+        class={workspace_mount_panel_class()}
+        aria-label="Open workspace folder"
+      >
+        <div class="flex h-[2.1rem] items-center gap-2.5 border-b border-base-content/10 bg-base-300/35 px-3.5">
+          <span class="inline-flex gap-1.5" aria-hidden="true">
+            <span class="size-2 rounded-full bg-base-content/20"></span>
+            <span class="size-2 rounded-full bg-base-content/20"></span>
+            <span class="size-2 rounded-full bg-base-content/20"></span>
+          </span>
+          <span class="inline-flex min-w-0 items-center gap-1.5 font-mono text-[0.72rem] text-base-content/70">
+            <.icon name="hero-folder-micro" class="size-3.5 shrink-0" />
+            <span class="truncate">no folder open</span>
+          </span>
+        </div>
+
+        <div
+          id="local-mount-picker-surface"
+          data-role="mount-picker-surface"
+          class="grid gap-[1.35rem] p-6 pb-5"
+        >
+          <header>
+            <h1
+              id="local-native-directory-status"
+              class="m-0 text-[1.06rem] font-semibold leading-snug text-base-content"
+            >
+              Open a workspace folder
+            </h1>
+            <p class="m-0 mt-1.5 text-[0.84rem] leading-6 text-base-content/70">
+              Point Ecrits at a folder on this machine to start editing. Everything
+              stays on disk.
+            </p>
+          </header>
+
+          <div
+            id="local-mount-control-row"
+            data-role="mount-control-row"
+            class="m-0 flex flex-col gap-4"
+          >
+            <button
+              id="local-mount-choose"
+              type="button"
+              phx-click="choose_mount_directory"
+              phx-disable-with="Opening picker..."
+              disabled={@picker_busy?}
+              aria-busy={to_string(@picker_busy?)}
+              data-busy={to_string(@picker_busy?)}
+              class={workspace_mount_open_class()}
+            >
+              <%= if @picker_busy? do %>
+                <.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
+                <span>Opening picker...</span>
+              <% else %>
+                <.icon name="hero-folder-open-micro" class="size-4 shrink-0" />
+                <span>Open folder...</span>
+              <% end %>
+            </button>
+
+            <.form
+              for={@path_form}
+              id="local-path-form"
+              phx-submit="open_path"
+              class="m-0"
+            >
+              <label
+                for="local-path-input"
+                class="mb-1.5 block text-[0.72rem] font-medium text-base-content/70"
+              >
+                or enter a path
+              </label>
+              <div class={workspace_mount_path_field_class()}>
+                <span
+                  class="inline-flex select-none items-center justify-center font-mono text-base leading-none text-base-content/40"
+                  aria-hidden="true"
+                >
+                  &rsaquo;
+                </span>
+                <.input
+                  field={@path_form[:path]}
+                  id="local-path-input"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="/Users/name/workspace"
+                  wrapper_class="m-0 min-w-0 self-stretch p-0"
+                  label_class="block h-full"
+                  class="h-full w-full border-0 bg-transparent px-2.5 font-mono text-[0.82rem] text-base-content outline-none placeholder:text-base-content/35 focus:outline-none focus:ring-0"
+                />
+                <button
+                  id="local-path-submit"
+                  type="submit"
+                  aria-label="Open path"
+                  title="Open this path"
+                  class={workspace_mount_path_submit_class()}
+                >
+                  <.icon name="hero-arrow-turn-down-left-micro" class="size-3.5" />
+                  <span class="leading-none">Open</span>
+                </button>
+              </div>
+            </.form>
+          </div>
+
+          <p
+            :if={@mount_error}
+            id="local-mount-error"
+            role="alert"
+            class="m-0 mt-1 flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-3 py-2 text-[0.82rem] leading-[1.45] text-error"
+          >
+            <.icon name="hero-exclamation-triangle-micro" class="mt-0.5 size-4 shrink-0" />
+            <span>{@mount_error}</span>
+          </p>
+        </div>
+      </section>
+    </div>
+    """
+  end
+
+  defp workspace_mount_panel_class do
+    [
+      "w-full max-w-[30rem] overflow-hidden rounded-lg",
+      "border border-base-content/10 bg-base-200 shadow-[0_8px_28px_rgba(0,0,0,0.45)]"
+    ]
+  end
+
+  defp workspace_mount_open_class do
+    [
+      "inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-transparent px-4 text-sm font-semibold text-white",
+      "bg-[oklch(44%_0.13_162)] transition-colors duration-150 hover:bg-[oklch(40%_0.13_162)] active:bg-[oklch(36%_0.13_162)]",
+      "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-[oklch(44%_0.13_162/0.38)]",
+      "disabled:cursor-progress disabled:opacity-65"
+    ]
+  end
+
+  defp workspace_mount_path_field_class do
+    [
+      "grid min-h-11 grid-cols-[auto_minmax(0,1fr)_auto] items-center rounded-md border border-base-content/15",
+      "bg-base-content/[0.02] py-1 pl-3 pr-1 transition-[border-color,box-shadow,background-color] duration-150",
+      "focus-within:border-primary focus-within:bg-base-200 focus-within:ring-[3px] focus-within:ring-primary/15"
+    ]
+  end
+
+  defp workspace_mount_path_submit_class do
+    [
+      "m-0 inline-flex min-h-[2.15rem] shrink-0 items-center justify-center gap-1 rounded px-3.5",
+      "bg-base-content/10 text-[0.78rem] font-semibold text-base-content/75 transition-colors duration-150",
+      "hover:bg-primary hover:text-primary-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
+    ]
+  end
+
+  @doc """
   Renders an input with label and error messages.
 
   A `Phoenix.HTML.FormField` may be passed as argument,
@@ -276,6 +526,8 @@ defmodule EcritsWeb.CoreComponents do
   attr :multiple, :boolean, default: false, doc: "the multiple flag for select inputs"
   attr :class, :any, default: nil, doc: "the input class to use over defaults"
   attr :error_class, :any, default: nil, doc: "the input error class to use over defaults"
+  attr :wrapper_class, :any, default: nil, doc: "the wrapper class to use over defaults"
+  attr :label_class, :any, default: nil, doc: "the label wrapper class to use"
 
   attr :rest, :global,
     include: ~w(accept autocomplete capture cols disabled form list max maxlength min minlength
@@ -305,8 +557,8 @@ defmodule EcritsWeb.CoreComponents do
       end)
 
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
+    <div class={@wrapper_class || "fieldset mb-2"}>
+      <label for={@id} class={@label_class}>
         <input
           type="hidden"
           name={@name}
@@ -333,8 +585,8 @@ defmodule EcritsWeb.CoreComponents do
 
   def input(%{type: "select"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
+    <div class={@wrapper_class || "fieldset mb-2"}>
+      <label for={@id} class={@label_class}>
         <span :if={@label} class="label mb-1">{@label}</span>
         <select
           id={@id}
@@ -354,8 +606,8 @@ defmodule EcritsWeb.CoreComponents do
 
   def input(%{type: "textarea"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
+    <div class={@wrapper_class || "fieldset mb-2"}>
+      <label for={@id} class={@label_class}>
         <span :if={@label} class="label mb-1">{@label}</span>
         <textarea
           id={@id}
@@ -375,8 +627,8 @@ defmodule EcritsWeb.CoreComponents do
   # All other inputs text, datetime-local, url, password, etc. are handled here...
   def input(assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
+    <div class={@wrapper_class || "fieldset mb-2"}>
+      <label for={@id} class={@label_class}>
         <span :if={@label} class="label mb-1">{@label}</span>
         <input
           type={@type}
