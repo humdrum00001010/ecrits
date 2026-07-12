@@ -52,4 +52,26 @@ defmodule EcritsWeb.MarkdownTest do
       assert EcritsWeb.Markdown.to_preview_html(nil) == ""
     end
   end
+
+  describe "repair_chat_prose_boundaries/1" do
+    test "repairs adjacent Korean prose sentences in text nodes" do
+      html = "<p>확인한다.첫 장을 본다.JSONL 검증도 한다.</p>"
+
+      assert EcritsWeb.Markdown.repair_chat_prose_boundaries(html) ==
+               "<p>확인한다. 첫 장을 본다. JSONL 검증도 한다.</p>"
+    end
+
+    test "leaves inline and fenced code text untouched" do
+      html = """
+      <p>확인한다.첫 장 <code>코드.깨면안됨</code></p><pre><code>코드.깨면안됨
+      </code></pre>
+      """
+
+      repaired = EcritsWeb.Markdown.repair_chat_prose_boundaries(html)
+
+      assert repaired =~ "확인한다. 첫 장"
+      assert repaired =~ "<code>코드.깨면안됨</code>"
+      assert repaired =~ "<pre><code>코드.깨면안됨\n</code></pre>"
+    end
+  end
 end

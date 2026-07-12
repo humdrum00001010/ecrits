@@ -155,6 +155,16 @@ defmodule Ecrits.Local.AcpAgent.Session do
   end
 
   @doc """
+  Append a display-only item to the visible transcript without sending it to the
+  ACP provider.
+
+  Used for UI-side artifacts such as durable edit-preview cards that are caused
+  by a tool/VFS write but are not themselves provider messages.
+  """
+  def append_transcript_item(pid, item) when is_pid(pid) and is_map(item),
+    do: GenServer.call(pid, {:append_transcript_item, item})
+
+  @doc """
   Updates this live session's turn parameters (access/approval mode, reasoning
   effort, same-provider model) WITHOUT recreating the session, so the chat
   conversation is preserved. The merged `adapter_opts` (and `mcp_servers`) are
@@ -286,6 +296,10 @@ defmodule Ecrits.Local.AcpAgent.Session do
 
   def handle_call(:transcript, _from, state) do
     {:reply, Enum.reverse(state.transcript), state}
+  end
+
+  def handle_call({:append_transcript_item, item}, _from, state) when is_map(item) do
+    {:reply, :ok, append_transcript_item_to_state(state, item)}
   end
 
   def handle_call({:update_options, new_opts}, _from, state) do
@@ -1074,6 +1088,25 @@ defmodule Ecrits.Local.AcpAgent.Session do
     else
       items ++ [%{role: :agent, body: text, status: :sent, segment: segment}]
     end
+  end
+
+  defp append_transcript_item_to_state(%{current: %{items: items} = current} = state, item)
+       when is_list(items) do
+    %{state | current: Map.put(current, :items, items ++ [item])}
+  end
+
+  defp append_transcript_item_to_state(%{transcript: [latest | rest]} = state, item) do
+    items = Map.get(latest, :items, []) ++ [item]
+    %{state | transcript: [Map.put(latest, :items, items) | rest]}
+  end
+
+  defp append_transcript_item_to_state(state, item) do
+    turn_id =
+      item[:turn_id] || item["turn_id"] ||
+        "display-#{System.unique_integer([:positive, :monotonic])}"
+
+    entry = %{turn_id: turn_id, user: "", agent: "", items: [item]}
+    %{state | transcript: [entry | state.transcript]}
   end
 
   defp put_tool_item(current, tool_call_id, name, status, body) when is_map(current) do

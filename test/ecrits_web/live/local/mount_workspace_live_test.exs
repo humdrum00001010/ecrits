@@ -336,6 +336,8 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     {:ok, workspace_lv, _html} = live(conn, ~p"/workspace")
 
     assert has_element?(workspace_lv, "#local-workspace-root")
+    assert has_element?(workspace_lv, "div#local-workspace-root")
+    refute has_element?(workspace_lv, "main#local-workspace-root")
     assert has_element?(workspace_lv, "a[aria-label='Ecrits'][href='/workspace']")
     assert has_element?(workspace_lv, "#local-workspace-root[class*='overflow-hidden']")
     assert has_element?(workspace_lv, "#local-workspace-grid[phx-hook='LocalChatRailResizer']")
@@ -368,6 +370,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
            )
 
     assert has_element?(workspace_lv, "#local-file-tree-panel [data-role='repo-browser-header']")
+    assert has_element?(workspace_lv, ~s(#local-file-tree-panel[aria-label="Workspace files"]))
 
     assert has_element?(
              workspace_lv,
@@ -1567,18 +1570,17 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     cond do
       mount_status.enabled? and mounted? ->
         assert prompt =~ "#{doc_vfs_backend_mode_label(mount_status)} mode"
-        assert prompt =~ "The ONLY MCP tool to call is `doc.open_doc"
         assert prompt =~ "doc.open_doc"
         assert prompt =~ "Do not call `doc.close_doc` in normal edit turns"
         assert prompt =~ "NEVER type `doc.open_doc` in the shell"
         assert prompt =~ "resource/tool discovery only to surface `doc.open_doc`"
         assert prompt =~ "Do not use discovery as a substitute for editing"
-        assert prompt =~ ".ecrits/mount/<name>.jsonl"
+        assert normalized_prompt =~ "returns a `mounted_at` path"
         assert prompt =~ "The JSONL file itself is IR-only"
         assert prompt =~ "does NOT contain `mounted_at`"
         assert prompt =~ "Never treat a missing `mounted_at` field inside"
         assert prompt =~ "NEVER create, copy, or edit a JSONL projection anywhere else"
-        assert prompt =~ "/tmp/<name>.jsonl"
+        assert prompt =~ "/tmp/<mount>.jsonl"
         assert prompt =~ "does NOT route to the document"
         assert prompt =~ "[ [ [ payload_node"
         assert prompt =~ "Positional HWPX refs are NOT payload fields"
@@ -1623,7 +1625,7 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
         assert prompt =~ "there is no doc.save"
         assert prompt =~ "Read-only questions: cat/grep and answer, do not edit"
         assert prompt =~ "No fabrication"
-        assert prompt =~ "There is NO doc.read"
+        assert normalized_prompt =~ "There is NO doc.read"
         assert prompt =~ "doc.context"
         refute prompt =~ "current_document.document"
 
@@ -1676,14 +1678,20 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
     sync_liveview(lv)
   end
 
-  test "manual VFS enable subscribes direct VFS edit cards", %{conn: conn} do
+  test "manual VFS enable subscribes direct VFS edit previews", %{conn: conn} do
     previous_vfs = Application.get_env(:ecrits, :doc_vfs)
     on_exit(fn -> restore_doc_vfs_env(previous_vfs) end)
 
     root = LocalWorkspaceAdapterStub.valid_path()
     Application.put_env(:ecrits, :doc_vfs, enabled: false)
 
-    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
+    {:ok, lv, _html} = open_workspace(conn, root, document: "employment_v1.hwp")
+    session_id = subscribe_agent(lv)
+
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="local-hwp-editor"][data-local-document-format="hwp"][data-document-path="employment_v1.hwp"])
+    )
 
     assert has_element?(lv, ~s(#fuse-mode-toggle[aria-pressed="false"]))
 
@@ -1709,8 +1717,8 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
           "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root),
           {:vfs_doc_edited,
            %{
-             path: Path.join(root, "template.hwp"),
-             doc: "template.hwp",
+             path: Path.join(root, "employment_v1.hwp"),
+             doc: "employment_v1.hwp",
              applied: 1,
              marker: "SYNTHETIC_VFS_CARD",
              highlights: [
@@ -1728,16 +1736,213 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
         assert has_element?(
                  lv,
-                 ~s([data-role="editor-preview"][data-document-path="template.hwp"])
+                 ~s([data-role="editor-preview"][data-document-path="employment_v1.hwp"][data-preview-delta-count="1"])
                )
 
         assert has_element?(
                  lv,
-                 ~s([data-role="local-hwp-editor"][data-editor-mirror="true"][data-preview-text=""][data-preview-highlights*="SYNTHETIC_VFS_CARD"])
+                 ~s([data-role="local-hwp-editor"][data-editor-mirror="true"][data-preview-highlights*="SYNTHETIC_VFS_CARD"])
                )
 
+        assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+        assert Enum.any?(items, &(Map.get(&1, :role) == :edit_preview))
+
+        refute has_element?(lv, ~s([data-role="edit-preview-card"]))
         refute has_element?(lv, ~s([data-role="doc-edit-card"]))
     end
+  end
+
+  test "VFS edit for a cold workspace document renders a durable descriptor and renderer preview",
+       %{
+         conn: conn
+       } do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root)
+    session_id = subscribe_agent(lv)
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwp"),
+         doc: "template.hwp",
+         applied: 1,
+         marker: "SYNTHETIC_COLD_VFS_PREVIEW",
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "replace_text",
+             "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+             "text" => "SYNTHETIC_COLD_VFS_PREVIEW"
+           }
+         ]
+       }}
+    )
+
+    sync_liveview(lv)
+
+    refute has_element?(lv, "#studio-document-tab-template-hwp")
+
+    assert has_element?(
+             lv,
+             ~s([data-role="editor-preview"][data-document-path="template.hwp"][data-preview-delta-count="1"])
+           )
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-hwp-editor"][data-editor-mirror="true"][data-preview-highlights*="SYNTHETIC_COLD_VFS_PREVIEW"])
+           )
+
+    refute has_element?(lv, ~s([data-role="edit-preview-card"]))
+    refute has_element?(lv, ~s([data-role="doc-edit-card"]))
+
+    assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+
+    assert Enum.any?(items, fn item ->
+             Map.get(item, :role) == :edit_preview and
+               Map.get(item, :document_path) == "template.hwp" and
+               Map.get(item, :backend) == "ehwp" and
+               Map.get(item, :mode) == "descriptor" and
+               is_map(Map.get(item, :version))
+           end)
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, lv2, _html2} = open_workspace(conn, root)
+
+    lv2
+    |> element("#local-agent-rail-picker")
+    |> render_click()
+
+    lv2
+    |> element("#local-agent-rail-option-#{session_id}")
+    |> render_click()
+
+    sync_liveview(lv2)
+
+    assert has_element?(
+             lv2,
+             ~s([data-role="editor-preview"][data-document-path="template.hwp"][data-preview-delta-count="1"])
+           )
+
+    assert has_element?(
+             lv2,
+             ~s([data-role="local-hwp-editor"][data-editor-mirror="true"][data-preview-highlights*="SYNTHETIC_COLD_VFS_PREVIEW"])
+           )
+
+    refute has_element?(lv2, ~s([data-role="doc-edit-card"]))
+  end
+
+  test "VFS edit for a large active document keeps one embedded rail mirror", %{
+    conn: conn
+  } do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
+    session_id = subscribe_agent(lv)
+
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="local-hwp-editor"][data-local-document-format="hwp"][data-document-path="template.hwp"])
+    )
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwp"),
+         doc: "template.hwp",
+         applied: 2,
+         marker: "SYNTHETIC_LARGE_ACTIVE_VFS",
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "replace_text",
+             "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+             "text" => "SYNTHETIC_LARGE_ACTIVE_VFS"
+           }
+         ]
+       }}
+    )
+
+    sync_liveview(lv)
+
+    assert has_element?(
+             lv,
+             ~s([data-role="editor-preview"][data-document-path="template.hwp"][data-preview-delta-count="2"])
+           )
+
+    assert has_element?(
+             lv,
+             ~s([data-role="local-hwp-editor"][data-editor-mirror="true"][data-preview-highlights*="SYNTHETIC_LARGE_ACTIVE_VFS"])
+           )
+
+    refute has_element?(lv, ~s([data-role="doc-edit-card"]))
+
+    assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+
+    assert Enum.any?(items, fn item ->
+             Map.get(item, :role) == :edit_preview and
+               Map.get(item, :document_path) == "template.hwp" and
+               Map.get(item, :applied) == 2 and
+               Map.get(item, :mode) == "descriptor"
+           end)
+  end
+
+  test "repeated VFS edits replace the previous embedded rail mirror", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwp")
+    _session_id = subscribe_agent(lv)
+
+    assert_has_element_after_open_sync(
+      lv,
+      ~s([data-role="local-hwp-editor"][data-local-document-format="hwp"][data-document-path="template.hwp"])
+    )
+
+    for marker <- ["SYNTHETIC_VFS_PREVIEW_ONE", "SYNTHETIC_VFS_PREVIEW_TWO"] do
+      send(
+        lv.pid,
+        {:vfs_doc_edited,
+         %{
+           path: Path.join(root, "template.hwp"),
+           doc: "template.hwp",
+           applied: 1,
+           marker: marker,
+           highlights: [
+             %{
+               "kind" => "text",
+               "op" => "replace_text",
+               "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+               "text" => marker
+             }
+           ]
+         }}
+      )
+
+      sync_liveview(lv)
+    end
+
+    html = render(lv)
+
+    preview_count =
+      html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="editor-preview"]))
+      |> LazyHTML.attribute("data-role")
+      |> length()
+
+    mirror_count =
+      html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="local-hwp-editor"][data-editor-mirror="true"]))
+      |> LazyHTML.attribute("data-editor-mirror")
+      |> length()
+
+    assert preview_count == 1
+    assert mirror_count == 1
+    assert html =~ "SYNTHETIC_VFS_PREVIEW_TWO"
+    refute html =~ "SYNTHETIC_VFS_PREVIEW_ONE"
+    refute has_element?(lv, ~s([data-role="doc-edit-card"]))
   end
 
   test "VFS property writes are pushed to the open HWP browser editor", %{conn: conn} do
@@ -2030,6 +2235,57 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert [%{user: "only rail a"} | _] = AcpAgent.agent_snapshot(session_id_a).transcript
     assert AcpAgent.agent_snapshot(session_id_b).transcript == []
+  end
+
+  test "VFS edit previews route only to the owning chat rail", %{conn: conn} do
+    root = LocalWorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "vfs-preview-owner", root)
+
+    {:ok, lv_a, _html} = open_workspace(conn, root)
+    {:ok, lv_b, _html} = open_workspace(conn, root)
+
+    session_id_a = subscribe_agent(lv_a)
+    session_id_b = subscribe_agent(lv_b)
+
+    event =
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id_a,
+         path: Path.join(root, "template.hwp"),
+         doc: "template.hwp",
+         applied: 1,
+         marker: "SYNTHETIC_OWNER_PREVIEW",
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "replace_text",
+             "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+             "text" => "SYNTHETIC_OWNER_PREVIEW"
+           }
+         ]
+       }}
+
+    send(lv_a.pid, event)
+    send(lv_b.pid, event)
+
+    sync_liveview(lv_a)
+    sync_liveview(lv_b)
+
+    assert has_element?(
+             lv_a,
+             ~s([data-role="editor-preview"][data-document-path="template.hwp"][data-preview-delta-count="1"])
+           )
+
+    refute has_element?(
+             lv_b,
+             ~s([data-role="editor-preview"][data-document-path="template.hwp"])
+           )
+
+    assert [%{items: items_a}] = AcpAgent.agent_snapshot(session_id_a).transcript
+    assert Enum.any?(items_a, &(Map.get(&1, :role) == :edit_preview))
+    assert AcpAgent.agent_snapshot(session_id_b).transcript == []
+
+    on_exit(fn -> stop_workspace_session(root) end)
   end
 
   test "refresh on an empty chat reuses the active rail instead of adding another blank",
@@ -2967,8 +3223,73 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
+             ~s([id^="local-agent-assistant-"][data-chat-role="chat-message"][class*="w-full"] [data-role="agent-text"][class*="text-left"])
+           )
+
+    refute has_element?(
+             lv,
              ~s([id^="local-agent-assistant-"][data-chat-role="chat-message"][class*="w-full"] [data-role="agent-text"][class*="text-justify"])
            )
+  end
+
+  test "agent sidebar repairs sentence boundaries lost between streamed prose deltas", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          {:text_delta, "확인한다."},
+          {:text_delta, "첫 장을 본다."},
+          {:text_delta, "JSONL 검증도 한다."}
+        ]
+      ]
+    )
+
+    {:ok, lv, _html} = open_workspace(conn)
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "stream Korean prose"})
+    |> render_submit()
+
+    assert_push_event(
+      lv,
+      "local_agent_text_append",
+      %{message_id: message_id, piece: "확인한다."},
+      1_000
+    )
+
+    assert_push_event(
+      lv,
+      "local_agent_text_append",
+      %{message_id: ^message_id, piece: "첫 장을 본다."},
+      1_000
+    )
+
+    assert_push_event(
+      lv,
+      "local_agent_text_append",
+      %{message_id: ^message_id, piece: "JSONL 검증도 한다."},
+      1_000
+    )
+
+    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+                   1_000
+
+    sync_liveview(lv)
+
+    final_body =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(
+        ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"])
+      )
+      |> LazyHTML.text()
+
+    assert final_body =~ "확인한다. 첫 장을 본다. JSONL 검증도 한다."
+    refute final_body =~ "확인한다.첫"
+    refute final_body =~ "본다.JSONL"
   end
 
   test "agent prose deltas do not create an embedded editor preview for the active document", %{
@@ -3260,16 +3581,15 @@ defmodule EcritsWeb.Local.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    # MDEx (GFM) emits standard semantic tags inside the `.chat-markdown`
-    # container (styling lives in app.css scoped to `.chat-markdown`).
+    # MDEx (GFM) emits standard semantic tags inside the shared prose container.
     assert has_element?(
              lv,
-             "##{message_id} [data-role='chat-md-body'].chat-markdown p strong",
+             "##{message_id} [data-role='chat-md-body'] p strong",
              "bold"
            )
 
-    assert has_element?(lv, "##{message_id} .chat-markdown p code", "inline()")
-    assert has_element?(lv, "##{message_id} .chat-markdown ul li", "first item")
+    assert has_element?(lv, "##{message_id} [data-role='chat-md-body'] p code", "inline()")
+    assert has_element?(lv, "##{message_id} [data-role='chat-md-body'] ul li", "first item")
 
     html = render(lv)
     # MDEx runs with the default safe mode, so raw HTML is dropped rather than

@@ -16,6 +16,7 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   """
 
   alias Ecrits.Doc.Editor
+  alias Ecrits.Doc.Office
   alias Ecrits.Doc.Pool
   alias Ecrits.Local.Document
   alias Ecrits.Local.Document.ByteSpool
@@ -58,6 +59,19 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
     end
   end
 
+  @spec save_replay(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def save_replay(document_id, params) when is_binary(document_id) and is_map(params) do
+    with {:ok, %Document{} = document} <- Document.document(document_id),
+         :ok <- verify_format(document, params),
+         {:ok, kind} <- office_kind(document.format),
+         {:ok, journal} <- replay_journal(params),
+         {:ok, bytes} <- replay_office_journal(document, kind, journal),
+         {:ok, saved_document, snapshot} <- Document.save(document, bytes, attrs(params)) do
+      :ok = sync_server_twin(document, bytes)
+      {:ok, save_response(saved_document, snapshot)}
+    end
+  end
+
   @spec record_mutation(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def record_mutation(document_id, params) when is_binary(document_id) and is_map(params) do
     with {:ok, _document} <- Document.document(document_id),
@@ -92,6 +106,99 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   end
 
   defp decode_bytes(params), do: ByteSpool.decode(params)
+
+  defp replay_journal(params) do
+    journal = param(params, :journal) || param(params, :replay_journal)
+
+    case journal do
+      [_ | _] = entries -> {:ok, entries}
+      _other -> {:error, :missing_replay_journal}
+    end
+  end
+
+  defp replay_office_journal(%Document{path: path, format: format}, kind, journal)
+       when is_binary(path) do
+    tmp_path = replay_tmp_path(format)
+
+    case Office.open(path, kind: kind) do
+      {:ok, handle} ->
+        try do
+          with :ok <- apply_replay_journal(handle, journal),
+               {:ok, _saved} <- Office.save(handle, format: kind, path: tmp_path),
+               {:ok, bytes} <- File.read(tmp_path) do
+            {:ok, bytes}
+          else
+            :ok ->
+              case File.read(tmp_path) do
+                {:ok, bytes} -> {:ok, bytes}
+                {:error, reason} -> {:error, {:office_replay_failed, "read failed: #{reason}"}}
+              end
+
+            {:error, reason} ->
+              {:error, {:office_replay_failed, replay_error(reason)}}
+          end
+        after
+          _ = Office.close(handle)
+          _ = File.rm(tmp_path)
+        end
+
+      {:error, reason} ->
+        {:error, {:office_replay_failed, replay_error(reason)}}
+    end
+  end
+
+  defp replay_tmp_path(format) do
+    ext = format |> to_string() |> String.trim_leading(".")
+
+    Path.join(
+      System.tmp_dir!(),
+      "ecrits-office-save-replay-#{System.unique_integer([:positive, :monotonic])}.#{ext}"
+    )
+  end
+
+  defp apply_replay_journal(handle, journal) do
+    Enum.reduce_while(journal, :ok, fn entry, :ok ->
+      case apply_replay_entry(handle, entry) do
+        :ok -> {:cont, :ok}
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp apply_replay_entry(handle, %{} = entry) do
+    case replay_verb(entry) do
+      "edit" ->
+        case replay_value(entry, :op) do
+          %{} = op -> Office.edit(handle, op)
+          _other -> {:error, "replay edit entry is missing op"}
+        end
+
+      "set" ->
+        with ref when is_binary(ref) and ref != "" <- replay_value(entry, :ref),
+             %{} = props <- replay_value(entry, :props) do
+          Office.set(handle, ref, props)
+        else
+          _other -> {:error, "replay set entry requires ref and props"}
+        end
+
+      verb ->
+        {:error, "unsupported replay verb: #{inspect(verb)}"}
+    end
+  end
+
+  defp apply_replay_entry(_handle, _entry), do: {:error, "replay entry must be an object"}
+
+  defp replay_verb(entry), do: replay_value(entry, :verb) || replay_value(entry, :type)
+
+  defp replay_value(entry, key) do
+    Map.get(entry, key) || Map.get(entry, Atom.to_string(key))
+  end
+
+  defp replay_error(reason) when is_binary(reason), do: reason
+  defp replay_error(%{message: message}) when is_binary(message), do: message
+  defp replay_error(%{"message" => message}) when is_binary(message), do: message
+  defp replay_error(reason), do: inspect(reason)
 
   defp verify_format(document, params) do
     case param(params, :format) do
@@ -164,6 +271,11 @@ defmodule Ecrits.Local.Document.RhwpAdapter do
   end
 
   defp authoritative_bytes(_document, disk_bytes), do: disk_bytes
+
+  defp office_kind("docx"), do: {:ok, :docx}
+  defp office_kind("pptx"), do: {:ok, :pptx}
+  defp office_kind("xlsx"), do: {:ok, :xlsx}
+  defp office_kind(_format), do: {:error, :unsupported_replay_format}
 
   defp format_atom("hwpx"), do: :hwpx
   defp format_atom(_format), do: :hwp

@@ -187,9 +187,17 @@ defmodule Ecrits.Doc.Rhwp do
 
   def elements(_handle, _opts), do: {:error, {:not_supported, "no ehwp handle"}}
 
-  @projected_picture_props ~w(width height horzOffset vertOffset treatAsChar
-                              horzRelTo vertRelTo horzAlign vertAlign textWrap
-                              description originalWidth originalHeight)
+  @projected_picture_props ~w(width height treatAsChar
+                              vertRelTo vertAlign horzRelTo horzAlign
+                              vertOffset horzOffset textWrap restrictInPage allowOverlap sizeProtect
+                              brightness contrast effect transparency description
+                              rotationAngle horzFlip vertFlip originalWidth originalHeight
+                              cropLeft cropTop cropRight cropBottom
+                              paddingLeft paddingTop paddingRight paddingBottom
+                              outerMarginLeft outerMarginTop outerMarginRight outerMarginBottom
+                              borderColor borderWidth
+                              hasCaption captionDirection captionVertAlign captionWidth
+                              captionSpacing captionMaxWidth captionIncludeMargin externalPath)
 
   defp enrich_picture_nodes(nodes, ehwp_handle) do
     Enum.map(nodes, fn

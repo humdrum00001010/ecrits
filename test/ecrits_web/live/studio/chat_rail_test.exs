@@ -488,16 +488,19 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
         |> LazyHTML.from_fragment()
         |> LazyHTML.query(~s([data-role="agent-text"][data-message-id="chat-msg-agent-left"]))
 
-      # MDEx wraps the completed prose in a plain <p> inside the
-      # `.chat-markdown` container; the styling lives in app.css scoped to
-      # `.chat-markdown`, so the tag carries no inline class.
+      # MDEx wraps the completed prose in a <p> inside the shared prose
+      # container; data-role keeps streaming appends attached to the same
+      # paragraph node.
       assert agent_text |> LazyHTML.text() |> String.trim() == "왼쪽에서 시작해야 합니다."
 
-      assert html
-             |> LazyHTML.from_fragment()
-             |> LazyHTML.query(~s(#chat-msg-agent-left .chat-markdown p))
-             |> LazyHTML.text()
-             |> String.trim() == "왼쪽에서 시작해야 합니다."
+      paragraph =
+        html
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.query(
+          ~s(#chat-msg-agent-left [data-role="chat-md-body"] p[data-role="agent-paragraph"])
+        )
+
+      assert paragraph |> LazyHTML.text() |> String.trim() == "왼쪽에서 시작해야 합니다."
 
       [class] =
         agent_text
@@ -544,21 +547,26 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
       fragment = LazyHTML.from_fragment(html)
 
-      # MDEx (comrak GFM) emits standard semantic tags inside the
-      # `.chat-markdown` container; styling is in app.css, not inline.
-      assert fragment |> LazyHTML.query(".chat-markdown p") |> Enum.any?()
-      assert fragment |> LazyHTML.query(".chat-markdown ul li") |> Enum.any?()
-      assert fragment |> LazyHTML.query(".chat-markdown blockquote") |> Enum.any?()
+      # MDEx (comrak GFM) emits standard semantic tags inside the shared
+      # prose container.
+      assert fragment |> LazyHTML.query(~s([data-role="chat-md-body"] p)) |> Enum.any?()
+
+      assert fragment
+             |> LazyHTML.query(~s([data-role="chat-md-body"] p[data-role="agent-paragraph"]))
+             |> Enum.any?()
+
+      assert fragment |> LazyHTML.query(~s([data-role="chat-md-body"] ul li)) |> Enum.any?()
+      assert fragment |> LazyHTML.query(~s([data-role="chat-md-body"] blockquote)) |> Enum.any?()
       # Fenced code block: a <pre><code class="language-elixir"> with MDEx's
       # inlined syntax-highlight styles.
-      assert fragment |> LazyHTML.query(".chat-markdown pre code") |> Enum.any?()
+      assert fragment |> LazyHTML.query(~s([data-role="chat-md-body"] pre code)) |> Enum.any?()
 
       assert fragment |> LazyHTML.query("strong") |> LazyHTML.text() |> String.trim() == "bold"
       assert fragment |> LazyHTML.query("em") |> LazyHTML.text() |> String.trim() == "emphasis"
 
       # Inline code is a bare <code> (not inside <pre>).
       assert fragment
-             |> LazyHTML.query(".chat-markdown p code")
+             |> LazyHTML.query(~s([data-role="chat-md-body"] p code))
              |> LazyHTML.text()
              |> String.trim() == "inline()"
 
@@ -566,12 +574,13 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
                "https://example.com/docs"
              ]
 
-      assert LazyHTML.attribute(LazyHTML.query(fragment, ".chat-markdown pre code"), "class") == [
-               "language-elixir"
-             ]
+      assert LazyHTML.attribute(
+               LazyHTML.query(fragment, ~s([data-role="chat-md-body"] pre code)),
+               "class"
+             ) == ["language-elixir"]
 
       assert fragment
-             |> LazyHTML.query(".chat-markdown pre code")
+             |> LazyHTML.query(~s([data-role="chat-md-body"] pre code))
              |> LazyHTML.text()
              |> String.trim() == "IO.puts(\"<safe>\")"
 
@@ -580,6 +589,55 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       # the agent/user can never inject live markup.
       refute html =~ "<script>"
       refute html =~ "alert(&quot;x&quot;)"
+    end
+
+    test "agent prose repairs streamed sentence boundaries without touching code" do
+      html =
+        render_component(ChatRail,
+          id: "chat-rail",
+          studio_state: default_state(),
+          streams: %{
+            chat_messages: [
+              {"chat-msg-agent-boundary",
+               %{
+                 id: "agent-boundary",
+                 role: :agent,
+                 result: %{
+                   body: """
+                   확인한다.첫 장을 본다.JSONL 검증도 한다.
+
+                   `코드.깨면안됨`
+
+                   ```text
+                   코드.깨면안됨
+                   ```
+                   """
+                 },
+                 transient?: false
+               }}
+            ]
+          },
+          current_scope: lawyer_scope()
+        )
+
+      fragment = LazyHTML.from_fragment(html)
+
+      paragraph_text =
+        fragment
+        |> LazyHTML.query(~s(#chat-msg-agent-boundary [data-role="chat-md-body"] p))
+        |> LazyHTML.text()
+
+      assert paragraph_text =~ "확인한다. 첫 장을 본다. JSONL 검증도 한다."
+
+      assert fragment
+             |> LazyHTML.query(~s(#chat-msg-agent-boundary [data-role="chat-md-body"] p code))
+             |> LazyHTML.text()
+             |> String.trim() == "코드.깨면안됨"
+
+      assert fragment
+             |> LazyHTML.query(~s(#chat-msg-agent-boundary [data-role="chat-md-body"] pre code))
+             |> LazyHTML.text()
+             |> String.trim() == "코드.깨면안됨"
     end
 
     test "user messages render Markdown without allowing raw HTML injection" do
@@ -608,8 +666,8 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
       fragment = LazyHTML.from_fragment(html)
 
-      # MDEx renders the ordered list as a standard <ol> inside `.chat-markdown`.
-      assert fragment |> LazyHTML.query(".chat-markdown ol li") |> Enum.any?()
+      # MDEx renders the ordered list as a standard <ol> inside the prose container.
+      assert fragment |> LazyHTML.query(~s([data-role="chat-md-body"] ol li)) |> Enum.any?()
 
       list_text =
         fragment
@@ -620,7 +678,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       assert list_text =~ "second"
 
       assert fragment
-             |> LazyHTML.query(".chat-markdown p code")
+             |> LazyHTML.query(~s([data-role="chat-md-body"] p code))
              |> LazyHTML.text()
              |> String.trim() == "<tag>"
 

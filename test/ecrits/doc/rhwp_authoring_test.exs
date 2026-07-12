@@ -50,9 +50,15 @@ defmodule Ecrits.Doc.RhwpAuthoringTest do
 
     els
     |> Jason.decode!()
-    |> Enum.filter(&(&1["type"] == "paragraph"))
+    |> Enum.filter(&body_paragraph_node?/1)
     |> Enum.map(fn e -> {e["ref"]["paragraph"], e["text"]} end)
   end
+
+  defp body_paragraph_node?(%{"type" => "paragraph", "ref" => ref}) when is_map(ref) do
+    not Map.has_key?(ref, "cell") and not Map.has_key?(ref, "cellPath")
+  end
+
+  defp body_paragraph_node?(_node), do: false
 
   defp char_bold(path, sec, para, off) do
     {:ok, h, _m} = EPool.open(File.read!(path))
@@ -170,7 +176,7 @@ defmodule Ecrits.Doc.RhwpAuthoringTest do
     assert cells == ["항목", "목표", "실적", "매출", "100", "95", "이익", "30", "28"]
 
     # The title paragraph stays clean — table data must NOT leak into the body.
-    body = parsed |> Enum.filter(&(&1["type"] == "paragraph")) |> Enum.map(& &1["text"])
+    body = parsed |> Enum.filter(&body_paragraph_node?/1) |> Enum.map(& &1["text"])
     assert "실적표" in body
     refute Enum.any?(body, &String.contains?(&1, "매출"))
   end

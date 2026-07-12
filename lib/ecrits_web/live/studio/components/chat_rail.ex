@@ -567,16 +567,44 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
 
   def markdown_body(assigns) do
     ~H"""
-    <div data-role="chat-md-body" class="chat-markdown min-w-0 max-w-full">
-      {render_markdown(@body)}
-    </div>
+    <.markdown_prose data-role="chat-md-body">
+      {render_markdown(@body, @paragraph_role)}
+    </.markdown_prose>
     """
   end
 
   # GFM markdown -> sanitized HTML via the shared MDEx renderer. Raw HTML in the
   # source is escaped by default, so agent/user output can't inject markup. On any
   # parse error the helper falls back to the plain text rather than crash.
-  defp render_markdown(body), do: EcritsWeb.Markdown.to_safe_html(body)
+  defp render_markdown(body, paragraph_role) do
+    body
+    |> EcritsWeb.Markdown.to_safe_html()
+    |> markdown_html_string()
+    |> EcritsWeb.Markdown.repair_chat_prose_boundaries()
+    |> put_markdown_paragraph_role(paragraph_role)
+    |> Phoenix.HTML.raw()
+  end
+
+  defp markdown_html_string({:safe, _iodata} = safe), do: Phoenix.HTML.safe_to_string(safe)
+
+  defp markdown_html_string(html) when is_binary(html) and html != "" do
+    html
+    |> Phoenix.HTML.html_escape()
+    |> Phoenix.HTML.safe_to_string()
+  end
+
+  defp markdown_html_string(_html), do: ""
+
+  defp put_markdown_paragraph_role(html, role)
+       when is_binary(html) and is_binary(role) and role != "" do
+    if Regex.match?(~r/^[a-z0-9_-]+$/i, role) do
+      String.replace(html, ~r/<p\b(?![^>]*\bdata-role=)([^>]*)>/, ~s(<p data-role="#{role}"\\1>))
+    else
+      html
+    end
+  end
+
+  defp put_markdown_paragraph_role(html, _role), do: html
 
   attr :operation, :map, required: true
   attr :transient?, :boolean, default: false

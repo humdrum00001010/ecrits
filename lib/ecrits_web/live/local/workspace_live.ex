@@ -34,6 +34,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # feedback; the tick re-renders the accumulated buffer through MDEx).
   @local_agent_text_flush_ms 120
   @local_agent_editor_preview_max 5_000
+  # Chat-rail document mirrors are expensive if they accumulate. Keep only the
+  # newest direct-edit mirror alive; the mirror hook itself renders the edited
+  # highlight pages instead of building a full page stack.
   # Idle window before a dirty viewed document is auto-saved. Each user/agent
   # edit (re)arms a per-document timer; when it fires and the doc is still dirty
   # we fire a canonical `doc.save` (the same path Ctrl/Cmd+S uses).
@@ -212,6 +215,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
      |> assign(:local_agent_text_segment, 0)
      |> assign(:local_agent_text_flush_ref, nil)
      |> assign(:local_agent_editor_preview, nil)
+     |> assign(:local_agent_vfs_preview_item, nil)
      |> assign(:local_agent_active_tools, %{})
      |> assign(:local_agent_reasoning_text, "")
      # Tracks whether reasoning text is being appended contiguously (codex glues
@@ -959,12 +963,41 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   # A DIRECT edit of a mounted `.jsonl` was routed onto the document (doc VFS
   # write-back). Drop a file-viewer card in the chat rail showing where it landed.
   def handle_info({:vfs_doc_edited, info}, socket) when is_map(info) do
+    turn_id = vfs_doc_edit_turn_id()
+
     socket =
       socket
-      |> stream_insert(:local_agent_items, vfs_doc_edit_item(socket, info))
+      |> maybe_route_vfs_doc_edit_preview(info, turn_id)
       |> resync_open_editor_after_vfs_edit(info)
 
     {:noreply, socket}
+  end
+
+  defp maybe_route_vfs_doc_edit_preview(socket, info, turn_id) do
+    if vfs_doc_edit_preview_for_active_agent?(socket, info) do
+      item = vfs_doc_edit_item(socket, info, turn_id)
+
+      socket
+      |> maybe_persist_vfs_edit_preview(info, turn_id)
+      |> replace_live_vfs_editor_preview(item)
+      |> maybe_stream_agent_item(item)
+    else
+      socket
+    end
+  end
+
+  defp vfs_doc_edit_preview_for_active_agent?(socket, info) do
+    case vfs_doc_edit_agent_id(info) do
+      agent_id when is_binary(agent_id) and agent_id != "" ->
+        agent_id == socket.assigns[:local_agent_session_id]
+
+      _ ->
+        true
+    end
+  end
+
+  defp vfs_doc_edit_agent_id(info) when is_map(info) do
+    item_field(info, :agent_id) || item_field(info, :session_id)
   end
 
   # A VFS write edits the SERVER document model + saves to disk. This function is
@@ -1029,7 +1062,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       request_id: "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic])),
       document_id: document_id,
       verb: "edit",
-      payload: %{ops: ops}
+      payload: %{ops: ops, resync: true}
     })
   end
 
@@ -1040,7 +1073,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       request_id: "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic])),
       document_id: document_id,
       verb: "set",
-      payload: %{sets: sets}
+      payload: %{sets: sets, resync: true}
     })
   end
 
@@ -1108,7 +1141,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       doc_vfs_backend={@doc_vfs_backend}
       brand_href={~p"/workspace"}
     >
-      <main
+      <div
         id="local-workspace-root"
         class="h-[calc(100dvh-60px)] min-h-0 min-w-[1024px] overflow-hidden bg-[var(--cs-bg)] text-[var(--cs-ink)]"
       >
@@ -1134,6 +1167,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         >
           <aside
             id="local-file-tree-panel"
+            aria-label="Workspace files"
             data-component="repo-browser"
             data-local-file-tree-panel="true"
             data-collapsed="false"
@@ -1574,6 +1608,13 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                       </div>
                     <% "editor_preview" -> %>
                       <div data-role="editor-preview-card" class="min-w-0 w-full px-3 py-1.5">
+                        <div
+                          :if={agent_editor_preview_summary(item) != ""}
+                          data-role="editor-preview-summary"
+                          class="mb-1 truncate font-mono text-[11px] leading-relaxed text-base-content/55"
+                        >
+                          {agent_editor_preview_summary(item)}
+                        </div>
                         <EditorSurface.embedded_document
                           id={"#{dom_id}-surface"}
                           document={agent_editor_preview_document(item)}
@@ -1589,43 +1630,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                           markdown_source={agent_editor_preview_text(item)}
                           markdown_preview_html=""
                         />
-                      </div>
-                    <% "doc_edit" -> %>
-                      <div data-role="doc-edit-card" class="min-w-0 w-full px-3 py-1.5">
-                        <div class="overflow-hidden rounded-md border border-primary/30 bg-primary/[0.04]">
-                          <div class="flex items-center gap-1.5 border-b border-primary/15 px-2.5 py-1.5 text-[11px]">
-                            <.icon name="hero-pencil-square" class="size-3.5 shrink-0 text-primary" />
-                            <span class="min-w-0 truncate font-medium text-base-content/80">
-                              {agent_doc_edit_doc(item)}
-                            </span>
-                            <span class="ml-auto shrink-0 font-mono text-base-content/45">
-                              {agent_doc_edit_location(item)}
-                            </span>
-                          </div>
-                          <div
-                            :if={agent_doc_edit_rows(item) != []}
-                            data-role="doc-edit-excerpt"
-                            class="px-2.5 py-1.5 font-mono text-[11px] leading-relaxed"
-                          >
-                            <div
-                              :for={row <- agent_doc_edit_rows(item)}
-                              class={[
-                                "truncate border-l-2 pl-2",
-                                row.hit? && "border-primary bg-primary/10 text-base-content/90",
-                                !row.hit? && "border-transparent text-base-content/45"
-                              ]}
-                            >
-                              {row.text}
-                            </div>
-                          </div>
-                          <div
-                            :if={agent_doc_edit_rows(item) == []}
-                            data-role="doc-edit-excerpt"
-                            class="px-2.5 py-1.5 font-mono text-[11px] text-base-content/70"
-                          >
-                            {agent_doc_edit_marker(item)}
-                          </div>
-                        </div>
                       </div>
                     <% "thinking" -> %>
                       <div
@@ -1708,7 +1712,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                         data-role="agent-text"
                         data-message-id={dom_id}
                         aria-busy={agent_item_loading?(item, @local_agent_editor_preview)}
-                        class="block min-w-0 px-3 py-1 text-[14px] leading-relaxed text-justify break-words text-base-content"
+                        class="block min-w-0 px-3 py-1 text-left text-[14px] leading-relaxed break-words text-base-content"
                       >
                         <div data-role="agent-text-body" data-message-id={dom_id}>
                           <ChatRail.markdown_body
@@ -1727,19 +1731,17 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                         >
                           <span
                             aria-hidden="true"
-                            style="animation-delay:-0.36s"
-                            class="size-1 rounded-full bg-current chat-typing-dot"
+                            class="size-1 rounded-full bg-current motion-safe:animate-bounce [animation-delay:-240ms]"
                           >
                           </span>
                           <span
                             aria-hidden="true"
-                            style="animation-delay:-0.18s"
-                            class="size-1 rounded-full bg-current chat-typing-dot"
+                            class="size-1 rounded-full bg-current motion-safe:animate-bounce [animation-delay:-120ms]"
                           >
                           </span>
                           <span
                             aria-hidden="true"
-                            class="size-1 rounded-full bg-current chat-typing-dot"
+                            class="size-1 rounded-full bg-current motion-safe:animate-bounce"
                           >
                           </span>
                         </span>
@@ -1869,6 +1871,8 @@ defmodule EcritsWeb.Local.WorkspaceLive do
                     data-role="chat-textarea"
                     disabled={@local_agent_status in [:offline, :starting]}
                     placeholder={agent_input_placeholder(@local_agent_status)}
+                    wrapper_class="m-0 p-0 gap-0"
+                    label_class="m-0 block"
                     class="block max-h-40 min-h-7 w-full resize-none overflow-y-auto border-0 bg-transparent px-3 pt-1.5 pb-0.5 text-[13px] leading-snug text-base-content outline-none placeholder:text-base-content/35 focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:text-base-content/40"
                   />
                   <div class="flex items-center justify-end gap-1 px-2 pb-1.5 pt-0">
@@ -2369,7 +2373,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             </script>
           </aside>
         </div>
-      </main>
+      </div>
     </Layouts.app>
     """
   end
@@ -2495,45 +2499,62 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp sync_doc_vfs_subscription(socket, _root, _mounted?),
     do: unsubscribe_doc_vfs(socket)
 
-  # The chat-rail view for a DIRECT file edit (write_back broadcast). Prefer the
-  # canonical embedded document viewer when the edited file is the active doc;
-  # keep the text excerpt only as a fallback for background/non-open documents.
-  defp vfs_doc_edit_item(socket, info) do
-    vfs_editor_preview_item(socket, info) || vfs_doc_edit_card(info)
+  defp vfs_doc_edit_turn_id do
+    "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
   end
 
-  defp vfs_editor_preview_item(socket, %{path: edited_abs} = info)
+  # The chat-rail view for a DIRECT file edit (write_back broadcast). Render the
+  # saved document itself, including cold/replayed docs; the browser hook narrows
+  # mirror rendering to the pages that contain the saved edit highlights.
+  defp vfs_doc_edit_item(socket, info, turn_id) do
+    vfs_editor_preview_item(socket, info, turn_id)
+  end
+
+  defp replace_live_vfs_editor_preview(socket, item) do
+    socket =
+      case socket.assigns[:local_agent_vfs_preview_item] do
+        %{role: :editor_preview} = previous -> stream_delete(socket, :local_agent_items, previous)
+        _other -> socket
+      end
+
+    case item do
+      %{role: :editor_preview} -> assign(socket, :local_agent_vfs_preview_item, item)
+      _other -> assign(socket, :local_agent_vfs_preview_item, nil)
+    end
+  end
+
+  defp maybe_stream_agent_item(socket, nil), do: socket
+  defp maybe_stream_agent_item(socket, item), do: stream_insert(socket, :local_agent_items, item)
+
+  defp vfs_editor_preview_item(socket, %{path: edited_abs} = info, turn_id)
        when is_binary(edited_abs) do
     workspace_path = socket.assigns[:workspace_path]
-    document = socket.assigns[:active_document]
-    document_id = active_document_id(socket)
 
-    with %{relative_path: relative_path} <- document,
-         document_path when is_binary(document_path) <-
-           socket.assigns[:active_document_path] || relative_path,
-         true <- is_binary(workspace_path),
-         true <- is_binary(relative_path),
-         true <- is_binary(document_id),
+    with true <- is_binary(workspace_path),
+         {:ok, %{document: document, relative_path: relative_path}} <-
+           vfs_preview_document(socket, edited_abs),
          true <-
-           canonical_path_for_compare(edited_abs) ==
-             canonical_path_for_compare(Path.join(workspace_path, document_path)) do
-      turn_id = "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+           Document.ehwp_format?(document.format) or Document.libreoffice_format?(document.format) or
+             Document.markdown_format?(document.format) do
+      highlights = vfs_preview_highlights(info)
 
       state = %{
         turn_id: turn_id,
-        document_id: document_id,
+        document_id: document.id,
         document: document,
-        document_path: document_path,
+        document_path: relative_path,
         document_spec: local_document_spec(document),
         canvas_id:
-          "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-canvas",
+          "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-canvas",
         bytes_url:
           workspace_path
           |> local_document_bytes_url(relative_path)
           |> cache_bust_url(),
         text: "",
         delta_count: info[:applied] || 1,
-        highlights: vfs_preview_highlights(info),
+        highlights: highlights,
+        marker: info[:marker] || "",
+        summary: vfs_edit_summary(info),
         status: :sent
       }
 
@@ -2543,10 +2564,117 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     end
   end
 
-  defp vfs_editor_preview_item(_socket, _info), do: nil
+  defp vfs_editor_preview_item(_socket, _info, _turn_id), do: nil
 
-  defp vfs_preview_highlights(%{highlights: highlights}) when is_list(highlights), do: highlights
+  # A viewer-INDEPENDENT one-line summary of a VFS write-back (from the broadcast's
+  # `sets`/`ops`), so the edit is visible in the rail even when the editor preview
+  # can't render (e.g. the office WASM viewer is unavailable). Example:
+  # "deck.pptx: 1 change — shape[title]: FillColor".
+  defp vfs_edit_summary(info) do
+    doc = info[:doc] || (is_binary(info[:path]) && Path.basename(info[:path])) || "document"
+
+    details =
+      Enum.map(List.wrap(info[:sets]), fn set ->
+        ref = set["ref"] || set[:ref]
+
+        props =
+          (set["props"] || set[:props] || %{})
+          |> Map.keys()
+          |> Enum.reject(&(&1 in ["kind", :kind]))
+
+        String.trim("#{vfs_edit_short_ref(ref)}: #{Enum.join(props, ", ")}", ": ")
+      end) ++
+        Enum.map(List.wrap(info[:ops]), fn op -> to_string(op["op"] || op[:op] || "edit") end)
+
+    details = Enum.reject(details, &(&1 in [nil, ""]))
+    count = info[:applied] || length(details)
+
+    suffix =
+      case Enum.take(details, 2) do
+        [] -> ""
+        shown -> " — " <> Enum.join(shown, "; ")
+      end
+
+    "#{doc}: #{count} #{if count == 1, do: "change", else: "changes"}#{suffix}"
+  end
+
+  # "page[page1]/shape[title]" -> "shape[title]"; sensible for short/nil refs.
+  defp vfs_edit_short_ref(ref) when is_binary(ref) and ref != "",
+    do: ref |> String.split("/") |> List.last()
+
+  defp vfs_edit_short_ref(_ref), do: "node"
+
+  defp vfs_preview_document(socket, edited_abs) do
+    workspace_path = socket.assigns[:workspace_path]
+
+    with true <- is_binary(workspace_path),
+         {:ok, relative_path} <- vfs_preview_relative_path(workspace_path, edited_abs),
+         {:ok, %Document{} = document} <-
+           vfs_preview_document_for_relative_path(socket, workspace_path, relative_path) do
+      {:ok, %{document: document, relative_path: relative_path}}
+    else
+      _ -> nil
+    end
+  end
+
+  defp vfs_preview_document_for_relative_path(_socket, workspace_path, candidate_path) do
+    Document.open(workspace_path, candidate_path)
+  end
+
+  defp vfs_preview_relative_path(workspace_path, edited_abs)
+       when is_binary(workspace_path) and is_binary(edited_abs) do
+    root = DocMount.canonical_root(workspace_path)
+    edited_path = DocMount.canonical_root(edited_abs)
+    relative_path = Path.relative_to(edited_path, root)
+
+    cond do
+      relative_path == edited_path -> {:error, :outside_workspace}
+      relative_path == "." -> {:error, :workspace_root}
+      String.starts_with?(relative_path, "..") -> {:error, :outside_workspace}
+      true -> LocalPath.normalize(relative_path)
+    end
+  end
+
+  defp vfs_preview_highlights(info) when is_map(info) do
+    case item_field(info, :highlights) do
+      highlights when is_list(highlights) -> highlights
+      _ -> []
+    end
+  end
+
   defp vfs_preview_highlights(_info), do: []
+
+  defp vfs_preview_marker(info) when is_map(info) do
+    case item_field(info, :marker) ||
+           vfs_preview_marker_from_highlights(vfs_preview_highlights(info)) do
+      marker when is_binary(marker) -> marker
+      _ -> ""
+    end
+  end
+
+  defp vfs_preview_marker(_info), do: ""
+
+  defp vfs_preview_marker_from_highlights(highlights) when is_list(highlights) do
+    highlights
+    |> Enum.find_value(fn
+      %{"text" => text} when is_binary(text) and text != "" -> text
+      %{text: text} when is_binary(text) and text != "" -> text
+      %{"replacement" => text} when is_binary(text) and text != "" -> text
+      %{replacement: text} when is_binary(text) and text != "" -> text
+      _ -> nil
+    end)
+  end
+
+  defp edit_preview_hash(highlights) when is_list(highlights) do
+    highlights
+    |> Enum.take(64)
+    |> Jason.encode!()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.url_encode64(padding: false)
+    |> String.slice(0, 32)
+  rescue
+    _ -> ""
+  end
 
   defp cache_bust_url(url) when is_binary(url) do
     separator = if String.contains?(url, "?"), do: "&", else: "?"
@@ -2555,23 +2683,128 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp cache_bust_url(url), do: url
 
-  # Fallback card for a direct file edit when no open canonical viewer can be
-  # resolved for the edited document.
-  defp vfs_doc_edit_card(info) do
-    {:ok, %{rows: rows}} =
-      Ecrits.Doc.Projection.edit_excerpt(info.path, marker: info[:marker], context: 3)
+  defp maybe_persist_vfs_edit_preview(socket, info, turn_id) do
+    case socket.assigns[:local_agent_session_id] do
+      session_id when is_binary(session_id) ->
+        if item = vfs_edit_preview_transcript_item(socket, info, turn_id) do
+          _ = ACP.append_transcript_item(session_id, item)
+        end
 
-    n = info[:applied] || 1
+        socket
 
-    %{
-      dom_id: "local-agent-vfsedit-#{System.unique_integer([:positive, :monotonic])}",
-      role: :doc_edit,
-      doc: info[:doc] || "document",
-      location: "file edit · #{n} change#{if n == 1, do: "", else: "s"}",
-      marker: info[:marker] || "",
-      rows: rows
-    }
+      _ ->
+        socket
+    end
   end
+
+  defp vfs_edit_preview_transcript_item(socket, %{path: edited_abs} = info, turn_id)
+       when is_binary(edited_abs) do
+    workspace_path = socket.assigns[:workspace_path]
+    highlights = vfs_preview_highlights(info)
+
+    with true <- is_binary(workspace_path),
+         {:ok, relative_path} <- vfs_preview_relative_path(workspace_path, edited_abs),
+         {:ok, format} <- Document.detect_format(relative_path),
+         true <- Document.ehwp_format?(format) or Document.libreoffice_format?(format) do
+      version = vfs_edit_preview_file_version(edited_abs)
+
+      %{
+        role: :edit_preview,
+        status: :sent,
+        turn_id: turn_id,
+        doc: item_field(info, :doc) || Path.basename(relative_path),
+        document_path: relative_path,
+        backend: edit_preview_backend(format),
+        format: format,
+        marker: vfs_preview_marker(info),
+        applied: item_field(info, :applied) |> preview_positive_int(1),
+        highlights: highlights,
+        hash: edit_preview_hash(highlights),
+        version: version,
+        mode: "descriptor"
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp vfs_edit_preview_transcript_item(_socket, _info, _turn_id), do: nil
+
+  defp edit_preview_backend(format) do
+    cond do
+      Document.ehwp_format?(format) -> "ehwp"
+      Document.libreoffice_format?(format) -> "libreofficex"
+      true -> nil
+    end
+  end
+
+  defp vfs_edit_preview_file_version(path) when is_binary(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, stat} -> %{byte_size: stat.size, mtime: stat.mtime}
+      _ -> %{}
+    end
+  end
+
+  defp transcript_edit_preview_item(socket, turn_id, item, index) do
+    document_path = item_field(item, :document_path) || item_field(item, :document)
+    applied = item_field(item, :applied) |> preview_positive_int(1)
+
+    with relative_path when is_binary(relative_path) and relative_path != "" <-
+           document_path && to_string(document_path),
+         {:ok, path} <- transcript_edit_preview_path(socket, relative_path),
+         {:ok, %{document: document, relative_path: relative_path}} <-
+           vfs_preview_document(socket, path),
+         true <-
+           Document.ehwp_format?(document.format) or Document.libreoffice_format?(document.format) or
+             Document.markdown_format?(document.format) do
+      state = %{
+        dom_id: "local-agent-editor-preview-#{dom_token(turn_id)}-#{index}",
+        turn_id: turn_id,
+        document_id: document.id,
+        document: document,
+        document_path: relative_path,
+        document_spec: local_document_spec(document),
+        canvas_id: "local-agent-editor-preview-#{dom_token(turn_id)}-#{index}-canvas",
+        bytes_url:
+          socket.assigns.workspace_path
+          |> local_document_bytes_url(relative_path)
+          |> cache_bust_url(),
+        text: "",
+        delta_count: applied,
+        highlights: vfs_preview_highlights(item),
+        marker: vfs_preview_marker(item),
+        status: :sent
+      }
+
+      agent_editor_preview_item(state)
+    else
+      _ -> nil
+    end
+  end
+
+  defp transcript_edit_preview_path(socket, relative_path) do
+    root = socket.assigns[:workspace_path]
+
+    with root when is_binary(root) and root != "" <- root,
+         {:ok, rel} <- LocalPath.normalize(relative_path),
+         {:ok, path} <- LocalPath.join(root, rel),
+         true <- File.regular?(path) do
+      {:ok, path}
+    else
+      _ -> :error
+    end
+  end
+
+  defp preview_positive_int(value, _default) when is_integer(value) and value >= 1, do: value
+
+  defp preview_positive_int(value, default) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} when int >= 1 -> int
+      _ -> default
+    end
+  end
+
+  defp preview_positive_int(_value, default), do: default
 
   defp do_mount_workspace(socket, path) do
     case WorkspaceAdapter.mount(path) do
@@ -3151,6 +3384,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_text, "")
     |> assign(:local_agent_text_segment, 0)
     |> assign(:local_agent_editor_preview, nil)
+    |> assign(:local_agent_vfs_preview_item, nil)
     |> assign(:local_agent_reasoning_text, "")
     |> assign(:local_agent_reasoning_open?, false)
     |> assign(:local_agent_active_tools, %{})
@@ -3324,6 +3558,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     |> assign(:local_agent_text, "")
     |> assign(:local_agent_text_segment, 0)
     |> assign(:local_agent_editor_preview, nil)
+    |> assign(:local_agent_vfs_preview_item, nil)
     |> assign(:local_agent_reasoning_text, "")
     |> assign(:local_agent_reasoning_open?, false)
     |> assign(:local_agent_active_tools, %{})
@@ -3871,6 +4106,7 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp error_message({:local_substrate_unavailable, message}) when is_binary(message), do: message
   defp error_message({:write_failed, message}) when is_binary(message), do: message
   defp error_message({:render_failed, message}) when is_binary(message), do: message
+  defp error_message({:office_replay_failed, message}) when is_binary(message), do: message
 
   defp error_message({:invalid_page_count, count}),
     do: "Invalid EHWP page count: #{inspect(count)}."
@@ -3878,6 +4114,11 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp error_message(:not_found), do: "Local document session was not found."
   defp error_message(:format_mismatch), do: "Local document format did not match."
   defp error_message(:missing_bytes), do: "Local document payload did not include document bytes."
+  defp error_message(:missing_replay_journal), do: "Office save did not include replayable edits."
+
+  defp error_message(:unsupported_replay_format),
+    do: "Office replay save is only supported for docx, pptx, and xlsx."
+
   defp error_message(:unsupported_format), do: "Select a supported document."
   defp error_message(:workspace_not_mounted), do: "Workspace is not mounted."
   defp error_message(:import_name_conflict), do: "Could not choose a local import path."
@@ -3952,18 +4193,29 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp local_rhwp_persist(:save, document_id, params),
     do: RhwpAdapter.save(document_id, params)
 
-  defp persist_local_viewer_save(%{"error" => error}, socket)
+  defp persist_local_viewer_save(%{"error" => error} = params, socket)
        when is_binary(error) do
-    error = error_message(error)
+    if replay_viewer_save?(params) do
+      do_persist_local_viewer_save(params, socket, &RhwpAdapter.save_replay/2)
+    else
+      error = error_message(error)
 
-    {:reply, %{error: error}, assign(socket, :local_document_error, error)}
+      {:reply, %{error: error}, assign(socket, :local_document_error, error)}
+    end
   end
 
   defp persist_local_viewer_save(params, socket) when is_map(params) do
+    persist =
+      if replay_viewer_save?(params), do: &RhwpAdapter.save_replay/2, else: &RhwpAdapter.save/2
+
+    do_persist_local_viewer_save(params, socket, persist)
+  end
+
+  defp do_persist_local_viewer_save(params, socket, persist) when is_function(persist, 2) do
     document_id = params["document_id"] || active_document_id(socket)
 
     with :ok <- verify_active_document(socket, document_id),
-         {:ok, response} <- RhwpAdapter.save(document_id, params) do
+         {:ok, response} <- persist.(document_id, params) do
       socket =
         socket
         |> assign(:active_document, document_summary(response))
@@ -3984,6 +4236,20 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
         {:reply, %{error: error}, assign(socket, :local_document_error, error)}
     end
+  end
+
+  defp replay_viewer_save?(params) when is_map(params) do
+    journal = params["journal"] || params["replay_journal"]
+    replay_only? = params["replay_only"] == true || params["replay_only"] == "true"
+
+    no_bytes? =
+      not Enum.any?(
+        ["bytes_token", "bytes_path", "bytes_base64", "bytes"],
+        &Map.has_key?(params, &1)
+      )
+
+    is_list(journal) and journal != [] and
+      (replay_only? or no_bytes? or is_binary(params["error"]))
   end
 
   defp verify_active_document(socket, document_id) when is_binary(document_id) do
@@ -5284,12 +5550,16 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         agent_tool_item(tool_call_id, name, :completed, tool_io_body(input, output))
       )
 
-    # A successful doc.edit also drops a compact "file viewer" card showing WHERE
-    # the edit landed — the document, the location, and an excerpt of the now-
-    # edited projection with the changed line highlighted.
-    case maybe_doc_edit_card(socket, tool_call_id, name, active[:args], result) do
-      nil -> socket
-      card -> stream_insert(socket, :local_agent_items, card)
+    # A successful doc.edit also drops a bounded document-renderer preview
+    # focused on the edited highlight region.
+    case maybe_doc_edit_preview_item(socket, tool_call_id, name, active[:args], result) do
+      nil ->
+        socket
+
+      preview ->
+        socket
+        |> replace_live_vfs_editor_preview(preview)
+        |> stream_insert(:local_agent_items, preview)
     end
   end
 
@@ -5503,6 +5773,17 @@ defmodule EcritsWeb.Local.WorkspaceLive do
             body
           )
         )
+
+      "edit_preview" ->
+        case transcript_edit_preview_item(socket, turn_id, item, index) do
+          nil ->
+            socket
+
+          preview ->
+            socket
+            |> replace_live_vfs_editor_preview(preview)
+            |> stream_insert(:local_agent_items, preview)
+        end
 
       _other ->
         socket
@@ -5872,7 +6153,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
 
   defp agent_editor_preview_item(state) do
     %{
-      dom_id: "local-agent-editor-preview-#{state.turn_id}-#{dom_token(state.document_id)}",
+      dom_id:
+        Map.get(state, :dom_id) ||
+          "local-agent-editor-preview-#{state.turn_id}-#{dom_token(state.document_id)}",
       role: :editor_preview,
       status: state.status,
       turn_id: state.turn_id,
@@ -5884,44 +6167,77 @@ defmodule EcritsWeb.Local.WorkspaceLive do
       bytes_url: state.bytes_url,
       body: state.text,
       delta_count: state.delta_count,
-      highlights: Map.get(state, :highlights, [])
+      highlights: Map.get(state, :highlights, []),
+      marker: Map.get(state, :marker, ""),
+      summary: Map.get(state, :summary, "")
     }
   end
 
-  # Build the compact doc-edit "file viewer" card for a completed doc.edit. nil
-  # for non-edit tools or when no editable content/document can be resolved (the
+  # Build the document-renderer preview for a completed doc.edit. nil for
+  # non-edit tools or when no editable content/document can be resolved (the
   # plain tool block still renders either way).
-  defp maybe_doc_edit_card(socket, tool_call_id, "doc.edit", args, result) when is_map(args) do
+  defp maybe_doc_edit_preview_item(socket, tool_call_id, "doc.edit", args, result)
+       when is_map(args) do
     with op when is_map(op) <- doc_edit_primary_op(args),
-         marker when is_binary(marker) <- doc_edit_marker(op) do
-      {doc, rows} =
-        case resolve_edit_doc_path(socket, args) do
-          {:ok, path} ->
-            {:ok, %{rows: rows}} =
-              Ecrits.Doc.Projection.edit_excerpt(path, marker: marker, context: 3)
+         marker when is_binary(marker) <- doc_edit_marker(op),
+         {:ok, path} <- resolve_edit_doc_path(socket, args),
+         {:ok, %{document: document, relative_path: relative_path}} <-
+           vfs_preview_document(socket, path),
+         true <-
+           Document.ehwp_format?(document.format) or Document.libreoffice_format?(document.format) or
+             Document.markdown_format?(document.format) do
+      highlights = doc_edit_preview_highlights(op, marker)
 
-            # Prefer the resolved filename over the raw arg (the agent often passes
-            # an opaque doc id like `d_docx_…`).
-            {Path.basename(path), rows}
-
-          _ ->
-            {doc_edit_label(args), []}
-        end
-
-      %{
-        dom_id: "local-agent-docedit-#{tool_call_id}",
-        role: :doc_edit,
-        doc: doc,
-        location: doc_edit_location(op, result),
+      state = %{
+        dom_id: "local-agent-docedit-preview-#{dom_token(tool_call_id)}",
+        turn_id: tool_call_id,
+        document_id: document.id,
+        document: document,
+        document_path: relative_path,
+        document_spec: local_document_spec(document),
+        canvas_id: "local-agent-docedit-preview-#{dom_token(tool_call_id)}-canvas",
+        bytes_url:
+          socket.assigns.workspace_path
+          |> local_document_bytes_url(relative_path)
+          |> cache_bust_url(),
+        text: "",
+        delta_count: doc_edit_delta_count(result),
+        highlights: highlights,
         marker: marker,
-        rows: rows
+        status: :sent
       }
+
+      agent_editor_preview_item(state)
     else
       _ -> nil
     end
   end
 
-  defp maybe_doc_edit_card(_socket, _id, _name, _args, _result), do: nil
+  defp maybe_doc_edit_preview_item(_socket, _id, _name, _args, _result), do: nil
+
+  defp doc_edit_preview_highlights(op, marker) when is_map(op) do
+    ref = op["ref"] || op[:ref]
+    kind = op["kind"] || op[:kind] || "text"
+    verb = op["op"] || op[:op] || kind
+
+    [
+      %{
+        "kind" => kind,
+        "op" => verb,
+        "ref" => ref,
+        "text" => marker
+      }
+    ]
+  end
+
+  defp doc_edit_delta_count(result) when is_map(result) do
+    case result["applied"] || result[:applied] || result["count"] || result[:count] do
+      value when is_integer(value) and value >= 1 -> value
+      _ -> 1
+    end
+  end
+
+  defp doc_edit_delta_count(_result), do: 1
 
   defp doc_edit_primary_op(args) do
     cond do
@@ -5942,36 +6258,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
         nil
     end
   end
-
-  defp doc_edit_label(args) do
-    case args["document"] do
-      d when is_binary(d) and d != "" -> Path.basename(d)
-      _ -> "document"
-    end
-  end
-
-  defp doc_edit_location(op, result) do
-    cond do
-      is_binary(op["ref"]) and op["ref"] != "" -> op["ref"]
-      p = doc_edit_para_idx(result) -> "¶#{p}"
-      is_binary(op["op"]) -> op["op"]
-      true -> ""
-    end
-  end
-
-  defp doc_edit_para_idx(result) when is_map(result) do
-    get_in(result, ["native", Access.at(0), "paraIdx"]) ||
-      get_in(result, ["native", Access.at(1), "paraIdx"])
-  end
-
-  defp doc_edit_para_idx(result) when is_binary(result) do
-    case Regex.run(~r/"paraIdx"\s*:\s*(\d+)/, result) do
-      [_, n] -> n
-      _ -> nil
-    end
-  end
-
-  defp doc_edit_para_idx(_result), do: nil
 
   # Resolve doc.edit's `document` arg to an absolute path for projection: a
   # workspace-relative/abs path that exists, else an open Pool doc matched by id
@@ -6099,6 +6385,9 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   defp agent_editor_preview_text(%{body: body}) when is_binary(body), do: body
   defp agent_editor_preview_text(_item), do: ""
 
+  defp agent_editor_preview_summary(%{summary: summary}) when is_binary(summary), do: summary
+  defp agent_editor_preview_summary(_item), do: ""
+
   defp agent_editor_preview_delta_count(%{delta_count: count}) when is_integer(count), do: count
   defp agent_editor_preview_delta_count(_item), do: 0
 
@@ -6106,18 +6395,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
     do: highlights
 
   defp agent_editor_preview_highlights(_item), do: []
-
-  defp agent_doc_edit_doc(%{doc: doc}) when is_binary(doc), do: doc
-  defp agent_doc_edit_doc(_item), do: "document"
-
-  defp agent_doc_edit_location(%{location: loc}) when is_binary(loc), do: loc
-  defp agent_doc_edit_location(_item), do: ""
-
-  defp agent_doc_edit_rows(%{rows: rows}) when is_list(rows), do: rows
-  defp agent_doc_edit_rows(_item), do: []
-
-  defp agent_doc_edit_marker(%{marker: m}) when is_binary(m), do: m
-  defp agent_doc_edit_marker(_item), do: ""
 
   # Chip label: the picked snippet only. An empty element (blank paragraph,
   # image, ...) keeps the chip compact — icon + type, ref on hover — instead of
@@ -6156,10 +6433,6 @@ defmodule EcritsWeb.Local.WorkspaceLive do
   end
 
   defp agent_item_class(%{role: :tool}) do
-    "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5"
-  end
-
-  defp agent_item_class(%{role: :doc_edit}) do
     "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5"
   end
 

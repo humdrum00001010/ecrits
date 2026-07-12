@@ -84,6 +84,32 @@ defmodule Ecrits.Doc.ProjectionTest do
     end
   end
 
+  describe "VFS edit highlight ranges" do
+    test "replace_text highlights only the changed replacement span" do
+      title = "범용(용역[지식ㆍ정보성과물]업 분야) 표준하도급계약서 "
+      marker = "CHATRAIL_FSKIT_HWP_OK"
+
+      op = %{
+        "op" => "replace_text",
+        "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+        "query" => title,
+        "replacement" => title <> marker
+      }
+
+      assert %{
+               "kind" => "text",
+               "op" => "replace_text",
+               "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+               "offset" => offset,
+               "length" => length,
+               "text" => ^marker
+             } = Projection.__text_highlight_for_test__(op, title <> marker)
+
+      assert offset == String.length(title)
+      assert length == String.length(marker)
+    end
+  end
+
   describe "project_file/2 + fingerprint/1 over the real doc layer" do
     setup do
       {:ok, ehwp: ehwp_available?(@hwp_fixture)}
@@ -367,11 +393,11 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         {picture_path, picture} =
           first_payload(after_doc, fn node ->
-            node["type"] == "picture" and match?([_ | _], get_in(node, ["ref", "cellPath"]))
+            node["type"] == "picture" and node["description"] == "JSONL_CELL_ANCHOR_PICTURE"
           end)
 
-        assert get_in(picture, ["ref", "type"]) == "picture"
-        assert payload_node(after_doc, previous_payload_path(picture_path))["type"] == "cell"
+        assert picture["description"] == "JSONL_CELL_ANCHOR_PICTURE"
+        assert previous_payload_of_type(after_doc, picture_path, "cell")["type"] == "cell"
       end
     end
 
@@ -708,6 +734,16 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         {picture_path, picture_node} = first_picture_payload(after_insert_doc)
 
+        for key <-
+              ~w(rotationAngle horzFlip vertFlip cropLeft cropTop cropRight cropBottom
+                 brightness contrast effect transparency borderColor borderWidth
+                 paddingLeft paddingTop paddingRight paddingBottom
+                 outerMarginLeft outerMarginTop outerMarginRight outerMarginBottom
+                 hasCaption captionDirection captionVertAlign captionWidth captionSpacing
+                 captionMaxWidth captionIncludeMargin restrictInPage allowOverlap sizeProtect) do
+          assert Map.has_key?(picture_node, key), "projected picture payload missing #{key}"
+        end
+
         moved_bytes =
           after_insert_doc
           |> replace_payload_node(
@@ -882,14 +918,17 @@ defmodule Ecrits.Doc.ProjectionTest do
   defp insert_after({section_index, paragraph_index, payload_index}),
     do: {section_index, paragraph_index, payload_index + 1}
 
-  defp previous_payload_path({section_index, paragraph_index, payload_index}),
-    do: {section_index, paragraph_index, payload_index - 1}
-
-  defp payload_node(doc, {section_index, paragraph_index, payload_index}) do
+  defp previous_payload_of_type(doc, {section_index, paragraph_index, payload_index}, type) do
     doc
     |> Enum.at(section_index)
     |> Enum.at(paragraph_index)
-    |> Enum.at(payload_index)
+    |> Enum.take(payload_index)
+    |> Enum.reverse()
+    |> Enum.find(fn node -> node["type"] == type end)
+    |> case do
+      nil -> raise "no previous payload of type #{inspect(type)}"
+      node -> node
+    end
   end
 
   defp insert_payload_node(doc, {section_index, paragraph_index, payload_index}, node) do

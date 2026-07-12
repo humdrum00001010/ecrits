@@ -323,6 +323,13 @@ defmodule Ecrits.Local.AcpAgent do
     end
   end
 
+  @doc "Append a display-only transcript item without sending it to the provider."
+  def append_transcript_item(session_id, item) when is_binary(session_id) and is_map(item) do
+    with {:ok, pid} <- fetch_session(session_id) do
+      Session.append_transcript_item(pid, item)
+    end
+  end
+
   @doc "The session's current chat title (nil when not yet derived)."
   def title(session_id) when is_binary(session_id) do
     case safe_whereis(session_id) do
