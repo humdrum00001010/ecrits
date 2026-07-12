@@ -40,6 +40,42 @@ defmodule Ecrits.Doc.Office.OpClassifyTest do
       assert wire["op"] == "delete_node"
       assert wire["ref"] == "img[Logo]"
     end
+
+    test "xlsx set_cell preserves typed Calc fields" do
+      assert {:ok, wire} =
+               Office.classify(%{
+                 "op" => "set_cell",
+                 "ref" => "sheet[Sheet1]/cell[B2]",
+                 "text" => "321",
+                 "value" => 321.0,
+                 "value_type" => "number"
+               })
+
+      assert wire == %{
+               "op" => "set_cell",
+               "ref" => "sheet[Sheet1]/cell[B2]",
+               "text" => "321",
+               "value" => 321.0,
+               "value_type" => "number"
+             }
+    end
+
+    test "set_columns can target an existing Office column_def ref" do
+      assert {:ok, wire} =
+               Office.classify(%{
+                 "op" => "set_columns",
+                 "ref" => "section[VfsColumns]/columns",
+                 "count" => 3,
+                 "gap" => 600
+               })
+
+      assert wire == %{
+               "op" => "set_columns",
+               "ref" => "section[VfsColumns]/columns",
+               "count" => 3,
+               "gap" => 600
+             }
+    end
   end
 
   describe "verbs Op.normalize already field-checks keep their specific messages" do

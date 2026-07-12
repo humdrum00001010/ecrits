@@ -93,6 +93,7 @@ const MAX_RENDER_PX = 33554432
 const SPREADSHEET_INTERACTIVE_RENDER_MAX_PX = 2000000
 const SPREADSHEET_INTERACTIVE_RENDER_WINDOW_MS = 250
 const SPREADSHEET_IDLE_FULL_RENDER_DELAY_MS = 1500
+const OFFICE_SAVE_MAX_MS = 120000
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -535,6 +536,11 @@ function resolveApi(Module) {
       loadStatus: direct("loadStatus"),
       getPartSizesJson: direct("getPartSizesJson"),
       saveToBytes: direct("saveToBytes"),
+      saveOriginalToBytesAsync: direct("saveOriginalToBytesAsync"),
+      saveToBytesAsync: direct("saveToBytesAsync"),
+      saveStatus: direct("saveStatus"),
+      saveError: direct("saveError"),
+      takeSavedBytes: direct("takeSavedBytes"),
       paintTile: direct("paintTile"),
       getDocumentSize: direct("getDocumentSize"),
       getDocumentType: direct("getDocumentType"),
@@ -707,6 +713,9 @@ const WasmOfficeEditor = {
 
     this.documentId = this.el.dataset.documentId
     this.format = this.el.dataset.localDocumentFormat || "docx"
+    this.officeDirty = false
+    this.officeSaveJournal = []
+    this.officeUnreplayableDirty = false
     this.officeAssetVersion = this.el.dataset.officeAssetVersion || ""
     this.mirror = this.el.dataset.editorMirror === "true"
     this.previewPatchText = ""
@@ -717,6 +726,7 @@ const WasmOfficeEditor = {
     this.previewPatchInFlight = null
     this.previewSavedHighlights = []
     this.previewSavedHighlight = null
+    this.previewPageFilter = null
     this.scrollPersistTimer = null
     this.pendingScrollPosition = null
     this.onScroll = () => this.rememberScrollPosition()
@@ -1155,20 +1165,9 @@ const WasmOfficeEditor = {
     }
   },
 
-  renderSavedEditHighlights() {
-    if (!this.mirror || !this.loaded) return
+  savedOfficeHighlightRects() {
     const highlights = this.parsePreviewHighlights()
     this.previewSavedHighlights = highlights
-
-    if (highlights.length === 0) {
-      this.previewSavedHighlight = null
-      this.el.dataset.previewHighlightMode = ""
-      this.el.dataset.previewHighlightCount = "0"
-      this.el.dataset.previewHighlightPages = ""
-      this.el.dataset.previewHighlightError = ""
-      this.paintPickedHighlights()
-      return
-    }
 
     let rects = []
     const errors = []
@@ -1182,6 +1181,31 @@ const WasmOfficeEditor = {
       } catch (error) {
         errors.push(String((error && error.message) || error))
       }
+    }
+
+    return { highlights, rects, errors }
+  },
+
+  previewPageIndexesForSavedHighlights() {
+    if (!this.mirror || !this.loaded) return null
+    const { highlights, rects } = this.savedOfficeHighlightRects()
+    if (!Array.isArray(highlights) || highlights.length === 0) return null
+    const pages = [...new Set(rects.map((rect) => rect.pageIndex).filter(Number.isInteger))]
+    return pages.length > 0 ? pages : [0]
+  },
+
+  renderSavedEditHighlights() {
+    if (!this.mirror || !this.loaded) return
+    const { highlights, rects, errors } = this.savedOfficeHighlightRects()
+
+    if (highlights.length === 0) {
+      this.previewSavedHighlight = null
+      this.el.dataset.previewHighlightMode = ""
+      this.el.dataset.previewHighlightCount = "0"
+      this.el.dataset.previewHighlightPages = ""
+      this.el.dataset.previewHighlightError = ""
+      this.paintPickedHighlights()
+      return
     }
 
     const pages = new Set(rects.map((rect) => rect.pageIndex).filter(Number.isInteger))
@@ -1426,6 +1450,7 @@ const WasmOfficeEditor = {
         this.setStatus("Opening document…")
         closeCachedOfficeDocument()
         this.handle = null
+        this.clearOfficeReplayState()
         await this.openWithBytes(Module, bytes)
         this.loadedUrl = url
 
@@ -1501,9 +1526,15 @@ const WasmOfficeEditor = {
     this.nativeTextEditReady = false
     this.nativeInteractionState = null
     this.composing = false
+    this.officeSaveJournal = Array.isArray(activeOfficeDocument.saveJournal)
+      ? activeOfficeDocument.saveJournal
+      : []
+    this.officeUnreplayableDirty = !!activeOfficeDocument.unreplayableDirty
+    this.officeDirty = this.officeSaveJournal.length > 0 || this.officeUnreplayableDirty
     this.loaded = true
     this.notifyViewerState(true)
     this.setStatus("")
+    this.previewPageFilter = this.previewPageIndexesForSavedHighlights()
     this.buildPageStack()
     this.restoreScrollPosition(url)
     this.renderVisiblePages()
@@ -1541,7 +1572,9 @@ const WasmOfficeEditor = {
       handle: this.handle,
       docType: this.docType,
       pageRects: this.pageRects.map((rect) => ({ ...rect })),
-      parts: this.parts.map((part) => ({ ...part }))
+      parts: this.parts.map((part) => ({ ...part })),
+      saveJournal: this.officeSaveJournal,
+      unreplayableDirty: this.officeUnreplayableDirty
     }
   },
 
@@ -1747,7 +1780,15 @@ const WasmOfficeEditor = {
     this.pageStack.replaceChildren()
     if (this.io) this.io.disconnect()
 
-    this.parts.forEach((part, i) => {
+    const pageIndexes = this.pageStackIndexes()
+    if (this.el && this.el.dataset) {
+      this.el.dataset.previewPageFilter = this.mirror && this.previewPageFilter
+        ? this.previewPageFilter.join(",")
+        : ""
+    }
+
+    for (const i of pageIndexes) {
+      const part = this.parts[i] || this.parts[0] || {}
       const w = Math.max(1, Math.round(part.width || 794))
       const h = Math.max(1, Math.round(part.height || 1123))
 
@@ -1784,7 +1825,14 @@ const WasmOfficeEditor = {
       section.appendChild(overlay)
       this.pageStack.appendChild(section)
       this.io.observe(section)
-    })
+    }
+  },
+
+  pageStackIndexes() {
+    if (this.mirror && Array.isArray(this.previewPageFilter) && this.previewPageFilter.length > 0) {
+      return this.previewPageFilter.filter((index) => Number.isInteger(index) && index >= 0 && index < this.parts.length)
+    }
+    return Array.from({ length: this.parts.length }, (_value, index) => index)
   },
 
   pageSection(index) {
@@ -1797,7 +1845,10 @@ const WasmOfficeEditor = {
   renderVisiblePages({ force = false } = {}) {
     if (!this.officeHookActive()) return
     for (const idx of this.visible) this.requestRenderPage(idx, { force })
-    if (this.visible.size === 0 && this.parts.length > 0) this.requestRenderPage(0, { force })
+    if (this.visible.size === 0) {
+      const first = this.pageStackIndexes()[0]
+      if (Number.isInteger(first)) this.requestRenderPage(first, { force })
+    }
   },
 
   requestRenderPage(index, { force = false } = {}) {
@@ -3843,6 +3894,12 @@ const WasmOfficeEditor = {
 
   handleDocumentKeyDown(event) {
     if (event.defaultPrevented || !this.documentShortcutTarget(event)) return
+    if (this.saveShortcut(event)) {
+      event.preventDefault()
+      event.stopPropagation()
+      this.saveLocalDocument({})
+      return
+    }
     this.handleEditShortcut(event)
   },
 
@@ -4175,9 +4232,79 @@ const WasmOfficeEditor = {
     }
   },
 
-  markViewerMutated() {
+  clearOfficeReplayState() {
+    this.officeDirty = false
+    this.officeSaveJournal = []
+    this.officeUnreplayableDirty = false
+    this.syncActiveOfficeReplayState()
+  },
+
+  syncActiveOfficeReplayState() {
+    if (!activeOfficeDocument) return
+    if (!cachedDocumentMatches(this.loadedUrl, this.officeAssetVersion, this.format)) return
+    activeOfficeDocument.saveJournal = this.officeSaveJournal
+    activeOfficeDocument.unreplayableDirty = this.officeUnreplayableDirty
+  },
+
+  cloneOfficeJson(value) {
+    try {
+      return JSON.parse(JSON.stringify(value))
+    } catch (_) {
+      return null
+    }
+  },
+
+  officeReplayOpFor(finalOp) {
+    if (!finalOp || typeof finalOp !== "object") return null
+    if (finalOp.op !== "set_text") return this.cloneOfficeJson(finalOp)
+
+    const ref = String(finalOp.ref || "")
+    const text = String(finalOp.text == null ? "" : finalOp.text)
+    if (!ref) return null
+    if (/\/cell\[[^\]]+\]$/.test(ref) || /^sheet\[[^\]]+\]\/cell\[[^\]]+\]$/.test(ref)) {
+      return { op: "set_cell", ref, text }
+    }
+
+    const el = this.officeElementForEdit(this.officeElements(), ref)
+    const previous = el && typeof el.text === "string" ? el.text : ""
+    if (previous.length > 0) {
+      return { op: "replace_text", ref, query: previous, replacement: text }
+    }
+    if (text.length > 0) return { op: "insert_text", ref, text }
+    return null
+  },
+
+  recordOfficeEditJournal(op) {
+    if (this.mirror) return false
+    const copy = this.cloneOfficeJson(op)
+    if (!copy) return false
+    this.officeSaveJournal.push({ verb: "edit", op: copy })
+    this.syncActiveOfficeReplayState()
+    return true
+  },
+
+  recordOfficeSetJournal(ref, props) {
+    if (this.mirror) return false
+    const copy = this.cloneOfficeJson(props)
+    if (!copy || !ref) return false
+    this.officeSaveJournal.push({ verb: "set", ref: String(ref), props: copy })
+    this.syncActiveOfficeReplayState()
+    return true
+  },
+
+  officeReplayJournalPayload() {
+    if (!Array.isArray(this.officeSaveJournal) || this.officeSaveJournal.length === 0) return []
+    return this.officeSaveJournal
+      .map((entry) => this.cloneOfficeJson(entry))
+      .filter(Boolean)
+  },
+
+  markViewerMutated(options = {}) {
     this._elementsCache = null
     if (this.mirror) return
+    this.officeDirty = true
+    if (!options.replayable) this.officeUnreplayableDirty = true
+    this.syncActiveOfficeReplayState()
     if (!this.documentId) return
     this.pushEvent("local_document.viewer_mutated", { document_id: this.documentId })
   },
@@ -4530,7 +4657,8 @@ const WasmOfficeEditor = {
       console.warn("[office-wasm] toolbar format failed", result.error)
       return
     }
-    this.finishAgentEdit({})
+    const replayable = this.recordOfficeSetJournal(ref, props)
+    this.finishAgentEdit({}, { replayable })
   },
 
   async officeToolbarToggleProp(prop, unoKey) {
@@ -4543,7 +4671,8 @@ const WasmOfficeEditor = {
       console.warn("[office-wasm] toolbar format failed", result.error)
       return
     }
-    this.finishAgentEdit({})
+    const replayable = this.recordOfficeSetJournal(ref, { [prop]: !enabled })
+    this.finishAgentEdit({}, { replayable })
   },
 
   officeToolbarCharPropEnabled(ref, unoKey) {
@@ -4606,7 +4735,8 @@ const WasmOfficeEditor = {
       console.warn("[office-wasm] toolbar image failed", result.error)
       return
     }
-    this.finishAgentEdit(result && result.extra ? result.extra : {})
+    const replayable = !!(result && result.journalOp && this.recordOfficeEditJournal(result.journalOp))
+    this.finishAgentEdit(result && result.extra ? result.extra : {}, { replayable })
   },
 
   officeToolbarTextRef() {
@@ -4818,9 +4948,6 @@ const WasmOfficeEditor = {
               reply({ result: this.officeGet(payload) })
               break
             case "save":
-              // The viewer's WASM model is authority for an open doc — settle
-              // pending edits FIRST (await the chain we're already in + a
-              // microtask flush), then export its CURRENT edited bytes.
               reply({ result: await this.officeSave() })
               break
             default:
@@ -5373,10 +5500,11 @@ const WasmOfficeEditor = {
   // Single op. uno_apply takes the op as a JSON string (the SAME op the server
   // normalised: {op, ref, text|query|replacement|count, …}). Settle the edit,
   // invalidate the IR cache, and re-render.
-  async officeApplyEdit({ op }) {
+  async officeApplyEdit({ op, resync }) {
     const r = await this.officeApplyOneOp(op)
     if (r.error) return { error: r.error }
-    return this.finishAgentEdit(r.extra || {})
+    const replayable = !resync && r.journalOp && this.recordOfficeEditJournal(r.journalOp)
+    return this.finishAgentEdit(r.extra || {}, { dirty: !resync, replayable })
   },
 
   // Apply ONE edit op via uno_apply. NEVER renders — the
@@ -5406,6 +5534,7 @@ const WasmOfficeEditor = {
     if (rewritten && rewritten.error) return { error: `${verb} failed: ${rewritten.error}` }
     const finalOp = this.prepareOfficePictureOp(rewritten && rewritten.op ? rewritten.op : op)
     const finalVerb = finalOp.op
+    const journalOp = this.officeReplayOpFor(finalOp)
 
     let res
     try {
@@ -5428,7 +5557,7 @@ const WasmOfficeEditor = {
     // re-read the post-edit text. finishAgentEdit also clears it, but only once at
     // the end of the batch, so clear here too for intra-batch correctness.
     if (rewritten && rewritten.op) this._elementsCache = null
-    return { ok: true, extra }
+    return { ok: true, extra, journalOp }
   },
 
   // Rewrite an edit op that the deployed `uno_apply` can't apply correctly into a
@@ -5524,10 +5653,11 @@ const WasmOfficeEditor = {
   // Batch doc.edit (ops:[…]). Apply every op via uno_apply with ONE re-render
   // at the end. Best-effort: a bad op does NOT abort the rest; the
   // result carries a per-op `results` array, mirroring the HWP batch shape.
-  async officeApplyEditBatch({ ops }) {
+  async officeApplyEditBatch({ ops, resync }) {
     const list = Array.isArray(ops) ? ops : []
     if (list.length === 0) return { error: "edit batch requires a non-empty 'ops' array" }
     const results = []
+    const journalOps = []
     let applied = 0
     let failed = 0
     for (const op of list) {
@@ -5540,13 +5670,17 @@ const WasmOfficeEditor = {
       }
       if (r && r.ok) {
         applied++
+        if (r.journalOp) journalOps.push(r.journalOp)
         results.push(Object.assign({ ref: refStr, ok: true }, r.extra || {}))
       } else {
         failed++
         results.push({ ref: refStr, error: (r && r.error) || "unknown_error" })
       }
     }
-    this.finishAgentEdit({})
+    const replayed = !resync
+      ? journalOps.filter((journalOp) => this.recordOfficeEditJournal(journalOp)).length
+      : 0
+    this.finishAgentEdit({}, { dirty: !resync, replayable: !resync && applied > 0 && replayed === applied })
     return { ok: true, result: { ok: true, applied, failed, results } }
   },
 
@@ -5554,10 +5688,11 @@ const WasmOfficeEditor = {
   // Single set. CHAR properties must address the PARAGRAPH ref `p<idx>` (verified:
   // a run ref like "p0/r0" returns {"error":"unresolved ref"}), so we coerce a
   // run ref down to its paragraph for the uno_set call.
-  async officeApplySet({ ref, props }) {
+  async officeApplySet({ ref, props, resync }) {
     const r = await this.officeApplySetOne(ref, props)
     if (r.error) return { error: r.error }
-    return this.finishAgentEdit({})
+    const replayable = !resync && this.recordOfficeSetJournal(ref, props)
+    return this.finishAgentEdit({}, { dirty: !resync, replayable })
   },
 
   async officeApplySetOne(ref, props) {
@@ -5664,10 +5799,11 @@ const WasmOfficeEditor = {
   },
 
   // Batch doc.set (sets:[{ref,props}, …]). Apply every set with ONE finish.
-  async officeApplySetBatch({ sets }) {
+  async officeApplySetBatch({ sets, resync }) {
     const list = Array.isArray(sets) ? sets : []
     if (list.length === 0) return { error: "set batch requires a non-empty 'sets' array" }
     const results = []
+    const journalSets = []
     let applied = 0
     let failed = 0
     for (const entry of list) {
@@ -5680,13 +5816,17 @@ const WasmOfficeEditor = {
       }
       if (r && r.ok) {
         applied++
+        journalSets.push({ ref: entry && entry.ref, props: entry && entry.props })
         results.push({ ref: refStr, ok: true })
       } else {
         failed++
         results.push({ ref: refStr, error: (r && r.error) || "unknown_error" })
       }
     }
-    this.finishAgentEdit({})
+    const replayed = !resync
+      ? journalSets.filter((entry) => this.recordOfficeSetJournal(entry.ref, entry.props)).length
+      : 0
+    this.finishAgentEdit({}, { dirty: !resync, replayable: !resync && applied > 0 && replayed === applied })
     return { ok: true, result: { ok: true, applied, failed, results } }
   },
 
@@ -5697,15 +5837,62 @@ const WasmOfficeEditor = {
   // commit is visible before we read the buffer.
   async officeSave() {
     const fn = this.api && this.api.saveToBytes
-    if (typeof fn !== "function") throw new Error("saveToBytes export not found in this office WASM build")
+    if (typeof fn !== "function" && typeof this.api?.saveToBytesAsync !== "function") {
+      throw new Error("saveToBytes export not found in this office WASM build")
+    }
     // Microtask flush: let any just-resolved edit's worker commit land before
     // reading the export buffer (the saveToBytes-vs-pending-edit race).
     await Promise.resolve()
-    let bytes = fn(this.format || "docx")
+
+    let bytes
+    if (typeof this.api.saveToBytesAsync === "function") {
+      bytes = await this.officeSaveAsync(this.format || "docx")
+    } else {
+      bytes = fn(this.format || "docx")
+    }
     if (bytes && typeof bytes.then === "function") bytes = await bytes
     if (!bytes || !bytes.length) throw new Error("saveToBytes returned no bytes")
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
     return { format: this.format || "docx", ...(await this.uploadLocalDocumentBytes(u8)) }
+  },
+
+  async officeSaveAsync(format) {
+    const start = performance.now()
+    const status = this.api && this.api.saveStatus
+    const take = this.api && this.api.takeSavedBytes
+    if (typeof status !== "function" || typeof take !== "function") {
+      throw new Error("async save exports incomplete in this office WASM build")
+    }
+
+    if (status() === 1) throw new Error("saveToBytes already in progress")
+    if (typeof this.api.saveOriginalToBytesAsync === "function") {
+      this.api.saveOriginalToBytesAsync(format)
+    } else {
+      this.api.saveToBytesAsync(format)
+    }
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const st = status()
+      if (st === 2) {
+        const bytes = take()
+        if (!bytes || !bytes.length) throw new Error("saveToBytes returned no bytes")
+        return bytes
+      }
+      if (st === 3) {
+        const saveError = typeof this.api.saveError === "function" ? this.api.saveError() : ""
+        throw new Error(saveError || "saveToBytes failed")
+      }
+      const now = performance.now()
+      if (now - start >= OFFICE_SAVE_MAX_MS) {
+        throw new Error(
+          "saveToBytes timed out after " +
+            Math.round(OFFICE_SAVE_MAX_MS / 1000) +
+            "s; the office engine is still busy, but the page remains responsive"
+        )
+      }
+      await delay(50)
+    }
   },
 
   async uploadLocalDocumentBytes(bytes) {
@@ -5740,6 +5927,17 @@ const WasmOfficeEditor = {
     }
   },
 
+  pushViewerSave(payload) {
+    this.pushEvent("local_document.viewer_save", payload, (reply) => {
+      if (reply && reply.ok) {
+        this.clearOfficeReplayState()
+        this.setStatus("")
+      } else if (reply && reply.error) {
+        this.setStatus(String(reply.error))
+      }
+    })
+  },
+
   async saveLocalDocument(payload = {}) {
     if (this.mirror) return
     const requestId = payload.request_id || `local-save:${Date.now()}`
@@ -5748,18 +5946,23 @@ const WasmOfficeEditor = {
       if (this._loadInFlight) await this._loadInFlight
       if (this._agentInFlight) await this._agentInFlight.catch(() => {})
       if (!this.api || !this.handle || !documentId) throw new Error("document_not_loaded")
-      const saved = await this.officeSave()
-      this.pushEvent("local_document.viewer_save", {
+      const journal = this.officeReplayJournalPayload()
+      const saved = journal.length > 0 && !this.officeUnreplayableDirty
+        ? { format: this.format || "docx", journal, replay_only: true }
+        : await this.officeSave()
+      this.pushViewerSave({
         request_id: requestId,
         document_id: documentId,
         ...saved
       })
     } catch (error) {
       console.error("[office-wasm] save failed", error)
-      this.pushEvent("local_document.viewer_save", {
+      const journal = !this.officeUnreplayableDirty ? this.officeReplayJournalPayload() : []
+      this.pushViewerSave({
         request_id: requestId,
         document_id: documentId,
-        error: String((error && error.message) || error)
+        error: String((error && error.message) || error),
+        ...(journal.length > 0 ? { journal } : {})
       })
     }
   },
@@ -5773,11 +5976,12 @@ const WasmOfficeEditor = {
   // Post-edit step (mirrors the HWP finishAgentEdit): the IR changed so the
   // cached element list is stale; re-render the visible pages so the edit shows
   // in the viewer.
-  finishAgentEdit(extra) {
+  finishAgentEdit(extra, options = {}) {
     this._elementsCache = null
     this.rendered.clear()
     this.renderVisiblePages()
     if (this.caret) this.refreshCaret()
+    if (options.dirty !== false) this.markViewerMutated({ replayable: options.replayable === true })
     return { ok: true, result: { ok: true, ...extra } }
   },
 

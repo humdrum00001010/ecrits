@@ -673,33 +673,80 @@ defmodule Ecrits.Doc.Projection do
       else: Ehwp.Ir.changes(old_nodes, new_nodes)
   end
 
-  # Office (libre) write-back diff. The projection dropped runs, the ref, and the
-  # derived fields, so we shape the live OLD nodes the SAME way (via the engine's
-  # IR policy in the dep) and diff position-by-position. The backend ref the
-  # projection omitted is recovered from the aligned live node (`old.ref`) — an
-  # ordinal `p<idx>` or a stable name `tbl[..]/cell[B2]` alike. Symmetric
-  # canonicalization keeps a stripped derived field from reading as a property
-  # edit. A changed node COUNT is a structural add/remove → `:structural_change`,
-  # matching the rhwp path (VFS structural inserts on office are out of scope here).
+  # Office (libre) write-back diff. The projection dropped runs, refs, and
+  # non-editable runtime context, so live OLD nodes are shaped the SAME way (via
+  # the dep IR policy) and the edited projection recovers refs from the aligned
+  # live nodes. Calc cell value/formula fields are deliberately still present and
+  # are routed as typed set_cell ops.
+  # Office refs are opaque strings, so this scanner mirrors the HWP change
+  # classes without reusing HWP's positional ref logic.
   defp office_changes(old_nodes, new_nodes) do
     old_shaped = OfficeIr.shape_old(old_nodes)
     news = Enum.map(new_nodes, &OfficeIr.canonicalize/1)
 
-    if length(old_shaped) != length(news) do
-      {:error, :structural_change}
-    else
-      old_shaped
-      |> Enum.zip(news)
-      |> Enum.reduce_while({:ok, []}, fn {old, new_node}, {:ok, acc} ->
-        case office_node_changes(old, new_node) do
-          {:ok, node_changes} -> {:cont, {:ok, Enum.reverse(node_changes) ++ acc}}
-          {:error, reason} -> {:halt, {:error, reason}}
+    case office_scan_changes(old_shaped, news, 0, 0, []) do
+      {:ok, changes} -> Enum.reverse(changes)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp office_scan_changes(old_nodes, new_nodes, old_index, new_index, acc) do
+    old_done? = old_index >= length(old_nodes)
+    new_done? = new_index >= length(new_nodes)
+
+    cond do
+      old_done? and new_done? ->
+        {:ok, acc}
+
+      new_done? ->
+        with {:ok, delete} <- office_payload_delete_change(Enum.at(old_nodes, old_index)) do
+          office_scan_changes(old_nodes, new_nodes, old_index + 1, new_index, [delete | acc])
         end
-      end)
-      |> case do
-        {:ok, acc} -> Enum.reverse(acc)
-        error -> error
-      end
+
+      old_done? ->
+        with {:ok, insert} <-
+               office_payload_insert_change(
+                 Enum.at(new_nodes, new_index),
+                 office_insertion_anchor(old_nodes, old_index)
+               ) do
+          office_scan_changes(old_nodes, new_nodes, old_index, new_index + 1, [insert | acc])
+        end
+
+      true ->
+        old = Enum.at(old_nodes, old_index)
+        new = Enum.at(new_nodes, new_index)
+
+        cond do
+          office_inserted_payload?(new) and not office_existing_insert_payload_match?(old, new) ->
+            with {:ok, insert} <-
+                   office_payload_insert_change(
+                     new,
+                     office_insertion_anchor(old_nodes, old_index)
+                   ) do
+              office_scan_changes(old_nodes, new_nodes, old_index, new_index + 1, [insert | acc])
+            end
+
+          office_deletable_payload?(old) and not office_same_payload_identity?(old.canon, new) and
+              office_aligns_after_deleted_payload?(old_nodes, old_index, new) ->
+            with {:ok, delete} <- office_payload_delete_change(old) do
+              office_scan_changes(old_nodes, new_nodes, old_index + 1, new_index, [delete | acc])
+            end
+
+          true ->
+            case office_node_changes(old, new) do
+              {:ok, node_changes} ->
+                office_scan_changes(
+                  old_nodes,
+                  new_nodes,
+                  old_index + 1,
+                  new_index + 1,
+                  Enum.reverse(node_changes) ++ acc
+                )
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+        end
     end
   end
 
@@ -711,49 +758,480 @@ defmodule Ecrits.Doc.Projection do
       old_node == new_node -> {:ok, []}
       old.type != Map.get(new_node, "type") -> {:error, :structural_change}
       is_nil(old.ref) -> {:error, :unroutable}
-      true -> office_text_change(old_node, new_node, old.ref, old.type)
+      true -> office_changes_for_node(old_node, new_node, old.ref, old.type)
     end
   end
 
-  # The office projection is text-only (canonicalize keeps just type/text), so a
-  # changed node is a single text edit: set_cell for a table cell, insert_text into
-  # an empty paragraph, else replace_text. The rhwp arm's richer node diff (text +
-  # property writes) lives in `Ehwp.Ir.changes/2`.
-  defp office_text_change(old_node, new_node, ref, type) do
+  defp office_changes_for_node(old_node, new_node, "sheet[" <> _ = ref, "cell") do
+    with {:ok, cell_change} <- office_calc_cell_change_for_node(old_node, new_node, ref),
+         {:ok, prop_change} <- office_prop_change_for_node(old_node, new_node, ref, "cell") do
+      {:ok, Enum.reject([cell_change, prop_change], &is_nil/1)}
+    end
+  end
+
+  defp office_changes_for_node(old_node, new_node, "section[" <> _ = ref, "column_def") do
+    with {:ok, column_change} <- office_column_def_change_for_node(old_node, new_node, ref),
+         {:ok, prop_change} <-
+           office_prop_change_for_node(old_node, new_node, ref, "column_def") do
+      {:ok, Enum.reject([column_change, prop_change], &is_nil/1)}
+    end
+  end
+
+  defp office_changes_for_node(old_node, new_node, ref, type) do
+    with {:ok, text_change} <- office_text_change_for_node(old_node, new_node, ref, type),
+         {:ok, prop_change} <- office_prop_change_for_node(old_node, new_node, ref, type) do
+      {:ok, Enum.reject([text_change, prop_change], &is_nil/1)}
+    end
+  end
+
+  @office_column_def_edit_fields ~w(count gap)
+
+  defp office_column_def_change_for_node(old_node, new_node, ref) do
+    changed =
+      Enum.filter(@office_column_def_edit_fields, fn key ->
+        Map.get(old_node, key) != Map.get(new_node, key)
+      end)
+
+    count = Map.get(new_node, "count")
+
+    cond do
+      changed == [] ->
+        {:ok, nil}
+
+      not office_positive_int?(count) ->
+        {:error, {:invalid_column_def, "column_def edits require integer count > 0"}}
+
+      true ->
+        op =
+          %{"op" => "set_columns", "ref" => ref, "count" => count}
+          |> office_maybe_put_integer("gap", Map.get(new_node, "gap"))
+
+        {:ok, {:text, op, Integer.to_string(count)}}
+    end
+  end
+
+  @office_calc_cell_edit_fields ~w(text value value_type formula)
+
+  defp office_calc_cell_change_for_node(old_node, new_node, ref) do
+    changed =
+      Enum.filter(@office_calc_cell_edit_fields, fn key ->
+        Map.get(old_node, key) != Map.get(new_node, key)
+      end)
+
+    value_type = Map.get(new_node, "value_type") || Map.get(old_node, "value_type")
+
+    cond do
+      changed == [] ->
+        {:ok, nil}
+
+      value_type == "formula" ->
+        office_formula_cell_change(changed, new_node, ref)
+
+      value_type == "number" ->
+        office_number_cell_change(changed, new_node, ref)
+
+      true ->
+        office_text_cell_change(changed, new_node, ref, value_type)
+    end
+  end
+
+  defp office_formula_cell_change(changed, new_node, ref) do
+    if Enum.any?(changed, &(&1 in ["formula", "text", "value_type"])) do
+      formula =
+        Map.get(new_node, "formula") ||
+          Map.get(new_node, "text") ||
+          office_calc_value_text(Map.get(new_node, "value"))
+
+      if is_binary(formula) do
+        {:ok,
+         {:text,
+          %{
+            "op" => "set_cell",
+            "ref" => ref,
+            "text" => formula,
+            "value_type" => "formula",
+            "formula" => formula
+          }, formula}}
+      else
+        {:error, :unroutable}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp office_number_cell_change(changed, new_node, ref) do
+    cond do
+      "value" in changed and is_number(Map.get(new_node, "value")) ->
+        value = Map.get(new_node, "value")
+
+        {:ok,
+         {:text,
+          %{
+            "op" => "set_cell",
+            "ref" => ref,
+            "text" => office_calc_value_text(value),
+            "value_type" => "number",
+            "value" => value
+          }, office_calc_value_text(value)}}
+
+      "text" in changed and is_binary(Map.get(new_node, "text")) ->
+        text = Map.get(new_node, "text")
+
+        {:ok,
+         {:text,
+          %{
+            "op" => "set_cell",
+            "ref" => ref,
+            "text" => text,
+            "value_type" => "number"
+          }, text}}
+
+      "value_type" in changed ->
+        office_text_cell_change(changed, new_node, ref, "number")
+
+      true ->
+        {:ok, nil}
+    end
+  end
+
+  defp office_text_cell_change(changed, new_node, ref, value_type) do
+    text =
+      cond do
+        "value" in changed -> office_calc_value_text(Map.get(new_node, "value"))
+        is_binary(Map.get(new_node, "text")) -> Map.get(new_node, "text")
+        true -> office_calc_value_text(Map.get(new_node, "value"))
+      end
+
+    if is_binary(text) do
+      op =
+        %{"op" => "set_cell", "ref" => ref, "text" => text}
+        |> office_maybe_put_string("value_type", value_type)
+
+      op =
+        if "value" in changed and Map.has_key?(new_node, "value") do
+          Map.put(op, "value", Map.get(new_node, "value"))
+        else
+          op
+        end
+
+      {:ok, {:text, op, text}}
+    else
+      {:error, :unroutable}
+    end
+  end
+
+  defp office_calc_value_text(value) when is_binary(value), do: value
+  defp office_calc_value_text(value) when is_integer(value), do: Integer.to_string(value)
+  defp office_calc_value_text(value) when is_float(value), do: Float.to_string(value)
+  defp office_calc_value_text(value) when is_boolean(value), do: to_string(value)
+  defp office_calc_value_text(nil), do: ""
+  defp office_calc_value_text(_value), do: nil
+
+  defp office_text_change_for_node(old_node, new_node, ref, type) do
     old_text = Map.get(old_node, "text")
     new_text = Map.get(new_node, "text")
 
     cond do
       old_text == new_text ->
-        {:ok, []}
+        {:ok, nil}
 
       not (is_binary(old_text) and is_binary(new_text)) ->
         {:error, :unroutable}
 
       type == "cell" ->
-        {:ok, [{:text, %{"op" => "set_cell", "ref" => ref, "text" => new_text}, new_text}]}
+        {:ok, {:text, %{"op" => "set_cell", "ref" => ref, "text" => new_text}, new_text}}
 
       old_text == "" ->
-        {:ok, [{:text, %{"op" => "insert_text", "ref" => ref, "text" => new_text}, new_text}]}
+        {:ok, {:text, %{"op" => "insert_text", "ref" => ref, "text" => new_text}, new_text}}
 
       true ->
         {:ok,
-         [
-           {:text,
-            %{
-              "op" => "replace_text",
-              "ref" => ref,
-              "query" => old_text,
-              "replacement" => new_text
-            }, new_text}
-         ]}
+         {:text,
+          %{
+            "op" => "replace_text",
+            "ref" => ref,
+            "query" => old_text,
+            "replacement" => new_text
+          }, new_text}}
     end
   end
+
+  defp office_prop_change_for_node(old_node, new_node, ref, type) do
+    props = office_changed_props(old_node, new_node)
+
+    if props == %{} do
+      {:ok, nil}
+    else
+      {:ok, {:set, ref, type, props}}
+    end
+  end
+
+  @office_ignored_prop_fields ~w(ref type text props prop_types context row col sheet address display value value_type formula name count gap widths columns)
+
+  defp office_changed_props(old_node, new_node) do
+    old_props = Map.get(old_node, "props")
+    new_props = Map.get(new_node, "props")
+
+    nested =
+      if is_map(old_props) and is_map(new_props) do
+        old_props
+        |> Map.keys()
+        |> Kernel.++(Map.keys(new_props))
+        |> Enum.uniq()
+        |> Enum.filter(fn key ->
+          Map.has_key?(new_props, key) and Map.get(old_props, key) != Map.get(new_props, key)
+        end)
+        |> Map.new(fn key -> {key, Map.get(new_props, key)} end)
+      else
+        %{}
+      end
+
+    top_level =
+      old_node
+      |> Map.keys()
+      |> Kernel.++(Map.keys(new_node))
+      |> Enum.uniq()
+      |> Enum.reject(&(&1 in @office_ignored_prop_fields))
+      |> Enum.filter(fn key ->
+        Map.has_key?(new_node, key) and Map.get(old_node, key) != Map.get(new_node, key)
+      end)
+      |> Map.new(fn key -> {key, Map.get(new_node, key)} end)
+
+    Map.merge(nested, top_level)
+  end
+
+  defp office_inserted_table_payload?(node) do
+    node = normalize_ir_value(node)
+
+    Map.get(node, "type") == "table" and
+      (is_list(Map.get(node, "cells")) or office_positive_int?(Map.get(node, "rows")) or
+         office_positive_int?(Map.get(node, "cols")))
+  end
+
+  defp office_inserted_picture_payload?(node) do
+    node = normalize_ir_value(node)
+
+    Map.get(node, "type") == "picture" and
+      (office_present_string?(Map.get(node, "src")) or
+         office_present_string?(Map.get(node, "path")) or
+         office_present_string?(Map.get(node, "image_base64")) or
+         office_nonempty_list?(Map.get(node, "bins")))
+  end
+
+  defp office_inserted_payload?(node),
+    do: office_inserted_table_payload?(node) or office_inserted_picture_payload?(node)
+
+  defp office_existing_insert_payload_match?(%{canon: _canon} = old, new),
+    do: office_existing_insert_payload_match?(old.canon, new)
+
+  defp office_existing_insert_payload_match?(old, new) do
+    old = normalize_ir_value(old)
+    new = normalize_ir_value(new)
+
+    cond do
+      Map.get(old, "type") == "table" and Map.get(new, "type") == "table" ->
+        not (Map.has_key?(new, "cells") or office_positive_int?(Map.get(new, "rows")) or
+               office_positive_int?(Map.get(new, "cols")))
+
+      Map.get(old, "type") == "picture" and Map.get(new, "type") == "picture" ->
+        true
+
+      true ->
+        false
+    end
+  end
+
+  defp office_deletable_payload?(%{} = old), do: office_deletable_payload?(old.canon, old.ref)
+  defp office_deletable_payload?(_old), do: false
+
+  defp office_deletable_payload?(node, ref) do
+    type = Map.get(normalize_ir_value(node), "type")
+    is_binary(ref) and type in ["picture", "shape", "text_frame"]
+  end
+
+  defp office_aligns_after_deleted_payload?(old_nodes, old_index, new) do
+    case Enum.at(old_nodes, old_index + 1) do
+      nil -> false
+      next_old -> office_same_payload_identity?(next_old.canon, new)
+    end
+  end
+
+  defp office_same_payload_identity?(old, new) do
+    old = old |> normalize_ir_value() |> Map.delete("prop_types")
+    new = new |> normalize_ir_value() |> Map.delete("prop_types")
+
+    Map.get(old, "type") == Map.get(new, "type") and old == new
+  end
+
+  defp office_payload_delete_change(%{} = old) do
+    if office_deletable_payload?(old) do
+      marker = Map.get(old.canon, "text") || old.ref
+      {:ok, {:delete_node, %{"op" => "delete_node", "ref" => old.ref}, marker}}
+    else
+      {:error, :structural_change}
+    end
+  end
+
+  defp office_payload_insert_change(node, anchor) do
+    cond do
+      office_inserted_table_payload?(node) -> office_table_insert_change(node, anchor)
+      office_inserted_picture_payload?(node) -> office_picture_insert_change(node, anchor)
+      true -> {:error, :structural_change}
+    end
+  end
+
+  defp office_table_insert_change(node, anchor) do
+    node = normalize_ir_value(node)
+    cells = office_coerce_table_cells(Map.get(node, "cells", []))
+    rows = office_table_rows(node, cells)
+    cols = office_table_cols(node, cells)
+
+    cond do
+      not (rows > 0 and cols > 0) ->
+        {:error, {:invalid_table_payload, "table payload needs cells or positive rows/cols"}}
+
+      true ->
+        op =
+          %{
+            "op" => "insert_table",
+            "ref" => office_writer_anchor(anchor),
+            "rows" => rows,
+            "cols" => cols
+          }
+          |> office_maybe_put_nonempty("cells", cells)
+          |> office_maybe_put_string("name", Map.get(node, "name"))
+          |> office_maybe_put_bool("header", Map.get(node, "header"))
+
+        {:ok, {:insert_table, op, first_table_marker(cells)}}
+    end
+  end
+
+  defp office_picture_insert_change(node, anchor) do
+    node = normalize_ir_value(node)
+    src = Map.get(node, "src") || Map.get(node, "path")
+
+    op =
+      %{"op" => "insert_picture"}
+      |> office_picture_anchor(anchor)
+      |> office_maybe_put_string("src", src)
+      |> office_maybe_put_string("image_base64", Map.get(node, "image_base64"))
+      |> office_maybe_put_nonempty("bins", Map.get(node, "bins", []))
+      |> office_maybe_put_string("extension", Map.get(node, "extension"))
+      |> office_maybe_put_string("name", Map.get(node, "name"))
+      |> office_maybe_put_integer("width", Map.get(node, "width") || Map.get(node, "Width"))
+      |> office_maybe_put_integer("height", Map.get(node, "height") || Map.get(node, "Height"))
+      |> office_maybe_put_integer("w", Map.get(node, "w"))
+      |> office_maybe_put_integer("h", Map.get(node, "h"))
+      |> office_maybe_put_integer("x", Map.get(node, "x"))
+      |> office_maybe_put_integer("y", Map.get(node, "y"))
+
+    {:ok, {:insert_picture, op, office_picture_marker(node), %{}}}
+  end
+
+  defp office_picture_anchor(op, "page[" <> rest = anchor) do
+    page = rest |> String.split("]", parts: 2) |> List.first()
+
+    op
+    |> Map.put("page", page)
+    |> office_maybe_put_string("ref", anchor)
+  end
+
+  defp office_picture_anchor(op, anchor), do: Map.put(op, "ref", anchor || "end")
+
+  defp office_writer_anchor(anchor) when is_binary(anchor) do
+    if Regex.match?(~r/^p\d+$/, anchor), do: anchor, else: "end"
+  end
+
+  defp office_writer_anchor(_anchor), do: "end"
+
+  defp office_insertion_anchor(old_nodes, old_index) do
+    previous =
+      old_nodes
+      |> Enum.take(old_index)
+      |> Enum.reverse()
+      |> Enum.find_value(&office_insert_ref/1)
+
+    next =
+      old_nodes
+      |> Enum.drop(old_index)
+      |> Enum.find_value(&office_insert_ref/1)
+
+    previous || next || "end"
+  end
+
+  defp office_insert_ref(%{ref: ref, type: type})
+       when is_binary(ref) and type in ["paragraph", "cell", "slide"],
+       do: ref
+
+  defp office_insert_ref(_old), do: nil
+
+  defp office_positive_int?(value), do: is_integer(value) and value > 0
+  defp office_nonempty_list?(value), do: is_list(value) and value != []
+  defp office_present_string?(value), do: is_binary(value) and value != ""
+
+  defp office_coerce_table_cells(cells) when is_list(cells) do
+    Enum.map(cells, fn
+      row when is_list(row) -> Enum.map(row, &to_string/1)
+      value -> [to_string(value)]
+    end)
+  end
+
+  defp office_coerce_table_cells(_cells), do: []
+
+  defp office_table_rows(node, cells) do
+    case Map.get(node, "rows") do
+      rows when is_integer(rows) and rows > 0 -> rows
+      _ -> length(cells)
+    end
+  end
+
+  defp office_table_cols(node, cells) do
+    case Map.get(node, "cols") do
+      cols when is_integer(cols) and cols > 0 ->
+        cols
+
+      _ ->
+        cells
+        |> Enum.map(&length/1)
+        |> Enum.max(fn -> 0 end)
+    end
+  end
+
+  defp office_picture_marker(node) do
+    Enum.find_value(["description", "alt", "src", "path", "text"], fn key ->
+      value = Map.get(node, key)
+      if is_binary(value) and value != "", do: value
+    end)
+  end
+
+  defp office_maybe_put_nonempty(map, _key, []), do: map
+
+  defp office_maybe_put_nonempty(map, key, value) when is_list(value),
+    do: Map.put(map, key, value)
+
+  defp office_maybe_put_nonempty(map, _key, _value), do: map
+
+  defp office_maybe_put_bool(map, key, value) when is_boolean(value), do: Map.put(map, key, value)
+  defp office_maybe_put_bool(map, _key, _value), do: map
+
+  defp office_maybe_put_integer(map, key, value) when is_integer(value),
+    do: Map.put(map, key, value)
+
+  defp office_maybe_put_integer(map, _key, _value), do: map
+
+  defp office_maybe_put_string(map, key, value) when is_binary(value) and value != "",
+    do: Map.put(map, key, value)
+
+  defp office_maybe_put_string(map, _key, _value), do: map
 
   if Mix.env() == :test do
     @doc false
     def __compute_ir_changes_for_test__(old_nodes, new_nodes),
       do: Ehwp.Ir.changes(old_nodes, new_nodes)
+
+    @doc false
+    def __text_highlight_for_test__(op, marker), do: text_highlight(op, marker)
   end
 
   defp normalize_ir_value(%{} = map) do
@@ -893,14 +1371,7 @@ defmodule Ecrits.Doc.Projection do
         |> Enum.zip(applied)
         |> Enum.flat_map(fn
           {{:text, op, marker}, _applied} ->
-            [
-              %{
-                "kind" => "text",
-                "op" => op["op"],
-                "ref" => op["ref"],
-                "text" => marker
-              }
-            ]
+            [text_highlight(op, marker)]
 
           {{:insert_table, op, _marker}, applied} ->
             table_insert_highlights(op, applied)
@@ -965,19 +1436,22 @@ defmodule Ecrits.Doc.Projection do
             []
         end)
 
+      info =
+        %{
+          path: abs_path,
+          doc: Path.basename(abs_path),
+          applied: length(changes),
+          marker: hit,
+          ops: ops,
+          highlights: highlights,
+          sets: sets
+        }
+        |> maybe_put_vfs_agent_id(vfs_agent_id(root, abs_path, opts))
+
       Phoenix.PubSub.broadcast(
         Ecrits.PubSub,
         "doc_vfs:" <> DocMount.canonical_root(root),
-        {:vfs_doc_edited,
-         %{
-           path: abs_path,
-           doc: Path.basename(abs_path),
-           applied: length(changes),
-           marker: hit,
-           ops: ops,
-           highlights: highlights,
-           sets: sets
-         }}
+        {:vfs_doc_edited, info}
       )
     end
 
@@ -987,6 +1461,86 @@ defmodule Ecrits.Doc.Projection do
   catch
     _, _ -> :ok
   end
+
+  defp vfs_agent_id(root, abs_path, opts) do
+    case Keyword.get(opts, :agent_id) do
+      agent_id when is_binary(agent_id) and agent_id != "" ->
+        agent_id
+
+      _ ->
+        if is_binary(root) do
+          Ecrits.Fuse.OpenDocs.owner_agent_id_for_source(root, abs_path) ||
+            Ecrits.Fuse.OpenDocs.owner_agent_id(root, Path.basename(abs_path))
+        end
+    end
+  end
+
+  defp maybe_put_vfs_agent_id(info, agent_id) when is_binary(agent_id) and agent_id != "",
+    do: Map.put(info, :agent_id, agent_id)
+
+  defp maybe_put_vfs_agent_id(info, _agent_id), do: info
+
+  defp text_highlight(op, marker) do
+    %{
+      "kind" => "text",
+      "op" => op["op"],
+      "ref" => op["ref"],
+      "text" => marker
+    }
+    |> Map.merge(text_highlight_range(op, marker))
+  end
+
+  defp text_highlight_range(
+         %{"op" => "replace_text", "ref" => ref, "query" => query, "replacement" => replacement},
+         _marker
+       )
+       when is_binary(query) and is_binary(replacement) do
+    {relative_offset, length, text} = replacement_changed_range(query, replacement)
+
+    %{
+      "offset" => ref_offset(ref) + relative_offset,
+      "length" => length,
+      "text" => text
+    }
+  end
+
+  defp text_highlight_range(%{"op" => op, "ref" => ref} = edit, marker)
+       when op in ["insert_text", "set_char"] do
+    text = Map.get(edit, "text", marker)
+
+    if is_binary(text) do
+      %{"offset" => ref_offset(ref), "length" => String.length(text), "text" => text}
+    else
+      %{}
+    end
+  end
+
+  defp text_highlight_range(_op, _marker), do: %{}
+
+  defp replacement_changed_range(query, replacement) do
+    old = String.graphemes(query)
+    new = String.graphemes(replacement)
+    prefix = common_prefix_count(old, new)
+    suffix = common_suffix_count(Enum.drop(old, prefix), Enum.drop(new, prefix))
+    length = max(length(new) - prefix - suffix, 0)
+    text = new |> Enum.drop(prefix) |> Enum.take(length) |> Enum.join()
+
+    {prefix, length, text}
+  end
+
+  defp common_prefix_count(left, right), do: common_prefix_count(left, right, 0)
+
+  defp common_prefix_count([a | left], [b | right], count) when a == b,
+    do: common_prefix_count(left, right, count + 1)
+
+  defp common_prefix_count(_left, _right, count), do: count
+
+  defp common_suffix_count(left, right),
+    do: common_prefix_count(Enum.reverse(left), Enum.reverse(right), 0)
+
+  defp ref_offset(%{"offset" => offset}) when is_integer(offset), do: max(offset, 0)
+  defp ref_offset(%{offset: offset}) when is_integer(offset), do: max(offset, 0)
+  defp ref_offset(_ref), do: 0
 
   defp table_insert_highlights(op, applied) do
     with [%{"controlIdx" => control, "paraIdx" => paragraph} | _] <-

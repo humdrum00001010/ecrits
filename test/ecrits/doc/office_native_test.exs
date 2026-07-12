@@ -111,6 +111,13 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       assert cell["ref"] =~ ~r/^tbl\[.*\]\/cell\[.*\]$/
       assert is_binary(cell["context"])
 
+      assert {:ok, inline_nodes} =
+               Pool.with_doc(ctx.pool, doc, &Ecrits.Doc.Editor.elements/1)
+
+      inline_cell = Enum.find(inline_nodes, &(&1["ref"] == cell["ref"]))
+      assert is_map(inline_cell["props"]), "office elements should expose reflected props inline"
+      assert inline_cell["prop_types"]["CharRightBorder"] == "com.sun.star.table.BorderLine"
+
       IO.puts(
         "\n[office] doc.find {type:cell} -> ref=#{cell["ref"]} context=#{inspect(cell["context"])}"
       )
@@ -121,6 +128,12 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       assert is_list(got["settable"])
       assert "CharWeight" in got["settable"]
 
+      assert "CharAutoKerning" in got["settable"],
+             "doc.get settable props should come from reflected XPropertySetInfo"
+
+      assert got["property_types"]["CharAutoKerning"] == "boolean"
+      assert got["property_types"]["CharRightBorder"] == "com.sun.star.table.BorderLine"
+
       # doc.set a cell property (universal setter -> uno_set)
       assert {:ok, %{"ok" => true}} =
                Tools.call(ctx, "doc.set", %{
@@ -128,6 +141,28 @@ defmodule Ecrits.Doc.OfficeNativeTest do
                  "ref" => cell["ref"],
                  "props" => %{"CharWeight" => 150.0}
                })
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.set", %{
+                 "document" => doc,
+                 "ref" => cell["ref"],
+                 "props" => %{
+                   "CharShadowFormat" => %{
+                     "_uno_type" => "com.sun.star.table.ShadowFormat",
+                     "Color" => 255,
+                     "IsTransparent" => false,
+                     "Location" => 3,
+                     "ShadowWidth" => 212
+                   }
+                 }
+               })
+
+      assert {:ok, shadow_get} =
+               Tools.call(ctx, "doc.get", %{"document" => doc, "ref" => cell["ref"]})
+
+      shadow = shadow_get["values"]["CharShadowFormat"]
+      assert shadow["Color"] == 255
+      assert shadow["ShadowWidth"] == 212
 
       # doc.edit set_text on the cell (replace_text scoped to the ref -> set_text)
       assert {:ok, %{"ok" => true}} =
@@ -202,6 +237,15 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       assert is_binary(shape["ref"])
       # Impress refs are page[<SlideName>]/shape[<ShapeName>]
       assert shape["ref"] =~ ~r/^page\[.*\]\/shape\[.*\]$/
+
+      assert {:ok, inline_nodes} =
+               Pool.with_doc(ctx.pool, doc, &Ecrits.Doc.Editor.elements/1)
+
+      inline_shape = Enum.find(inline_nodes, &(&1["ref"] == shape["ref"]))
+      assert is_map(inline_shape["props"]), "office elements should expose reflected props inline"
+      assert inline_shape["prop_types"]["FillGradient"] == "com.sun.star.awt.Gradient"
+      assert is_list(inline_shape["props"]["FillGradient"]["ColorStops"])
+
       IO.puts("\n[office] pptx doc.find {type:#{shape["type"]}} -> ref=#{shape["ref"]}")
 
       # doc.get on the shape ref -> reflective type + settable property names + values
@@ -209,6 +253,36 @@ defmodule Ecrits.Doc.OfficeNativeTest do
       assert got["type"] == "shape"
       assert is_list(got["settable"])
       assert "FillColor" in got["settable"]
+
+      assert "TextFitToSizeFontScale" in got["settable"],
+             "shape settable props should come from reflected XPropertySetInfo"
+
+      assert got["property_types"]["TextFitToSizeFontScale"] == "double"
+
+      [first_stop | rest_stops] = got["values"]["FillGradient"]["ColorStops"]
+
+      first_stop =
+        first_stop
+        |> put_in(["StopColor", "Red"], 0.9)
+        |> put_in(["StopColor", "Green"], 0.1)
+        |> put_in(["StopColor", "Blue"], 0.2)
+
+      gradient = put_in(got["values"]["FillGradient"], ["ColorStops"], [first_stop | rest_stops])
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.set", %{
+                 "document" => doc,
+                 "ref" => shape["ref"],
+                 "props" => %{"FillGradient" => gradient}
+               })
+
+      assert {:ok, gradient_get} =
+               Tools.call(ctx, "doc.get", %{"document" => doc, "ref" => shape["ref"]})
+
+      color = hd(gradient_get["values"]["FillGradient"]["ColorStops"])["StopColor"]
+      assert color["Red"] == 0.9
+      assert color["Green"] == 0.1
+      assert color["Blue"] == 0.2
 
       # doc.set a shape property (universal setter -> uno_set)
       assert {:ok, %{"ok" => true}} =

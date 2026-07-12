@@ -133,7 +133,7 @@ defmodule Ecrits.Doc.Office.Op do
   defop("insert_footnote", ref: :opt, text: :opt)
   defop("insert_endnote", ref: :opt, text: :opt)
   defop("insert_equation", ref: {:def, "end"}, script: :opt)
-  defop("set_columns", count: :opt, from: :opt, to: :opt, name: :opt)
+  defop("set_columns", ref: :opt, count: :opt, from: :opt, to: :opt, name: :opt, gap: :opt)
 
   # ── pictures / slides ─────────────────────────────────────────────────────
   defop("insert_picture", ref: {:def, "end"}, src: :req, w: :opt, h: :opt, name: :opt)

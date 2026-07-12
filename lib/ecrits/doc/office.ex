@@ -207,17 +207,14 @@ defmodule Ecrits.Doc.Office do
   # surface the `props` map (UNO property name -> value); `props` (a name list)
   # narrows the returned set when given.
   def get(%{doc: _} = handle, ref, props) when is_binary(ref) do
-    Instance.run(handle, fn session ->
-      case Native.uno_get(session, ref) do
-        {:ok, json} ->
-          decoded = decode_json(json)
-          values = Map.get(decoded, "props", decoded)
-          {:ok, narrow(values, props)}
+    case uno_get_decoded(handle, ref) do
+      {:ok, decoded} ->
+        values = Map.get(decoded, "props", decoded)
+        {:ok, narrow(values, props)}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end)
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   def get(_handle, _ref, _props), do: {:error, :invalid_ref}
@@ -537,6 +534,24 @@ defmodule Ecrits.Doc.Office do
     {:ok, Op.InsertText.to_wire(%Op.InsertText{ref: ref, text: text})}
   end
 
+  # Calc cells need typed write-back: numbers stay numbers and formulas stay
+  # formulas instead of going through generic XText replacement.
+  defp to_uno_op(%{op: "set_cell", ref: "sheet[" <> _ = ref} = op) do
+    wire =
+      [
+        {"text", op[:text]},
+        {"value", op[:value]},
+        {"value_type", op[:value_type]},
+        {"formula", op[:formula]}
+      ]
+      |> Enum.reduce(%{"op" => "set_cell", "ref" => ref}, fn
+        {_key, nil}, acc -> acc
+        {key, value}, acc -> Map.put(acc, key, value)
+      end)
+
+    {:ok, wire}
+  end
+
   # HWP-arm verb agents reuse on office tables: set the whole cell's text.
   defp to_uno_op(%{op: "set_cell", ref: ref} = op) when is_binary(ref) do
     {:ok, Op.SetText.to_wire(%Op.SetText{ref: ref, text: op[:text] || ""})}
@@ -608,12 +623,16 @@ defmodule Ecrits.Doc.Office do
 
   defp to_uno_op(%{op: "insert_table"} = op) do
     {:ok,
-     Op.InsertTable.to_wire(%Op.InsertTable{
-       ref: op[:ref] || "end",
-       rows: op[:rows],
-       cols: op[:cols],
-       name: op[:name]
-     })}
+     %{
+       "op" => "insert_table",
+       "ref" => op[:ref] || "end",
+       "rows" => op[:rows],
+       "cols" => op[:cols],
+       "name" => op[:name],
+       "cells" => op[:cells]
+     }
+     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+     |> Map.new()}
   end
 
   defp to_uno_op(%{op: "insert_footnote"} = op) do
@@ -643,12 +662,17 @@ defmodule Ecrits.Doc.Office do
 
   defp to_uno_op(%{op: "set_columns"} = op) do
     {:ok,
-     Op.SetColumns.to_wire(%Op.SetColumns{
-       count: op[:count],
-       from: op[:from],
-       to: op[:to],
-       name: op[:name]
-     })}
+     %{
+       "op" => "set_columns",
+       "ref" => op[:ref],
+       "count" => op[:count],
+       "from" => op[:from],
+       "to" => op[:to],
+       "name" => op[:name],
+       "gap" => op[:gap]
+     }
+     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+     |> Map.new()}
   end
 
   defp to_uno_op(%{op: "delete_paragraph", ref: ref}) when is_binary(ref) do
@@ -860,12 +884,16 @@ defmodule Ecrits.Doc.Office do
   # --- inspect helpers -----------------------------------------------------
 
   defp build_inspect(handle, ref, kind) do
+    property_types = reflected_property_types(handle, ref, kind)
+    properties = reflected_property_names(property_types, kind)
+
     base = %{
       ref: ref || "",
       type: Ref.type(kind),
       kind: Atom.to_string(kind),
       interfaces: interfaces_for(kind),
-      properties: native_props(kind)
+      properties: properties,
+      property_types: property_types
     }
 
     case kind do
@@ -879,6 +907,22 @@ defmodule Ecrits.Doc.Office do
         Map.put(base, :children, [])
     end
   end
+
+  defp reflected_property_types(_handle, ref, kind)
+       when kind in [:document, :table, :slide] or not is_binary(ref) or ref == "",
+       do: %{}
+
+  defp reflected_property_types(handle, ref, _kind) do
+    case uno_get_decoded(handle, ref) do
+      {:ok, %{"prop_types" => types}} when is_map(types) -> types
+      _ -> %{}
+    end
+  end
+
+  defp reflected_property_names(types, _kind) when is_map(types) and map_size(types) > 0,
+    do: Map.keys(types) |> Enum.sort()
+
+  defp reflected_property_names(_types, kind), do: native_props(kind)
 
   defp child_summaries(children),
     do: Enum.map(children, fn c -> %{ref: c.ref, type: c.type} end)
@@ -971,4 +1015,13 @@ defmodule Ecrits.Doc.Office do
     do: Map.take(values, props)
 
   defp narrow(values, _props), do: values
+
+  defp uno_get_decoded(handle, ref) do
+    Instance.run(handle, fn session ->
+      case Native.uno_get(session, ref) do
+        {:ok, json} -> {:ok, decode_json(json)}
+        {:error, reason} -> {:error, reason}
+      end
+    end)
+  end
 end

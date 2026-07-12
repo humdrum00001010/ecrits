@@ -38,6 +38,68 @@ describe("WasmOfficeEditor runtime prewarm API", () => {
   })
 })
 
+describe("WasmOfficeEditor save replay journal", () => {
+  it("records a server-replayable op for browser-only set_text edits", async () => {
+    const editor = Object.create(WasmOfficeEditor)
+    editor.mirror = false
+    editor.documentId = "office-save-replay"
+    editor.api = { unoApply: () => JSON.stringify({ ok: true }) }
+    editor.handle = {}
+    editor.officeSaveJournal = []
+    editor.officeUnreplayableDirty = false
+    editor.officeDirty = false
+    editor.rendered = new Map()
+    editor.caret = null
+    editor.renderVisiblePages = () => {}
+    editor.pushEvent = () => {}
+    editor.officeElements = () => [
+      {
+        ref: "page[CPU vs Memory Performance]/shape[Title 1]",
+        type: "shape",
+        text: "CPU vs Memory Performance",
+      },
+    ]
+
+    const result = await editor.officeApplyEdit({
+      op: {
+        op: "set_text",
+        ref: "page[CPU vs Memory Performance]/shape[Title 1]",
+        text: "CPU* vs Memory Performance",
+      },
+    })
+
+    assert.equal(result.ok, true)
+    assert.equal(editor.officeDirty, true)
+    assert.equal(editor.officeUnreplayableDirty, false)
+    assert.deepEqual(editor.officeSaveJournal, [
+      {
+        verb: "edit",
+        op: {
+          op: "replace_text",
+          ref: "page[CPU vs Memory Performance]/shape[Title 1]",
+          query: "CPU vs Memory Performance",
+          replacement: "CPU* vs Memory Performance",
+        },
+      },
+    ])
+  })
+
+  it("does not treat raw keyboard edits as replayable", () => {
+    const editor = Object.create(WasmOfficeEditor)
+    editor.mirror = false
+    editor.officeSaveJournal = []
+    editor.officeUnreplayableDirty = false
+    editor.officeDirty = false
+    editor.pushEvent = () => {}
+
+    editor.markViewerMutated()
+
+    assert.equal(editor.officeDirty, true)
+    assert.equal(editor.officeUnreplayableDirty, true)
+    assert.deepEqual(editor.officeReplayJournalPayload(), [])
+  })
+})
+
 describe("WasmOfficeEditor scroll preservation", () => {
   it("restores a document scroll offset across hook remounts", () => {
     const win = (globalThis as any).window
@@ -156,6 +218,61 @@ describe("WasmOfficeEditor scroll preservation", () => {
         },
       },
     ])
+  })
+})
+
+describe("WasmOfficeEditor edit preview page filtering", () => {
+  it("builds only saved-highlight pages for mirror previews", () => {
+    const observed: string[] = []
+    const stack = {
+      replaceChildren() {
+        observed.length = 0
+      },
+      appendChild(section: any) {
+        observed.push(section.dataset.pageIndex)
+      },
+    }
+
+    const oldDocument = (globalThis as any).document
+    ;(globalThis as any).document = {
+      ...documentStub,
+      createElement: (tag: string) => ({
+        dataset: {},
+        style: {},
+        className: "",
+        appendChild() {},
+        querySelector() {
+          return null
+        },
+        getContext: tag === "canvas" ? () => ({ fillStyle: "", fillRect() {} }) : undefined,
+      }),
+    }
+
+    try {
+      const editor = Object.create(WasmOfficeEditor)
+      editor.mirror = true
+      editor.loaded = true
+      editor.parts = [
+        { width: 600, height: 900 },
+        { width: 600, height: 900 },
+        { width: 600, height: 900 },
+      ]
+      editor.pageStack = stack
+      editor.rendered = new Map()
+      editor.visible = new Set()
+      editor.io = { disconnect() {}, observe() {} }
+      editor.el = { dataset: {} }
+      editor.officeHookActive = () => true
+      editor.previewPageFilter = [1]
+
+      editor.buildPageStack()
+
+      assert.deepEqual(observed, ["1"])
+      assert.equal(editor.el.dataset.previewPageFilter, "1")
+      assert.deepEqual(editor.pageStackIndexes(), [1])
+    } finally {
+      ;(globalThis as any).document = oldDocument
+    }
   })
 })
 
