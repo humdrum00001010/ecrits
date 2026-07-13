@@ -163,6 +163,16 @@ defmodule EcritsWeb.FakeAcpAdapter do
   defp to_session_update(%{type: :text_delta, delta: text}, session_id),
     do: to_session_update({:text_delta, text}, session_id)
 
+  defp to_session_update(%{type: :edit_delta} = event, session_id) do
+    session_update(session_id, %{
+      "sessionUpdate" => "tool_call",
+      "toolCallId" => event[:id],
+      "title" => "Edit File",
+      "kind" => "edit",
+      "rawInput" => %{"path" => event[:path], "diff" => event[:delta]}
+    })
+  end
+
   defp to_session_update(%{type: :tool_call_completed} = event, session_id) do
     session_update(session_id, %{
       "sessionUpdate" => "tool_call_update",

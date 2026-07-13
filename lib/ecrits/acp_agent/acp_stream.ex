@@ -67,7 +67,14 @@ defmodule Ecrits.AcpAgent.AcpStream do
   end
 
   @doc false
-  def update_state, do: %{saw_text?: false, tool_titles: %{}}
+  def update_state,
+    do: %{
+      saw_text?: false,
+      tool_titles: %{},
+      tool_kinds: %{},
+      edit_payloads: %{},
+      edit_paths: %{}
+    }
 
   @doc false
   def map_session_update(update, state) when is_map(state) do
@@ -516,60 +523,75 @@ defmodule Ecrits.AcpAgent.AcpStream do
   defp map_update(%{"sessionUpdate" => "tool_call"} = update, state) do
     tool_call_id = tool_call_id(update)
     name = tool_name(update)
-    state = put_in(state.tool_titles[tool_call_id], name)
+    kind = tool_kind(update)
 
-    {:event,
-     %{
-       type: :tool_call_started,
-       tool_call_id: tool_call_id,
-       name: name,
-       arguments: tool_arguments(update)
-     }, state}
+    state =
+      state
+      |> put_in([:tool_titles, tool_call_id], name)
+      |> put_in([:tool_kinds, tool_call_id], kind)
+
+    if kind == "edit" do
+      map_edit_update(update, tool_call_id, state)
+    else
+      {:event,
+       %{
+         type: :tool_call_started,
+         tool_call_id: tool_call_id,
+         name: name,
+         arguments: tool_arguments(update)
+       }, state}
+    end
   end
 
   defp map_update(%{"sessionUpdate" => "tool_call_update"} = update, state) do
     tool_call_id = tool_call_id(update)
     name = tool_name(update) || Map.get(state.tool_titles, tool_call_id)
+    kind = tool_kind(update) || Map.get(state.tool_kinds, tool_call_id)
+    state = put_in(state.tool_kinds[tool_call_id], kind)
 
-    case Map.get(update, "status") do
-      "completed" ->
-        {:event,
-         %{
-           type: :tool_call_completed,
-           tool_call_id: tool_call_id,
-           name: name,
-           result: tool_output(update)
-         }, state}
-
-      "failed" ->
-        {:event,
-         %{
-           type: :tool_call_failed,
-           tool_call_id: tool_call_id,
-           name: name,
-           reason: tool_failure_reason(update)
-         }, state}
-
-      _other ->
-        # A non-terminal update for a call we have not seen is its START: the
-        # Claude adapter's first report of a tool_use block is a
-        # `tool_call_update` (pending/in_progress) with no prior `tool_call`.
-        # Without this the call would only surface at completion — after the
-        # UI already parked the reply bubble above it — and the terminal
-        # update carries no toolName, so the row would fall back to "tool".
-        if Map.has_key?(state.tool_titles, tool_call_id) do
-          {:skip, state}
-        else
-          state = put_in(state.tool_titles[tool_call_id], name)
-
+    if kind == "edit" do
+      map_edit_update(update, tool_call_id, state)
+    else
+      case Map.get(update, "status") do
+        "completed" ->
           {:event,
            %{
-             type: :tool_call_started,
+             type: :tool_call_completed,
              tool_call_id: tool_call_id,
              name: name,
-             arguments: tool_arguments(update)
+             result: tool_output(update)
            }, state}
-        end
+
+        "failed" ->
+          {:event,
+           %{
+             type: :tool_call_failed,
+             tool_call_id: tool_call_id,
+             name: name,
+             reason: tool_failure_reason(update)
+           }, state}
+
+        _other ->
+          # A non-terminal update for a call we have not seen is its START: the
+          # Claude adapter's first report of a tool_use block is a
+          # `tool_call_update` (pending/in_progress) with no prior `tool_call`.
+          # Without this the call would only surface at completion — after the
+          # UI already parked the reply bubble above it — and the terminal
+          # update carries no toolName, so the row would fall back to "tool".
+          if Map.has_key?(state.tool_titles, tool_call_id) do
+            {:skip, state}
+          else
+            state = put_in(state.tool_titles[tool_call_id], name)
+
+            {:event,
+             %{
+               type: :tool_call_started,
+               tool_call_id: tool_call_id,
+               name: name,
+               arguments: tool_arguments(update)
+             }, state}
+          end
+      end
     end
   end
 
@@ -583,6 +605,68 @@ defmodule Ecrits.AcpAgent.AcpStream do
     state
     |> Map.put_new(:saw_text?, false)
     |> Map.put_new(:tool_titles, %{})
+    |> Map.put_new(:tool_kinds, %{})
+    |> Map.put_new(:edit_payloads, %{})
+    |> Map.put_new(:edit_paths, %{})
+  end
+
+  defp map_edit_update(update, tool_call_id, state) do
+    path = edit_path(update) || Map.get(state.edit_paths, tool_call_id)
+    delta = edit_delta(update)
+    state = if is_binary(path), do: put_in(state.edit_paths[tool_call_id], path), else: state
+
+    cond do
+      not (is_binary(delta) and delta != "") ->
+        {:skip, state}
+
+      Map.get(state.edit_payloads, tool_call_id) == delta ->
+        {:skip, state}
+
+      true ->
+        state = put_in(state.edit_payloads[tool_call_id], delta)
+
+        {:event, %{type: :edit_delta, edit_id: tool_call_id, path: path, delta: delta}, state}
+    end
+  end
+
+  defp tool_kind(update) do
+    case Map.get(update, "kind") do
+      kind when is_binary(kind) -> String.downcase(kind)
+      _ -> nil
+    end
+  end
+
+  defp edit_path(update) do
+    input = edit_input(update)
+
+    input["path"] ||
+      update
+      |> Map.get("content", [])
+      |> List.wrap()
+      |> Enum.find_value(fn
+        %{"type" => "diff", "path" => path} when is_binary(path) -> path
+        _ -> nil
+      end)
+  end
+
+  defp edit_delta(update) do
+    input = edit_input(update)
+
+    input["diff"] || input["newText"] ||
+      update
+      |> Map.get("content", [])
+      |> List.wrap()
+      |> Enum.find_value(fn
+        %{"type" => "diff"} = diff -> diff["newText"] || diff["diff"]
+        _ -> nil
+      end)
+  end
+
+  defp edit_input(update) do
+    case Map.get(update, "rawInput") || Map.get(update, "input") do
+      input when is_map(input) -> input
+      _ -> %{}
+    end
   end
 
   defp update_text(%{"content" => %{"text" => text}}), do: text

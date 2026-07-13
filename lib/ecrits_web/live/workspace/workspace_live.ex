@@ -9,7 +9,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   alias Ecrits.Doc.Editor, as: DocEditor
   alias Ecrits.Doc.Pool, as: DocPool
+  alias Ecrits.Doc.Projection
   alias Ecrits.Fuse.DocMount
+  alias Ecrits.Fuse.OpenDocs
   alias Ecrits.AcpAgent, as: ACP
   alias Ecrits.Document
   alias Ecrits.Document.RhwpAdapter
@@ -1994,9 +1996,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                      embedded options row (model / 📎 attach / reasoning / access)
                      live in ONE bordered box, ChatGPT-style. The composer is a
                      native `phx-submit` form; the colocated `.ChatInput` hook adds
-                     Enter-to-send / button-send UX (pushEvent) WITHOUT a native
-                     submit, so a double-Enter mid-stream can never trip the parent
-                     grid hook's submit guard. The options stay a SEPARATE sibling
+                     Enter-to-send while the button uses native form submission.
+                     The options stay a SEPARATE sibling
                      form (`local-agent-provider-options`) so they never submit a
                      chat turn. --%>
               <div class="shrink-0 rounded border border-base-300 bg-base-100 transition-colors focus-within:border-base-content/40">
@@ -2077,7 +2078,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                     <button
                       :if={@local_agent_status != :running}
                       id="local-agent-submit"
-                      type="button"
+                      type="submit"
                       data-role="chat-send"
                       data-action="send"
                       disabled={@local_agent_status in [:offline, :starting]}
@@ -5471,12 +5472,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp apply_local_agent_event(
          %{assigns: %{local_agent_turn_id: turn_id}} = socket,
-         %{type: :edit_delta, turn_id: turn_id, delta: delta}
+         %{type: :edit_delta, turn_id: turn_id, delta: delta} = event
        )
        when is_binary(delta) do
     socket
-    |> ensure_inline_editor_preview(turn_id)
-    |> inline_editor_preview_accumulate_delta(turn_id, delta)
+    |> ensure_inline_editor_preview(turn_id, Map.get(event, :path))
+    |> inline_editor_preview_accumulate_delta(turn_id, delta, Map.get(event, :path))
   end
 
   defp apply_local_agent_event(
@@ -5533,7 +5534,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     active = Map.get(socket.assigns.local_agent_active_tools || %{}, tool_call_id, %{})
     input = active[:input]
     output = agent_tool_payload(name, result)
-
     # Close the text segment / drop the empty placeholder here too: a provider
     # that only reports terminal tool updates (no started event) must not leave
     # the turn-start placeholder parked ABOVE this row soaking up the reply.
@@ -5841,8 +5841,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   # ── inline chat: streaming text buffer helpers ─────────────────────
 
-  defp ensure_inline_editor_preview(socket, turn_id) when is_binary(turn_id) do
-    case inline_editor_preview_seed(socket, turn_id) do
+  defp ensure_inline_editor_preview(socket, turn_id, path) when is_binary(turn_id) do
+    case inline_editor_preview_seed(socket, turn_id, path) do
       nil ->
         socket
 
@@ -5861,11 +5861,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp ensure_inline_editor_preview(socket, _turn_id), do: socket
+  defp ensure_inline_editor_preview(socket, _turn_id, _path), do: socket
 
-  defp inline_editor_preview_accumulate_delta(socket, turn_id, delta)
+  defp inline_editor_preview_accumulate_delta(socket, turn_id, delta, path)
        when is_binary(turn_id) and is_binary(delta) do
-    socket = ensure_inline_editor_preview(socket, turn_id)
+    socket = ensure_inline_editor_preview(socket, turn_id, path)
 
     case socket.assigns[:local_agent_editor_preview] do
       %{turn_id: ^turn_id, document_id: document_id} = state when is_binary(document_id) ->
@@ -5892,7 +5892,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp inline_editor_preview_accumulate_delta(socket, _turn_id, _delta), do: socket
+  defp inline_editor_preview_accumulate_delta(socket, _turn_id, _delta, _path), do: socket
 
   defp finalize_inline_editor_preview(socket, turn_id, status) when is_binary(turn_id) do
     case socket.assigns[:local_agent_editor_preview] do
@@ -5910,7 +5910,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp finalize_inline_editor_preview(socket, _turn_id, _status), do: socket
 
-  defp inline_editor_preview_seed(socket, turn_id) do
+  defp inline_editor_preview_seed(socket, turn_id, path) do
+    case inline_editor_preview_document(socket, path) do
+      {:ok, %{document: document, relative_path: relative_path}} ->
+        inline_editor_preview_seed(socket, turn_id, document, relative_path)
+
+      _ ->
+        inline_editor_preview_seed_from_active_document(socket, turn_id)
+    end
+  end
+
+  defp inline_editor_preview_seed_from_active_document(socket, turn_id) do
     document = socket.assigns[:active_document]
     path = socket.assigns[:active_document_path]
     document_id = active_document_id(socket)
@@ -5930,6 +5940,52 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       }
     else
       _other -> nil
+    end
+  end
+
+  defp inline_editor_preview_seed(socket, turn_id, document, relative_path) do
+    %{
+      turn_id: turn_id,
+      document_id: document.id,
+      document: document,
+      document_path: relative_path,
+      document_spec: local_document_spec(document),
+      canvas_id:
+        "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-canvas",
+      bytes_url: local_document_bytes_url(socket.assigns.workspace_path, relative_path)
+    }
+  end
+
+  defp inline_editor_preview_document(socket, path) when is_binary(path) and path != "" do
+    with {:ok, source_path} <- inline_editor_preview_source_path(socket, path) do
+      vfs_preview_document(socket, source_path)
+    end
+  end
+
+  defp inline_editor_preview_document(_socket, _path), do: nil
+
+  defp inline_editor_preview_source_path(socket, path) do
+    workspace_path = socket.assigns[:workspace_path]
+    projected_name = path |> Path.basename() |> Projection.source_basename()
+
+    cond do
+      is_binary(workspace_path) and is_binary(projected_name) ->
+        OpenDocs.source_path(workspace_path, projected_name)
+
+      Path.type(path) == :absolute and File.regular?(path) ->
+        {:ok, path}
+
+      is_binary(workspace_path) ->
+        with {:ok, normalized} <- WorkspacePath.normalize(path),
+             {:ok, source_path} <- WorkspacePath.join(workspace_path, normalized),
+             true <- File.regular?(source_path) do
+          {:ok, source_path}
+        else
+          _ -> :error
+        end
+
+      true ->
+        :error
     end
   end
 
@@ -6239,7 +6295,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   defp edit_preview_ref([highlight | _]) when is_map(highlight) do
-    Map.get(highlight, "ref") || Map.get(highlight, :ref)
+    ref = Map.get(highlight, "ref") || Map.get(highlight, :ref)
+    offset = Map.get(highlight, "offset") || Map.get(highlight, :offset)
+    length = Map.get(highlight, "length") || Map.get(highlight, :length)
+
+    if is_map(ref) and is_integer(offset) and is_integer(length) and length > 0 do
+      ref
+      |> Map.put("offset", offset)
+      |> Map.put("highlightLength", length)
+    else
+      ref
+    end
   end
 
   defp edit_preview_ref(_highlights), do: nil

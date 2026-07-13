@@ -61,4 +61,62 @@ defmodule Ecrits.AcpAgent.AcpStreamTest do
       assert {:skip, _state} = AcpStream.map_session_update(in_progress, state)
     end
   end
+
+  describe "map_session_update/2 ACP edits" do
+    test "normalizes an edit as an edit delta rather than a generic tool call" do
+      started = %{
+        "sessionUpdate" => "tool_call",
+        "toolCallId" => "edit-1",
+        "title" => "Edit File",
+        "kind" => "edit",
+        "rawInput" => %{"path" => ".ecrits/mount/template.hwpx.jsonl", "diff" => "@@ edit @@"}
+      }
+
+      assert {:event, event, state} =
+               AcpStream.map_session_update(started, AcpStream.update_state())
+
+      assert event == %{
+               type: :edit_delta,
+               edit_id: "edit-1",
+               path: ".ecrits/mount/template.hwpx.jsonl",
+               delta: "@@ edit @@"
+             }
+
+      completed = %{
+        "sessionUpdate" => "tool_call_update",
+        "toolCallId" => "edit-1",
+        "kind" => "edit",
+        "status" => "completed",
+        "content" => [
+          %{
+            "type" => "diff",
+            "path" => ".ecrits/mount/template.hwpx.jsonl",
+            "newText" => "@@ edit @@"
+          }
+        ]
+      }
+
+      assert {:skip, _state} = AcpStream.map_session_update(completed, state)
+    end
+
+    test "uses a completion-only structured diff when the start had no payload" do
+      completed = %{
+        "sessionUpdate" => "tool_call_update",
+        "toolCallId" => "edit-2",
+        "kind" => "edit",
+        "status" => "completed",
+        "content" => [
+          %{"type" => "diff", "path" => "notes.md", "newText" => "+replacement"}
+        ]
+      }
+
+      assert {:event,
+              %{
+                type: :edit_delta,
+                edit_id: "edit-2",
+                path: "notes.md",
+                delta: "+replacement"
+              }, _state} = AcpStream.map_session_update(completed, AcpStream.update_state())
+    end
+  end
 end

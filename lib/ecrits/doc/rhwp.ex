@@ -972,7 +972,7 @@ defmodule Ecrits.Doc.Rhwp do
             paragraph: ppara,
             control: ctrl,
             cell: c,
-            props: %{"BackgroundColor" => color}
+            props: %{"fillColor" => color}
           }
         end
 
@@ -1228,9 +1228,9 @@ defmodule Ecrits.Doc.Rhwp do
 
       # Multi-column with NO inter-column gap renders the two columns nearly
       # touching (text runs together, unreadable). Default a real-document
-      # gutter (~8mm = 2268 HWPUNIT) when the agent doesn't specify spacing.
+      # gutter (~12mm = 3402 HWPUNIT) when the agent doesn't specify spacing.
       ir[:op] == "set_columns" and (is_nil(ir[:spacing]) or ir[:spacing] == 0) ->
-        [Map.put(ir, :spacing, 2268)]
+        [Map.put(ir, :spacing, 3402)]
 
       true ->
         [ir]

@@ -3198,7 +3198,11 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
              ~s(#local-agent-provider-options input[type="file"][name="local_document_import"][class="sr-only"][data-role="local-document-upload-file-input"])
            )
 
-    assert has_element?(lv, "#local-agent-submit[data-role='chat-send'][data-action='send']")
+    assert has_element?(
+             lv,
+             "#local-agent-submit[type='submit'][data-role='chat-send'][data-action='send']"
+           )
+
     refute has_element?(lv, "#document-direct-upload-input")
     refute has_element?(lv, ~s([phx-hook="DirectR2Upload"]))
   end
@@ -3601,6 +3605,41 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
              ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"]),
              "draft"
            )
+  end
+
+  test "ACP edit updates render a document preview without a generic tool row", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          %{
+            type: :edit_delta,
+            id: "acp-edit-1",
+            path: Path.join(root, ".ecrits/mount/template.hwpx.jsonl"),
+            delta: "@@ -1 +1 @@\n-old\n+new"
+          }
+        ]
+      ]
+    )
+
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#local-agent-form", agent: %{message: "edit the document"})
+    |> render_submit()
+
+    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+                   1_000
+
+    sync_liveview(lv)
+
+    assert_preview_state(lv, %{"documentPath" => "template.hwpx", "deltaCount" => 1})
+    refute has_element?(lv, "#local-agent-tool-acp-edit-1")
+
+    assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+    refute Enum.any?(items, &(Map.get(&1, :role) == :tool))
   end
 
   test "waiting indicator shows on the empty placeholder and drops once prose lands",

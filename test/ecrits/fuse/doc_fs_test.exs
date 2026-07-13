@@ -49,7 +49,7 @@ defmodule Ecrits.Fuse.DocFsTest do
     socket = Exfuse.Socket.new(DocMount.mount_point(root), %{root: root})
 
     assert {:reply, names, _socket} = DocFs.handle_event(:readdir, %{path: "/"}, socket)
-    assert names == ["doc.hwpx.jsonl"]
+    assert names == [{"doc.hwpx.jsonl", {0o0644, 2, 0}}]
   end
 
   test "readdir projects opened nested documents through a flat mount name" do
@@ -69,7 +69,7 @@ defmodule Ecrits.Fuse.DocFsTest do
     socket = Exfuse.Socket.new(DocMount.mount_point(root), %{root: root})
 
     assert {:reply, names, _socket} = DocFs.handle_event(:readdir, %{path: "/"}, socket)
-    assert names == ["drafts%2Fdoc.hwpx.jsonl"]
+    assert names == [{"drafts%2Fdoc.hwpx.jsonl", {0o0644, 2, 0}}]
   end
 
   test "chunked in-place rewrite commits once the buffer is valid" do

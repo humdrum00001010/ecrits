@@ -109,7 +109,7 @@ defmodule Ecrits.Fuse.DocFs do
     names =
       opened
       |> Enum.filter(&source_supported?(state.root, &1))
-      |> Enum.map(&Projection.projected_name/1)
+      |> Enum.map(&{Projection.projected_name(&1), attr(type: :file)})
 
     {:reply, names, socket}
   end

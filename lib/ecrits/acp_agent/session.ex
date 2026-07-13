@@ -941,6 +941,19 @@ defmodule Ecrits.AcpAgent.Session do
     emit(state, %{type: :reasoning_delta, turn_id: turn_id, delta: delta})
   end
 
+  defp handle_turn_event(state, turn_id, %{type: :edit_delta, delta: delta} = event)
+       when is_binary(delta) do
+    state
+    |> Map.update!(:current, &flush_pending_text_item/1)
+    |> emit(%{
+      type: :edit_delta,
+      turn_id: turn_id,
+      edit_id: Map.get(event, :edit_id),
+      path: Map.get(event, :path),
+      delta: delta
+    })
+  end
+
   defp handle_turn_event(state, turn_id, %{type: :tool_call_started} = event) do
     current =
       state.current

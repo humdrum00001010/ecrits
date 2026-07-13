@@ -57,12 +57,18 @@ defmodule Ecrits.Doc.EditPreview do
   defp hwp_target(%{} = ref), do: hwp_target(Jason.encode!(ref))
 
   defp hwp_target(ref) when is_binary(ref) do
+    decoded_ref = decode_ref_map(ref)
+
     case Ref.decode(ref) do
       {:ok, %{kind: :char, sec: section, para: paragraph, off: offset}} ->
-        {:ok, %{section: section, paragraph: paragraph, offset: offset}}
+        {:ok,
+         %{section: section, paragraph: paragraph, offset: offset}
+         |> maybe_put_highlight_length(decoded_ref)}
 
       {:ok, %{kind: :paragraph, sec: section, para: paragraph}} ->
-        {:ok, %{section: section, paragraph: paragraph, offset: 0}}
+        {:ok,
+         %{section: section, paragraph: paragraph, offset: ref_offset(decoded_ref)}
+         |> maybe_put_highlight_length(decoded_ref)}
 
       {:ok,
        %{
@@ -82,7 +88,8 @@ defmodule Ecrits.Doc.EditPreview do
            cell: cell,
            cell_para: cell_paragraph,
            offset: offset
-         }}
+         }
+         |> maybe_put_highlight_length(decoded_ref)}
 
       {:ok, %{kind: :control, sec: section, para: paragraph}} ->
         {:ok, %{section: section, paragraph: paragraph, offset: 0}}
@@ -99,6 +106,30 @@ defmodule Ecrits.Doc.EditPreview do
   end
 
   defp hwp_target(_ref), do: {:error, :invalid_ref}
+
+  defp decode_ref_map(ref) do
+    case Jason.decode(ref) do
+      {:ok, decoded} when is_map(decoded) -> decoded
+      _ -> %{}
+    end
+  end
+
+  defp ref_offset(ref) do
+    case ref["offset"] || ref[:offset] do
+      offset when is_integer(offset) and offset >= 0 -> offset
+      _ -> 0
+    end
+  end
+
+  defp maybe_put_highlight_length(target, ref) do
+    case ref["highlightLength"] || ref["highlight_length"] || ref[:highlight_length] do
+      length when is_integer(length) and length > 0 ->
+        Map.put(target, :highlight_length, length)
+
+      _ ->
+        target
+    end
+  end
 
   defp office_ref(nil), do: ""
   defp office_ref(ref) when is_binary(ref), do: ref

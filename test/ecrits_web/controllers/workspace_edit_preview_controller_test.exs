@@ -16,13 +16,22 @@ defmodule EcritsWeb.WorkspaceEditPreviewControllerTest do
     params = %{
       "path" => root,
       "document" => "contract.hwpx",
-      "ref" => Jason.encode!(%{"section" => 0, "paragraph" => 0, "offset" => 0})
+      "ref" =>
+        Jason.encode!(%{
+          "section" => 0,
+          "paragraph" => 0,
+          "offset" => 0,
+          "highlightLength" => 1
+        })
     }
 
     conn = get(conn, ~p"/local/edit-preview?#{params}")
 
     assert response_content_type(conn, :png) =~ "image/png"
     assert ["ehwp"] = get_resp_header(conn, "x-ecrits-preview-backend")
+    assert [encoded_metadata] = get_resp_header(conn, "x-ecrits-preview-meta")
+    assert {:ok, metadata_json} = Base.url_decode64(encoded_metadata, padding: false)
+    assert %{"highlight_rect_count" => 1} = Jason.decode!(metadata_json)
     assert <<137, "PNG", 13, 10, 26, 10, _::binary>> = response(conn, 200)
   end
 
