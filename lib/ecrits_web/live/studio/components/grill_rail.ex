@@ -8,13 +8,14 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRail do
   ## Assigns
 
     * `:id` — DOM id.
-    * `:grill_marks` — list of mark records (structs or maps) the parent
+    * `:state` — `%Ecrits.Studio.ChatRailState{}` containing the mark records,
+      permissions, current agent run, and layout. The parent
       `ChatRail` has filtered to the current `agent_run_id`. The component
       treats both `%Ecrits.MarkInput{}` structs and plain maps the same
       way; it pulls out `:id`, `:text`, `:data`, `:intent`. Marks with
       `intent: :ask` and no `data["answer"]` render as **prompts**; those
       with an answer collapse to a Q→A summary line.
-    * `:current_scope` — `%Ecrits.Context{}`. The component reads
+      The component reads the state's permissions
       `:perms` to gate the answer flow:
         - `:agent_supervised` (perms include `:agent_run` but not `:write`
           — for the purposes of this rail we use the looser "no `:write`"
@@ -23,9 +24,8 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRail do
           returns an empty fragment.
         - All other personas (`:lawyer`, `:paralegal`, `:admin`) get the
           full submit input.
-    * `:studio_state` — current `%Ecrits.Studio.State{}`; used so the
-      submit button can be disabled when there is no `agent_run_id` yet.
-    * `:layout` — `:default` or `:mobile_full`. The mobile variant uses
+      The current agent run disables submit until the run exists.
+      The state's layout is `:default` or `:mobile_full`. The mobile variant uses
       tighter padding and stacks the rationale below the question text.
 
   ## Event contract
@@ -55,14 +55,12 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRail do
 
   alias Ecrits.Context
   alias Ecrits.MarkInput
+  alias Ecrits.Studio.ChatRailState
 
   # ---- Attribute contract ------------------------------------------------
 
   attr :id, :string, required: true
-  attr :grill_marks, :list, default: []
-  attr :current_scope, :map, required: true
-  attr :studio_state, :map, required: true
-  attr :layout, :atom, default: :default
+  attr :state, :map, required: true
 
   # ---- Lifecycle ---------------------------------------------------------
 
@@ -72,13 +70,13 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRail do
   end
 
   @impl true
-  def update(assigns, socket) do
+  def update(%{state: %ChatRailState{}} = assigns, socket) do
     drafts = socket.assigns[:drafts] || %{}
 
     # Drop drafts whose marks have since been answered or removed so the
     # map can't grow unboundedly across a long grill session.
     incoming_ids =
-      assigns[:grill_marks]
+      assigns.state.grill_marks
       |> List.wrap()
       |> Enum.map(&mark_id/1)
       |> MapSet.new()
@@ -91,8 +89,6 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRail do
     socket =
       socket
       |> assign(assigns)
-      |> assign_new(:grill_marks, fn -> [] end)
-      |> assign_new(:layout, fn -> :default end)
       |> assign(:drafts, drafts)
 
     {:ok, socket}
@@ -115,13 +111,13 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRail do
   # ---- Render ------------------------------------------------------------
 
   @impl true
-  def render(assigns) do
-    perm_mode = perm_mode(assigns.current_scope)
+  def render(%{state: %ChatRailState{}} = assigns) do
+    perm_mode = perm_mode(assigns.state.permissions)
 
     assigns =
       assigns
       |> assign(:perm_mode, perm_mode)
-      |> assign(:partitioned, partition_marks(assigns.grill_marks))
+      |> assign(:partitioned, partition_marks(assigns.state.grill_marks))
 
     ~H"""
     <div
@@ -130,8 +126,8 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRail do
       data-perm-mode={@perm_mode}
       class={[
         "flex flex-col",
-        @layout == :mobile_full && "px-2 py-2 gap-2",
-        @layout != :mobile_full && "px-3 py-3 gap-3",
+        ChatRailState.mobile?(@state) && "px-2 py-2 gap-2",
+        not ChatRailState.mobile?(@state) && "px-3 py-3 gap-3",
         empty?(@partitioned) && "hidden",
         @perm_mode == :hidden && "hidden"
       ]}
@@ -204,7 +200,7 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRail do
                   }
                   disabled={
                     String.trim(draft_for(@drafts, mark_id(mark))) == "" or
-                      is_nil(@studio_state.agent_run_id)
+                      is_nil(@state.agent_run_id)
                   }
                   class="btn btn-sm btn-primary"
                 >
@@ -274,6 +270,7 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRail do
     * Anything else (no scope, no perms) → `:hidden`.
   """
   @spec perm_mode(Context.t() | map() | nil) :: :hidden | :readonly | :answer
+  def perm_mode(perms) when is_list(perms), do: perm_mode_for_perms(perms)
   def perm_mode(%Context{perms: perms}) when is_list(perms), do: perm_mode_for_perms(perms)
   def perm_mode(%{perms: perms}) when is_list(perms), do: perm_mode_for_perms(perms)
   def perm_mode(_), do: :hidden

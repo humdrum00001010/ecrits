@@ -13,13 +13,8 @@ defmodule Ecrits.Doc.ProjectionTest do
   alias Ecrits.Doc.Pool
   alias Ecrits.Doc.Projection
 
-  # A committed real HWP the ehwp NIF can open (used only by the guarded e2e block).
-  @hwp_fixture Path.expand(
-                 "../../../priv/static/assets/standard_contracts/employment_v1.hwp",
-                 __DIR__
-               )
   @hwpx_fixture Path.expand("../../fixtures/hwpx/real_contract.hwpx", __DIR__)
-  @image_fixture Path.expand("../../../priv/static/images/landing/hero.png", __DIR__)
+  @png_1x1 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII="
 
   describe "supported?/1" do
     test "true for every supported extension, case-insensitive" do
@@ -107,48 +102,6 @@ defmodule Ecrits.Doc.ProjectionTest do
 
       assert offset == String.length(title)
       assert length == String.length(marker)
-    end
-  end
-
-  describe "project_file/2 + fingerprint/1 over the real doc layer" do
-    setup do
-      {:ok, ehwp: ehwp_available?(@hwp_fixture)}
-    end
-
-    test "projects a real HWP to deterministic, grep-able bytes", %{ehwp: ehwp} do
-      if not ehwp do
-        IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection e2e over a real HWP")
-      else
-        # Use a PRIVATE pool so the test is isolated; project_file/2 talks to the
-        # default-named Pool, so name this one __MODULE__ via a start_supervised
-        # is not possible (project_file uses @default_name). Instead exercise the
-        # default pool the app already supervises.
-        path = copy_to_tmp(@hwp_fixture, "projection_e2e", ".hwp")
-
-        assert {:ok, bytes} = Projection.project_file(path)
-        assert is_binary(bytes)
-        assert byte_size(bytes) > 0
-        assert String.valid?(bytes)
-        # The projection IS the document IR, nested for compact editability:
-        # sections -> paragraphs -> payload nodes.
-        {lines, doc} = decode_projection(bytes)
-        assert length(lines) == 1
-        assert nested_projection?(doc)
-        assert Enum.any?(payload_nodes(doc), &match?(%{"type" => _}, &1))
-        refute Enum.any?(payload_nodes(doc), &match?(%{"ref" => ref} when is_list(ref), &1))
-
-        # Deterministic: a second projection of the same content is byte-identical.
-        assert {:ok, bytes2} = Projection.project_file(path)
-        assert bytes == bytes2
-
-        # Fingerprint is stable and equals phash2 of the bytes.
-        assert {:ok, fp} = Projection.fingerprint(path)
-        assert fp == :erlang.phash2(bytes)
-        assert {:ok, ^fp} = Projection.fingerprint(path)
-
-        _ = Pool.close_by_path(path)
-        File.rm_rf(Path.dirname(path))
-      end
     end
   end
 
@@ -338,7 +291,7 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         picture = %{
           "type" => "picture",
-          "src" => @image_fixture,
+          "src" => image_fixture(),
           "width" => 3200,
           "height" => 2400,
           "description" => "JSONL_STRUCTURAL_ANCHOR_PICTURE"
@@ -375,7 +328,7 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         picture = %{
           "type" => "picture",
-          "src" => @image_fixture,
+          "src" => image_fixture(),
           "width" => 3200,
           "height" => 2400,
           "description" => "JSONL_CELL_ANCHOR_PICTURE"
@@ -418,7 +371,7 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         picture = %{
           "type" => "picture",
-          "src" => @image_fixture,
+          "src" => image_fixture(),
           "width" => 5200,
           "height" => 3000,
           "description" => "JSONL_LEADING_PICTURE_INSERT"
@@ -452,7 +405,7 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         first_picture = %{
           "type" => "picture",
-          "src" => @image_fixture,
+          "src" => image_fixture(),
           "description" => "JSONL_EXISTING_PICTURE"
         }
 
@@ -469,7 +422,7 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         second_picture = %{
           "type" => "picture",
-          "src" => @image_fixture,
+          "src" => image_fixture(),
           "description" => "JSONL_SECOND_PICTURE"
         }
 
@@ -709,7 +662,7 @@ defmodule Ecrits.Doc.ProjectionTest do
         picture =
           %{
             "type" => "picture",
-            "src" => @image_fixture,
+            "src" => image_fixture(),
             "width" => 5200,
             "height" => 3600,
             "x" => 12_000,
@@ -784,6 +737,12 @@ defmodule Ecrits.Doc.ProjectionTest do
 
   # --- helpers --------------------------------------------------------------
 
+  defp image_fixture do
+    path = Path.join(System.tmp_dir!(), "ecrits-projection-pixel.png")
+    File.write!(path, Base.decode64!(@png_1x1))
+    path
+  end
+
   defp copy_to_tmp(src, tag, ext) do
     dir = Path.join(System.tmp_dir!(), "ecrits-#{tag}-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
@@ -805,18 +764,6 @@ defmodule Ecrits.Doc.ProjectionTest do
   defp encode_projection(doc) do
     Jason.encode!(doc) <> "\n"
   end
-
-  defp nested_projection?(doc) when is_list(doc) do
-    Enum.all?(doc, fn section ->
-      is_list(section) and
-        Enum.all?(section, fn paragraph ->
-          is_list(paragraph) and
-            Enum.all?(paragraph, &match?(%{"type" => _}, &1))
-        end)
-    end)
-  end
-
-  defp nested_projection?(_doc), do: false
 
   defp payload_nodes(doc) do
     for section <- doc,

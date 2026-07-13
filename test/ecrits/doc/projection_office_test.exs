@@ -216,6 +216,82 @@ defmodule Ecrits.Doc.ProjectionOfficeTest do
     end)
   end
 
+  test "write_back persists Writer metadata and tracked-change settings", %{native: native} do
+    skip_or(native, "office document semantics write_back", fn ->
+      tmp = copy(@docx)
+      {:ok, bytes} = Projection.project_file(tmp)
+      doc = Jason.decode!(bytes)
+      {document_path, document} = first_payload(doc, &(&1["type"] == "document"))
+
+      edited_document =
+        put_in(document, ["metadata", "title"], "IR contract metadata")
+
+      assert {:ok, %{applied: 1}} =
+               Projection.write_back(tmp, replace_payload(doc, document_path, edited_document),
+                 root: Path.dirname(tmp)
+               )
+
+      Pool.close_by_path(tmp)
+      {:ok, metadata_bytes} = Projection.project_file(tmp)
+      metadata_doc = Jason.decode!(metadata_bytes)
+      {_path, metadata_after} = first_payload(metadata_doc, &(&1["type"] == "document"))
+      assert get_in(metadata_after, ["metadata", "title"]) == "IR contract metadata"
+
+      case first_payload(
+             metadata_doc,
+             &(&1["type"] == "document_protection" and
+                 is_boolean(get_in(&1, ["props", "RecordChanges"])))
+           ) do
+        {settings_path, settings} ->
+          current = get_in(settings, ["props", "RecordChanges"])
+          edited_settings = put_in(settings, ["props", "RecordChanges"], not current)
+
+          assert {:ok, %{applied: 1}} =
+                   Projection.write_back(
+                     tmp,
+                     replace_payload(metadata_doc, settings_path, edited_settings),
+                     root: Path.dirname(tmp)
+                   )
+
+          Pool.close_by_path(tmp)
+          {:ok, settings_bytes} = Projection.project_file(tmp)
+          settings_doc = Jason.decode!(settings_bytes)
+
+          {_path, settings_after} =
+            first_payload(settings_doc, &(&1["type"] == "document_protection"))
+
+          assert get_in(settings_after, ["props", "RecordChanges"]) == not current
+      end
+
+      cleanup(tmp)
+    end)
+  end
+
+  test "write_back rejects unknown and type-invalid reflected properties", %{native: native} do
+    skip_or(native, "office property validation", fn ->
+      tmp = copy(@docx)
+      {:ok, bytes} = Projection.project_file(tmp)
+      doc = Jason.decode!(bytes)
+      {path, paragraph} = first_payload(doc, &(&1["type"] == "paragraph"))
+
+      unknown = put_in(paragraph, ["props", "TypoStyle"], "Heading 1")
+
+      assert {:error, {:invalid_property, "TypoStyle"}} =
+               Projection.write_back(tmp, replace_payload(doc, path, unknown),
+                 root: Path.dirname(tmp)
+               )
+
+      invalid_type = put_in(paragraph, ["props", "ParaStyleName"], 42)
+
+      assert {:error, {:invalid_property_type, "ParaStyleName", _uno_type}} =
+               Projection.write_back(tmp, replace_payload(doc, path, invalid_type),
+                 root: Path.dirname(tmp)
+               )
+
+      cleanup(tmp)
+    end)
+  end
+
   test "write_back routes inserted table payloads through Office native table creation", %{
     native: native
   } do
@@ -296,6 +372,39 @@ defmodule Ecrits.Doc.ProjectionOfficeTest do
       [section] = Jason.decode!(bytes)
       types = Enum.map(section, fn [node] -> node["type"] end)
       assert "slide" in types
+      cleanup(tmp)
+    end)
+  end
+
+  test "pptx shape geometry edits route through set_geometry and persist", %{native: native} do
+    skip_or(native, "pptx projection geometry", fn ->
+      tmp = copy(@pptx)
+      {:ok, bytes} = Projection.project_file(tmp)
+      doc = Jason.decode!(bytes)
+      {path, shape} = first_payload(doc, &(&1["type"] in ["shape", "text_frame"]))
+
+      assert is_integer(shape["x"])
+      assert is_integer(shape["width"]) and shape["width"] > 0
+
+      edited =
+        shape
+        |> Map.update!("x", &(&1 + 250))
+        |> Map.update!("width", &(&1 + 500))
+
+      assert {:ok, %{applied: applied}} =
+               Projection.write_back(tmp, replace_payload(doc, path, edited),
+                 root: Path.dirname(tmp)
+               )
+
+      assert applied >= 1
+      Pool.close_by_path(tmp)
+      {:ok, after_bytes} = Projection.project_file(tmp)
+
+      {_path, shape_after} =
+        first_payload(Jason.decode!(after_bytes), &(&1["type"] == shape["type"]))
+
+      assert shape_after["x"] == shape["x"] + 250
+      assert_in_delta shape_after["width"], shape["width"] + 500, 1
       cleanup(tmp)
     end)
   end

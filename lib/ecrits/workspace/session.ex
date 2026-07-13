@@ -16,8 +16,8 @@ defmodule Ecrits.Workspace.Session do
       foreground agent.
 
   The Session holds **no live doc handles** and supervises **no agents** — the
-  foreground agent is a `Ecrits.Local.AcpAgent.Session` GenServer held under
-  `Ecrits.Local.AcpAgent.SessionSupervisor` (durable in its own right). The
+  foreground agent is a `Ecrits.AcpAgent.Session` GenServer held under
+  `Ecrits.AcpAgent.SessionSupervisor` (durable in its own right). The
   Session is the directory that binds path + LiveView pid → foreground agent and
   the single entry point the LiveView uses.
 
@@ -29,7 +29,7 @@ defmodule Ecrits.Workspace.Session do
   use GenServer
 
   alias Ecrits.Doc.Pool
-  alias Ecrits.Local.AcpAgent
+  alias Ecrits.AcpAgent
   alias Ecrits.Workspace.Session.{Agent, Document}
 
   @registry Ecrits.Workspace.SessionRegistry
@@ -135,7 +135,7 @@ defmodule Ecrits.Workspace.Session do
 
   @doc """
   Spawn a BACKGROUND worker AgentLive in `path`'s workspace, owned (lifecycle) by
-  `parent_agent_id`. The worker is a full `Ecrits.Local.AcpAgent.Session` started
+  `parent_agent_id`. The worker is a full `Ecrits.AcpAgent.Session` started
   through the same `SessionSupervisor` as the foreground agent (so it has its own
   per-agent MCP url + doc context — invariant 3), tagged `:background` in the
   roster. Returns `{:ok, %{id, pid, topic}}`; the caller `subscribe_agent/1`s the
@@ -180,6 +180,7 @@ defmodule Ecrits.Workspace.Session do
     AcpAgent.subscribe(agent_id)
   end
 
+  # [deprecated] dead code — no callers in lib or test (dead-code audit 2026-07-13: xref + repo grep + runtime trace)
   @doc "The PubSub topic an agent (worker or foreground) publishes its stream on."
   @spec agent_topic(String.t()) :: String.t()
   def agent_topic(agent_id) when is_binary(agent_id), do: AcpAgent.topic(agent_id)
@@ -273,6 +274,7 @@ defmodule Ecrits.Workspace.Session do
 
   def fetch_agent(_agent_id), do: :error
 
+  # [deprecated] dead code — no callers in lib or test (the live `Session.title` calls are AcpAgent.Session's) (dead-code audit 2026-07-13)
   @doc "The foreground agent's current chat title (derived from the first prompt)."
   @spec title(ws()) :: String.t() | nil
   def title(%{agent_id: agent_id}) when is_binary(agent_id) do
@@ -531,6 +533,7 @@ defmodule Ecrits.Workspace.Session do
     call_if_alive(path, {:owner, document_id}, nil)
   end
 
+  # [deprecated] dead code — no callers in lib or test; the {:release_owner, ...} handle_call is only reachable through this fn (dead-code audit 2026-07-13)
   @doc "Release `agent_id`'s ownership of `document_id` (no-op if it isn't the owner)."
   @spec release_owner(String.t(), String.t(), String.t()) :: :ok
   def release_owner(path, document_id, agent_id)
@@ -538,6 +541,7 @@ defmodule Ecrits.Workspace.Session do
     call_if_alive(path, {:release_owner, document_id, agent_id}, :ok)
   end
 
+  # [deprecated] dead code — no callers in lib or test; nothing publishes or subscribes on this topic (dead-code audit 2026-07-13)
   @doc "Stable doc-topic for this workspace (Phase 1 stub — nothing publishes on it yet)."
   @spec doc_topic(String.t()) :: String.t()
   def doc_topic(path) when is_binary(path), do: "workspace_doc:" <> canonical_path(path)

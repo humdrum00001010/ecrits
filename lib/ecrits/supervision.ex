@@ -102,16 +102,16 @@ defmodule Ecrits.Supervision do
 
   defp local_document_runtime_children do
     [
-      {Registry, keys: :unique, name: Ecrits.Local.Document.Registry},
-      Ecrits.Local.Document.Supervisor
+      {Registry, keys: :unique, name: Ecrits.Document.Registry},
+      Ecrits.Document.Supervisor
     ]
   end
 
   defp local_agent_runtime_children do
     [
-      Ecrits.Local.WorkspaceHandoff,
-      {Registry, keys: :unique, name: Ecrits.Local.AcpAgent.SessionRegistry},
-      Ecrits.Local.AcpAgent.SessionSupervisor,
+      Ecrits.WorkspaceHandoff,
+      {Registry, keys: :unique, name: Ecrits.AcpAgent.SessionRegistry},
+      Ecrits.AcpAgent.SessionSupervisor,
       # Per-workspace Session directory (keyed by canonical path, cookieless).
       # Durable: survives the workspace LiveView dying / a browser refresh, so
       # re-attaching by path returns the same foreground agent (same provider

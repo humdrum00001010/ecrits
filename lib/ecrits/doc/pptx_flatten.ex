@@ -23,7 +23,7 @@ defmodule Ecrits.Doc.PptxFlatten do
   ORIGINAL bytes unchanged, so a malformed deck never yields corrupt output.
 
   This is a VIEW transform applied at the bytes-load path
-  (`LocalDocumentBytesController`). The wasm model therefore reflects the flattened
+  (`WorkspaceDocumentBytesController`). The wasm model therefore reflects the flattened
   deck; an edit+save would persist it (animations lost). Acceptable for the
   read-mostly lecture decks this targets; the on-disk file is untouched until an
   explicit save.

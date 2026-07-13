@@ -24,7 +24,7 @@ defmodule Ecrits.Doc.MCPServer do
 
   alias Ecrits.Doc.MCPToolPolicy
   alias Ecrits.Doc.Tools
-  alias Ecrits.Local.AcpAgent.Session, as: AgentLive
+  alias Ecrits.AcpAgent.Session, as: AgentLive
   alias Ecrits.Workspace.Session, as: WorkspaceSession
   require Logger
 

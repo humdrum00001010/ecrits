@@ -20,16 +20,16 @@ defmodule Ecrits.Doc.McpScenarioTest do
   end
 
   test "agent locates '제2조', inspects it, and edits it (find -> get -> edit)", %{ctx: ctx} do
-    # employment_v1.hwp opened into the pool (backing: server / headless)
+    # A synthetic HWPX path opened into the fake headless runtime.
     {:ok, %{"document" => doc}} =
       Tools.call(ctx, "doc.open", %{
-        "path" => "employment_v1.hwp",
+        "path" => "scenario.hwpx",
         "open_opts" => [__text__: "제1조 (목적)\n제2조 (계약기간) 본 계약의 기간\n제3조 (대금지급)"]
       })
 
     # doc.list shows it
     {:ok, %{"documents" => docs}} = Tools.call(ctx, "doc.list", %{})
-    assert Enum.any?(docs, &(&1["document"] == doc and &1["kind"] == "hwp"))
+    assert Enum.any?(docs, &(&1["document"] == doc and &1["kind"] == "hwpx"))
 
     # 1) find the paragraph
     {:ok, %{"matches" => [match | _]}} =

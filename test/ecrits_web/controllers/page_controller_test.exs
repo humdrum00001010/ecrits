@@ -1,4 +1,4 @@
-defmodule EcritsWeb.LocalRootTest do
+defmodule EcritsWeb.WorkspaceRootTest do
   use EcritsWeb.ConnCase
 
   import Phoenix.LiveViewTest
@@ -19,7 +19,7 @@ defmodule EcritsWeb.LocalRootTest do
 
       assert has_element?(
                lv,
-               "#local-native-directory-picker #local-path-form[phx-submit='open_path']"
+               "#local-native-directory-picker #local-path-form[phx-submit='workspace.path.open']"
              )
 
       assert has_element?(
@@ -60,7 +60,7 @@ defmodule EcritsWeb.LocalRootTest do
 
       assert has_element?(
                lv,
-               "#local-native-directory-picker #local-path-form[phx-submit='open_path']"
+               "#local-native-directory-picker #local-path-form[phx-submit='workspace.path.open']"
              )
 
       assert has_element?(

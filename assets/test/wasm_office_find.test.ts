@@ -1,5 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { importOfficeWasmInternals } from "./support/colocated_hook.ts"
 
 const listeners = new Map<string, Function[]>()
 const documentStub: any = {
@@ -26,7 +27,69 @@ const documentStub: any = {
 ;(globalThis as any).document = (globalThis as any).document || documentStub
 ;(globalThis as any).window = (globalThis as any).window || {}
 
-const { WasmOfficeEditor } = await import("../js/wasm_office_editor.js")
+const { WasmOfficeEditor } = await importOfficeWasmInternals()
+
+// A find-bar-capable editor: captures postUnoCommand calls, serves a canned
+// text selection + live cursor, and (optionally) moves the caret after each
+// search post the way a successful LOK search does. `applyDelayMs` makes the
+// search apply ASYNCHRONOUSLY (the real wasm behavior: the LO main loop runs
+// on its own pthread) instead of in-call.
+function findBarEditor(options: any = {}) {
+  const posted: Array<{ command: string; args: string }> = []
+  const moveCaret = options.moveCaret ?? true
+  const applyDelayMs = options.applyDelayMs ?? 0
+  const state = { selection: options.selection ?? "clock", caretX: 100 }
+
+  const editor = Object.create(WasmOfficeEditor)
+  editor.mirror = false
+  editor.documentId = "office-find-doc"
+  editor.format = "docx"
+  editor.el = { isConnected: true, scrollTop: 0, clientHeight: 600 }
+  editor.handle = {}
+  editor.officeDirty = false
+  editor.caret = { page: 1, x: state.caretX, y: 220, height: 16 }
+  editor.pageRects = [{ x: 0, y: 0, w: 9000, h: 12000 }]
+  // Keep the settle deadline fast for stubs where nothing ever changes.
+  editor.officeFindSettleTickMs = 1
+  editor.api = {
+    postUnoCommand: (command: string, args: string) => {
+      posted.push({ command, args })
+      const apply = () => {
+        if (moveCaret) state.caretX += 40
+        if (options.applySelection != null) state.selection = options.applySelection
+      }
+      if (applyDelayMs > 0) setTimeout(apply, applyDelayMs)
+      else apply()
+    },
+    getTextSelection: () => state.selection,
+    getCursor: () => ({ ok: true, page: 1, x: state.caretX, y: 220, height: 16 }),
+  }
+  editor.renderAfterInput = () => {}
+  editor.refreshCaret = () => {
+    editor.caret = { page: 1, x: state.caretX, y: 220, height: 16 }
+  }
+  editor.officeScrollCaretIntoView = () => {}
+  return { editor, posted, state }
+}
+
+// The find flow settles asynchronously: run the action(s), then await the
+// editor's serialized action chain before reading the emitted states.
+async function captureOfficeFindStates(editor: any, fn: () => void) {
+  const states: any[] = []
+  const doc = (globalThis as any).document
+  const oldDispatch = doc.dispatchEvent
+  doc.dispatchEvent = (event: any) => {
+    if (event && event.type === "ecrits:document-search-result") states.push(event.detail)
+    return true
+  }
+  try {
+    fn()
+    await (editor._officeFindChain || Promise.resolve())
+  } finally {
+    doc.dispatchEvent = oldDispatch
+  }
+  return states
+}
 
 describe("WasmOfficeEditor runtime prewarm API", () => {
   it("exposes a document-free runtime prewarm entrypoint", () => {
@@ -209,7 +272,7 @@ describe("WasmOfficeEditor scroll preservation", () => {
 
     assert.deepEqual(pushed, [
       {
-        event: "local_document.viewport_changed",
+        event: "document.viewport.changed",
         payload: {
           document_path: "drafts/persist-scroll.docx",
           document_id: "office-persist-scroll-doc",
@@ -508,7 +571,7 @@ describe("WasmOfficeEditor.officeFind", () => {
     editor.scale = 1
     editor.caret = null
     editor.selectionVisual = null
-    editor.elementPickerEnabled = false
+    editor.pickerEnabled = () => false
     editor.el = {
       dataset: {
         previewHighlights: JSON.stringify([{ ref: "p5", text: "Edited paragraph" }]),
@@ -563,7 +626,7 @@ describe("WasmOfficeEditor.officeFind", () => {
     editor.rendered = new Map([[0, true]])
     editor.caret = null
     editor.selectionVisual = null
-    editor.elementPickerEnabled = false
+    editor.pickerEnabled = () => false
     editor.el = {
       dataset: {
         bytesUrl: url,
@@ -614,6 +677,188 @@ describe("WasmOfficeEditor.officeFind", () => {
     assert.ok(editor.el.scrollTop > 400)
   })
 
+  it("posts .uno:ExecuteSearch for find-bar actions without dirtying the doc", async () => {
+    const { editor, posted } = findBarEditor()
+
+    const states = await captureOfficeFindStates(editor, () => {
+      editor.handleFindCommand({ action: "search", query: "clock", document_id: "office-find-doc" })
+    })
+
+    assert.equal(posted.length, 1)
+    assert.equal(posted[0].command, ".uno:ExecuteSearch")
+    const args = JSON.parse(posted[0].args)
+    assert.deepEqual(args["SearchItem.SearchString"], { type: "string", value: "clock" })
+    assert.deepEqual(args["SearchItem.Backward"], { type: "boolean", value: false })
+    assert.deepEqual(args["SearchItem.Command"], { type: "long", value: 0 })
+    // Fresh queries anchor at the session start: caret page 1 at (100, 200)px
+    // -> page twip origin + px * 15.
+    assert.deepEqual(args["SearchItem.SearchStartPointX"], { type: "long", value: 1500 })
+    assert.deepEqual(args["SearchItem.SearchStartPointY"], { type: "long", value: 3300 })
+    // Step-wise arm: found -> total null (no counter), and NOT marked dirty.
+    assert.deepEqual(states, [
+      { document_id: "office-find-doc", query: "clock", total: null, index: null },
+    ])
+    assert.equal(editor.officeDirty, false)
+  })
+
+  it("searches backward on prev and reports a miss as total 0", async () => {
+    const { editor, posted } = findBarEditor({ selection: "" })
+
+    const states = await captureOfficeFindStates(editor, () => {
+      editor.handleFindCommand({ action: "prev", query: "missing", document_id: "office-find-doc" })
+    })
+
+    assert.equal(JSON.parse(posted[0].args)["SearchItem.Backward"].value, true)
+    // Steps do NOT re-anchor at the session start.
+    assert.equal("SearchItem.SearchStartPointX" in JSON.parse(posted[0].args), false)
+    assert.deepEqual(states, [
+      { document_id: "office-find-doc", query: "missing", total: 0, index: null },
+    ])
+  })
+
+  it("wraps once from the document edge when a step does not move the SETTLED caret", async () => {
+    // The selection still equals the query after the post (core keeps the old
+    // selection on a miss) and the caret stays put -> wrap retry from origin.
+    const { editor, posted } = findBarEditor({ moveCaret: false })
+
+    await captureOfficeFindStates(editor, () => {
+      editor.handleFindCommand({ action: "next", query: "clock", document_id: "office-find-doc" })
+    })
+
+    assert.equal(posted.length, 2)
+    const wrapArgs = JSON.parse(posted[1].args)
+    assert.deepEqual(wrapArgs["SearchItem.SearchStartPointX"], { type: "long", value: 0 })
+    assert.deepEqual(wrapArgs["SearchItem.SearchStartPointY"], { type: "long", value: 0 })
+  })
+
+  it("matches the found selection loosely (case + whitespace)", () => {
+    const editor = Object.create(WasmOfficeEditor)
+    assert.equal(editor.officeFindSelectionMatches("Private\nTimer  Clock", "private timer clock"), true)
+    assert.equal(editor.officeFindSelectionMatches("other text", "clock"), false)
+    assert.equal(editor.officeFindSelectionMatches("", "clock"), false)
+  })
+
+  it("paints a confirmed find band from native caret geometry", async () => {
+    const { editor } = findBarEditor({ selection: "Private Timer Clock" })
+
+    await captureOfficeFindStates(editor, () => {
+      editor.handleFindCommand({
+        action: "search",
+        query: "Private Timer Clock",
+        document_id: "office-find-doc",
+      })
+    })
+
+    assert.equal(editor.officeFindVisual, true)
+    assert.equal(editor.selectionVisual.confirmed, true)
+    assert.equal(editor.selectionVisual.rects.length, 1)
+    const rect = editor.selectionVisual.rects[0]
+    assert.equal(rect.pageIndex, 0)
+    assert.equal(rect.y, 220)
+    assert.equal(rect.height, 16)
+    assert.ok(rect.width > 100)
+    assert.ok(rect.x < 140)
+
+    editor.handleFindCommand({ action: "close", document_id: "office-find-doc" })
+    assert.equal(editor.officeFindVisual, false)
+    assert.equal(editor.selectionVisual, null)
+  })
+
+  it("ignores find events from mirrors and foreign documents", async () => {
+    const mirror = findBarEditor()
+    mirror.editor.mirror = true
+    await captureOfficeFindStates(mirror.editor, () => {
+      mirror.editor.handleFindCommand({ action: "search", query: "clock", document_id: "office-find-doc" })
+    })
+    assert.equal(mirror.posted.length, 0)
+
+    const foreign = findBarEditor()
+    await captureOfficeFindStates(foreign.editor, () => {
+      foreign.editor.handleFindCommand({ action: "search", query: "clock", document_id: "other-doc" })
+    })
+    assert.equal(foreign.posted.length, 0)
+  })
+
+  it("settles an ASYNC search application before the found verdict", async () => {
+    // The real wasm applies .uno:ExecuteSearch on the LO pthread ~later; the
+    // pre-settle code read the PRE-search state and reported a false miss.
+    const { editor, posted } = findBarEditor({
+      selection: "",
+      applySelection: "clock",
+      applyDelayMs: 25,
+    })
+    // Keep the deadline (ticks x tick-ms) safely past the 25ms apply.
+    editor.officeFindSettleTickMs = 10
+
+    const states = await captureOfficeFindStates(editor, () => {
+      editor.handleFindCommand({ action: "search", query: "clock", document_id: "office-find-doc" })
+    })
+
+    assert.equal(posted.length, 1)
+    assert.deepEqual(states, [
+      { document_id: "office-find-doc", query: "clock", total: null, index: null },
+    ])
+    // The caret adopt ran against the settled cursor, not the pre-search one.
+    assert.equal(editor.caret.x, 140)
+  })
+
+  it("reports a genuine miss only after the settle deadline", async () => {
+    // A miss changes NOTHING (no selection move, no caret move): the verdict
+    // must wait out the deadline instead of concluding from the first read.
+    const { editor } = findBarEditor({ selection: "", moveCaret: false })
+    editor.officeFindSettleMaxTries = 3
+    let ticks = 0
+    editor.setOfficeTimer = (fn: Function, ms: number) => {
+      ticks++
+      return setTimeout(fn, ms)
+    }
+
+    const states = await captureOfficeFindStates(editor, () => {
+      editor.handleFindCommand({ action: "search", query: "missing", document_id: "office-find-doc" })
+    })
+
+    assert.equal(ticks, 3)
+    assert.deepEqual(states, [
+      { document_id: "office-find-doc", query: "missing", total: 0, index: null },
+    ])
+  })
+
+  it("serializes queued find actions (a step waits for the search to settle)", async () => {
+    const order: string[] = []
+    const { editor, posted } = findBarEditor({ applyDelayMs: 10 })
+    const origPost = editor.api.postUnoCommand
+    editor.api.postUnoCommand = (command: string, args: string) => {
+      order.push(`post:${posted.length}`)
+      origPost(command, args)
+    }
+
+    const states = await captureOfficeFindStates(editor, () => {
+      editor.handleFindCommand({ action: "search", query: "clock", document_id: "office-find-doc" })
+      editor.handleFindCommand({ action: "next", query: "clock", document_id: "office-find-doc" })
+    })
+
+    // Both actions ran, in order, each settling before the next posted.
+    assert.equal(posted.length, 2)
+    assert.deepEqual(order, ["post:0", "post:1"])
+    assert.equal(states.length, 2)
+    assert.ok(states.every((s: any) => s.total === null))
+  })
+
+  it("close drops an in-flight settle without emitting a state", async () => {
+    // Nothing ever settles (no caret/selection change) and the user closes the
+    // bar mid-deadline: the pending verdict must be abandoned.
+    const { editor } = findBarEditor({ selection: "", moveCaret: false })
+    editor.officeFindSettleMaxTries = 50
+
+    const states = await captureOfficeFindStates(editor, () => {
+      editor.handleFindCommand({ action: "search", query: "clock", document_id: "office-find-doc" })
+      editor.handleFindCommand({ action: "close", document_id: "office-find-doc" })
+    })
+
+    assert.deepEqual(states, [])
+    assert.equal(editor.officeFindBar, null)
+  })
+
   it("uses ref order instead of page top when DOCX preview highlight geometry is unavailable", () => {
     const editor = Object.create(WasmOfficeEditor)
     editor.mirror = true
@@ -623,7 +868,7 @@ describe("WasmOfficeEditor.officeFind", () => {
     editor.scale = 1
     editor.caret = null
     editor.selectionVisual = null
-    editor.elementPickerEnabled = false
+    editor.pickerEnabled = () => false
     editor.el = {
       dataset: {
         previewHighlights: JSON.stringify([{ ref: "p3", text: "Edited paragraph" }]),

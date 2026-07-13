@@ -3,12 +3,15 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
 
   import Phoenix.LiveViewTest
 
+  alias Ecrits.DocumentCanvasState
+  alias Ecrits.EditorPreviewState
+  alias Ecrits.EditorSurfaceState
   alias EcritsWeb.Live.Studio.Components.EditorSurface
-  alias EcritsWeb.Live.Studio.Components.Canvas.LocalHwpPages
+  alias EcritsWeb.Live.Studio.Components.Canvas.HwpPages
 
-  test "document tab close marks the tab hidden before pushing the LiveView close callback" do
+  test "document tab close sends an explicit LiveView event" do
     html =
-      render_component(&EditorSurface.local_document/1,
+      render_local_document(
         shell_id: "local-rhwp-shell",
         toolbar_id: "local-rhwp-toolbar",
         frame_id: "local-rhwp-editor-frame",
@@ -33,13 +36,8 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     assert close |> LazyHTML.attribute("type") == ["button"]
     assert close |> LazyHTML.attribute("href") == []
 
-    phx_click = close |> LazyHTML.attribute("phx-click") |> List.first()
-    assert phx_click =~ "set_attr"
-    assert phx_click =~ "hidden"
-    assert phx_click =~ "tab_close"
-    assert phx_click =~ "07-hwp"
-
-    assert String.split(phx_click, "set_attr") |> List.last() =~ "push"
+    assert close |> LazyHTML.attribute("phx-click") == ["workspace.document.close"]
+    assert close |> LazyHTML.attribute("phx-value-id") == ["07-hwp"]
 
     tab =
       html
@@ -72,7 +70,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
 
   test "quick toolbar exposes bold/italic/underline commands with shortcut hints for hwp" do
     html =
-      render_component(&EditorSurface.local_document/1,
+      render_local_document(
         shell_id: "local-rhwp-shell",
         toolbar_id: "local-rhwp-toolbar",
         frame_id: "local-rhwp-editor-frame",
@@ -121,8 +119,8 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
       assert input |> LazyHTML.attribute("aria-label") != []
     end
 
-    # The four align commands live in ONE dropdown: a menu button whose face
-    # carries all four icons (JS shows the caret's alignment), and a hidden menu.
+    # The four align commands live in one native disclosure whose face is
+    # selected by the LiveView-owned toolbar state.
     menu_button =
       fragment
       |> LazyHTML.query(~s([data-role="align-menu-button"]))
@@ -130,7 +128,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
       |> List.first()
 
     assert menu_button
-    assert menu_button |> LazyHTML.attribute("aria-haspopup") == ["menu"]
+    assert menu_button |> LazyHTML.tag() == ["summary"]
 
     face_icons =
       fragment
@@ -147,7 +145,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
       |> List.first()
 
     assert menu
-    assert menu |> LazyHTML.attribute("hidden") != []
+    assert menu |> LazyHTML.attribute("role") == ["menu"]
 
     menu_items =
       fragment
@@ -176,14 +174,20 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
 
   test "HWP page scroll host is keyboard focusable outside mirror previews" do
     html =
-      render_component(&LocalHwpPages.render/1,
+      render_component(&HwpPages.render/1,
         id: "local-hwp-pages",
         pages: [],
-        page_count: 0,
-        spec: %{key: "local_hwp", name: "sample.hwp", template_hwp_path: "sample.hwp"},
-        document_id: "sample-hwp",
-        document_path: "sample.hwp",
-        local_document_format: "hwp"
+        state:
+          DocumentCanvasState.new(%{
+            document_id: "sample-hwp",
+            document_path: "sample.hwp",
+            document_format: "hwp",
+            spec: %{
+              key: "local_hwp",
+              name: "sample.hwp",
+              template_hwp_path: "sample.hwp"
+            }
+          })
       )
 
     editor =
@@ -198,9 +202,68 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     assert editor |> LazyHTML.attribute("aria-label") == ["Document pages"]
   end
 
+  test "HEEx owns the backend-neutral document search controls" do
+    html =
+      render_local_document(
+        shell_id: "local-rhwp-shell",
+        toolbar_id: "local-rhwp-toolbar",
+        frame_id: "local-rhwp-editor-frame",
+        document: %{id: "07-hwp", format: "hwp", relative_path: "07_공문.hwp"},
+        document_path: "07_공문.hwp",
+        document_spec: %{key: "local_hwp", name: "07_공문.hwp", template_hwp_path: "07_공문.hwp"},
+        canvas_id: "local-rhwp-07-hwp",
+        open_documents: [],
+        active_document_id: "07-hwp",
+        dirty_document_ids: MapSet.new(),
+        hwp_pages: [],
+        hwp_page_count: 0
+      )
+
+    fragment = LazyHTML.from_fragment(html)
+    bar = fragment |> LazyHTML.query("form#document-search-bar") |> Enum.at(0)
+    input = fragment |> LazyHTML.query("#document-search-input") |> Enum.at(0)
+    counter = fragment |> LazyHTML.query("#document-search-counter") |> Enum.at(0)
+
+    assert bar
+    assert bar |> LazyHTML.attribute("role") == ["search"]
+    assert bar |> LazyHTML.attribute("hidden") != []
+    assert bar |> LazyHTML.attribute("phx-change") == ["document.search.query_changed"]
+    assert bar |> LazyHTML.attribute("phx-submit") == ["document.search.next"]
+    assert bar |> LazyHTML.attribute("phx-window-keydown") == ["document.search.close"]
+    assert bar |> LazyHTML.attribute("phx-hook") == []
+    assert input |> LazyHTML.attribute("type") == ["search"]
+    assert input |> LazyHTML.attribute("name") == ["document_search[query]"]
+    assert input |> LazyHTML.attribute("phx-debounce") == ["150"]
+    assert counter |> LazyHTML.attribute("aria-live") == ["polite"]
+
+    for {id, event} <- [
+          {"document-search-prev", "document.search.previous"},
+          {"document-search-next", "document.search.next"},
+          {"document-search-close", "document.search.close"}
+        ] do
+      button = fragment |> LazyHTML.query("##{id}") |> Enum.at(0)
+      assert button
+      assert button |> LazyHTML.attribute("type") == ["button"]
+      assert button |> LazyHTML.attribute("aria-label") != []
+      assert button |> LazyHTML.attribute("phx-click") == [event]
+    end
+
+    bridge = fragment |> LazyHTML.query("#local-rhwp-shell") |> Enum.at(0)
+
+    assert bridge |> LazyHTML.attribute("phx-hook") == [
+             "EcritsWeb.Live.Studio.Components.EditorSurface.DocumentSearchBridge"
+           ]
+
+    assert bridge
+           |> LazyHTML.attribute("data-search-state")
+           |> List.first()
+           |> Jason.decode!()
+           |> Map.fetch!("open") == false
+  end
+
   test "quick toolbar hides underline and image for markdown documents" do
     html =
-      render_component(&EditorSurface.local_document/1,
+      render_local_document(
         shell_id: "local-rhwp-shell",
         toolbar_id: "local-rhwp-toolbar",
         frame_id: "local-rhwp-editor-frame",
@@ -234,19 +297,33 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     refute Enum.any?(commands, &String.starts_with?(&1, "font-size-"))
     refute "text-color" in commands
     refute "highlight" in commands
+
+    refute fragment
+           |> LazyHTML.query("#document-search-bar")
+           |> Enum.any?()
   end
 
-  test "embedded document renders a mirror office surface with preview metadata" do
+  test "embedded document renders a partial image without an office mirror" do
     html =
       render_component(&EditorSurface.embedded_document/1,
         id: "agent-preview",
-        canvas_id: "agent-preview-canvas",
-        document: %{id: "doc-1", name: "calc.xlsx", relative_path: "calc.xlsx", format: "xlsx"},
-        document_path: "calc.xlsx",
-        hwp_bytes_url: "/local/document-bytes?document=doc-1",
-        status: :running,
-        preview_text: "Draft text",
-        delta_count: 2
+        state:
+          EditorPreviewState.new(%{
+            canvas_id: "agent-preview-canvas",
+            document: %{id: "doc-1", relative_path: "calc.xlsx", format: "xlsx"},
+            document_path: "calc.xlsx",
+            preview_url: "/local/edit-preview?document=doc-1",
+            status: :running,
+            canvas: %{
+              document_id: "doc-1",
+              document_path: "calc.xlsx",
+              document_format: "xlsx",
+              bytes_url: "/local/document-bytes?document=doc-1",
+              mirror?: true,
+              preview_text: "Draft text",
+              preview_delta_count: 2
+            }
+          })
       )
 
     fragment = LazyHTML.from_fragment(html)
@@ -258,21 +335,41 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
       |> List.first()
 
     assert preview
-    assert preview |> LazyHTML.attribute("data-document-id") == ["doc-1"]
-    assert preview |> LazyHTML.attribute("data-preview-delta-count") == ["2"]
+    [preview_state_json] = LazyHTML.attribute(preview, "data-preview-state")
+    preview_state = Jason.decode!(preview_state_json)
 
-    office =
+    assert preview_state["documentId"] == "doc-1"
+    assert preview_state["deltaCount"] == 2
+
+    image =
       fragment
-      |> LazyHTML.query(~s([data-component="canvas-local-office-wasm"]))
+      |> LazyHTML.query(~s([data-role="editor-preview-image"]))
       |> Enum.to_list()
       |> List.first()
 
-    assert office
-    assert office |> LazyHTML.attribute("data-document-id") == ["doc-1"]
-    assert office |> LazyHTML.attribute("data-editor-mirror") == ["true"]
-    assert office |> LazyHTML.attribute("data-preview-text") == ["Draft text"]
+    assert image
+    assert image |> LazyHTML.attribute("src") == ["/local/edit-preview?document=doc-1"]
+
+    assert fragment
+           |> LazyHTML.query(~s([data-component="canvas-local-office-wasm"]))
+           |> Enum.to_list() ==
+             []
 
     assert fragment |> LazyHTML.query(~s([data-role="editor-preview-open"])) |> Enum.to_list() !=
              []
+  end
+
+  defp render_local_document(attrs) do
+    render_component(&EditorSurface.local_document/1,
+      shell_id: Keyword.fetch!(attrs, :shell_id),
+      toolbar_id: Keyword.fetch!(attrs, :toolbar_id),
+      frame_id: Keyword.fetch!(attrs, :frame_id),
+      hwp_pages: Keyword.get(attrs, :hwp_pages, []),
+      state:
+        attrs
+        |> Keyword.drop([:shell_id, :toolbar_id, :frame_id, :hwp_pages])
+        |> Map.new()
+        |> EditorSurfaceState.new()
+    )
   end
 end

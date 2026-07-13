@@ -11,7 +11,13 @@
 
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { OPS, type EditorContext, type Op, type ParsedRef } from "../js/wasm_ops.ts"
+import { loadHwpColocatedHook } from "./support/hwp_colocated.ts"
+
+type EditorContext = any
+type Op = Record<string, any>
+type ParsedRef = Record<string, any>
+
+const { OPS } = await loadHwpColocatedHook()
 
 // ─── spy + mock harness ──────────────────────────────────────────────────────
 

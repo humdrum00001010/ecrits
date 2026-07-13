@@ -2,7 +2,7 @@ defmodule Ecrits.Workspace.Session.Document do
   @moduledoc """
   Session-owned document UI state.
 
-  This is distinct from `Ecrits.Local.Document.t/0`, which describes the opened
+  This is distinct from `Ecrits.Document.t/0`, which describes the opened
   file/runtime document. This module describes what the durable workspace
   session needs to restore: path, handles, and scroll position.
   """

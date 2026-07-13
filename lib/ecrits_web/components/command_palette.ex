@@ -6,7 +6,7 @@ defmodule EcritsWeb.Components.CommandPalette do
   palette is a self-contained `Phoenix.LiveComponent` that:
 
     * binds a `Palette` JS hook on the root element so it can intercept
-      `Cmd/Ctrl+K` from anywhere in the document and forward a `"toggle"`
+      `Cmd/Ctrl+K` from anywhere in the document and forward a `"command_palette.toggle"`
       event back to this component;
 
     * holds its own open/closed/query/selected state — the parent LV does
@@ -140,14 +140,14 @@ defmodule EcritsWeb.Components.CommandPalette do
   Stateless navbar trigger for the command palette.
 
   Renders a button styled to match the other `top_nav/1` items.
-  Clicking it pushes the `"toggle"`
+  Clicking it pushes the `"command_palette.toggle"`
   event to the palette `LiveComponent` (`#cmd-k-palette`) — same handler
   the Cmd/Ctrl+K keybind ultimately invokes via the JS hook.
 
   The trigger is intentionally decoupled from the `LiveComponent` body
   (which carries its own modal + keybind hook) so the button can live
   inside the navbar and not float at the viewport. The two share state
-  via the LiveComponent's `"toggle"` handler — keybind and click are
+  via the LiveComponent's `"command_palette.toggle"` handler — keybind and click are
   independent surfaces wired to the same server-side function.
   """
   def command_palette_trigger(assigns) do
@@ -155,7 +155,7 @@ defmodule EcritsWeb.Components.CommandPalette do
     <button
       type="button"
       class="hidden sm:inline-flex items-center h-9 px-3 text-sm text-base-content/60 hover:text-base-content gap-1 font-mono rounded-box hover:bg-base-200/60"
-      phx-click="toggle"
+      phx-click="command_palette.toggle"
       phx-target="#cmd-k-palette"
       aria-label="Open command palette"
       data-role="palette-trigger"
@@ -218,7 +218,7 @@ defmodule EcritsWeb.Components.CommandPalette do
   end
 
   @impl true
-  def handle_event("toggle", _params, socket) do
+  def handle_event("command_palette.toggle", _params, socket) do
     if socket.assigns.open? do
       {:noreply, close(socket)}
     else
@@ -226,11 +226,11 @@ defmodule EcritsWeb.Components.CommandPalette do
     end
   end
 
-  def handle_event("close", _params, socket) do
+  def handle_event("command_palette.close", _params, socket) do
     {:noreply, close(socket)}
   end
 
-  def handle_event("query", %{"value" => value}, socket) do
+  def handle_event("command_palette.query.change", %{"value" => value}, socket) do
     filtered = filter_commands(socket.assigns.available_commands, value)
 
     {:noreply,
@@ -240,7 +240,7 @@ defmodule EcritsWeb.Components.CommandPalette do
      |> assign(:filtered, filtered)}
   end
 
-  def handle_event("key", params, socket) do
+  def handle_event("command_palette.key.press", params, socket) do
     case Map.get(params, "key") do
       "Escape" ->
         case socket.assigns.mode do
@@ -260,10 +260,10 @@ defmodule EcritsWeb.Components.CommandPalette do
 
       "Enter" ->
         # Prefer the form-submitted value over the stored `query` assign:
-        # `phx-debounce="50"` on the input means the `phx-change="query"`
+        # `phx-debounce="50"` on the input means the `phx-change="command_palette.query.change"`
         # event may not have arrived yet when the user presses Enter, so
         # `socket.assigns.query` can be stale (often `""`). The form's
-        # `phx-submit="key"` carries the live input value as `params["value"]`
+        # `phx-submit="command_palette.key.press"` carries the live input value as `params["value"]`
         # — use that to pick the highlighted command.
         query =
           case Map.get(params, "value") do
@@ -283,22 +283,22 @@ defmodule EcritsWeb.Components.CommandPalette do
     end
   end
 
-  def handle_event("pick", %{"id" => id}, socket) do
+  def handle_event("command_palette.item.pick", %{"id" => id}, socket) do
     case Enum.find(socket.assigns.available_commands, &(Atom.to_string(&1.id) == id)) do
       nil -> {:noreply, socket}
       command -> fire(command, socket)
     end
   end
 
-  def handle_event("back", _params, socket) do
+  def handle_event("command_palette.back", _params, socket) do
     {:noreply, back_to_list(socket)}
   end
 
-  def handle_event("law_query", %{"value" => value}, socket) do
+  def handle_event("command_palette.law_query.change", %{"value" => value}, socket) do
     {:noreply, run_law_search(socket, value)}
   end
 
-  def handle_event("doc_query", %{"value" => value}, socket) do
+  def handle_event("command_palette.document_query.change", %{"value" => value}, socket) do
     {:noreply, run_doc_search(socket, value)}
   end
 
@@ -315,26 +315,29 @@ defmodule EcritsWeb.Components.CommandPalette do
       data-cmdk-ready="false"
     >
       <script :type={Phoenix.LiveView.ColocatedHook} name=".Palette">
+        const handlePaletteKeydown = event => {
+          const isModKey = event.metaKey || event.ctrlKey
+          if (!isModKey || !event.key || event.key.toLowerCase() !== "k") return
+
+          const trigger = document.querySelector('[data-role="palette-key-trigger"]')
+          if (!trigger) return
+
+          event.preventDefault()
+          event.stopPropagation()
+          trigger.click()
+        }
+
         export default {
           mounted() {
             // The global Cmd/Ctrl+K listener is bound on `mounted()`
             // regardless of palette visibility. The handler is a no-op
             // until `this.el` is still in the DOM and the LiveSocket
             // is connected — `pushEventTo` silently drops otherwise.
-            this.handler = (e) => {
-              if (!this.el || !this.el.isConnected) return
-              const isModKey = e.metaKey || e.ctrlKey
-              if (isModKey && e.key && e.key.toLowerCase() === "k") {
-                e.preventDefault()
-                e.stopPropagation()
-                this.pushEventTo(this.el, "toggle", {})
-              }
-            }
             // Capture phase so we beat any document-level keydown
             // handlers that might call `stopPropagation` (e.g.
             // contenteditable canvas in Studio). The palette is global
             // to the page.
-            window.addEventListener("keydown", this.handler, true)
+            window.addEventListener("keydown", handlePaletteKeydown, true)
             // Mark the root as ready so Playwright/integration tests
             // can wait for the binding to attach before pressing the
             // chord. Without this, a `page.keyboard.press` issued
@@ -343,11 +346,21 @@ defmodule EcritsWeb.Components.CommandPalette do
             this.el.setAttribute("data-cmdk-ready", "true")
           },
           destroyed() {
-            window.removeEventListener("keydown", this.handler, true)
+            window.removeEventListener("keydown", handlePaletteKeydown, true)
             this.el.setAttribute("data-cmdk-ready", "false")
           }
         }
       </script>
+
+      <button
+        type="button"
+        class="hidden"
+        data-role="palette-key-trigger"
+        phx-click="command_palette.toggle"
+        phx-target={@myself}
+        tabindex="-1"
+        aria-hidden="true"
+      />
 
       <div
         :if={@open?}
@@ -360,23 +373,23 @@ defmodule EcritsWeb.Components.CommandPalette do
       >
         <div
           id={"#{@id}-keys-escape"}
-          phx-window-keydown="key"
+          phx-window-keydown="command_palette.key.press"
           phx-key="Escape"
           phx-target={@myself}
         />
         <div
           id={"#{@id}-keys-down"}
-          phx-window-keydown="key"
+          phx-window-keydown="command_palette.key.press"
           phx-key="ArrowDown"
           phx-target={@myself}
         />
         <div
           id={"#{@id}-keys-up"}
-          phx-window-keydown="key"
+          phx-window-keydown="command_palette.key.press"
           phx-key="ArrowUp"
           phx-target={@myself}
         />
-        <div class="modal-backdrop" phx-click="close" phx-target={@myself} />
+        <div class="modal-backdrop" phx-click="command_palette.close" phx-target={@myself} />
         <div
           class="modal-box w-[480px] max-w-[90vw] p-0 absolute left-1/2 -translate-x-1/2"
           style="top: 15vh;"
@@ -408,8 +421,8 @@ defmodule EcritsWeb.Components.CommandPalette do
     ~H"""
     <form
       class="border-b border-base-200 px-3 py-2 flex items-center gap-2"
-      phx-change="query"
-      phx-submit="key"
+      phx-change="command_palette.query.change"
+      phx-submit="command_palette.key.press"
       phx-target={@myself}
     >
       <span class="text-base-content/40 text-sm font-mono">⌘K</span>
@@ -475,7 +488,7 @@ defmodule EcritsWeb.Components.CommandPalette do
       <button
         type="button"
         class="btn btn-ghost btn-xs"
-        phx-click="back"
+        phx-click="command_palette.back"
         phx-target={@myself}
       >
         Back
@@ -491,8 +504,8 @@ defmodule EcritsWeb.Components.CommandPalette do
     ~H"""
     <form
       class="px-3 py-2 border-b border-base-200 flex items-center gap-2"
-      phx-change="law_query"
-      phx-submit="law_query"
+      phx-change="command_palette.law_query.change"
+      phx-submit="command_palette.law_query.change"
       phx-target={@myself}
     >
       <span class="text-xs uppercase text-base-content/60 tracking-wide">법령</span>
@@ -505,7 +518,12 @@ defmodule EcritsWeb.Components.CommandPalette do
         phx-debounce="200"
         autofocus
       />
-      <button type="button" class="btn btn-ghost btn-xs" phx-click="back" phx-target={@myself}>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        phx-click="command_palette.back"
+        phx-target={@myself}
+      >
         Back
       </button>
     </form>
@@ -532,8 +550,8 @@ defmodule EcritsWeb.Components.CommandPalette do
     ~H"""
     <form
       class="px-3 py-2 border-b border-base-200 flex items-center gap-2"
-      phx-change="doc_query"
-      phx-submit="doc_query"
+      phx-change="command_palette.document_query.change"
+      phx-submit="command_palette.document_query.change"
       phx-target={@myself}
     >
       <span class="text-xs uppercase text-base-content/60 tracking-wide">Docs</span>
@@ -546,7 +564,12 @@ defmodule EcritsWeb.Components.CommandPalette do
         phx-debounce="200"
         autofocus
       />
-      <button type="button" class="btn btn-ghost btn-xs" phx-click="back" phx-target={@myself}>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        phx-click="command_palette.back"
+        phx-target={@myself}
+      >
         Back
       </button>
     </form>
@@ -574,7 +597,7 @@ defmodule EcritsWeb.Components.CommandPalette do
   end
 
   defp click_for(%Command{id: id}, target) do
-    JS.push("pick", value: %{id: Atom.to_string(id)}, target: target)
+    JS.push("command_palette.item.pick", value: %{id: Atom.to_string(id)}, target: target)
   end
 
   defp fire(%Command{action: {:navigate, path}} = _cmd, socket) do

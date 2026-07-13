@@ -1,6 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { hwpColocatedSource, loadHwpColocatedHook } from "./support/hwp_colocated.ts"
 
 const documentStub: any = {
   body: { dataset: {} },
@@ -23,7 +23,7 @@ const documentStub: any = {
 ;(globalThis as any).window = (globalThis as any).window || {}
 
 const { WasmHwpEditor, HWP_VIEW_STATE_KEYS, installHwpViewState, unexpectedHwpLooseOwnStateKeys } =
-  await import("../js/wasm_hwp_editor.ts")
+  await loadHwpColocatedHook()
 
 function fakeCanvas(width = 100, height = 100) {
   const ctx = {
@@ -59,17 +59,10 @@ function fakeHwpSection(index: number, canvas = fakeCanvas(), overlay = fakeCanv
 }
 
 function directHookStateAssignments() {
-  const sources = [
-    new URL("../js/wasm_hwp_editor.ts", import.meta.url),
-    new URL("../js/wasm_hwp_keys.ts", import.meta.url),
-  ]
   const assigned = new Set<string>()
 
-  for (const source of sources) {
-    const text = readFileSync(source, "utf8")
-    for (const match of text.matchAll(/\bthis\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g)) {
-      assigned.add(match[1])
-    }
+  for (const match of hwpColocatedSource().matchAll(/\bthis\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g)) {
+    assigned.add(match[1])
   }
 
   return [...assigned].sort()
@@ -96,10 +89,13 @@ function withMountedHook(fn: (editor: any) => void) {
   const editor = Object.create(WasmHwpEditor)
   editor.el = {
     dataset: {
-      documentId: "hwp-state-guard-doc",
-      localDocumentFormat: "hwp",
-      editorMirror: "true",
+      canvasState: JSON.stringify({
+        documentId: "hwp-state-guard-doc",
+        localDocumentFormat: "hwp",
+        editorMirror: true,
+      }),
     },
+    classList: { toggle() {} },
     addEventListener() {},
     removeEventListener() {},
     querySelector(selector: string) {
@@ -206,8 +202,12 @@ describe("WasmHwpEditor scroll preservation", () => {
       first.mirror = false
       first.documentId = "hwp-scroll-doc"
       first.loadedUrl = "/bytes/hwp-scroll-doc"
+      first.canvasState = {
+        documentPath: "drafts/service.hwpx",
+        bytesUrl: "/bytes/hwp-scroll-doc",
+      }
       first.el = {
-        dataset: { documentPath: "drafts/service.hwpx", bytesUrl: "/bytes/hwp-scroll-doc" },
+        dataset: {},
         scrollTop: 640,
         scrollLeft: 18,
       }
@@ -220,8 +220,12 @@ describe("WasmHwpEditor scroll preservation", () => {
       second.mirror = false
       second.documentId = "hwp-scroll-doc"
       second.loadedUrl = "/bytes/hwp-scroll-doc"
+      second.canvasState = {
+        documentPath: "drafts/service.hwpx",
+        bytesUrl: "/bytes/hwp-scroll-doc",
+      }
       second.el = {
-        dataset: { documentPath: "drafts/service.hwpx", bytesUrl: "/bytes/hwp-scroll-doc" },
+        dataset: {},
         isConnected: true,
         scrollTop: 0,
         scrollLeft: 0,
@@ -256,13 +260,14 @@ describe("WasmHwpEditor scroll preservation", () => {
       editor.mirror = false
       editor.documentId = "hwp-server-scroll-doc"
       editor.loadedUrl = "/bytes/hwp-server-scroll-doc"
+      editor.canvasState = {
+        documentPath: "drafts/server-scroll.hwpx",
+        bytesUrl: "/bytes/hwp-server-scroll-doc",
+        scrollTop: 731,
+        scrollLeft: 9,
+      }
       editor.el = {
-        dataset: {
-          documentPath: "drafts/server-scroll.hwpx",
-          bytesUrl: "/bytes/hwp-server-scroll-doc",
-          scrollTop: "731",
-          scrollLeft: "9",
-        },
+        dataset: {},
         isConnected: true,
         scrollTop: 0,
         scrollLeft: 0,
@@ -289,11 +294,12 @@ describe("WasmHwpEditor scroll preservation", () => {
     editor.mirror = false
     editor.documentId = "hwp-persist-scroll-doc"
     editor.loadedUrl = "/bytes/hwp-persist-scroll-doc"
+    editor.canvasState = {
+      documentPath: "drafts/persist-scroll.hwpx",
+      bytesUrl: "/bytes/hwp-persist-scroll-doc",
+    }
     editor.el = {
-      dataset: {
-        documentPath: "drafts/persist-scroll.hwpx",
-        bytesUrl: "/bytes/hwp-persist-scroll-doc",
-      },
+      dataset: {},
       scrollTop: 88,
       scrollLeft: 4,
     }
@@ -304,7 +310,7 @@ describe("WasmHwpEditor scroll preservation", () => {
 
     assert.deepEqual(pushed, [
       {
-        event: "local_document.viewport_changed",
+        event: "document.viewport.changed",
         payload: {
           document_path: "drafts/persist-scroll.hwpx",
           document_id: "hwp-persist-scroll-doc",
@@ -520,6 +526,77 @@ describe("WasmHwpEditor renderer memory policy", () => {
     rendered.length = 0
     editor.renderCaretPage({ refreshVisible: true })
     assert.deepEqual(rendered, [2, 1, 3])
+  })
+
+  it("uses the cached path cursor query with the current page as its hint", () => {
+    const calls: any[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      caret: {
+        section: 1,
+        paragraph: 4,
+        offset: 7,
+        cursorRect: { pageIndex: 9 },
+        cell: {
+          parentParaIndex: 4,
+          controlIndex: 2,
+          cellIndex: 3,
+          cellParaIndex: 5,
+        },
+      },
+      doc: {
+        getCursorRectByPathNear(...args: any[]) {
+          calls.push(args)
+          return JSON.stringify({ pageIndex: 9, x: 12, y: 34, height: 18 })
+        },
+        getCursorRectInCell() {
+          throw new Error("legacy uncached cursor query must not run")
+        },
+      },
+      scheduleToolbarStateSync() {},
+    } as any
+
+    editor.refreshCursorRect()
+
+    assert.deepEqual(calls, [[
+      1,
+      4,
+      JSON.stringify([{ controlIndex: 2, cellIndex: 3, cellParaIndex: 5 }]),
+      7,
+      9,
+    ]])
+    assert.deepEqual(editor.caret.cursorRect, { pageIndex: 9, x: 12, y: 34, height: 18 })
+  })
+
+  it("falls back to the legacy cell cursor query for older wasm builds", () => {
+    const calls: any[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      caret: {
+        section: 0,
+        paragraph: 8,
+        offset: 2,
+        cursorRect: null,
+        cell: {
+          parentParaIndex: 8,
+          controlIndex: 1,
+          cellIndex: 6,
+          cellParaIndex: 0,
+        },
+      },
+      doc: {
+        getCursorRectInCell(...args: any[]) {
+          calls.push(args)
+          return JSON.stringify({ pageIndex: 3, x: 20, y: 40, height: 16 })
+        },
+      },
+      scheduleToolbarStateSync() {},
+    } as any
+
+    editor.refreshCursorRect()
+
+    assert.deepEqual(calls, [[0, 8, 1, 6, 0, 2]])
+    assert.equal(editor.caret.cursorRect.pageIndex, 3)
   })
 })
 
@@ -1199,34 +1276,35 @@ describe("WasmHwpEditor preview patch safety", () => {
       previewSavedHighlight: null,
       rendered: new Map([[0, true], [2, true], [3, true]]),
       scale: 1,
+      canvasState: {
+        previewHighlights: JSON.stringify([
+          {
+            kind: "text",
+            op: "replace_text",
+            ref: { section: 0, paragraph: 1, offset: 0 },
+            text: "STAGE_PROOF_PARA_A"
+          },
+          {
+            kind: "text",
+            op: "set_cell",
+            ref: {
+              section: 0,
+              paragraph: 2,
+              offset: 0,
+              cell: {
+                parentParaIndex: 2,
+                controlIndex: 0,
+                cellIndex: 3,
+                cellParaIndex: 0
+              }
+            },
+            text: "STAGE_PROOF_CELL_A"
+          }
+        ])
+      },
       el: {
         scrollTop: 0,
-        dataset: {
-          previewHighlights: JSON.stringify([
-            {
-              kind: "text",
-              op: "replace_text",
-              ref: { section: 0, paragraph: 1, offset: 0 },
-              text: "STAGE_PROOF_PARA_A"
-            },
-            {
-              kind: "text",
-              op: "set_cell",
-              ref: {
-                section: 0,
-                paragraph: 2,
-                offset: 0,
-                cell: {
-                  parentParaIndex: 2,
-                  controlIndex: 0,
-                  cellIndex: 3,
-                  cellParaIndex: 0
-                }
-              },
-              text: "STAGE_PROOF_CELL_A"
-            }
-          ])
-        }
+        dataset: {}
       },
       doc: {
         getParagraphLength() {
@@ -1300,20 +1378,21 @@ describe("WasmHwpEditor preview patch safety", () => {
       previewSavedHighlight: null,
       rendered: new Map([[0, true]]),
       scale: 1,
+      canvasState: {
+        previewHighlights: JSON.stringify([
+          {
+            kind: "text",
+            op: "replace_text",
+            ref: { section: 0, paragraph: 0, offset: 0 },
+            offset: title.length,
+            length: marker.length,
+            text: marker
+          }
+        ])
+      },
       el: {
         scrollTop: 0,
-        dataset: {
-          previewHighlights: JSON.stringify([
-            {
-              kind: "text",
-              op: "replace_text",
-              ref: { section: 0, paragraph: 0, offset: 0 },
-              offset: title.length,
-              length: marker.length,
-              text: marker
-            }
-          ])
-        }
+        dataset: {}
       },
       doc: {
         getParagraphLength() {
@@ -1366,20 +1445,21 @@ describe("WasmHwpEditor preview patch safety", () => {
       rendered: new Map([[4, true]]),
       scale: 1,
       pageCount: 8,
+      canvasState: {
+        previewHighlights: JSON.stringify([
+          {
+            kind: "text",
+            op: "replace_text",
+            ref: { section: 0, paragraph: 42, offset: 0 },
+            offset: 13,
+            length: 11,
+            text: "EDITED_LINE"
+          }
+        ])
+      },
       el: {
         scrollTop: 0,
-        dataset: {
-          previewHighlights: JSON.stringify([
-            {
-              kind: "text",
-              op: "replace_text",
-              ref: { section: 0, paragraph: 42, offset: 0 },
-              offset: 13,
-              length: 11,
-              text: "EDITED_LINE"
-            }
-          ])
-        }
+        dataset: {}
       },
       doc: {
         getParagraphLength() {
@@ -1443,18 +1523,19 @@ describe("WasmHwpEditor preview patch safety", () => {
       rendered: new Map([[2, true]]),
       scale: 1,
       pageCount: 3,
+      canvasState: {
+        previewHighlights: JSON.stringify([
+          {
+            kind: "text",
+            op: "replace_text",
+            ref: { section: 0, paragraph: 9, offset: 0 },
+            text: "ESTIMATED_LINE"
+          }
+        ])
+      },
       el: {
         scrollTop: 0,
-        dataset: {
-          previewHighlights: JSON.stringify([
-            {
-              kind: "text",
-              op: "replace_text",
-              ref: { section: 0, paragraph: 9, offset: 0 },
-              text: "ESTIMATED_LINE"
-            }
-          ])
-        }
+        dataset: {}
       },
       doc: {
         getParagraphLength() {
@@ -1928,7 +2009,7 @@ describe("WasmHwpEditor preview patch safety", () => {
       editor.emitToolbarState()
 
       assert.equal(events.length, 1)
-      assert.equal(events[0].type, "ecrits:local-editor-state")
+      assert.equal(events[0].type, "ecrits:editor-state")
       assert.equal(events[0].detail.document_id, "doc-9")
       assert.equal(events[0].detail.bold, true)
       assert.equal(events[0].detail.underline, false)
@@ -1946,15 +2027,19 @@ describe("WasmHwpEditor preview patch safety", () => {
       mirror: true,
       documentId: "doc-1",
       previewSavedHighlights: [],
+      canvasState: {
+        previewTurnId: "turn-1",
+        previewText: "",
+        previewDeltaCount: 9,
+        previewHighlights: JSON.stringify([
+          { op: "insert_table", ref: { section: 0, paragraph: 1, offset: 0 }, text: "A1" },
+        ]),
+      },
+      readCanvasState() {
+        return this.canvasState
+      },
       el: {
-        dataset: {
-          previewTurnId: "turn-1",
-          previewText: "",
-          previewDeltaCount: "9",
-          previewHighlights: JSON.stringify([
-            { op: "insert_table", ref: { section: 0, paragraph: 1, offset: 0 }, text: "A1" },
-          ]),
-        },
+        dataset: {},
       },
       requestAuthoritativePreview(payload: any) {
         requested = payload
@@ -1982,12 +2067,13 @@ describe("WasmHwpEditor preview patch safety", () => {
       ...WasmHwpEditor,
       mirror: true,
       previewSavedHighlights: [],
+      canvasState: {
+        previewHighlights: JSON.stringify([
+          { op: "insert_table", ref: { section: 0, paragraph: 1, offset: 0 }, text: "A1" },
+        ]),
+      },
       el: {
-        dataset: {
-          previewHighlights: JSON.stringify([
-            { op: "insert_table", ref: { section: 0, paragraph: 1, offset: 0 }, text: "A1" },
-          ]),
-        },
+        dataset: {},
       },
       requestAuthoritativePreview() {
         requested += 1
@@ -2457,7 +2543,7 @@ describe("WasmHwpEditor picker hover preview", () => {
       doc: {},
       imageDrag: null,
       dragSelect: null,
-      elementPickerEnabled: true,
+      pickerEnabled: () => true,
       queuePickerHover(event: any) {
         queued = event
       },
@@ -2475,7 +2561,7 @@ describe("WasmHwpEditor picker hover preview", () => {
       doc: {},
       imageDrag: null,
       dragSelect: null,
-      elementPickerEnabled: false,
+      pickerEnabled: () => false,
       queuePickerHover() {
         pickerQueued = true
       },
@@ -2494,7 +2580,7 @@ describe("WasmHwpEditor picker hover preview", () => {
     const editor = {
       ...WasmHwpEditor,
       doc: {},
-      elementPickerEnabled: true,
+      pickerEnabled: () => true,
       pickerHover: null,
       hitTestEvent: () => ({ hit: { sectionIndex: 0 }, pageIndex: 0 }),
       hwpPick: () => ({ type: "paragraph", ref: '{"section":0}', rects: [{ x: 1, y: 2, width: 3, height: 4 }] }),
@@ -2515,7 +2601,7 @@ describe("WasmHwpEditor picker hover preview", () => {
     const editor = {
       ...WasmHwpEditor,
       doc: {},
-      elementPickerEnabled: true,
+      pickerEnabled: () => true,
       pickerHover: null,
       hitTestEvent: () => ({ hit: { sectionIndex: 0 }, pageIndex: 0 }),
       hwpPick: () => ({
@@ -2535,7 +2621,7 @@ describe("WasmHwpEditor picker hover preview", () => {
     const editor = {
       ...WasmHwpEditor,
       doc: {},
-      elementPickerEnabled: true,
+      pickerEnabled: () => true,
       pickerHover: { key: "stale", rects: [{ x: 0, y: 0, width: 1, height: 1, pageIndex: 0 }] },
       paintPickedHighlights() {
         painted += 1
@@ -2552,7 +2638,7 @@ describe("WasmHwpEditor picker hover preview", () => {
     const editor = {
       ...WasmHwpEditor,
       scale: 1,
-      elementPickerEnabled: true,
+      pickerEnabled: () => true,
       pickerHover: { key: "x", rects: [{ x: 5, y: 6, width: 7, height: 8, pageIndex: 0 }] },
       documentAdornmentPicks: () => [],
       pageOverlay: () => ({ getContext: () => ctx }),
@@ -2568,7 +2654,7 @@ describe("WasmHwpEditor picker hover preview", () => {
     const editor = {
       ...WasmHwpEditor,
       scale: 1,
-      elementPickerEnabled: true,
+      pickerEnabled: () => true,
       // two line-rects of the same element -> a single gathered box
       pickerHover: { key: "x", rects: [
         { x: 10, y: 10, width: 100, height: 12, pageIndex: 0 },

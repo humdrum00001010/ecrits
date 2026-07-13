@@ -10,7 +10,7 @@ defmodule Ecrits.Workspace.SessionRestartTest do
 
   use ExUnit.Case, async: false
 
-  alias Ecrits.Local.AcpAgent
+  alias Ecrits.AcpAgent
   alias Ecrits.Workspace.Session
 
   setup do

@@ -5,7 +5,7 @@ defmodule EcritsWeb.DocBrowserOpMatrixTest do
   verb through the SAME bridge code the agent path uses:
 
     * HWP: `WasmHwpEditor.applyOneOp` bound to the live `window.__rhwpDoc`
-      (the exact glue `doc.apply_edit` invokes) — sync rhwp wasm calls.
+      (the exact glue `document.engine.operation.command` invokes) — sync rhwp wasm calls.
     * Office: `window.__officeWasmEditor.officeApplyOneOp` — async embind calls
       into the relinked soffice.wasm (full uno_apply op set). Needs the page to
       be crossOriginIsolated, which real top-level Chrome gives us (the Tidewave
@@ -20,31 +20,28 @@ defmodule EcritsWeb.DocBrowserOpMatrixTest do
   @moduletag :browser
   @moduletag timeout: 420_000
 
-  @hwp_fixture Path.expand(
-                 "../../../priv/static/assets/standard_contracts/employment_v1.hwp",
-                 __DIR__
-               )
+  @hwpx_fixture Path.expand("../../fixtures/hwpx/real_contract.hwpx", __DIR__)
   @docx_fixture Path.expand("../../fixtures/office/table.docx", __DIR__)
 
   setup do
     dir = Path.join(System.tmp_dir!(), "doc_matrix_ws_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
-    File.cp!(@hwp_fixture, Path.join(dir, "matrix.hwp"))
+    File.cp!(@hwpx_fixture, Path.join(dir, "matrix.hwpx"))
     File.cp!(@docx_fixture, Path.join(dir, "matrix.docx"))
     on_exit(fn -> File.rm_rf(dir) end)
     {:ok, ws: dir}
   end
 
-  feature "hwp browser arm: all 22 HWP verbs apply via applyOneOp", %{session: session, ws: ws} do
+  feature "HWPX browser arm: all 22 HWP verbs apply via applyOneOp", %{session: session, ws: ws} do
     session = Wallaby.Browser.visit(session, "/workspace?path=#{URI.encode(ws)}")
-    open_file(session, "matrix.hwp")
+    open_document(session, "matrix.hwpx")
 
     # Re-click while waiting: a click that landed on the dead (pre-connect)
     # render is swallowed, so retry until the wasm doc exists.
     assert poll(
              session,
              "if (window.__rhwpDoc) return true;" <>
-               "var el = document.querySelector('[phx-click=\"open_file\"][phx-value-path=\"matrix.hwp\"]');" <>
+               "var el = document.querySelector('[phx-click=\"workspace.document.open\"][phx-value-path=\"matrix.hwpx\"]');" <>
                "if (el) el.click(); return false;",
              90_000
            ),
@@ -52,7 +49,9 @@ defmodule EcritsWeb.DocBrowserOpMatrixTest do
 
     raw =
       js(session, """
-      const proto = window.liveSocket.hooks.WasmHwpEditor;
+      const proto = Object.entries(window.liveSocket.hooks)
+        .find(([name]) => name.endsWith(".WasmHwpEditor"))?.[1];
+      if (!proto) return JSON.stringify([["hook", {error: "WasmHwpEditor hook missing"}]]);
       const ctx = Object.create(proto); ctx.doc = window.__rhwpDoc; ctx.recordOp = () => {};
       const out = [];
       const run = (label, op) => { try { out.push([label, ctx.applyOneOp(op)]); } catch (e) { out.push([label, { error: String(e) }]); } };
@@ -112,7 +111,7 @@ defmodule EcritsWeb.DocBrowserOpMatrixTest do
   feature "office browser arm: relinked soffice.wasm accepts the full op set",
           %{session: session, ws: ws} do
     session = Wallaby.Browser.visit(session, "/workspace?path=#{URI.encode(ws)}")
-    open_file(session, "matrix.docx")
+    open_document(session, "matrix.docx")
 
     coi = js(session, "return window.crossOriginIsolated === true;")
     assert coi, "workspace page is not crossOriginIsolated — office wasm cannot boot"
@@ -122,7 +121,7 @@ defmodule EcritsWeb.DocBrowserOpMatrixTest do
         session,
         "var ed = window.__officeWasmEditor;" <>
           "if (ed && ed.api && typeof ed.api.loadStatus === 'function' && ed.api.loadStatus() === 2) return true;" <>
-          "if (!ed) { var el = document.querySelector('[phx-click=\"open_file\"][phx-value-path=\"matrix.docx\"]');" <>
+          "if (!ed) { var el = document.querySelector('[phx-click=\"workspace.document.open\"][phx-value-path=\"matrix.docx\"]');" <>
           "if (el) el.click(); } return false;",
         300_000
       )
@@ -171,13 +170,13 @@ defmodule EcritsWeb.DocBrowserOpMatrixTest do
 
   # ── plumbing ────────────────────────────────────────────────────────────
 
-  defp open_file(session, name) do
+  defp open_document(session, name) do
     # Wait for the LiveView to CONNECT first (a click on the dead render is
-    # swallowed), then click the tree entry [phx-click=open_file][phx-value-path].
+    # swallowed), then click the tree entry [phx-click=workspace.document.open][phx-value-path].
     assert poll(
              session,
              "if (!document.querySelector('.phx-connected')) return false;" <>
-               "var el = document.querySelector('[phx-click=\"open_file\"][phx-value-path=\"#{name}\"]');" <>
+               "var el = document.querySelector('[phx-click=\"workspace.document.open\"][phx-value-path=\"#{name}\"]');" <>
                "if (el) { el.click(); return true; } return false;",
              30_000
            ),

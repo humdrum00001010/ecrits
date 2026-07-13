@@ -15,9 +15,11 @@ defmodule EcritsWeb.Plugs.CrossOriginIsolationPlug do
       Cross-Origin-Opener-Policy:   same-origin
       Cross-Origin-Embedder-Policy: require-corp
 
-  We set these ONLY on the local workspace page and the `/assets/office/*` WASM
-  artifacts (not the whole app) to keep the blast radius small — COOP/COEP can
-  block cross-origin embeds elsewhere. `require-corp` has broader browser
+  We set these ONLY on the local workspace page, the `/assets/office/*` WASM
+  artifacts, and the dev-only `/phoenix/live_reload/frame` iframe (which must
+  itself carry COEP to remain embeddable in the isolated workspace page — see
+  `isolate?/1`), not the whole app, to keep the blast radius small — COOP/COEP
+  can block cross-origin embeds elsewhere. `require-corp` has broader browser
   support than `credentialless`, and the local workspace uses same-origin assets
   for the chrome needed by the office editor.
 
@@ -134,7 +136,21 @@ defmodule EcritsWeb.Plugs.CrossOriginIsolationPlug do
 
   # Isolate the workspace HTML page (which hosts the WasmOfficeEditor hook) and
   # the office WASM static artifacts it fetches. Everything else is untouched.
+  #
+  # The Phoenix live-reload iframe (dev only) must also carry
+  # `Cross-Origin-Embedder-Policy: require-corp`: a COEP `require-corp`
+  # document (i.e. `/workspace`) may only embed frames whose *responses* also
+  # declare COEP — even same-origin ones. Without this, the browser replaces
+  # the `/phoenix/live_reload/frame` document with an opaque error page, its
+  # websocket never connects, and `/workspace` tabs (notably the Tidewave
+  # shell, which always hosts `/workspace`) silently stop live-reloading and
+  # keep running stale JS bundles after asset rebuilds. This plug runs before
+  # `Phoenix.LiveReloader` in the endpoint, so headers set here are included
+  # when the frame response is sent. In prod the path 404s and the extra
+  # headers are inert.
   defp isolate?(%Plug.Conn{request_path: path}) do
-    path == "/workspace" or String.starts_with?(path, @office_prefix)
+    path == "/workspace" or
+      String.starts_with?(path, @office_prefix) or
+      String.starts_with?(path, "/phoenix/live_reload/frame")
   end
 end

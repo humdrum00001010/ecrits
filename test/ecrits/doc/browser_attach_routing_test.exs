@@ -25,7 +25,7 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
 
   alias Ecrits.Doc.Pool
   alias Ecrits.Doc.Tools
-  alias Ecrits.Local.Document.ByteSpool
+  alias Ecrits.Document.ByteSpool
   alias Ecrits.Test.FakeEhwpRuntime
   alias Ecrits.Workspace.Session
 

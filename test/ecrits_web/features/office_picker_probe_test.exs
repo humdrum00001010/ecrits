@@ -31,7 +31,7 @@ defmodule EcritsWeb.OfficePickerProbeTest do
   feature "resolveRef returns per-line rects and restores the caret on hover probes",
           %{session: session, ws: ws} do
     session = Wallaby.Browser.visit(session, "/workspace?path=#{URI.encode(ws)}")
-    open_file(session, "probe.docx")
+    open_document(session, "probe.docx")
 
     assert js(session, "return window.crossOriginIsolated === true;"),
            "workspace page is not crossOriginIsolated — office wasm cannot boot"
@@ -41,7 +41,7 @@ defmodule EcritsWeb.OfficePickerProbeTest do
         session,
         "var ed = window.__officeWasmEditor;" <>
           "if (ed && ed.api && typeof ed.api.loadStatus === 'function' && ed.api.loadStatus() === 2) return true;" <>
-          "if (!ed) { var el = document.querySelector('[phx-click=\"open_file\"][phx-value-path=\"probe.docx\"]');" <>
+          "if (!ed) { var el = document.querySelector('[phx-click=\"workspace.document.open\"][phx-value-path=\"probe.docx\"]');" <>
           "if (el) el.click(); } return false;",
         300_000
       )
@@ -239,11 +239,11 @@ defmodule EcritsWeb.OfficePickerProbeTest do
 
   # ── plumbing (mirrors doc_browser_op_matrix_test) ─────────────────────────
 
-  defp open_file(session, name) do
+  defp open_document(session, name) do
     assert poll(
              session,
              "if (!document.querySelector('.phx-connected')) return false;" <>
-               "var el = document.querySelector('[phx-click=\"open_file\"][phx-value-path=\"#{name}\"]');" <>
+               "var el = document.querySelector('[phx-click=\"workspace.document.open\"][phx-value-path=\"#{name}\"]');" <>
                "if (el) { el.click(); return true; } return false;",
              30_000
            ),

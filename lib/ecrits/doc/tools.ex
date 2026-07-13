@@ -59,7 +59,7 @@ defmodule Ecrits.Doc.Tools do
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
   alias Ecrits.Fuse.DocMount
-  alias Ecrits.Local.Document.ByteSpool
+  alias Ecrits.Document.ByteSpool
   alias Ecrits.Workspace.Session
   require Logger
 

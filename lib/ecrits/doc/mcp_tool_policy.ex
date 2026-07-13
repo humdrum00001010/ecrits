@@ -3,6 +3,7 @@ defmodule Ecrits.Doc.MCPToolPolicy do
 
   @vfs_allowed_tools ~w(doc.open_doc)
 
+  # [deprecated] dead code — no callers; all internal uses read the module attribute directly (dead-code audit 2026-07-13)
   @spec vfs_allowed_tools() :: [String.t()]
   def vfs_allowed_tools, do: @vfs_allowed_tools
 

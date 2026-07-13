@@ -167,7 +167,7 @@ defmodule EcritsWeb.Layouts do
         <button
           id="fuse-mode-toggle"
           type="button"
-          phx-click="toggle_fuse"
+          phx-click="workspace.document_vfs.toggle"
           aria-pressed={"#{@fuse_mode == true}"}
           aria-label={
             if(@fuse_mode == true,
@@ -312,7 +312,7 @@ defmodule EcritsWeb.Layouts do
 
   def flash_group(assigns) do
     ~H"""
-    <div id={@id} aria-live="polite" phx-hook=".SessionStaleToggle">
+    <div id={@id} aria-live="polite">
       <.flash kind={:info} flash={@flash} />
       <.flash kind={:error} flash={@flash} />
 
@@ -339,43 +339,6 @@ defmodule EcritsWeb.Layouts do
         {dgettext("layouts", "Attempting to reconnect")}
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
-
-      <%!-- Same look as #client-error / #server-error above, but driven
-           by server-side push_event ("session-stale" / "session-recovered")
-           from Studio's `:session_stale` handler (lease/Session lifecycle —
-           NOT a WebSocket drop, which is what the two above cover). --%>
-      <.flash
-        id="session-stale"
-        kind={:error}
-        title={dgettext("layouts", "Reconnecting document session")}
-        hidden
-      >
-        {dgettext("layouts", "Attempting to reconnect")}
-        <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
-      </.flash>
-
-      <script :type={Phoenix.LiveView.ColocatedHook} name=".SessionStaleToggle">
-        export default {
-          mounted() {
-            const el = () => document.getElementById("session-stale")
-            this.onStale = () => {
-              const n = el(); if (!n) return
-              n.removeAttribute("hidden")
-              n.classList.remove("hidden")
-            }
-            this.onRecovered = () => {
-              const n = el(); if (!n) return
-              n.setAttribute("hidden", "")
-            }
-            window.addEventListener("phx:session-stale", this.onStale)
-            window.addEventListener("phx:session-recovered", this.onRecovered)
-          },
-          destroyed() {
-            if (this.onStale) window.removeEventListener("phx:session-stale", this.onStale)
-            if (this.onRecovered) window.removeEventListener("phx:session-recovered", this.onRecovered)
-          }
-        }
-      </script>
     </div>
     """
   end

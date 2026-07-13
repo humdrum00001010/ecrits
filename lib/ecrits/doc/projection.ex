@@ -190,6 +190,7 @@ defmodule Ecrits.Doc.Projection do
   `hit?` flags the edited line. `found?` is false (rows empty) when the marker is
   absent (e.g. a pure deletion) or the doc cannot be projected. Never raises.
   """
+  # [deprecated] dead code — no callers in lib or test (dead-code audit 2026-07-13: xref + repo grep + runtime trace)
   @spec edit_excerpt(String.t(), keyword()) ::
           {:ok, %{found?: boolean(), rows: [%{text: String.t(), hit?: boolean()}]}}
   def edit_excerpt(abs_path, opts \\ []) do
@@ -356,7 +357,7 @@ defmodule Ecrits.Doc.Projection do
   `set_cell` writes, a newly inserted `%{"type" => "table", "cells" => ...}`
   payload becomes native `insert_table`, and other node-field changes become
   native property writes.
-  This is not the MCP/browser `doc.edit` -> `doc.apply_edit` path; that path remains the
+  This is not the MCP/browser `doc.edit` -> `document.engine.operation.command` path; that path remains the
   semantic hook for non-VFS editor requests and may only be used later to resync
   an already-open browser viewer.
 
@@ -777,11 +778,51 @@ defmodule Ecrits.Doc.Projection do
     end
   end
 
+  defp office_changes_for_node(old_node, new_node, ref, type)
+       when type in ["shape", "text_frame", "placeholder", "shape_group"] do
+    with {:ok, geometry_change} <- office_geometry_change_for_node(old_node, new_node, ref),
+         {:ok, text_change} <- office_text_change_for_node(old_node, new_node, ref, type),
+         {:ok, prop_change} <- office_prop_change_for_node(old_node, new_node, ref, type) do
+      {:ok, Enum.reject([geometry_change, text_change, prop_change], &is_nil/1)}
+    end
+  end
+
   defp office_changes_for_node(old_node, new_node, ref, type) do
     with {:ok, text_change} <- office_text_change_for_node(old_node, new_node, ref, type),
          {:ok, prop_change} <- office_prop_change_for_node(old_node, new_node, ref, type) do
       {:ok, Enum.reject([text_change, prop_change], &is_nil/1)}
     end
+  end
+
+  @office_geometry_fields ~w(x y width height)
+
+  defp office_geometry_change_for_node(old_node, new_node, ref) do
+    changed =
+      Enum.filter(@office_geometry_fields, fn key ->
+        Map.get(old_node, key) != Map.get(new_node, key)
+      end)
+
+    cond do
+      changed == [] ->
+        {:ok, nil}
+
+      Enum.any?(changed, &(not is_integer(Map.get(new_node, &1)))) ->
+        {:error, {:invalid_geometry, "shape geometry values must be integers in 1/100 mm"}}
+
+      true ->
+        op =
+          %{"op" => "set_geometry", "ref" => ref}
+          |> office_maybe_put_integer("x", changed_geometry_value(changed, new_node, "x"))
+          |> office_maybe_put_integer("y", changed_geometry_value(changed, new_node, "y"))
+          |> office_maybe_put_integer("w", changed_geometry_value(changed, new_node, "width"))
+          |> office_maybe_put_integer("h", changed_geometry_value(changed, new_node, "height"))
+
+        {:ok, {:text, op, inspect(Map.take(new_node, @office_geometry_fields))}}
+    end
+  end
+
+  defp changed_geometry_value(changed, node, key) do
+    if key in changed, do: Map.get(node, key)
   end
 
   @office_column_def_edit_fields ~w(count gap)
@@ -958,16 +999,18 @@ defmodule Ecrits.Doc.Projection do
   end
 
   defp office_prop_change_for_node(old_node, new_node, ref, type) do
-    props = office_changed_props(old_node, new_node)
+    with :ok <- Libreofficex.LokBackend.Ir.validate_property_changes(old_node, new_node) do
+      props = office_changed_props(old_node, new_node)
 
-    if props == %{} do
-      {:ok, nil}
-    else
-      {:ok, {:set, ref, type, props}}
+      if props == %{} do
+        {:ok, nil}
+      else
+        {:ok, {:set, ref, type, props}}
+      end
     end
   end
 
-  @office_ignored_prop_fields ~w(ref type text props prop_types context row col sheet address display value value_type formula name count gap widths columns)
+  @office_ignored_prop_fields ~w(ref type text props prop_types context row col sheet address display value value_type formula name count gap widths columns x y width height childCount placeholderKind master colors)
 
   defp office_changed_props(old_node, new_node) do
     old_props = Map.get(old_node, "props")
@@ -1047,7 +1090,7 @@ defmodule Ecrits.Doc.Projection do
 
   defp office_deletable_payload?(node, ref) do
     type = Map.get(normalize_ir_value(node), "type")
-    is_binary(ref) and type in ["picture", "shape", "text_frame"]
+    is_binary(ref) and type in ["picture", "shape", "text_frame", "placeholder", "shape_group"]
   end
 
   defp office_aligns_after_deleted_payload?(old_nodes, old_index, new) do

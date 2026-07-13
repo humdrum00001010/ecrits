@@ -1,3 +1,5 @@
+# [deprecated] dead module — nothing calls Ecrits.Env anywhere (lib/test/config);
+# config/config.exs re-implements the .env loading inline (dead-code audit 2026-07-13)
 defmodule Ecrits.Env do
   @moduledoc """
   Minimal `.env` loader used at application boot in dev/test.

@@ -69,14 +69,14 @@ defmodule Ecrits.Workspace.SessionOrchestrationTest do
     # The worker is OBSERVABLE on its own topic: subscribe, run a turn, see the
     # streamed events.
     :ok = Session.subscribe_agent(worker.id)
-    {:ok, %{id: turn_id}} = Ecrits.Local.AcpAgent.send_turn(nil, worker.id, "do the thing")
+    {:ok, %{id: turn_id}} = Ecrits.AcpAgent.send_turn(nil, worker.id, "do the thing")
 
     assert_receive {:local_agent_event, %{type: :turn_started, turn_id: ^turn_id}}, 2_000
     assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
 
     # The foreground agent did NOT receive the worker's turn (isolation): its
     # transcript is empty (no fg turn was sent).
-    assert Ecrits.Local.AcpAgent.agent_snapshot(orchestrator_id).transcript == []
+    assert Ecrits.AcpAgent.agent_snapshot(orchestrator_id).transcript == []
   end
 
   test "workers/1 drops a worker whose process has died", %{path: path, ws: ws} do
@@ -85,7 +85,7 @@ defmodule Ecrits.Workspace.SessionOrchestrationTest do
 
     assert [%{id: _}] = Session.workers(path)
 
-    Ecrits.Local.AcpAgent.close(worker.id)
+    Ecrits.AcpAgent.close(worker.id)
     # Give the supervisor a moment to reap it.
     Process.sleep(50)
 

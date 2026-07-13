@@ -13,70 +13,37 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
     * Switches between a desktop right-rail layout and a mobile full-viewport
       layout depending on the `layout` attr / `viewport` assign.
 
-  ## Hard local constraint
-
-  The send button is `type="button"` (never `type="submit"`). The form's
-  `phx-submit` exists as a fallback, but the colocated `.ChatInput` hook
-  intercepts both Enter-in-textarea and click-on-send-button, calling
-  `pushEvent` directly. This preserves keyboard focus on mobile across
-  sends — losing focus mid-thread on Korean IME is the regression
-  recorded in the responsive-scope memory.
+  Submission belongs to LiveView through the form's `phx-submit`. The
+  colocated `.ChatInput` hook translates Enter into a native form submission
+  and applies textarea autosizing; it does not own message or submission state.
 
   Keyboard rules:
 
     * Enter (no shift) → submit
     * Shift+Enter → newline
-    * On send: clear textarea + refocus
+    * Send button → native form submit
   """
   use EcritsWeb, :live_component
 
+  alias Ecrits.Studio.ChatRailState
   alias EcritsWeb.Live.Studio.Components.GrillRail
 
   attr :id, :string, required: true
-  attr :studio_state, :map, required: true
-  attr :agent_document_status, :map, default: nil
-  attr :chat_thread, :map, default: nil
+  attr :state, :map, required: true
   attr :streams, :map, required: true
-  attr :current_scope, :map, required: true
-  attr :layout, :atom, default: :default
-
-  # Whether to mount the GrillRail sub-LiveComponent. Parent decides this
-  # based on the latest agent message's mode (`"grill"` = unanswered
-  # ask-marks). Defaults to nil; the component falls back to
-  # `studio_state.grill_active?` if the parent set that flag.
-  attr :grill_active?, :any, default: nil
-
-  # Unresolved ask-marks for the current agent_run_id. Computed by the
-  # parent shell (filters `@projection.marks` for `intent: :ask` matching
-  # the current `agent_run_id`) and forwarded into GrillRail. The shell
-  # wiring is a separate merge-fix; this component just accepts + forwards.
-  attr :grill_marks, :list, default: []
 
   @impl true
-  def render(assigns) do
-    assigns =
-      assigns
-      |> assign_new(:mobile?, fn -> assigns.layout == :mobile_full end)
-      |> assign(
-        :agent_status,
-        agent_status(assigns.studio_state, assigns[:agent_document_status])
-      )
-      |> assign(:observer_mode?, observer_mode?(assigns.current_scope))
-      |> assign(:grill_active?, resolve_grill_active?(assigns))
-      |> assign(:no_document?, no_document?(assigns.studio_state))
-      |> assign(:chat_thread_title, chat_thread_title(assigns[:chat_thread]))
-      |> assign(:chat_context_empty?, chat_context_empty?(assigns[:chat_thread]))
-
+  def render(%{state: %ChatRailState{}} = assigns) do
     ~H"""
     <aside
       id={@id}
       data-component="chat-rail"
-      data-layout={if @mobile?, do: "mobile", else: "desktop"}
+      data-layout={if ChatRailState.mobile?(@state), do: "mobile", else: "desktop"}
       data-stub="chat-rail"
       class={[
         "group/chat flex flex-col bg-base-200 text-base-content min-h-0 h-full w-full",
-        not @mobile? && "shrink-0 border-l border-base-300",
-        @mobile? && "w-full flex-1 h-full"
+        not ChatRailState.mobile?(@state) && "shrink-0 border-l border-base-300",
+        ChatRailState.mobile?(@state) && "w-full flex-1 h-full"
       ]}
     >
       <div
@@ -85,7 +52,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
       >
         <h2
           data-role="chat-thread-title"
-          title={@chat_thread_title}
+          title={chat_thread_title(@state)}
           class="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-semibold leading-5 text-base-content"
         >
           <img
@@ -106,10 +73,10 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
               id="chat-thread-title-input"
               type="text"
               name="title"
-              value={@chat_thread_title}
+              value={chat_thread_title(@state)}
               phx-debounce="blur"
               aria-label={dgettext("studio", "Chat title")}
-              title={@chat_thread_title}
+              title={chat_thread_title(@state)}
               autocomplete="off"
               spellcheck="false"
               data-role="chat-thread-title-input"
@@ -123,7 +90,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
             type="button"
             phx-click="chat.context_reset"
             data-role="chat-context-reset"
-            disabled={@chat_context_empty?}
+            disabled={ChatRailState.chat_context_empty?(@state)}
             class="inline-flex size-8 items-center justify-center rounded-md text-base-content/60 hover:bg-base-300 hover:text-base-content disabled:cursor-not-allowed disabled:opacity-35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-base-content/25"
             aria-label={dgettext("studio", "Reset chat context")}
             title={dgettext("studio", "Reset chat context")}
@@ -135,7 +102,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
 
       <%!-- Observer-mode banner (agent_supervised persona) --%>
       <div
-        :if={@observer_mode?}
+        :if={ChatRailState.observer_mode?(@state)}
         data-role="observer-banner"
         role="status"
         class="px-4 py-2 text-xs bg-warning/10 text-warning-content border-b border-warning/30"
@@ -144,13 +111,11 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
       </div>
 
       <%!-- GrillRail (unanswered ask-marks) --%>
-      <div :if={@grill_active?} class="shrink-0">
+      <div :if={@state.grill_active?} class="shrink-0">
         <.live_component
           module={GrillRail}
           id={"#{@id}-grill"}
-          studio_state={@studio_state}
-          current_scope={@current_scope}
-          grill_marks={@grill_marks}
+          state={@state}
         />
       </div>
 
@@ -158,7 +123,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
            pure phx-update="stream" container. Hidden via the `group/chat`
            on the aside as soon as any chat-message appears in the stream. --%>
       <div
-        :if={not @no_document?}
+        :if={not ChatRailState.no_document?(@state)}
         id={"#{@id}-welcome"}
         data-role="chat-welcome"
         class="shrink-0 px-1.5 py-6 text-sm text-base-content/60 italic text-center group-has-[[data-role=chat-message]]/chat:hidden"
@@ -186,13 +151,6 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
           data-message-kind={msg_kind(msg)}
           data-transient={msg_transient?(msg)}
           hidden={msg_hidden?(msg)}
-          phx-click={tool_call_toggle_js(msg)}
-          phx-keydown={tool_call_toggle_js(msg)}
-          phx-key={tool_call_toggle_key(msg)}
-          role={tool_call_toggle_role(msg)}
-          tabindex={tool_call_toggle_tabindex(msg)}
-          aria-expanded={tool_call_aria_expanded(msg)}
-          aria-controls={tool_call_aria_controls(msg)}
           class={
             [
               "group/message relative flex flex-col items-stretch gap-0.5 w-full",
@@ -204,8 +162,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
               # gap. Applied via Tailwind's next-sibling variant on this
               # element when it's an agent article.
               msg_role(msg) == "agent" && "[&+[data-message-role=agent]]:!-mt-3",
-              tool_call_message?(msg) &&
-                "cursor-pointer focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-base-content/20"
+              tool_call_message?(msg) && "focus-visible:outline-none"
             ]
           }
         >
@@ -275,16 +232,14 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
 
       <%!-- Input footer — icon upload + message input + icon send.
            The row shape is identical on desktop and mobile. --%>
-      <%!-- No `phx-submit` here — the colocated ChatInput hook is the
-           single source of truth for sending. Keeping both produces a
-           duplicate user message (empty + real) per turn. --%>
       <form
         id={"#{@id}-form"}
         phx-hook=".ChatInput"
+        phx-submit="chat.submit"
         data-role="chat-form"
         class={[
           "border-t border-base-300 bg-base-200 shrink-0 px-3 py-2",
-          @mobile? && "pb-[max(0.5rem,env(safe-area-inset-bottom))]"
+          ChatRailState.mobile?(@state) && "pb-[max(0.5rem,env(safe-area-inset-bottom))]"
         ]}
         autocomplete="off"
       >
@@ -316,7 +271,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
                 <.icon name="hero-paper-clip" class="size-3.5" />
               </label>
             </div>
-            <%= if @agent_status.key in [:working, :queued, :materializing] do %>
+            <%= if ChatRailState.busy?(@state) do %>
               <button
                 id={"#{@id}-send"}
                 type="button"
@@ -331,7 +286,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
             <% else %>
               <button
                 id={"#{@id}-send"}
-                type="button"
+                type="submit"
                 data-role="chat-send"
                 data-action="send"
                 class="inline-flex h-6 w-6 items-center justify-center rounded text-base-content/45 hover:text-base-content transition-colors"
@@ -345,216 +300,34 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
       </form>
 
       <script :type={Phoenix.LiveView.ColocatedHook} name=".ChatInput">
+        const autosizeChatInput = form => {
+          const textarea = form.querySelector('[data-role="chat-textarea"]')
+          if (!textarea || textarea.dataset.autosize !== "true") return
+          textarea.style.height = "auto"
+          textarea.style.height = `${Math.min(textarea.scrollHeight, 128)}px`
+        }
+
+        const handleChatInput = event => autosizeChatInput(event.currentTarget)
+
+        const handleChatKeydown = event => {
+          const submit = event.target.matches('[data-role="chat-textarea"]')
+            && event.key === "Enter"
+            && !event.shiftKey
+            && !event.isComposing
+          if (!submit) return
+          event.preventDefault()
+          event.currentTarget.requestSubmit()
+        }
+
         export default {
           mounted() {
-            this.form = this.el
-
-            // Resolve the live textarea each call — morphdom may swap the node
-            // across patches, so a cached ref can go stale.
-            const textarea = () => this.form.querySelector('[data-role="chat-textarea"]')
-
-            this.send = (e) => {
-              if (e) e.preventDefault()
-              const ta = textarea()
-              if (!ta) return
-              const value = ta.value
-              if (!value || !value.trim()) return
-              // chat.submit is handled by the parent DocumentLive — pushEvent
-              // from a LiveComponent-hosted hook still routes to the root LV.
-              this.pushEvent("chat.submit", { message: value })
-              ta.value = ""
-              this.autosize()
-              // Keep focus on the textarea so the mobile keyboard never hides.
-              ta.focus({ preventScroll: true })
-            }
-
-            this.autosize = () => {
-              const ta = textarea()
-              if (!ta) return
-              if (ta.dataset.autosize !== "true") return
-              ta.style.height = "auto"
-              const next = Math.min(ta.scrollHeight, 128)
-              ta.style.height = next + "px"
-            }
-
-            // Event delegation on the stable <form> node. This is robust
-            // against morphdom replacing the button or textarea subtree —
-            // listeners on direct refs would silently break after a patch.
-            this.onFormKeydown = (e) => {
-              if (e.target.matches('[data-role="chat-textarea"]')
-                  && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-                this.send(e)
-              }
-            }
-
-            this.onFormInput = (e) => {
-              if (e.target.matches('[data-role="chat-textarea"]')) this.autosize()
-            }
-
-            // Mobile (iOS Safari) regression fix: tapping the send button
-            // fires `blur` on the textarea, which dismisses the keyboard.
-            // With `h-[100dvh]` the layout reflows mid-tap and the `click`
-            // never lands. Send on pointerdown/mousedown itself, while
-            // preventDefault() keeps focus on the textarea so the mobile
-            // keyboard stays open and no form submit is needed.
-            this.onFormPointerDown = (e) => {
-              const btn = e.target.closest('[data-role="chat-send"]')
-              if (!btn || !this.form.contains(btn)) return
-              e.preventDefault()
-              if (e.type === "mousedown" && this._sendButtonPressSent) return
-              this._sendButtonPressSent = true
-              clearTimeout(this._sendButtonPressTimer)
-              this._sendButtonPressTimer = setTimeout(() => {
-                this._sendButtonPressSent = false
-              }, 400)
-              this.send(e)
-            }
-
-            this.onFormClick = (e) => {
-              const btn = e.target.closest('[data-role="chat-send"]')
-              if (!btn || !this.form.contains(btn)) return
-              if (this._sendButtonPressSent) {
-                e.preventDefault()
-                this._sendButtonPressSent = false
-                return
-              }
-              this.send(e)
-            }
-
-            this.onFormSubmit = (e) => this.send(e)
-
-            // Live token streaming: per-delta `agent_text_append` events
-            // bypass LV's stream-diff cycle (which would batch successive
-            // stream_inserts into one render). We split each piece on
-            // double-newlines so paragraph breaks land in their own
-            // child span (matching the SSR shape from chat_rail.ex), and
-            // get a controlled gap via `mb-1.5` instead of a full blank
-            // line from whitespace-pre-wrap.
-            this.onAppend = (e) => {
-              const id = e.detail && e.detail.message_id
-              const piece = e.detail && e.detail.piece
-              if (!id || !piece) return
-              const container = document.querySelector(
-                `[data-role="agent-text"][data-message-id="${id}"]`
-              )
-              if (!container) return
-              const paraClass = "block whitespace-normal [&:not(:last-child)]:mb-1"
-              const paraSelector = '[data-role="agent-paragraph"]'
-              const mkPara = () => {
-                const s = document.createElement("span")
-                s.dataset.role = "agent-paragraph"
-                s.className = paraClass
-                container.appendChild(s)
-                return s
-              }
-              // First real token arriving: kill the bouncing-dots indicator.
-              // Keeping it alive would just have it trail the prose as new
-              // text streams in (the old behaviour moved it from paragraph
-              // to paragraph), which reads as a stray glyph next to the
-              // agent's words.
-              const dropLoading = () => {
-                const indicator = container.querySelector('[data-role="agent-loading"]')
-                if (indicator) indicator.remove()
-              }
-              const appendText = (target, text) => {
-                target.appendChild(document.createTextNode(text))
-              }
-              const paragraphs = container.querySelectorAll(paraSelector)
-              let current = paragraphs[paragraphs.length - 1] || mkPara()
-              dropLoading()
-              const parts = piece.split(/\n{2,}/)
-              appendText(current, parts[0])
-              for (let i = 1; i < parts.length; i++) {
-                current = mkPara()
-                appendText(current, parts[i])
-              }
-            }
-            window.addEventListener("phx:agent_text_append", this.onAppend)
-
-            // Same trick for the reasoning stream. Without this, every
-            // reasoning_summary delta (hundreds per turn) re-sent the
-            // entire accumulated buffer through LV diffs and the text
-            // arrived in big chunks instead of flowing.
-            this.onReasoningAppend = (e) => {
-              const id = e.detail && e.detail.message_id
-              const piece = e.detail && e.detail.piece
-              if (!id || !piece) return
-              const span = document.querySelector(
-                `[data-role="agent-reasoning-text"][data-message-id="${id}"]`
-              )
-              if (span && span.dataset.placeholder === "true") {
-                span.textContent = ""
-                span.dataset.placeholder = "false"
-              }
-              if (span) {
-                const message = span.closest('[data-role="chat-message"]')
-                if (message) message.removeAttribute("hidden")
-                span.appendChild(document.createTextNode(piece))
-              }
-              const detailsContent = document.querySelector(
-                `[data-role="agent-reasoning-details-content"][data-message-id="${id}"]`
-              )
-              const details = detailsContent
-                ? detailsContent.querySelector('[data-role="agent-reasoning-details-text"]')
-                : document.querySelector(
-                    `[data-role="agent-reasoning-details-text"][data-message-id="${id}"]`
-                  )
-              if (details) details.appendChild(document.createTextNode(piece))
-            }
-            window.addEventListener("phx:agent_reasoning_append", this.onReasoningAppend)
-
-            // Sticky-bottom auto-scroll. Watches the chat-stream container
-            // (which is also the scrollable viewport) for ANY DOM change
-            // (stream_inserts, TextNode appends, etc.) and pulls the
-            // viewport to bottom — but only while the user is already
-            // pinned there. As soon as they scroll up to read earlier
-            // turns we stop forcing them back down.
-            this.scroller = document.querySelector('[data-role="chat-stream"]')
-            if (this.scroller) {
-              this.pinned = true
-              const pinThreshold = 80
-              this.onScroll = () => {
-                const distance =
-                  this.scroller.scrollHeight - this.scroller.scrollTop - this.scroller.clientHeight
-                this.pinned = distance < pinThreshold
-              }
-              this.scroller.addEventListener("scroll", this.onScroll, { passive: true })
-
-              this.scrollObserver = new MutationObserver(() => {
-                if (this.pinned) this.scroller.scrollTop = this.scroller.scrollHeight
-              })
-              this.scrollObserver.observe(this.scroller, {
-                childList: true,
-                subtree: true,
-                characterData: true
-              })
-
-              // Initial position at the bottom.
-              this.scroller.scrollTop = this.scroller.scrollHeight
-            }
-
-            this.form.addEventListener("keydown", this.onFormKeydown)
-            this.form.addEventListener("input", this.onFormInput)
-            this.form.addEventListener("pointerdown", this.onFormPointerDown)
-            this.form.addEventListener("mousedown", this.onFormPointerDown)
-            this.form.addEventListener("click", this.onFormClick)
-            this.form.addEventListener("submit", this.onFormSubmit)
-
-            this.autosize()
+            this.el.addEventListener("keydown", handleChatKeydown)
+            this.el.addEventListener("input", handleChatInput)
+            autosizeChatInput(this.el)
           },
           destroyed() {
-            clearTimeout(this._sendButtonPressTimer)
-            if (this.onAppend) window.removeEventListener("phx:agent_text_append", this.onAppend)
-            if (this.onReasoningAppend) window.removeEventListener("phx:agent_reasoning_append", this.onReasoningAppend)
-            if (this.scrollObserver) this.scrollObserver.disconnect()
-            if (this.scroller && this.onScroll) this.scroller.removeEventListener("scroll", this.onScroll)
-            if (!this.form) return
-            this.form.removeEventListener("keydown", this.onFormKeydown)
-            this.form.removeEventListener("input", this.onFormInput)
-            this.form.removeEventListener("pointerdown", this.onFormPointerDown)
-            this.form.removeEventListener("mousedown", this.onFormPointerDown)
-            this.form.removeEventListener("click", this.onFormClick)
-            this.form.removeEventListener("submit", this.onFormSubmit)
+            this.el.removeEventListener("keydown", handleChatKeydown)
+            this.el.removeEventListener("input", handleChatInput)
           }
         }
       </script>
@@ -627,28 +400,16 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
 
     ~H"""
     <%= if @operation_type in ["tool_call", "reasoning"] do %>
-      <%!-- Codex-style inline trace row used for both tool calls and
-           reasoning summaries. Visually identical: tiny wrench glyph + dim
-           "<Label>: <one-liner>". The whole article carries the click
-           handler (a `Phoenix.LiveView.JS` toggle, set on the <article>
-           by the stream loop above) — child elements stay inert
-           (`pointer-events-none`) so child clicks bubble cleanly. We
-           render both the collapsed affordance AND the expanded details
-           panel; the panel starts `hidden` and `JS.toggle_attribute`
-           flips it client-side. Phoenix.LiveView streams don't re-render
-           already-inserted items on outer assign changes, so any
-           server-side expand state would never reach the DOM after the
-           first insertion. --%>
-      <div class={[
+      <details class={[
         "group/trace relative flex w-full items-center gap-1 px-3 py-1.5",
         @operation_type == "reasoning" && @transient? && "animate-pulse"
       ]}>
-        <div
+        <summary
           id={"tool-trace-#{@operation_id}"}
           data-role="tool-trace"
           data-status={@operation_status}
           class={[
-            "tool-trace inline-flex min-w-0 items-center gap-1.5 py-0.5 text-left text-[12px] leading-snug transition",
+            "tool-trace inline-flex min-w-0 cursor-pointer list-none items-center gap-1.5 py-0.5 text-left text-[12px] leading-snug transition",
             @operation_status == "running" &&
               "text-base-content/45 animate-pulse",
             @operation_status == "completed" &&
@@ -680,7 +441,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
               {@operation_summary}
             </span>
           </span>
-        </div>
+        </summary>
         <span
           id={"tool-trace-#{@operation_id}-expand"}
           data-role="tool-trace-expand"
@@ -696,39 +457,38 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
         >
           <.icon name="hero-chevron-down" class="size-3" />
         </span>
-      </div>
-      <div
-        id={"tool-trace-#{@operation_id}-details"}
-        data-role="tool-trace-details"
-        hidden
-        class="self-start w-full max-w-full"
-      >
         <div
-          data-role={reasoning_details_content_data_role(@operation_type)}
-          data-message-id={@reasoning_message_id}
-          class="rounded-md border border-base-300 bg-base-100 px-3 py-2 font-mono text-[11px] leading-relaxed text-base-content/60 shadow-sm"
+          id={"tool-trace-#{@operation_id}-details"}
+          data-role="tool-trace-details"
+          class="self-start w-full max-w-full"
         >
-          <pre
-            data-role={reasoning_details_data_role(@operation_type)}
+          <div
+            data-role={reasoning_details_content_data_role(@operation_type)}
             data-message-id={@reasoning_message_id}
-            class="whitespace-pre-wrap break-words"
-          >{operation_expanded_body(@operation_type, @operation)}</pre>
-        </div>
-        <div data-role="tool-trace-collapse-row" class="flex justify-center pt-1">
-          <span
-            id={"tool-trace-#{@operation_id}-collapse"}
-            data-role="tool-trace-collapse"
-            title={dgettext("studio", "접기")}
-            aria-label={dgettext("studio", "접기")}
-            class="inline-flex items-center gap-1 text-[11px] text-base-content/55 pointer-events-none"
+            class="rounded-md border border-base-300 bg-base-100 px-3 py-2 font-mono text-[11px] leading-relaxed text-base-content/60 shadow-sm"
           >
-            <.icon name="hero-chevron-up" class="size-3" />
-            {dgettext("studio", "접기")}
-          </span>
+            <pre
+              data-role={reasoning_details_data_role(@operation_type)}
+              data-message-id={@reasoning_message_id}
+              class="whitespace-pre-wrap break-words"
+            >{operation_expanded_body(@operation_type, @operation)}</pre>
+          </div>
+          <div data-role="tool-trace-collapse-row" class="flex justify-center pt-1">
+            <span
+              id={"tool-trace-#{@operation_id}-collapse"}
+              data-role="tool-trace-collapse"
+              title={dgettext("studio", "접기")}
+              aria-label={dgettext("studio", "접기")}
+              class="inline-flex items-center gap-1 text-[11px] text-base-content/55 pointer-events-none"
+            >
+              <.icon name="hero-chevron-up" class="size-3" />
+              {dgettext("studio", "접기")}
+            </span>
+          </div>
         </div>
-      </div>
+      </details>
     <% else %>
-      <section
+      <details
         id={"operation-block-#{@operation_id}"}
         data-role="operation-block"
         data-operation-type={@operation_type}
@@ -738,29 +498,14 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
           @operation_type == "tool_call" && "tool-trace"
         ]}
       >
-        <button
+        <summary
           id={"operation-block-#{@operation_id}-toggle"}
-          type="button"
-          aria-expanded="false"
           aria-controls={"operation-block-#{@operation_id}-details"}
-          phx-click={
-            JS.toggle_attribute({"hidden", "hidden"},
-              to: "#operation-block-#{@operation_id}-details"
-            )
-            |> JS.toggle_attribute({"aria-expanded", "true", "false"})
-            |> JS.toggle(to: "#operation-block-#{@operation_id}-toggle [data-role='chev-right']")
-            |> JS.toggle(to: "#operation-block-#{@operation_id}-toggle [data-role='chev-down']")
-          }
-          class="flex w-full items-start gap-2 px-3 py-2 text-left transition hover:bg-base-200/70"
+          class="flex w-full cursor-pointer list-none items-start gap-2 px-3 py-2 text-left transition hover:bg-base-200/70"
         >
           <span
             data-role="chev-right"
             class="mt-0.5 size-4 shrink-0 text-base-content/50 hero-chevron-right"
-          />
-          <span
-            data-role="chev-down"
-            style="display: none;"
-            class="mt-0.5 size-4 shrink-0 text-base-content/50 hero-chevron-down"
           />
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-2">
@@ -776,109 +521,28 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
               {@operation_summary}
             </p>
           </div>
-        </button>
+        </summary>
         <div
           id={"operation-block-#{@operation_id}-details"}
           data-role="operation-details"
-          hidden
           class="border-t border-base-200 bg-base-50 px-3 py-2"
         >
           <pre class="whitespace-pre-wrap break-words text-xs leading-relaxed text-base-content/70">{operation_details(@operation)}</pre>
         </div>
-      </section>
+      </details>
     <% end %>
     """
   end
 
   # ----------------------------------------------------------------------------
-  # Status pill helpers
-  # ----------------------------------------------------------------------------
-
-  @doc false
-  def agent_status(studio_state, agent_document_status \\ nil)
-
-  def agent_status(_studio_state, %{current_attempt: current, queue: queue})
-      when not is_nil(current) do
-    queue_size = length(List.wrap(queue))
-    key = if queue_size > 0, do: :queued, else: :working
-
-    %{
-      key: key,
-      label: status_busy(queue_size),
-      current_run_id: current.id,
-      queue_size: queue_size
-    }
-  end
-
-  def agent_status(_studio_state, %{current_attempt: nil, queue: queue}) when queue != [] do
-    queue_size = length(List.wrap(queue))
-
-    %{
-      key: :materializing,
-      label: dgettext("studio", "준비 중 · %{count} 대기", count: queue_size),
-      current_run_id: nil,
-      queue_size: queue_size
-    }
-  end
-
-  def agent_status(%{agent_run_id: nil}, _status),
-    do: %{key: :idle, label: status_idle(), current_run_id: nil, queue_size: 0}
-
-  def agent_status(%{agent_run_id: id}, _status) when is_binary(id),
-    do: %{key: :working, label: status_busy(0), current_run_id: id, queue_size: 0}
-
-  def agent_status(_, _status),
-    do: %{key: :idle, label: status_idle(), current_run_id: nil, queue_size: 0}
-
-  defp status_idle, do: dgettext("studio", "대기")
-  defp status_busy(0), do: dgettext("studio", "응답 중")
-  defp status_busy(queue_size), do: dgettext("studio", "응답 중 · %{count} 대기", count: queue_size)
-
-  # ----------------------------------------------------------------------------
-  # Observer / persona helpers
-  # ----------------------------------------------------------------------------
-
-  @doc false
-  # agent_supervised persona perm signature: has agent_run + write + commit
-  # but lacks both :export and :type_change. This is the unique fingerprint
-  # vs. lawyer (has both), paralegal (has type_change), viewer (no write),
-  # admin (has both).
-  def observer_mode?(%{perms: perms}) when is_list(perms) do
-    :agent_run in perms and :write in perms and :commit in perms and
-      :export not in perms and :type_change not in perms
-  end
-
-  def observer_mode?(_), do: false
-
-  # ----------------------------------------------------------------------------
   # Header helpers
   # ----------------------------------------------------------------------------
 
-  defp chat_thread_title(%{title: title}) when is_binary(title) and title != "",
-    do: title
+  defp chat_thread_title(%ChatRailState{thread_title: title})
+       when is_binary(title) and title != "",
+       do: title
 
   defp chat_thread_title(_), do: dgettext("studio", "새 대화")
-
-  defp chat_context_empty?(%{message_count: count}) when is_integer(count), do: count == 0
-  defp chat_context_empty?(_), do: true
-
-  @doc false
-  def no_document?(%Ecrits.Studio.State{mode: :no_document}), do: true
-  def no_document?(%{mode: :no_document}), do: true
-  def no_document?(_), do: false
-
-  # ----------------------------------------------------------------------------
-  # Grill helpers — the parent decides whether the latest agent message has
-  # unanswered ask-marks; we just render the sub-component when told.
-  # ----------------------------------------------------------------------------
-
-  defp resolve_grill_active?(assigns) do
-    cond do
-      assigns[:grill_active?] == true -> true
-      Map.get(assigns[:studio_state] || %{}, :grill_active?) == true -> true
-      true -> false
-    end
-  end
 
   # ----------------------------------------------------------------------------
   # Message field extractors — the stream items use a few shapes:
@@ -893,56 +557,6 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
   defp msg_operation(_), do: nil
 
   defp tool_call_message?(msg), do: match?(%{}, tool_call_operation(msg))
-
-  # The whole article carries a `Phoenix.LiveView.JS` toggle that flips
-  # the `hidden` attribute on the details panel and the article's
-  # aria-expanded — pure client-side, no server roundtrip. The chevron
-  # and the 접기 sub-elements stay `pointer-events-none` so a click
-  # anywhere on the row bubbles to the article handler exactly once.
-  # We can't drive expand state from a server assign because
-  # `phx-update="stream"` items don't re-render when outer assigns
-  # change — that was the "freshly-inserted tool_call won't expand,
-  # reload doesn't fix it" regression.
-  defp tool_call_toggle_js(msg) do
-    case tool_call_operation(msg) do
-      nil ->
-        nil
-
-      operation ->
-        operation_id = operation_id(operation)
-
-        # Attribute selector (not `#id`) — tool ids like
-        # `tool-{run_id}-doc.get` contain dots, which CSS would parse as
-        # class separators and miss the element entirely.
-        JS.toggle_attribute({"hidden", "hidden"},
-          to: ~s([id="tool-trace-#{operation_id}-details"])
-        )
-        |> JS.toggle_attribute({"aria-expanded", "true", "false"})
-    end
-  end
-
-  defp tool_call_toggle_key(msg) do
-    if tool_call_message?(msg), do: "Enter"
-  end
-
-  defp tool_call_toggle_role(msg) do
-    if tool_call_message?(msg), do: "button"
-  end
-
-  defp tool_call_toggle_tabindex(msg) do
-    if tool_call_message?(msg), do: "0"
-  end
-
-  defp tool_call_aria_expanded(msg) do
-    if tool_call_message?(msg), do: "false"
-  end
-
-  defp tool_call_aria_controls(msg) do
-    case tool_call_operation(msg) do
-      nil -> nil
-      operation -> "tool-trace-#{operation_id(operation)}-details"
-    end
-  end
 
   defp tool_call_operation(msg) do
     case msg_operation(msg) do

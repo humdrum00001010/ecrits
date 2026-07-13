@@ -34,6 +34,7 @@ defmodule Ecrits.Context do
   @doc """
   Builds a context for the given user term, or `nil` when no user is given.
   """
+  # [deprecated] dead code — no callers in lib or test (dead-code audit 2026-07-13: xref + repo grep + runtime trace)
   @spec for_user(term() | nil) :: t() | nil
   def for_user(nil), do: nil
   def for_user(user), do: %__MODULE__{user: user}

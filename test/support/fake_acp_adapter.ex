@@ -194,6 +194,20 @@ defmodule EcritsWeb.FakeAcpAdapter do
     })
   end
 
+  # Mirrors the vendored Claude adapter's FIRST report of a tool_use block: a
+  # `tool_call_update` with a non-terminal status and no prior `tool_call`
+  # (the terminal update then arrives without a toolName — script a
+  # `:tool_call_completed` entry without `:name` to match).
+  defp to_session_update(%{type: :tool_call_in_progress} = event, session_id) do
+    session_update(session_id, %{
+      "sessionUpdate" => "tool_call_update",
+      "status" => "in_progress",
+      "toolCallId" => event[:id],
+      "toolName" => event[:name],
+      "input" => event[:arguments] || %{}
+    })
+  end
+
   defp prompt_result(id, session_id, opts, prompt) do
     text = if Keyword.get(opts, :echo_opts), do: echo_text(opts, prompt), else: final_text(opts)
 

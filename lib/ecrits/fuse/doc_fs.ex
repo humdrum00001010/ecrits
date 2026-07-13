@@ -116,7 +116,7 @@ defmodule Ecrits.Fuse.DocFs do
 
   getattr "/" do
     {mtime, socket} = content_mtime(socket, "/", Enum.sort(OpenDocs.list(state.root)))
-    {:reply, dir(mtime: mtime), socket}
+    {:reply, attr(type: :dir, mtime: mtime), socket}
   end
 
   getattr "/:name" do
@@ -124,11 +124,11 @@ defmodule Ecrits.Fuse.DocFs do
       is_binary(name_buffer(socket, name)) ->
         buf = name_buffer(socket, name)
         {mtime, socket} = content_mtime(socket, name, buf)
-        {:reply, file(size: byte_size(buf), mtime: mtime), socket}
+        {:reply, attr(type: :file, size: byte_size(buf), mtime: mtime), socket}
 
       match?({:ok, _}, source_path(state.root, name)) ->
         {size, mtime, socket} = projected_attrs(socket, state.root, name)
-        {:reply, file(size: size, mtime: mtime), socket}
+        {:reply, attr(type: :file, size: size, mtime: mtime), socket}
 
       true ->
         {:error, :enoent, socket}

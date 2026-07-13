@@ -29,6 +29,7 @@ defmodule EcritsWeb.CoreComponents do
   use Phoenix.Component
   use Gettext, backend: EcritsWeb.Gettext
 
+  alias Ecrits.WorkspaceMount
   alias Phoenix.LiveView.JS
 
   @doc """
@@ -305,11 +306,16 @@ defmodule EcritsWeb.CoreComponents do
   treatment are component-owned so the global stylesheet can stay focused on
   fonts, theme tokens, and semantic rendered content.
   """
-  attr :picker_busy?, :boolean, required: true
-  attr :path_form, :any, required: true
-  attr :mount_error, :string, default: nil
+  attr :workspace_mount, :any, required: true
 
-  def workspace_mount_panel(assigns) do
+  def workspace_mount_panel(%{workspace_mount: %WorkspaceMount{}} = assigns) do
+    assigns =
+      assign(
+        assigns,
+        :workspace_mount_form,
+        to_form(%{"path" => assigns.workspace_mount.path}, as: :local_path)
+      )
+
     ~H"""
     <div
       id="local-mount-root"
@@ -359,14 +365,14 @@ defmodule EcritsWeb.CoreComponents do
             <button
               id="local-mount-choose"
               type="button"
-              phx-click="choose_mount_directory"
+              phx-click="workspace.directory_picker.open"
               phx-disable-with="Opening picker..."
-              disabled={@picker_busy?}
-              aria-busy={to_string(@picker_busy?)}
-              data-busy={to_string(@picker_busy?)}
+              disabled={@workspace_mount.picker_busy?}
+              aria-busy={to_string(@workspace_mount.picker_busy?)}
+              data-busy={to_string(@workspace_mount.picker_busy?)}
               class={workspace_mount_open_class()}
             >
-              <%= if @picker_busy? do %>
+              <%= if @workspace_mount.picker_busy? do %>
                 <.icon name="hero-arrow-path-micro" class="size-4 shrink-0 animate-spin" />
                 <span>Opening picker...</span>
               <% else %>
@@ -376,9 +382,9 @@ defmodule EcritsWeb.CoreComponents do
             </button>
 
             <.form
-              for={@path_form}
+              for={@workspace_mount_form}
               id="local-path-form"
-              phx-submit="open_path"
+              phx-submit="workspace.path.open"
               class="m-0"
             >
               <label
@@ -395,7 +401,7 @@ defmodule EcritsWeb.CoreComponents do
                   &rsaquo;
                 </span>
                 <.input
-                  field={@path_form[:path]}
+                  field={@workspace_mount_form[:path]}
                   id="local-path-input"
                   type="text"
                   autocomplete="off"
@@ -420,13 +426,13 @@ defmodule EcritsWeb.CoreComponents do
           </div>
 
           <p
-            :if={@mount_error}
+            :if={@workspace_mount.error}
             id="local-mount-error"
             role="alert"
             class="m-0 mt-1 flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-3 py-2 text-[0.82rem] leading-[1.45] text-error"
           >
             <.icon name="hero-exclamation-triangle-micro" class="mt-0.5 size-4 shrink-0" />
-            <span>{@mount_error}</span>
+            <span>{@workspace_mount.error}</span>
           </p>
         </div>
       </section>

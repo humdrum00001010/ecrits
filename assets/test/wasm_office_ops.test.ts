@@ -1,5 +1,5 @@
 // Unit tests for the office (LibreOffice→WASM) browser arm's typed op vocabulary
-// (`wasm_office_ops.ts`, #49 O4). Pure logic, no wasm — drives `rewriteOfficeOp`
+// (the OfficeWasm colocated hook, #49 O4). Pure logic, no wasm — drives `rewriteOfficeOp`
 // against a fully-mocked `ctx` and asserts the CONTRACT: native verbs pass
 // through (null), the 3 IR-composed shims (replace_text/set_cell/delete_range)
 // produce the right set_text op + count, and the exact guard error strings.
@@ -7,7 +7,19 @@
 
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { rewriteOfficeOp, OFFICE_OPS, type OfficeEditorContext, type OfficeElement } from "../js/wasm_office_ops.ts"
+import { importOfficeWasmInternals } from "./support/colocated_hook.ts"
+
+const { rewriteOfficeOp, OFFICE_OPS } = await importOfficeWasmInternals()
+
+type OfficeElement = { ref: string; text: string; [key: string]: any }
+type OfficeEditorContext = {
+  officeElements(): OfficeElement[]
+  setTextRefFor(ref: string): string
+  isSetTextTarget(ref: string): boolean
+  officeElementForEdit(elements: OfficeElement[], ref: string): OfficeElement | null
+  replaceAllCounted(text: string, query: string, replacement: string): { text: string; count: number }
+  singleParagraphText(value: any): string
+}
 
 // A mock editor ctx whose elements are addressed by ref; setTextRefFor collapses
 // a run ref (`…/r<n>`) to its paragraph, matching the real editor.

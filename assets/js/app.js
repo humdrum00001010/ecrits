@@ -12,8 +12,8 @@
 // If you have dependencies that try to import CSS, esbuild will generate a separate `app.css` file.
 // To load it, simply add a second `<link>` to your `root.html.heex` file.
 
-// Keep this file as Phoenix's generated bundle entrypoint.
-// Do not put production code here; put app behavior in dedicated assets/js modules.
+// Keep this file as Phoenix's generated bundle entrypoint. Application hooks
+// are colocated with their LiveView components and arrive through the manifest.
 
 // Include phoenix_html to handle method=PUT/DELETE in forms and buttons.
 import "phoenix_html"
@@ -22,16 +22,13 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/ecrits"
 import topbar from "topbar"
-import {hooks as ecritsHooks, installEcritsClientBehavior} from "./ecrits_app.js"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
 const liveSocket = new LiveSocket("/live", Socket, {
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, ...ecritsHooks},
+  hooks: colocatedHooks,
 })
-
-installEcritsClientBehavior()
 
 // Show progress bar on live navigation and form submits
 topbar.config({barColors: {0: "#29d"}, shadowColor: "rgba(0, 0, 0, .3)"})

@@ -73,23 +73,29 @@ defmodule EcritsWeb.Router do
 
     live_session :local,
       on_mount: [EcritsWeb.Locale] do
-      live "/", Local.MountLive, :index, container: {:div, class: "contents"}
+      live "/", Workspace.MountLive, :index, container: {:div, class: "contents"}
 
-      live "/local/agent-providers/:provider/setup", Local.AgentProviderSetupLive, :show,
+      live "/local/agent-providers/:provider/setup", Workspace.AgentProviderSetupLive, :show,
         container: {:div, class: "contents"}
 
-      live "/workspace", Local.WorkspaceLive, :show, container: {:div, class: "contents"}
+      live "/workspace", Workspace.WorkspaceLive, :show, container: {:div, class: "contents"}
     end
 
     # Read-only raw bytes of a local workspace HWP/HWPX document, gated to the
     # workspace path. The browser rhwp_core WASM engine fetches these to render
     # + hit-test locally (the server keeps the bytes as source of truth).
-    get "/local/document-bytes", LocalDocumentBytesController, :show
-    post "/local/document-bytes", LocalDocumentBytesController, :create
+    get "/local/document-bytes", WorkspaceDocumentBytesController, :show
+    post "/local/document-bytes", WorkspaceDocumentBytesController, :create
+
+    # Server-rendered, cropped image for durable chat-rail edit descriptors.
+    # This controller belongs in the existing browser pipeline: it works in the
+    # same local authenticated-or-not session as `/workspace` and validates the
+    # workspace/document pair itself before opening either native engine.
+    get "/local/edit-preview", WorkspaceEditPreviewController, :show
 
     # Inline previews for doc.render outputs (PNG files in the render scratch
     # dir) — the chat rail swaps the render tool-call chip body for the image.
-    get "/local/render-preview", LocalRenderPreviewController, :show
+    get "/local/render-preview", WorkspaceRenderPreviewController, :show
   end
 
   defp put_local_live_session_id(conn, _opts) do

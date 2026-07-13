@@ -7,7 +7,7 @@ defmodule Ecrits.Agent.AgentLive do
 
   ## Status (Phase 5): a boundary + note, not a forced refactor
 
-  The concrete AgentLive today is `Ecrits.Local.AcpAgent.Session`. Factoring its
+  The concrete AgentLive today is `Ecrits.AcpAgent.Session`. Factoring its
   GENERIC mechanics (transcript append/snapshot, the send-turn FIFO queue, title
   derivation, the `emit/topic` PubSub contract, `agent_snapshot`) into a
   `use Ecrits.Agent.AgentLive` behaviour with overridable callbacks would mean
@@ -21,7 +21,7 @@ defmodule Ecrits.Agent.AgentLive do
   This module is that clear boundary. It declares the STABLE public contract a
   generic AgentLive exposes as `@callback`s, so a future repo extraction is
   mechanical: the concrete module already implements every function below with
-  the listed arity (`Ecrits.Local.AcpAgent.Session`), and the generic core
+  the listed arity (`Ecrits.AcpAgent.Session`), and the generic core
   (transcript / queue / title / emit) can later be lifted behind a `__using__/1`
   that provides default implementations of these callbacks, with the
   provider-specific turn driver (`run_turn`/`AcpStream`) as the single override

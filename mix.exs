@@ -43,7 +43,7 @@ defmodule Ecrits.MixProject do
     [
       {:tidewave, "~> 0.6", only: [:dev]},
       {:bcrypt_elixir, "~> 3.0"},
-      {:phoenix, "~> 1.8.7"},
+      {:phoenix, "~> 1.8.8"},
       {:ecto, "~> 3.13"},
       {:ecto_sqlite3, "~> 0.23.0"},
       {:phoenix_html, "~> 4.1"},
@@ -102,7 +102,6 @@ defmodule Ecrits.MixProject do
       # docs/plans/2026-06-23-exfuse-doc-vfs-migration.md.
       {:exfuse, git: "https://github.com/humdrum00001010/exfuse", branch: "main"},
       # ecrits extra deps.
-      {:openai_ex, "~> 0.9"},
       {:dotenvy, "~> 1.0"},
       {:toml, "~> 0.7"},
       {:stream_data, "~> 1.1", only: [:test, :dev]},

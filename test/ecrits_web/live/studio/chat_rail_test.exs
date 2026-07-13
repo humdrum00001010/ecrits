@@ -16,6 +16,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
   import Phoenix.LiveViewTest
 
   alias Ecrits.Context
+  alias Ecrits.Studio.ChatRailState
   alias Ecrits.Studio.State
   alias EcritsWeb.Live.Studio.Components.ChatRail
 
@@ -32,6 +33,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
     # Phoenix.Component.assign/3. Disambiguate by aliasing.
     alias Phoenix.Component, as: PC
     alias Phoenix.LiveView, as: PLV
+    alias Ecrits.Studio.ChatRailState
     alias EcritsWeb.Live.Studio.Components.ChatRail
 
     @impl true
@@ -48,13 +50,19 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
             agent_run_id: nil
           }
 
+      chat_rail_state =
+        ChatRailState.new(%{
+          studio_state: state,
+          current_scope: scope,
+          chat_thread: session["chat_thread"],
+          layout: session["layout"] || :default,
+          grill_active?: session["grill_active?"] || false
+        })
+
       socket =
         socket
         |> PC.assign(:scope, scope)
-        |> PC.assign(:studio_state, state)
-        |> PC.assign(:chat_thread, session["chat_thread"])
-        |> PC.assign(:chat_layout, session["layout"] || :default)
-        |> PC.assign(:grill_active?, session["grill_active?"] || nil)
+        |> PC.assign(:chat_rail_state, chat_rail_state)
         |> PC.assign(:test_pid, session["test_pid"])
         |> PLV.stream_configure(:chat_messages, dom_id: &"chat-msg-#{&1.id}")
         |> PLV.stream(:chat_messages, [])
@@ -68,11 +76,13 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
     end
 
     def handle_info({:set_state, state}, socket) do
-      {:noreply, PC.assign(socket, :studio_state, state)}
+      {:noreply,
+       PC.update(socket, :chat_rail_state, &ChatRailState.put(&1, %{studio_state: state}))}
     end
 
     def handle_info({:set_grill, value}, socket) do
-      {:noreply, PC.assign(socket, :grill_active?, value)}
+      {:noreply,
+       PC.update(socket, :chat_rail_state, &ChatRailState.put(&1, %{grill_active?: value}))}
     end
 
     @impl true
@@ -104,12 +114,8 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
         <.live_component
           module={ChatRail}
           id="chat-rail"
-          studio_state={@studio_state}
-          chat_thread={@chat_thread}
+          state={@chat_rail_state}
           streams={%{chat_messages: @streams.chat_messages}}
-          current_scope={@scope}
-          layout={@chat_layout}
-          grill_active?={@grill_active?}
         />
       </div>
       """
@@ -141,6 +147,17 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
     []
   end
 
+  defp render_chat_rail(attrs) do
+    {streams, attrs} = Keyword.pop!(attrs, :streams)
+    {id, attrs} = Keyword.pop(attrs, :id, "chat-rail")
+
+    render_component(ChatRail,
+      id: id,
+      state: ChatRailState.new(Map.new(attrs)),
+      streams: streams
+    )
+  end
+
   # ===========================================================================
   # render_component/2 cases
   # ===========================================================================
@@ -148,7 +165,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
   describe "static rendering" do
     test "case 1 — empty chat shows the welcome message" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{chat_messages: empty_stream()},
@@ -164,7 +181,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "renders compact title controls with context reset" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           chat_thread: %{title: "Discussion - Scope confirmed", message_count: 4},
@@ -230,35 +247,29 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       refute favicon_class =~ "size-6"
     end
 
-    test "case 4 — send button is type=button (NOT submit) — mobile regression" do
+    test "case 4 — send button submits the LiveView form" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{chat_messages: empty_stream()},
           current_scope: lawyer_scope()
         )
 
-      # The send button must NEVER be type=submit. The form's phx-submit is
-      # intercepted by the .ChatInput hook so the mobile keyboard never
-      # collapses on send.
       assert html =~ ~s(data-role="chat-send")
+      assert html =~ ~s(phx-submit="chat.submit")
 
-      # Extract the send button element. It must carry type="button".
       assert Regex.match?(
-               ~r/<button[^>]*data-role="chat-send"[^>]*type="button"|<button[^>]*type="button"[^>]*data-role="chat-send"/s,
+               ~r/<button[^>]*data-role="chat-send"[^>]*type="submit"|<button[^>]*type="submit"[^>]*data-role="chat-send"/s,
                html
              ),
-             "expected the send button to be type=\"button\"; got: " <>
+             "expected the send button to be type=\"submit\"; got: " <>
                (Regex.run(~r/<button[^>]*data-role="chat-send"[^>]*>/, html) |> inspect())
-
-      # And critically: nowhere in the form does a submit-type button appear.
-      refute html =~ ~s(type="submit")
     end
 
     test "case 6 — mobile layout pins the input footer to the safe-area bottom" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{chat_messages: empty_stream()},
@@ -282,7 +293,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "agent_supervised persona sees the observer-mode banner" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{chat_messages: empty_stream()},
@@ -297,7 +308,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       no_doc_state = %State{mode: :no_document, last_seen_version: 0, agent_run_id: nil}
 
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: no_doc_state,
           streams: %{chat_messages: empty_stream()},
@@ -360,7 +371,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "agent status drives the composer action without a header status label" do
       idle_html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: %State{default_state() | agent_run_id: nil},
           streams: %{chat_messages: empty_stream()},
@@ -388,7 +399,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       queued_run_id = Ecto.UUID.generate()
 
       busy_html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: %State{default_state() | agent_run_id: run_id},
           agent_document_status: %{
@@ -416,20 +427,23 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
              |> LazyHTML.text() =~
                "응답 중"
 
-      assert %{
-               key: :queued,
-               current_run_id: ^run_id,
-               queue_size: 1
+      assert %ChatRailState{
+               agent_status: :queued,
+               agent_current_run_id: ^run_id,
+               agent_queue_size: 1
              } =
-               ChatRail.agent_status(%State{default_state() | agent_run_id: run_id}, %{
-                 current_attempt: %{id: run_id, status: :running},
-                 queue: [%{id: queued_run_id, status: :pending}]
+               ChatRailState.new(%{
+                 studio_state: %State{default_state() | agent_run_id: run_id},
+                 agent_document_status: %{
+                   current_attempt: %{id: run_id, status: :running},
+                   queue: [%{id: queued_run_id, status: :pending}]
+                 }
                })
     end
 
     test "operation protocol messages render structured blocks with stable DOM ids" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -466,7 +480,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "agent prose starts at the left edge of the chat stream" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -513,7 +527,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "agent prose renders limited Markdown and escapes raw HTML" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -593,7 +607,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "agent prose repairs streamed sentence boundaries without touching code" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -642,7 +656,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "user messages render Markdown without allowing raw HTML injection" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -689,7 +703,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "tool call details stay plain escaped JSON instead of Markdown" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -731,7 +745,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "transient agent prose shows a loading indicator until the final message arrives" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -779,7 +793,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "reasoning renders through operation_block as a compact aligned row" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -829,9 +843,8 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       assert text_class =~ "truncate"
       assert text_class =~ "whitespace-nowrap"
 
-      # Reasoning uses the same trace structure as tool_call — no separate
-      # `<details>` element with native browser disclosure.
-      refute html =~ ~s(<details)
+      assert LazyHTML.query(fragment, "details > summary#tool-trace-reasoning-compact")
+             |> Enum.any?()
     end
 
     test "completed empty reasoning is not rendered as a stale thinking row" do
@@ -841,7 +854,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       # equivalent invariant at the component level: a row carrying ONLY
       # `kind: :reasoning` with no operation must be hidden.
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -865,7 +878,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
     test "legacy `kind: :thinking` row no longer renders (consolidated into the reasoning bubble)" do
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: default_state(),
           streams: %{
@@ -959,17 +972,15 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       refute html =~ ~s(data-transient="true")
     end
 
-    test "case 5 — colocated hook pushes chat.submit with the body",
+    test "case 5 — LiveView handles chat.submit from the form",
          %{conn: conn} do
       {:ok, lv, _html} =
         live_isolated(conn, WrapperLive,
           session: %{"scope" => lawyer_scope(), "test_pid" => self()}
         )
 
-      # The form no longer carries `phx-submit` — the colocated `.ChatInput`
-      # hook is the only path that fires `chat.submit`. We simulate the hook
-      # by pushing the event directly through the form element (which is the
-      # node bearing `phx-hook`).
+      # Exercise the same server event bound by the form. The colocated hook
+      # only translates Enter into `requestSubmit()` in the browser.
       lv
       |> element("#chat-rail-form")
       |> render_hook("chat.submit", %{"message" => "hi agent"})
@@ -1019,7 +1030,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       assert_receive {:captured, "chat.thread.rename", %{"title" => "Deal setup"}}
     end
 
-    test "case 5b — mobile layout: send button has a stable id, form delegates click → chat.submit",
+    test "case 5b — mobile layout submits through the native LiveView form",
          %{conn: conn} do
       # Item 6 regression — owner report: "send btn in mobile simply
       # doesn't work in chat-rail." Root cause: the colocated hook bound
@@ -1051,40 +1062,31 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ ~s(id="chat-rail-send")
       assert html =~ ~s(data-role="chat-send")
 
-      # The form is wired to the colocated `.ChatInput` hook (LV 1.1
-      # expands `.ChatInput` to the fully-qualified module path at
-      # compile time). There is no `phx-submit` — the hook is the
-      # single source of truth for sending so we never double-fire on
-      # mobile when the user taps the send button while the textarea is
-      # focused.
+      # LiveView owns submission. The colocated hook only translates Enter
+      # and applies the browser-only textarea height effect.
       assert html =~ ~s(id="chat-rail-form")
       assert html =~ ~s(phx-hook="EcritsWeb.Live.Studio.Components.ChatRail.ChatInput")
-      refute html =~ ~s(phx-submit="chat.submit")
+      assert html =~ ~s(phx-submit="chat.submit")
 
       # The textarea has the data-role that the hook uses to delegate
       # keydown/input events from the form.
       assert html =~ ~s(data-role="chat-textarea")
       assert html =~ ~s(name="message")
 
-      # The send button MUST remain type=button (preserves mobile
-      # keyboard focus — see module @moduledoc).
+      # The send button uses the native form contract.
       assert Regex.match?(
-               ~r/<button[^>]*id="chat-rail-send"[^>]*type="button"|<button[^>]*type="button"[^>]*id="chat-rail-send"/s,
+               ~r/<button[^>]*id="chat-rail-send"[^>]*type="submit"|<button[^>]*type="submit"[^>]*id="chat-rail-send"/s,
                html
              )
 
-      # Simulate the hook firing `chat.submit` — this is the same event
-      # the delegated click handler pushes — so asserting the form-level
-      # wire is intact pins the contract that the rest of the system
-      # (DocumentLive.event_to_command) expects.
       lv
-      |> element("#chat-rail-form")
-      |> render_hook("chat.submit", %{"message" => "from mobile"})
+      |> form("#chat-rail-form", %{"message" => "from mobile"})
+      |> render_submit()
 
       assert_receive {:captured, "chat.submit", %{"message" => "from mobile"}}
     end
 
-    test "mobile send hook sends on pointerdown without relying on form submit or click",
+    test "mobile send hook contains no client-owned submission controller state",
          %{conn: conn} do
       {:ok, _lv, html} =
         live_isolated(conn, WrapperLive,
@@ -1100,15 +1102,11 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
           Path.expand("../../../../lib/ecrits_web/live/studio/components/chat_rail.ex", __DIR__)
         )
 
-      [_, pointerdown_block] =
-        Regex.run(
-          ~r/this\.onFormPointerDown = \(e\) => \{(?<body>.*?)\n            \}\n\n            this\.onFormClick/s,
-          source
-        )
-
-      assert pointerdown_block =~ "this.send(e)"
-
-      refute html =~ ~s(phx-submit="chat.submit")
+      refute source =~ "this.onFormPointerDown ="
+      refute source =~ "this._sendButtonPressSent ="
+      refute source =~ "handleEvent(event)"
+      assert source =~ "event.currentTarget.requestSubmit()"
+      assert html =~ ~s(phx-submit="chat.submit")
     end
 
     test "case 7 — GrillRail mounts when grill_active? is true", %{conn: conn} do
@@ -1126,7 +1124,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ ~s(data-component="grill-rail")
     end
 
-    test "non-tool operation block expand uses client-side JS toggle on the details panel",
+    test "non-tool operation block uses a native disclosure",
          %{conn: conn} do
       {:ok, lv, _html} =
         live_isolated(conn, WrapperLive, session: %{"scope" => lawyer_scope()})
@@ -1154,31 +1152,18 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ ~s(id="operation-block-op-toggle-1")
       assert html =~ ~s(id="operation-block-op-toggle-1-toggle")
 
-      # Details panel is always rendered, with the `hidden` attribute so
-      # the JS toggle on the button can flip it client-side without
-      # needing a server roundtrip (the row is inside a phx-update="stream"
-      # container, so changing an outer assign would not re-render it).
       details =
         fragment
         |> LazyHTML.query("#operation-block-op-toggle-1-details")
 
-      [details_hidden] = LazyHTML.attribute(details, "hidden")
-      assert details_hidden == "" or details_hidden == "hidden"
+      assert LazyHTML.attribute(details, "hidden") == []
       assert html =~ "complete"
 
-      # The toggle button carries a JS-encoded phx-click — no server event.
-      [phx_click] =
-        fragment
-        |> LazyHTML.query("#operation-block-op-toggle-1-toggle")
-        |> LazyHTML.attribute("phx-click")
-
-      assert phx_click =~ "toggle_attr"
-      assert phx_click =~ ~s(hidden)
-      assert phx_click =~ "#operation-block-op-toggle-1-details"
-      assert phx_click =~ "aria-expanded"
+      assert LazyHTML.query(fragment, "#operation-block-op-toggle-1-toggle")
+             |> LazyHTML.attribute("phx-click") == []
     end
 
-    test "tool call trace uses the whole message article as a client-side JS toggle target", %{
+    test "tool call trace uses a native disclosure", %{
       conn: conn
     } do
       {:ok, lv, _html} =
@@ -1205,25 +1190,12 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       refute has_element?(lv, "#chat-msg-tool-hover-msg[class*='rounded']")
       refute has_element?(lv, "#chat-msg-tool-hover-msg[class*='hover:bg']")
 
-      # Article carries a JS-encoded phx-click — no server roundtrip.
-      [article_phx_click] =
-        fragment
-        |> LazyHTML.query("#chat-msg-tool-hover-msg")
-        |> LazyHTML.attribute("phx-click")
+      assert LazyHTML.query(fragment, "#chat-msg-tool-hover-msg")
+             |> LazyHTML.attribute("phx-click") == []
 
-      assert article_phx_click =~ "toggle_attr"
-      assert article_phx_click =~ ~s(tool-trace-tool-hover-1-details)
-      assert article_phx_click =~ "aria-expanded"
+      assert has_element?(lv, "details > summary#tool-trace-tool-hover-1")
 
-      assert has_element?(lv, "#chat-msg-tool-hover-msg[aria-expanded='false']")
-
-      assert has_element?(
-               lv,
-               "#chat-msg-tool-hover-msg[aria-controls='tool-trace-tool-hover-1-details']"
-             )
-
-      # The chevron and the 접기 sub-elements never carry their own
-      # phx-click — they bubble cleanly to the article handler.
+      # The chevron and collapse label are presentational children of the summary.
       assert has_element?(
                lv,
                "#tool-trace-tool-hover-1-expand[data-role='tool-trace-expand']:not([phx-click])"
@@ -1236,14 +1208,11 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
                "#tool-trace-tool-hover-1-expand .hero-chevron-down"
              )
 
-      # Details panel is always rendered + `hidden` so the JS toggle can
-      # flip it on the client. Inspect the attribute directly.
       details =
         fragment
         |> LazyHTML.query("#tool-trace-tool-hover-1-details")
 
-      [details_hidden] = LazyHTML.attribute(details, "hidden")
-      assert details_hidden == "" or details_hidden == "hidden"
+      assert LazyHTML.attribute(details, "hidden") == []
       assert html =~ ~s(data-role="tool-trace-details")
       assert html =~ "status"
       assert html =~ "doc.get"
@@ -1289,13 +1258,8 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
 
       assert html =~ ~s(id="chat-msg-tool-failed-msg")
 
-      [article_phx_click] =
-        fragment
-        |> LazyHTML.query("#chat-msg-tool-failed-msg")
-        |> LazyHTML.attribute("phx-click")
-
-      assert article_phx_click =~ "toggle_attr"
-      assert article_phx_click =~ ~s(tool-trace-tool-failed-1-details)
+      assert LazyHTML.query(fragment, "#chat-msg-tool-failed-msg")
+             |> LazyHTML.attribute("phx-click") == []
 
       assert has_element?(lv, "#tool-trace-tool-failed-1[data-status='failed']")
 
@@ -1304,29 +1268,17 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
                "#tool-trace-tool-failed-1-expand[data-role='tool-trace-expand'][data-visible='true']"
              )
 
-      # Details panel is rendered + hidden so the JS toggle can flip it.
       details =
         fragment
         |> LazyHTML.query("#tool-trace-tool-failed-1-details")
 
-      [details_hidden] = LazyHTML.attribute(details, "hidden")
-      assert details_hidden == "" or details_hidden == "hidden"
+      assert LazyHTML.attribute(details, "hidden") == []
       assert html =~ "ecrits-doc returned 424 Failed Dependency"
       assert html =~ "doc.get"
     end
 
-    test "freshly stream_inserted tool_call article toggles via client-side JS (no server roundtrip)",
+    test "freshly stream_inserted tool_call article contains a native disclosure",
          %{conn: conn} do
-      # Regression: tool_call rows inserted mid-conversation by the parent
-      # LV via `stream_insert(:chat_messages, ...)` would refuse to expand
-      # on the first click — the user had to reload the page first. Root
-      # cause was that `phx-update="stream"` items don't re-render when
-      # outer assigns change, so server-side expand state (`MapSet` on
-      # the LiveComponent) never reached the DOM after insertion. Fix
-      # moves the toggle to a `Phoenix.LiveView.JS` command on the
-      # article that flips `hidden` on the details panel client-side.
-      # This test pins the wiring + asserts the details panel is always
-      # rendered and starts hidden.
       {:ok, lv, _html} =
         live_isolated(conn, WrapperLive, session: %{"scope" => lawyer_scope()})
 
@@ -1349,38 +1301,23 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       html = render(lv)
       fragment = LazyHTML.from_fragment(html)
 
-      [article_phx_click] =
-        fragment
-        |> LazyHTML.query("#chat-msg-tool-fresh-msg")
-        |> LazyHTML.attribute("phx-click")
+      assert has_element?(lv, "details > summary#tool-trace-tool-fresh-1")
 
-      assert article_phx_click =~ "toggle_attr"
-      assert article_phx_click =~ ~s(tool-trace-tool-fresh-1-details)
-      assert article_phx_click =~ "aria-expanded"
-
-      # No phx-target needed — the click never reaches the server.
-      assert LazyHTML.query(fragment, "#chat-msg-tool-fresh-msg")
-             |> LazyHTML.attribute("phx-target") == []
-
-      # Chevron must not carry phx-click — otherwise its click bubbles up
-      # to the article and the JS toggle would fire twice (no-op).
+      # The chevron is presentational and carries no LiveView event.
       assert has_element?(
                lv,
                "#tool-trace-tool-fresh-1-expand[data-role='tool-trace-expand']:not([phx-click])"
              )
 
-      # Details panel rendered + hidden — the JS toggle flips the
-      # `hidden` attribute on the client.
       details =
         fragment
         |> LazyHTML.query("#tool-trace-tool-fresh-1-details")
 
-      [details_hidden] = LazyHTML.attribute(details, "hidden")
-      assert details_hidden == "" or details_hidden == "hidden"
+      assert LazyHTML.attribute(details, "hidden") == []
       assert html =~ "delivery"
     end
 
-    test "reasoning row renders through operation_block (same data-roles as tool_call) with JS toggle",
+    test "reasoning row renders through operation_block with a native disclosure",
          %{conn: conn} do
       {:ok, lv, _html} =
         live_isolated(conn, WrapperLive, session: %{"scope" => lawyer_scope()})
@@ -1407,17 +1344,7 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       html = render(lv)
       fragment = LazyHTML.from_fragment(html)
 
-      # Same article-level JS toggle as tool_call — pure client-side.
-      [article_phx_click] =
-        fragment
-        |> LazyHTML.query("#chat-msg-reasoning-run-1")
-        |> LazyHTML.attribute("phx-click")
-
-      assert article_phx_click =~ "toggle_attr"
-      assert article_phx_click =~ ~s(tool-trace-reasoning-run-1-details)
-
-      # No standalone `<details>` element — reasoning shares operation_block.
-      refute html =~ ~s(<details data-role="agent-reasoning")
+      assert has_element?(lv, "details > summary#tool-trace-reasoning-run-1")
 
       # Streaming JS hook targets these data-roles (kept across the refactor
       # so per-delta TextNode appends don't break).
@@ -1427,25 +1354,22 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
       assert html =~ "Thinking:"
       assert html =~ "Reviewing the title clause"
 
-      # Details panel is rendered + hidden — the JS toggle flips `hidden`
-      # client-side on the same DOM element.
       details =
         fragment
         |> LazyHTML.query("#tool-trace-reasoning-run-1-details")
 
-      [details_hidden] = LazyHTML.attribute(details, "hidden")
-      assert details_hidden == "" or details_hidden == "hidden"
+      assert LazyHTML.attribute(details, "hidden") == []
       assert html =~ ~s(data-role="agent-reasoning-details-text")
       assert html =~ "Then check the effective date."
     end
 
-    test "transient reasoning live append targets collapsed row and expanded details content" do
+    test "transient reasoning renders LiveView-owned collapsed and expanded targets" do
       agent_run_id = "72514285-c931-4db4-abcf-e1d1c118d552"
       operation_id = "reasoning-#{agent_run_id}"
       message_dom_id = "chat-msg-reasoning-#{agent_run_id}"
 
       html =
-        render_component(ChatRail,
+        render_chat_rail(
           id: "chat-rail",
           studio_state: %State{default_state() | agent_run_id: agent_run_id},
           streams: %{
@@ -1506,17 +1430,8 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRailTest do
           Path.expand("../../../../lib/ecrits_web/live/studio/components/chat_rail.ex", __DIR__)
         )
 
-      [_, handler] =
-        Regex.run(
-          ~r/this\.onReasoningAppend = \(e\) => \{(?<body>.*?)\n            \}\n            window\.addEventListener\("phx:agent_reasoning_append"/s,
-          source
-        )
-
-      assert handler =~ ~s([data-role="agent-reasoning-text"][data-message-id="${id}"])
-      assert handler =~ ~s([data-role="agent-reasoning-details-content"][data-message-id="${id}"])
-      assert handler =~ ~s([data-role="agent-reasoning-details-text"])
-      assert handler =~ ~S|closest('[data-role="chat-message"]')|
-      assert handler =~ ~S|removeAttribute("hidden")|
+      refute source =~ "this.onReasoningAppend ="
+      refute source =~ ~s(window.addEventListener("phx:agent_reasoning_append")
     end
   end
 end

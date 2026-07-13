@@ -9,7 +9,7 @@ defmodule EcritsWeb.Markdown do
 
     * `to_preview_html/1` — Observex composite render (GFM + `$...$` /
       `$$...$$` math + fenced `tikz` blocks) for the markdown document
-      preview (`LocalMarkdownEditor`). Source raw HTML is still escaped by
+      preview (`MarkdownEditor`). Source raw HTML is still escaped by
       Observex; only its generated `<tex-island>` markup is live, and the
       `ObservexPreview` hook renders those islands client-side (MathJax /
       TikZJax from /observex/ assets).

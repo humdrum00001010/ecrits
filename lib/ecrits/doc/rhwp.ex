@@ -34,10 +34,11 @@ defmodule Ecrits.Doc.Rhwp do
     * `edit replace_text` -> `Ehwp.write(handle, {:replace_one, q, r})`
 
   `set/3` is the UNIVERSAL property setter: char-run formatting
-  (Bold/Italic/FontSize/TextColor/…) routes to the `apply_char_format` op
-  (the NIF rejects `set_properties kind:char`), while picture/shape/table/cell
-  (incl. cell `BackgroundColor`) and paragraph properties route to
-  `set_properties kind:<k>`.
+  (Bold/Italic/FontSize/TextColor/…) routes to the range-oriented
+  `apply_char_format` op, while picture/shape/table/cell (incl. cell
+  `BackgroundColor`) and paragraph properties route to
+  `set_properties kind:<k>`. The NIF also accepts `set_properties kind:char`
+  for IR-direct callers carrying `offset`/`length`.
   """
 
   @behaviour Ecrits.Doc
@@ -551,9 +552,8 @@ defmodule Ecrits.Doc.Rhwp do
   # element kind, so it must route to the right native op:
   #
   #   * char-run formatting (Bold/Italic/Underline/FontName/FontSize/TextColor/…)
-  #     goes through the `apply_char_format` op — the NIF's `set_properties`
-  #     REJECTS `kind:char` ("unknown set_properties kind: char"), so a char ref
-  #     (or `kind:"char"`) is dispatched to `apply_char_format` instead.
+  #     goes through the range-oriented `apply_char_format` op. The NIF also
+  #     accepts `set_properties kind:char` for lower-level IR callers.
   #   * picture/shape/table/cell/paragraph properties (incl. cell BackgroundColor,
   #     paragraph Alignment/LineSpacing) go through `set_properties kind:<k>`,
   #     which the NIF accepts.
@@ -1321,21 +1321,30 @@ defmodule Ecrits.Doc.Rhwp do
     ref = unnest_cell(ref)
 
     base =
-      Enum.reduce([:section, :paragraph, :offset, :control, :cell, :cell_para], %{}, fn k, acc ->
-        case Map.get(ref, k, Map.get(ref, Atom.to_string(k))) do
-          nil -> acc
-          v -> Map.put(acc, k, v)
+      Enum.reduce(
+        [:section, :paragraph, :offset, :length, :control, :cell, :cell_para],
+        %{},
+        fn k, acc ->
+          case Map.get(ref, k, Map.get(ref, Atom.to_string(k))) do
+            nil -> acc
+            v -> Map.put(acc, k, v)
+          end
         end
-      end)
+      )
 
     # The element enumerator also emits container/nested addressing keys
-    # (`subParagraph` for header/footer/footnote sub-paragraphs, `cellPath` for
-    # controls/cells nested inside cells or textboxes). Pass them through under
-    # their original keys so an edit/get can target the nested element when the
-    # NIF supports it; absent keys are simply omitted.
+    # (`subParagraph`/`subControl` for header/footer/footnote nested controls,
+    # `containerType` to distinguish footnote/endnote setters, `cellPath` for
+    # controls/cells nested inside cells or textboxes). Pass them through so an
+    # edit/get targets the nested element; absent keys are simply omitted.
     base
     |> put_if_present(:sub_paragraph, ref, "subParagraph")
+    |> put_if_present(:sub_control, ref, "subControl")
+    |> put_if_present(:container_type, ref, "containerType")
     |> put_if_present(:cell_path, ref, "cellPath")
+    |> put_if_present(:style_id, ref, "styleId")
+    |> put_if_present(:numbering_id, ref, "numberingId")
+    |> put_if_present(:bullet_id, ref, "bulletId")
   end
 
   defp flatten_ref(_ref), do: %{}
@@ -1435,6 +1444,15 @@ defmodule Ecrits.Doc.Rhwp do
 
   defp ref_kind(%{"type" => type}) when is_binary(type) and type != "", do: type
   defp ref_kind(%{type: type}) when is_binary(type) and type != "", do: type
+  defp ref_kind(%{"styleId" => _style_id}), do: "style_def"
+  defp ref_kind(%{styleId: _style_id}), do: "style_def"
+  defp ref_kind(%{style_id: _style_id}), do: "style_def"
+  defp ref_kind(%{"numberingId" => _numbering_id}), do: "numbering_def"
+  defp ref_kind(%{numberingId: _numbering_id}), do: "numbering_def"
+  defp ref_kind(%{numbering_id: _numbering_id}), do: "numbering_def"
+  defp ref_kind(%{"bulletId" => _bullet_id}), do: "bullet_def"
+  defp ref_kind(%{bulletId: _bullet_id}), do: "bullet_def"
+  defp ref_kind(%{bullet_id: _bullet_id}), do: "bullet_def"
   defp ref_kind(%{"cell" => _cell}), do: "cell"
   defp ref_kind(%{cell: _cell}), do: "cell"
   defp ref_kind(_ref), do: "char"

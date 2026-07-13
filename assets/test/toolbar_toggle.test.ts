@@ -1,5 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { importOfficeWasmInternals } from "./support/colocated_hook.ts"
+import { loadHwpColocatedHook } from "./support/hwp_colocated.ts"
 
 const documentStub: any = {
   body: { dataset: {} },
@@ -25,8 +27,10 @@ const documentStub: any = {
 ;(globalThis as any).document = (globalThis as any).document || documentStub
 ;(globalThis as any).window = (globalThis as any).window || {}
 
-const { WasmOfficeEditor } = await import("../js/wasm_office_editor.js")
-const { WasmHwpEditor } = await import("../js/wasm_hwp_editor.ts")
+const { WasmOfficeEditor } = await importOfficeWasmInternals()
+const hwp = await loadHwpColocatedHook()
+const { WasmHwpEditor } = hwp
+const picker = hwp
 
 describe("WasmOfficeEditor toolbar toggle state", () => {
   it("routes toolbar format/align commands through native UNO dispatch", () => {
@@ -152,7 +156,7 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
       editor.emitToolbarState()
 
       assert.equal(events.length, 1)
-      assert.equal(events[0].type, "ecrits:local-editor-state")
+      assert.equal(events[0].type, "ecrits:editor-state")
       assert.deepEqual(events[0].detail, {
         document_id: "doc-7",
         bold: true,
@@ -160,7 +164,58 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
         underline: false, // tri-state -1 (no update yet) maps to unlit
         strikethrough: false,
         alignment: "center",
+        font_size_pt: null, // old wasm: no fontSizePt key → toolbar no-op
       })
+    } finally {
+      doc.dispatchEvent = originalDispatch
+    }
+  })
+
+  it("mirrors the .uno:FontHeight feed into font_size_pt", () => {
+    const events: any[] = []
+    const doc = (globalThis as any).document
+    const originalDispatch = doc.dispatchEvent
+    doc.dispatchEvent = (event: any) => {
+      events.push(event)
+      return true
+    }
+
+    try {
+      const editor = {
+        ...WasmOfficeEditor,
+        officeHookAlive: true,
+        api: {},
+        documentId: "doc-7",
+        callApi: (name: string) =>
+          name === "getInteractionState"
+            ? JSON.stringify({
+                seq: 9,
+                format: {
+                  bold: 0, italic: 0, underline: 0, strikeout: 0, align: null,
+                  fontSizePt: 10.5, fontName: "Liberation Serif",
+                },
+              })
+            : null,
+      } as any
+
+      editor.emitToolbarState()
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].detail.font_size_pt, 10.5)
+
+      // Engine "unknown" (null) and garbage values stay null for the toolbar.
+      for (const fontSizePt of [null, -1, 0, "abc"]) {
+        events.length = 0
+        editor.callApi = (name: string) =>
+          name === "getInteractionState"
+            ? JSON.stringify({
+                seq: 10,
+                format: { bold: 0, italic: 0, underline: 0, strikeout: 0, align: null, fontSizePt },
+              })
+            : null
+        editor.emitToolbarState()
+        assert.equal(events[0].detail.font_size_pt, null, `fontSizePt=${fontSizePt} → null`)
+      }
     } finally {
       doc.dispatchEvent = originalDispatch
     }
@@ -278,7 +333,7 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     const editor = {
       ...WasmOfficeEditor,
       scale: 1,
-      elementPickerEnabled: true,
+      pickerEnabled: () => true,
       pickerHover: { rects: [{ pageIndex: 0, x: 10, y: 20, width: 30, height: 40 }] },
       currentDocumentPicks: () => [],
       caretOverlay: () => overlay,
@@ -1684,7 +1739,6 @@ describe("WasmHwpEditor image move", () => {
   })
 
   it("plain image clicks select locally without adding chat composer picks", () => {
-    const picker = (globalThis as any).window.EcritsDocumentElementPicker
     picker.clearPicks()
     const calls: Array<{ name: string; args?: unknown[] }> = []
     const editor = {
@@ -1701,22 +1755,21 @@ describe("WasmHwpEditor image move", () => {
 
     editor.endImageDrag()
 
-    assert.deepEqual(picker.picks, [])
+    assert.deepEqual(picker.pickedElements(), [])
     assert.equal(editor.localImagePick, imagePick)
     assert.ok(calls.some(call => call.name === "paintPickedHighlights"))
   })
 
-  it("uses the global picker state when deciding whether an image click goes to chat", () => {
-    const picker = (globalThis as any).window.EcritsDocumentElementPicker
+  it("uses the server-transmitted picker state when deciding whether an image click goes to chat", () => {
     picker.clearPicks()
-    picker.setEnabled(false)
     const calls: Array<{ name: string; args?: unknown[] }> = []
     const editor = {
       ...WasmHwpEditor,
-      elementPickerEnabled: true,
+      pickerEnabled: () => false,
       doc: {},
       format: "hwp",
-      el: { dataset: { documentPath: "/tmp/doc.hwp" } },
+      canvasState: { documentPath: "/tmp/doc.hwp" },
+      el: { dataset: {} },
       hitTestEvent: () => ({ hit: { x: 10, y: 20 }, pageIndex: 0 }),
       hwpPick: () => ({
         type: "image",
@@ -1736,8 +1789,8 @@ describe("WasmHwpEditor image move", () => {
 
     editor.onCanvasMouseDown(event)
 
-    assert.equal(editor.elementPickerEnabled, false)
-    assert.deepEqual(picker.picks, [])
+    assert.equal(editor.pickerEnabled(), false)
+    assert.deepEqual(picker.pickedElements(), [])
     assert.ok(calls.some(call => call.name === "beginImageDrag"))
     assert.ok(calls.some(call => call.name === "focus"))
     assert.equal(calls.some(call => call.name === "stopPropagation"), false)
@@ -1790,7 +1843,7 @@ describe("WasmHwpEditor image move", () => {
     const editor = {
       ...WasmHwpEditor,
       doc: {},
-      elementPickerEnabled: true,
+      pickerEnabled: () => true,
       imageDrag: null,
       dragSelect: null,
       pickerHover: null,
@@ -1846,13 +1899,12 @@ describe("WasmHwpEditor image move", () => {
   })
 
   it("does not add a null document-element pick when hit resolution fails", () => {
-    const picker = (globalThis as any).window.EcritsDocumentElementPicker
     picker.clearPicks()
-    picker.setEnabled(true)
     const calls: Array<{ name: string }> = []
     const editor = {
       ...WasmHwpEditor,
       doc: {},
+      pickerEnabled: () => true,
       sel: null,
       hitTestEvent: () => ({ hit: { sectionIndex: 0, paragraphIndex: 0, charOffset: 0, x: 1, y: 2 }, pageIndex: 0 }),
       hwpPickFromHit: () => null,
@@ -1865,21 +1917,20 @@ describe("WasmHwpEditor image move", () => {
 
     try {
       editor.onCanvasMouseDown(event)
-      assert.deepEqual(picker.picks, [])
+      assert.deepEqual(picker.pickedElements(), [])
       assert.ok(calls.some(call => call.name === "preventDefault"))
       assert.ok(calls.some(call => call.name === "stopPropagation"))
     } finally {
       picker.clearPicks()
-      picker.setEnabled(false)
     }
   })
 
   it("uses local image selection for document adornments without exposing it to current chat picks", () => {
-    const picker = (globalThis as any).window.EcritsDocumentElementPicker
     picker.clearPicks()
     const editor = {
       ...WasmHwpEditor,
-      el: { dataset: { documentPath: "/tmp/doc.hwp" } },
+      canvasState: { documentPath: "/tmp/doc.hwp" },
+      el: { dataset: {} },
       localImagePick: imagePick,
     } as any
 
@@ -1888,19 +1939,19 @@ describe("WasmHwpEditor image move", () => {
   })
 
   it("does not expose mirror preview image selections as current chat picks", () => {
-    const picker = (globalThis as any).window.EcritsDocumentElementPicker
     picker.clearPicks()
     const editor = {
       ...WasmHwpEditor,
       mirror: true,
-      el: { dataset: { documentPath: "/tmp/doc.hwp", editorMirror: "true" } },
+      canvasState: { documentPath: "/tmp/doc.hwp", editorMirror: true },
+      el: { dataset: {} },
       localImagePick: imagePick,
     } as any
     const documentAny = (globalThis as any).document
     const originalQuerySelectorAll = documentAny.querySelectorAll
     documentAny.querySelectorAll = (selector: string) =>
       selector === "[data-role='local-hwp-editor']"
-        ? [{ dataset: { editorMirror: "true" }, __wasmHwpEditor: editor }]
+        ? [{ dataset: { canvasState: JSON.stringify({ editorMirror: true }) }, __wasmHwpEditor: editor }]
         : []
 
     try {
@@ -1914,17 +1965,19 @@ describe("WasmHwpEditor image move", () => {
   })
 
   it("sends local image selection as an implicit agent pick", () => {
-    const picker = (globalThis as any).window.EcritsDocumentElementPicker
     picker.clearPicks()
     const editor = {
       ...WasmHwpEditor,
-      el: { dataset: { documentPath: "/tmp/doc.hwp" } },
+      canvasState: { documentPath: "/tmp/doc.hwp" },
+      el: { dataset: {} },
       localImagePick: imagePick,
     } as any
     const documentAny = (globalThis as any).document
     const originalQuerySelectorAll = documentAny.querySelectorAll
     documentAny.querySelectorAll = (selector: string) =>
-      selector === "[data-role='local-hwp-editor']" ? [{ __wasmHwpEditor: editor }] : []
+      selector === "[data-role='local-hwp-editor']"
+        ? [{ dataset: { canvasState: "{}" }, __wasmHwpEditor: editor }]
+        : []
 
     try {
       assert.deepEqual(editor.currentDocumentPicks(), [])

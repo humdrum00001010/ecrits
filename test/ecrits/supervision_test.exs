@@ -24,11 +24,11 @@ defmodule Ecrits.SupervisionTest do
              Ecrits.Doc.Pool,
              Ecrits.Fuse.OpenDocs,
              EcritsWeb.Endpoint,
-             Ecrits.Local.Document.Registry,
-             Ecrits.Local.Document.Supervisor,
-             Ecrits.Local.WorkspaceHandoff,
-             Ecrits.Local.AcpAgent.SessionRegistry,
-             Ecrits.Local.AcpAgent.SessionSupervisor,
+             Ecrits.Document.Registry,
+             Ecrits.Document.Supervisor,
+             Ecrits.WorkspaceHandoff,
+             Ecrits.AcpAgent.SessionRegistry,
+             Ecrits.AcpAgent.SessionSupervisor,
              Ecrits.Workspace.SessionRegistry,
              Ecrits.Workspace.SessionSupervisor
            ]

@@ -13,6 +13,7 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRailTest do
   import Phoenix.LiveViewTest
 
   alias Ecrits.Context
+  alias Ecrits.Studio.ChatRailState
   alias Ecrits.Studio.State
   alias EcritsWeb.Live.Studio.Components.GrillRail
 
@@ -56,15 +57,17 @@ defmodule EcritsWeb.Live.Studio.Components.GrillRailTest do
   end
 
   defp base_assigns(extra) when is_map(extra) do
-    Map.merge(
-      %{
-        id: "grill-rail",
-        grill_marks: [],
-        current_scope: lawyer_scope(),
-        studio_state: studio_state()
-      },
-      extra
-    )
+    attrs =
+      Map.merge(
+        %{
+          grill_marks: [],
+          current_scope: lawyer_scope(),
+          studio_state: studio_state()
+        },
+        extra
+      )
+
+    %{id: "grill-rail", state: ChatRailState.new(attrs)}
   end
 
   # ---- 1. Renders 3 ask-marks as 3 input panels ------------------------

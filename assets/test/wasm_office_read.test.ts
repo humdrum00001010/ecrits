@@ -1,7 +1,10 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { officeReadRefCandidates, readOfficeElements } from "../js/wasm_office_read.ts"
-import type { OfficeElement } from "../js/wasm_office_ops.ts"
+import { importOfficeWasmInternals } from "./support/colocated_hook.ts"
+
+const { officeReadRefCandidates, readOfficeElements } = await importOfficeWasmInternals()
+
+type OfficeElement = { ref: string; text: string; type: string; [key: string]: any }
 
 describe("readOfficeElements", () => {
   const slideElements: OfficeElement[] = [

@@ -51,6 +51,7 @@ defmodule Ecrits.Studio.State do
     field :recently_authored_agent, :map, default: %{}
   end
 
+  # [deprecated] dead code — no callers in lib or test; not referenced by any cast_embed/cast_assoc (dead-code audit 2026-07-13)
   @spec changeset(t(), T.attrs()) :: Ecto.Changeset.t()
   def changeset(state, attrs) do
     state

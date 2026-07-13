@@ -10,7 +10,7 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
 
   alias Ecrits.Doc.MCPServer
   alias Ecrits.Doc.Pool
-  alias Ecrits.Local.AcpAgent.Session, as: AgentLive
+  alias Ecrits.AcpAgent.Session, as: AgentLive
   alias Ecrits.Test.FakeEhwpRuntime
 
   setup do

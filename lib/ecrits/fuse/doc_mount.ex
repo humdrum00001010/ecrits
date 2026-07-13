@@ -12,10 +12,11 @@ defmodule Ecrits.Fuse.DocMount do
   (missing native backend, VFS backend error) must NEVER crash the caller. Both
   rescue/catch and log via `Logger`.
 
-  Truth about "is it mounted?" comes from the OS mount table, not `Exfuse.list/0`
-  (the Elixir side can lag / linger a stopping server). `Exfuse.umount/1` already
-  does a clean kernel unmount (`umount` then `diskutil unmount force`) and stops
-  the server normally, so `teardown/1` just trusts it.
+  Mount mechanics live in `exfuse`: per-point exclusive servers, dead-mount
+  healing, busy retry, serving verification with rollback, and idempotent
+  force-unmount. This module only decides WHEN to (re)mount — `Exfuse.serving?/1`
+  is the health gate (a mount left by a beam crash lingers in the kernel table
+  but EIOs fast, so `ensure/1` remounts it instead of reporting `:already`).
 
   Gated by `enabled?/0`: the `:doc_vfs` config flag (default ON) and a usable
   native backend. The backend is determined by the OS alone — macOS mounts
@@ -29,9 +30,6 @@ defmodule Ecrits.Fuse.DocMount do
 
   @fskit_extension_id "org.exfuse.fskit.extension"
   @fskit_settings_url "x-apple.systempreferences:com.apple.ExtensionsPreferences?extension-points"
-  @fskit_port_base 49_152
-  @fskit_port_count 16_384
-  @mount_retries 12
 
   @doc "The mount point for a workspace root: `<root>/.ecrits/mount` (root realpathed)."
   @spec mount_point(String.t()) :: String.t()
@@ -112,25 +110,7 @@ defmodule Ecrits.Fuse.DocMount do
 
   @doc "Whether the workspace's mount point is mounted and serving requests."
   @spec mounted?(String.t()) :: boolean()
-  def mounted?(root), do: mounted_and_live?(root)
-
-  # Mounted AND actually serving. A mount left by a prior crash/restart (port
-  # killed without a clean unmount) lingers in the mount table but returns I/O
-  # error FAST on access — so `ensure/1` must remount it, not report `:already`.
-  defp mounted_and_live?(root) do
-    point = mount_point(root)
-    in_mount_table?(point) and live?(point)
-  end
-
-  # External probe (no BEAM `:file_server`): a healthy mount `ls`-es fast (cheap
-  # ETS-backed readdir); a dead node returns non-zero (I/O error) fast.
-  defp live?(point) do
-    match?({_out, 0}, System.cmd("ls", [point], stderr_to_stdout: true))
-  rescue
-    _ -> false
-  catch
-    _, _ -> false
-  end
+  def mounted?(root), do: root |> mount_point() |> Exfuse.serving?()
 
   @doc """
   Idempotently mount the doc VFS for a workspace root.
@@ -147,7 +127,7 @@ defmodule Ecrits.Fuse.DocMount do
 
       cond do
         not status.enabled? -> :disabled
-        mounted_and_live?(root) -> {:ok, :already}
+        mounted?(root) -> {:ok, :already}
         true -> do_mount(root, status.backend)
       end
     end)
@@ -163,26 +143,14 @@ defmodule Ecrits.Fuse.DocMount do
 
   @doc """
   Unmount the workspace's doc VFS. Treats absent/unmounted as success. Never
-  raises. `Exfuse.umount/1` handles the kernel unmount + server stop.
+  raises. `Exfuse.unmount/1` handles the native detach; the workspace filesystem
+  runtime is stopped after its mount process is gone.
   """
   @spec teardown(String.t()) :: :ok | {:error, term()}
   def teardown(root) do
-    root = canonical_root(root)
     point = mount_point(root)
 
-    with_mount_lock(fn ->
-      _ = Exfuse.umount(point)
-
-      case wait_until_unmounted(point) do
-        :ok ->
-          :ok
-
-        :timeout ->
-          clean_leaf(point)
-          _ = wait_until_unmounted(point, 4)
-          :ok
-      end
-    end)
+    with_mount_lock(fn -> unmount_point(point) end)
   rescue
     error ->
       Logger.error("[DocMount] teardown crashed for #{inspect(root)}: #{inspect(error)}")
@@ -205,159 +173,58 @@ defmodule Ecrits.Fuse.DocMount do
   defp do_mount(root, backend) do
     root = canonical_root(root)
     point = mount_point(root)
-    # Clear any lingering/half-stopped server for this point (e.g. a concurrent
-    # mounter raced us) so we don't end up with two servers on one mount point.
-    _ = Exfuse.umount(point)
-    clean_dead_mount(point)
-    ensure_clean_dir(point)
+    # Clear any lingering/half-stopped server first; exfuse owns the rest of
+    # the mechanics (exclusivity, dead-mount healing, busy retry, and the
+    # `verify: :serving` gate that rolls back a mount that never serves).
+    _ = unmount_point(point)
 
-    mount_once(root, point, backend, @mount_retries, 0)
-  end
-
-  defp mount_once(root, point, backend, retries, attempt) do
-    case Exfuse.mount(point, Ecrits.Fuse.DocFs, %{root: root}, mount_opts(root, backend, attempt)) do
-      {:ok, _pid} ->
-        if mount_serving?(point) do
-          Logger.info("[DocMount] mounted doc VFS at #{point}")
-          {:ok, :mounted}
-        else
-          # Port started but the kernel mount() never reached the mount table in
-          # the settle window. Roll back so no dead, unservable mountpoint lingers.
-          rollback_failed_mount(point)
-
-          Logger.warning(
-            "[DocMount] mount did not reach the kernel table at #{point}; rolled back"
-          )
-
-          {:error, :mount_not_serving}
-        end
-
-      {:error, :eaddrinuse} when retries > 0 ->
-        rollback_failed_mount(point)
-        Process.sleep(100)
-        mount_once(root, point, backend, retries - 1, attempt + 1)
-
-      {:error, reason} when retries > 0 ->
-        if retryable_mount_error?(reason) do
-          rollback_failed_mount(point)
-          Process.sleep(300)
-          mount_once(root, point, backend, retries - 1, attempt)
-        else
-          rollback_failed_mount(point)
-          Logger.error("[DocMount] mount failed at #{point}: #{inspect(reason)}")
-          {:error, reason}
-        end
+    case Exfuse.start_fs(Ecrits.Fuse.DocFs, %{root: root}) do
+      {:ok, fs} ->
+        mount_fs(fs, point, backend)
 
       {:error, reason} ->
-        rollback_failed_mount(point)
-        Logger.error("[DocMount] mount failed at #{point}: #{inspect(reason)}")
-        {:error, reason}
-
-      other ->
-        rollback_failed_mount(point)
-        Logger.error("[DocMount] unexpected mount result at #{point}: #{inspect(other)}")
-        {:error, other}
+        mount_error(point, reason)
     end
   end
 
-  defp mount_opts(root, :fskit, attempt) do
-    [backend: :fskit, wire_port: fskit_wire_port(root, attempt)]
-  end
+  defp mount_fs(fs, point, backend) do
+    case Exfuse.mount(fs, point, backend: backend, verify: :serving) do
+      {:ok, _mount} ->
+        Logger.info("[DocMount] mounted doc VFS at #{point}")
+        {:ok, :mounted}
 
-  defp mount_opts(_root, backend, _attempt), do: [backend: backend]
+      {:error, {:already_mounted, _pid}} ->
+        Exfuse.stop_fs(fs)
+        {:ok, :already}
 
-  @doc false
-  @spec fskit_wire_port(String.t(), non_neg_integer()) :: :inet.port_number()
-  def fskit_wire_port(root, attempt \\ 0) when is_binary(root) and is_integer(attempt) do
-    offset = root |> canonical_root() |> :erlang.phash2(@fskit_port_count)
-    @fskit_port_base + rem(offset + max(attempt, 0), @fskit_port_count)
-  end
-
-  @doc false
-  @spec retryable_mount_error?(term()) :: boolean()
-  def retryable_mount_error?({:fskit_mount_failed, _status, out}) when is_binary(out) do
-    String.contains?(out, "Resource busy")
-  end
-
-  def retryable_mount_error?(_reason), do: false
-
-  # Authoritative "is this point mounted?" — the OS mount table. macOS resolves
-  # /tmp -> /private/tmp, so match the realpath too.
-  defp in_mount_table?(point) do
-    targets = mount_path_candidates(point)
-
-    case System.cmd("mount", [], stderr_to_stdout: true) do
-      {out, 0} -> Enum.any?(targets, &String.contains?(out, " on " <> &1 <> " "))
-      _ -> false
-    end
-  rescue
-    _ -> false
-  catch
-    _, _ -> false
-  end
-
-  # A fresh mount can take a moment to settle (longer right after a teardown), so
-  # poll briefly before declaring it un-served.
-  defp mount_serving?(point), do: mount_serving?(point, 8)
-  defp mount_serving?(_point, 0), do: false
-
-  defp mount_serving?(point, tries) do
-    if mounted_point_live?(point) do
-      true
-    else
-      Process.sleep(250)
-      mount_serving?(point, tries - 1)
+      {:error, reason} ->
+        Exfuse.stop_fs(fs)
+        mount_error(point, reason)
     end
   end
 
-  defp mounted_point_live?(point), do: in_mount_table?(point) and live?(point)
-
-  defp wait_until_unmounted(point, tries \\ 10)
-  defp wait_until_unmounted(_point, 0), do: :timeout
-
-  defp wait_until_unmounted(point, tries) do
-    if in_mount_table?(point) do
-      Process.sleep(100)
-      wait_until_unmounted(point, tries - 1)
-    else
-      :ok
-    end
+  defp mount_error(point, reason) do
+    # Exfuse rolled the mount back; just don't leave an empty `.ecrits`
+    # skeleton behind (rmdir refuses a non-empty parent, so a real workspace
+    # store is never touched).
+    clean_empty_parent(point)
+    Logger.error("[DocMount] mount failed at #{point}: #{inspect(reason)}")
+    {:error, reason}
   end
 
-  defp clean_dead_mount(point) do
-    if in_mount_table?(point) and not live?(point), do: clean_leaf(point)
-    :ok
-  end
-
-  # mkdir_p the mount LEAF, healing a dead/stale mount node a prior teardown may
-  # have left (mkdir over a dead VFS node raises File.Error :enotdir).
-  defp ensure_clean_dir(point) do
-    File.mkdir_p!(point)
-  rescue
-    File.Error ->
-      clean_leaf(point)
-      File.mkdir_p!(point)
-  end
-
-  # Force-unmount + drop the mount LEAF only. Defensive; never raises, never
-  # touches the parent dir (`.ecrits` is ecrits' own per-workspace store).
-  defp clean_leaf(point) do
-    Enum.each(mount_path_candidates(point), fn p ->
-      _ = System.cmd("umount", ["-f", p], stderr_to_stdout: true)
+  defp unmount_point(point) do
+    point
+    |> mounts_at()
+    |> Enum.each(fn {mount, %{fs: fs}} ->
+      :ok = Exfuse.unmount(mount)
+      Exfuse.stop_fs(fs)
     end)
 
-    _ = File.rmdir(point)
     :ok
-  rescue
-    _ -> :ok
-  catch
-    _, _ -> :ok
   end
 
-  defp rollback_failed_mount(point) do
-    _ = Exfuse.umount(point)
-    clean_leaf(point)
-    clean_empty_parent(point)
+  defp mounts_at(point) do
+    Enum.filter(Exfuse.list(), fn {_mount, status} -> status.mount_point == point end)
   end
 
   defp clean_empty_parent(point) do
@@ -369,21 +236,8 @@ defmodule Ecrits.Fuse.DocMount do
     _, _ -> :ok
   end
 
-  defp mount_path_candidates(point) do
-    [point, real_path(point), private_tmp_path(point)]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
-  end
-
   defp private_tmp_path("/tmp/" <> rest), do: "/private/tmp/" <> rest
   defp private_tmp_path(_point), do: nil
-
-  defp real_path(point) do
-    case System.cmd("realpath", [point], stderr_to_stdout: true) do
-      {p, 0} -> String.trim(p)
-      _ -> point
-    end
-  end
 
   defp config_enabled? do
     :ecrits
