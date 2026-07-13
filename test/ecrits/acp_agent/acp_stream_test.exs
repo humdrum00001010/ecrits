@@ -60,6 +60,50 @@ defmodule Ecrits.AcpAgent.AcpStreamTest do
 
       assert {:skip, _state} = AcpStream.map_session_update(in_progress, state)
     end
+
+    test "anonymous ACP bookkeeping does not fabricate a tool call" do
+      started = %{
+        "sessionUpdate" => "tool_call",
+        "toolCallId" => "call-anonymous-start",
+        "status" => "in_progress",
+        "rawInput" => %{}
+      }
+
+      assert {:skip, state} =
+               AcpStream.map_session_update(started, AcpStream.update_state())
+
+      assert state.tool_titles == %{}
+
+      updated = %{
+        "sessionUpdate" => "tool_call_update",
+        "toolCallId" => "call-anonymous-update",
+        "status" => "in_progress",
+        "rawInput" => %{}
+      }
+
+      assert {:skip, state} = AcpStream.map_session_update(updated, state)
+      assert state.tool_titles == %{}
+
+      completed = %{updated | "status" => "completed"}
+      assert {:skip, state} = AcpStream.map_session_update(completed, state)
+      assert state.tool_titles == %{}
+    end
+
+    test "ACP kind is not used as a synthetic tool name" do
+      update = %{
+        "sessionUpdate" => "tool_call",
+        "toolCallId" => "call-kind-only",
+        "kind" => "execute",
+        "status" => "in_progress",
+        "rawInput" => %{}
+      }
+
+      assert {:skip, state} =
+               AcpStream.map_session_update(update, AcpStream.update_state())
+
+      assert state.tool_titles == %{}
+      assert state.tool_kinds == %{"call-kind-only" => "execute"}
+    end
   end
 
   describe "map_session_update/2 ACP edits" do

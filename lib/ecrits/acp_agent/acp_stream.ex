@@ -527,19 +527,24 @@ defmodule Ecrits.AcpAgent.AcpStream do
 
     state =
       state
-      |> put_in([:tool_titles, tool_call_id], name)
       |> put_in([:tool_kinds, tool_call_id], kind)
+      |> maybe_put_tool_title(tool_call_id, name)
 
-    if kind == "edit" do
-      map_edit_update(update, tool_call_id, state)
-    else
-      {:event,
-       %{
-         type: :tool_call_started,
-         tool_call_id: tool_call_id,
-         name: name,
-         arguments: tool_arguments(update)
-       }, state}
+    cond do
+      kind == "edit" ->
+        map_edit_update(update, tool_call_id, state)
+
+      tool_name?(name) ->
+        {:event,
+         %{
+           type: :tool_call_started,
+           tool_call_id: tool_call_id,
+           name: name,
+           arguments: tool_arguments(update)
+         }, state}
+
+      true ->
+        {:skip, state}
     end
   end
 
@@ -553,7 +558,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
       map_edit_update(update, tool_call_id, state)
     else
       case Map.get(update, "status") do
-        "completed" ->
+        "completed" when is_binary(name) and name != "" ->
           {:event,
            %{
              type: :tool_call_completed,
@@ -562,7 +567,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
              result: tool_output(update)
            }, state}
 
-        "failed" ->
+        "failed" when is_binary(name) and name != "" ->
           {:event,
            %{
              type: :tool_call_failed,
@@ -571,26 +576,34 @@ defmodule Ecrits.AcpAgent.AcpStream do
              reason: tool_failure_reason(update)
            }, state}
 
-        _other ->
+        status when status not in ["completed", "failed"] ->
           # A non-terminal update for a call we have not seen is its START: the
           # Claude adapter's first report of a tool_use block is a
           # `tool_call_update` (pending/in_progress) with no prior `tool_call`.
           # Without this the call would only surface at completion — after the
           # UI already parked the reply bubble above it — and the terminal
           # update carries no toolName, so the row would fall back to "tool".
-          if Map.has_key?(state.tool_titles, tool_call_id) do
-            {:skip, state}
-          else
-            state = put_in(state.tool_titles[tool_call_id], name)
+          cond do
+            Map.has_key?(state.tool_titles, tool_call_id) ->
+              {:skip, state}
 
-            {:event,
-             %{
-               type: :tool_call_started,
-               tool_call_id: tool_call_id,
-               name: name,
-               arguments: tool_arguments(update)
-             }, state}
+            tool_name?(name) ->
+              state = put_in(state.tool_titles[tool_call_id], name)
+
+              {:event,
+               %{
+                 type: :tool_call_started,
+                 tool_call_id: tool_call_id,
+                 name: name,
+                 arguments: tool_arguments(update)
+               }, state}
+
+            true ->
+              {:skip, state}
           end
+
+        _terminal_without_identity ->
+          {:skip, state}
       end
     end
   end
@@ -678,7 +691,15 @@ defmodule Ecrits.AcpAgent.AcpStream do
   end
 
   defp tool_name(update) do
-    Map.get(update, "toolName") || Map.get(update, "title") || Map.get(update, "kind")
+    Map.get(update, "toolName") || Map.get(update, "title")
+  end
+
+  defp tool_name?(name), do: is_binary(name) and String.trim(name) != ""
+
+  defp maybe_put_tool_title(state, tool_call_id, name) do
+    if tool_name?(name),
+      do: put_in(state.tool_titles[tool_call_id], name),
+      else: state
   end
 
   defp tool_arguments(update) do

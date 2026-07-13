@@ -72,6 +72,39 @@ defmodule Ecrits.AcpAgent.SessionQueueTest do
     send(task2, :go)
   end
 
+  test "a display preview splits pending prose at its transcript position" do
+    {_id, pid} = start_blocking_session()
+
+    {:ok, %{id: turn_id, status: :running}} = Session.send_turn(pid, nil, "edit it")
+    assert_receive {:local_agent_adapter_waiting, task}, 2_000
+
+    send(pid, {:turn_event, turn_id, %{type: :text_delta, delta: "before preview"}})
+    _ = :sys.get_state(pid)
+
+    :ok =
+      Session.append_transcript_item(pid, %{
+        role: :edit_preview,
+        status: :sent,
+        turn_id: turn_id,
+        document_path: "template.hwpx"
+      })
+
+    send(pid, {:turn_event, turn_id, %{type: :text_delta, delta: "after preview"}})
+    _ = :sys.get_state(pid)
+    send(task, :go)
+
+    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+
+    assert [%{items: items}] = Session.transcript(pid)
+
+    assert [
+             %{role: :user},
+             %{role: :agent, body: "before preview", segment: 0},
+             %{role: :edit_preview},
+             %{role: :agent, body: "after previewok", segment: 1}
+           ] = items
+  end
+
   test "a queued follow-up drains as an addendum, not a standalone newcomer prompt" do
     {_id, pid} = start_blocking_session(%{extra_opts: [report_prompts: true, echo_opts: true]})
 

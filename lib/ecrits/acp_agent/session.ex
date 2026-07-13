@@ -1107,9 +1107,11 @@ defmodule Ecrits.AcpAgent.Session do
     end
   end
 
-  defp append_transcript_item_to_state(%{current: %{items: items} = current} = state, item)
-       when is_list(items) do
-    %{state | current: Map.put(current, :items, items ++ [item])}
+  defp append_transcript_item_to_state(%{current: current} = state, item)
+       when is_map(current) do
+    current = flush_pending_text_item(current)
+    items = Map.get(current, :items, []) ++ [item]
+    %{state | current: Map.put(current, :items, items)}
   end
 
   defp append_transcript_item_to_state(%{transcript: [latest | rest]} = state, item) do

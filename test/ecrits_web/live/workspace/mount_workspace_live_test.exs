@@ -3613,12 +3613,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     use_test_agent_adapter!(
       adapter_opts: [
         script: [
+          {:text_delta, "before edit"},
+          %{type: :anonymous_tool_call, id: "anonymous-before-edit"},
           %{
             type: :edit_delta,
             id: "acp-edit-1",
             path: Path.join(root, ".ecrits/mount/template.hwpx.jsonl"),
             delta: "@@ -1 +1 @@\n-old\n+new"
-          }
+          },
+          %{type: :anonymous_tool_call, id: "anonymous-after-edit"},
+          {:text_delta, "after edit"}
         ]
       ]
     )
@@ -3637,6 +3641,31 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert_preview_state(lv, %{"documentPath" => "template.hwpx", "deltaCount" => 1})
     refute has_element?(lv, "#local-agent-tool-acp-edit-1")
+    refute has_element?(lv, "#local-agent-tool-anonymous-before-edit")
+    refute has_element?(lv, "#local-agent-tool-anonymous-after-edit")
+
+    rows =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s(#local-agent-thread > [data-chat-role="chat-message"]))
+      |> Enum.map(fn node ->
+        {
+          node |> LazyHTML.attribute("data-message-role") |> List.first(),
+          node |> LazyHTML.attribute("id") |> List.first()
+        }
+      end)
+      |> Enum.reject(fn {role, _id} -> role == "thinking" end)
+
+    assert [
+             {"user", _user_id},
+             {"agent", before_id},
+             {"editor_preview", _preview_id},
+             {"agent", after_id}
+           ] = rows
+
+    assert before_id =~ "-0"
+    assert after_id =~ "-1"
 
     assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
     refute Enum.any?(items, &(Map.get(&1, :role) == :tool))

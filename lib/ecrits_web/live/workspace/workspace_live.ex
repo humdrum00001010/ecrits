@@ -1090,6 +1090,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
     socket =
       socket
+      |> split_local_agent_text_before_preview()
       |> maybe_route_vfs_doc_edit_preview(info, turn_id)
       |> resync_open_editor_after_vfs_edit(info)
 
@@ -5476,6 +5477,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
        )
        when is_binary(delta) do
     socket
+    |> split_local_agent_text_before_preview()
     |> ensure_inline_editor_preview(turn_id, Map.get(event, :path))
     |> inline_editor_preview_accumulate_delta(turn_id, delta, Map.get(event, :path))
   end
@@ -6015,6 +6017,16 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
       _empty ->
         socket
+    end
+  end
+
+  defp split_local_agent_text_before_preview(socket) do
+    if is_binary(socket.assigns[:local_agent_turn_id]) do
+      socket
+      |> close_local_agent_text_segment()
+      |> maybe_remove_empty_agent_placeholder()
+    else
+      socket
     end
   end
 

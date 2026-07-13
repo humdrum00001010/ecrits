@@ -173,6 +173,15 @@ defmodule EcritsWeb.FakeAcpAdapter do
     })
   end
 
+  defp to_session_update(%{type: :anonymous_tool_call} = event, session_id) do
+    session_update(session_id, %{
+      "sessionUpdate" => event[:session_update] || "tool_call_update",
+      "toolCallId" => event[:id],
+      "status" => event[:status] || "in_progress",
+      "rawInput" => %{}
+    })
+  end
+
   defp to_session_update(%{type: :tool_call_completed} = event, session_id) do
     session_update(session_id, %{
       "sessionUpdate" => "tool_call_update",
