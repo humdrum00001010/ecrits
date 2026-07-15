@@ -175,11 +175,13 @@ defmodule Ecrits.Fuse.DocMount do
   """
   @spec teardown(String.t()) :: :ok | {:error, term()}
   def teardown(root) do
+    root = canonical_root(root)
     point = mount_point(root)
 
     with_mount_lock(fn ->
       :ok = unmount_point(point)
-      remove_legacy_mount(canonical_root(root))
+      :ok = close_pooled_documents(root)
+      remove_legacy_mount(root)
     end)
   rescue
     error ->
@@ -270,6 +272,31 @@ defmodule Ecrits.Fuse.DocMount do
     _ -> :ok
   catch
     _, _ -> :ok
+  end
+
+  # Projection reads intentionally reuse the server-side document twin while a
+  # workspace is alive. A workspace teardown is the ownership boundary for
+  # those twins: keeping one after the native file is restored or replaced at
+  # the same path makes a later mount project the old in-memory document.
+  defp close_pooled_documents(root) do
+    Ecrits.Doc.Pool.list()
+    |> Enum.map(& &1.path)
+    |> Enum.filter(&path_within_root?(&1, root))
+    |> Enum.each(&Ecrits.Doc.Pool.close_by_path/1)
+
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp path_within_root?(path, root) do
+    relative = path |> canonical_file_path() |> Path.relative_to(root)
+    relative != "." and relative != ".." and not String.starts_with?(relative, "../")
+  end
+
+  defp canonical_file_path(path) do
+    path = Path.expand(path)
+    Path.join(canonical_root(Path.dirname(path)), Path.basename(path))
   end
 
   defp private_tmp_path("/tmp/" <> rest), do: "/private/tmp/" <> rest

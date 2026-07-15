@@ -1,7 +1,12 @@
 defmodule Ecrits.Fuse.DocMountTest do
   use ExUnit.Case, async: false
 
+  alias Ecrits.Doc.Pool
+  alias Ecrits.Doc.Projection
   alias Ecrits.Fuse.DocMount
+  alias Ecrits.Fuse.OpenDocs
+
+  @hwpx_fixture Path.expand("../../fixtures/hwpx/real_contract.hwpx", __DIR__)
 
   setup do
     prev_config = Application.get_env(:ecrits, :doc_vfs)
@@ -73,6 +78,41 @@ defmodule Ecrits.Fuse.DocMountTest do
         assert status.settings_url == DocMount.settings_url()
       end
     end
+  end
+
+  test "teardown invalidates a same-path projection after the native document is restored" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "ecrits-doc-mount-same-path-#{System.unique_integer([:positive])}"
+      )
+
+    source = Path.join(root, "doc.hwpx")
+    original = File.read!(@hwpx_fixture)
+    File.mkdir_p!(root)
+    File.write!(source, original)
+
+    on_exit(fn ->
+      OpenDocs.close(root, "doc.hwpx")
+      DocMount.teardown(root)
+      Pool.close_by_path(source)
+      File.rm_rf(root)
+    end)
+
+    assert {:ok, first_projection} = Projection.project_file(source)
+    edited_projection = String.replace(first_projection, "계약", "변조", global: false)
+    assert edited_projection != first_projection
+    assert {:ok, _result} = Projection.write_back(source, edited_projection)
+    assert File.read!(source) != original
+
+    OpenDocs.open(root, "doc.hwpx", source_path: source)
+    OpenDocs.close(root, "doc.hwpx")
+    File.write!(source, original)
+
+    assert :ok = DocMount.teardown(root)
+    assert {:ok, remounted_projection} = Projection.project_file(source)
+    assert remounted_projection == first_projection
+    refute remounted_projection =~ "변조"
   end
 
   defp fskit_extension_enabled_for_test? do
