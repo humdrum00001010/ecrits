@@ -57,6 +57,11 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
       ["strikethrough", ".uno:Strikeout"],
       ["bullets", ".uno:DefaultBullet"],
       ["numbering", ".uno:DefaultNumbering"],
+      ["indent-decrease", ".uno:DecrementIndent"],
+      ["indent-increase", ".uno:IncrementIndent"],
+      ["table-row-before", ".uno:InsertRowsBefore"],
+      ["table-column-after", ".uno:InsertColumnsAfter"],
+      ["table-merge", ".uno:MergeCells"],
       ["align-center", ".uno:CenterPara"],
       ["align-justify", ".uno:JustifyPara"],
     ] as const) {
@@ -98,6 +103,29 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
         JSON.stringify({ "FontHeight.Height": { type: "float", value: 13 } }),
       ],
       [
+        { command: "font-family-set", family: "Noto Sans" },
+        ".uno:CharFontName",
+        JSON.stringify({ "CharFontName.FamilyName": { type: "string", value: "Noto Sans" } }),
+      ],
+      [
+        { command: "line-spacing-set", spacing: 1.5 },
+        ".uno:SpacePara15",
+        "",
+      ],
+      [
+        { command: "named-style-set", style: "heading-2" },
+        ".uno:Heading2ParaStyle",
+        "",
+      ],
+      [
+        { command: "table-insert", rows: 3, cols: 4 },
+        ".uno:InsertTable",
+        JSON.stringify({
+          Columns: { type: "short", value: 4 },
+          Rows: { type: "short", value: 3 },
+        }),
+      ],
+      [
         { command: "text-color", color: "#e11d48" },
         ".uno:Color",
         JSON.stringify({ Color: { type: "long", value: 0xe11d48 } }),
@@ -122,6 +150,10 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     for (const detail of [
       { command: "font-size-set", size: 0 },
       { command: "font-size-set", size: "abc" },
+      { command: "font-family-set", family: "" },
+      { command: "line-spacing-set", spacing: 1.25 },
+      { command: "named-style-set", style: "not-a-style" },
+      { command: "table-insert", rows: 0, cols: 2 },
       { command: "text-color" },
       { command: "highlight", color: "not-a-color" },
     ]) {
@@ -172,6 +204,10 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
         numbering: false,
         alignment: "center",
         font_size_pt: null, // old wasm: no fontSizePt key → toolbar no-op
+        font_family: null,
+        line_spacing: null,
+        named_style: null,
+        table_context: false,
       })
     } finally {
       doc.dispatchEvent = originalDispatch
@@ -201,7 +237,9 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
                   bold: 0, italic: 0, underline: 0, strikeout: 0,
                   bullets: 0, numbering: 1, align: null,
                   fontSizePt: 10.5, fontName: "Liberation Serif",
+                  lineSpacing: 1.5, styleName: "Heading 1",
                 },
+                tableSelection: { rectangle: "A1:B2" },
               })
             : null,
       } as any
@@ -210,6 +248,10 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
 
       assert.equal(events.length, 1)
       assert.equal(events[0].detail.font_size_pt, 10.5)
+      assert.equal(events[0].detail.font_family, "Liberation Serif")
+      assert.equal(events[0].detail.line_spacing, 1.5)
+      assert.equal(events[0].detail.named_style, "Heading 1")
+      assert.equal(events[0].detail.table_context, true)
 
       // Engine "unknown" (null) and garbage values stay null for the toolbar.
       for (const fontSizePt of [null, -1, 0, "abc"]) {
@@ -1619,6 +1661,40 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     assert.ok(calls.some(call => call.name === "postKeyEvent" && call.args?.[2] === 1280))
     assert.equal(editor.imeProxy.value, "")
   })
+
+  it("pastes Office HTML through the native LOK clipboard path", () => {
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmOfficeEditor,
+      api: { pasteData: () => true },
+      caret: { page: 1, x: 10, y: 10, height: 12 },
+      hasApiMethod: (name: string) => name === "pasteData",
+      callApi: (name: string, ...args: unknown[]) => {
+        calls.push({ name, args })
+        return name === "pasteData" ? true : null
+      },
+      renderAfterInput: () => calls.push({ name: "renderAfterInput" }),
+      refreshCaret: () => calls.push({ name: "refreshCaret" }),
+      settleCaretAfterInput: () => calls.push({ name: "settleCaretAfterInput" }),
+      markViewerMutated: () => calls.push({ name: "markViewerMutated" }),
+      imeProxy: { value: "stale" },
+    } as any
+    const event = {
+      clipboardData: {
+        getData: (type: string) => type === "text/html" ? "<p><strong>Rich</strong></p>" : "Rich",
+      },
+      preventDefault: () => calls.push({ name: "preventDefault" }),
+    } as any
+
+    editor.handlePaste(event)
+
+    assert.deepEqual(calls.find(call => call.name === "pasteData")?.args, [
+      "text/html",
+      "<p><strong>Rich</strong></p>",
+    ])
+    assert.ok(calls.some(call => call.name === "markViewerMutated"))
+    assert.equal(editor.imeProxy.value, "")
+  })
 })
 
 describe("WasmHwpEditor clipboard editing", () => {
@@ -1673,6 +1749,41 @@ describe("WasmHwpEditor clipboard editing", () => {
 
     assert.ok(calls.some(call => call.name === "preventDefault"))
     assert.ok(calls.some(call => call.name === "insertPlainTextAtCaret" && call.args?.[0] === "A\nB"))
+  })
+
+  it("pastes HTML into HWP through the engine parser", () => {
+    const calls: Array<{ name: string; args?: unknown[] }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        pasteHtml: (...args: unknown[]) => {
+          calls.push({ name: "pasteHtml", args })
+          return JSON.stringify({ ok: true, paraIdx: 2, charOffset: 4 })
+        },
+      },
+      caret: { section: 0, paragraph: 1, offset: 3, cell: null, preferredX: 0 },
+      hasSelection: () => false,
+      pushHwpUndoCheckpoint: () => calls.push({ name: "checkpoint" }),
+      recordOp: (...args: unknown[]) => calls.push({ name: "recordOp", args }),
+      finishAgentEdit: () => calls.push({ name: "finishAgentEdit" }),
+      refreshCursorRect: () => calls.push({ name: "refreshCursorRect" }),
+      scheduleToolbarStateSync: () => calls.push({ name: "scheduleToolbarStateSync" }),
+    } as any
+    const event = {
+      clipboardData: {
+        getData: (type: string) => type === "text/html" ? "<p><b>Rich</b></p>" : "Rich",
+      },
+      preventDefault: () => calls.push({ name: "preventDefault" }),
+    } as any
+
+    editor.handlePaste(event)
+
+    assert.deepEqual(calls.find(call => call.name === "pasteHtml")?.args, [
+      0, 1, 3, "<p><b>Rich</b></p>",
+    ])
+    assert.equal(editor.caret.paragraph, 2)
+    assert.equal(editor.caret.offset, 4)
+    assert.ok(calls.some(call => call.name === "finishAgentEdit"))
   })
 })
 

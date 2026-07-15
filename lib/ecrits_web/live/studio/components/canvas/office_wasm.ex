@@ -3302,10 +3302,11 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
           emitToolbarState() {
             if (!this.api || !this.officeHookAlive) return null
             let format = null
+            let state = null
             let seq = null
             try {
               const raw = this.callApi("getInteractionState")
-              const state = typeof raw === "string" ? JSON.parse(raw || "{}") : (raw || {})
+              state = typeof raw === "string" ? JSON.parse(raw || "{}") : (raw || {})
               format = state.format || null
               seq = Number.isFinite(Number(state.seq)) ? Number(state.seq) : null
             } catch (_) {}
@@ -3329,7 +3330,13 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
                 // guard skips it (silent no-op, same as pre-feed behavior).
                 font_size_pt: Number.isFinite(Number(format.fontSizePt)) && Number(format.fontSizePt) > 0
                   ? Number(format.fontSizePt)
-                  : null
+                  : null,
+                font_family: format.fontName || null,
+                line_spacing: Number.isFinite(Number(format.lineSpacing)) && Number(format.lineSpacing) > 0
+                  ? Number(format.lineSpacing)
+                  : null,
+                named_style: format.styleName || null,
+                table_context: !!state.tableSelection || Number(state.editingCell) === 1
               }
             }))
             return seq
@@ -4372,10 +4379,31 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
           },
 
           handlePaste(event) {
+            const html = event.clipboardData && event.clipboardData.getData("text/html")
             const text = event.clipboardData && event.clipboardData.getData("text/plain")
-            if (!text) return
+            if (!html && !text) return
             event.preventDefault()
+            if (html && html.length <= 2e6 && this.insertRichClipboardAtCaret("text/html", html)) return
             this.insertPlainTextAtCaret(text)
+          },
+
+          insertRichClipboardAtCaret(mimeType, data) {
+            if (!this.hasApiMethod("pasteData")) return false
+            const previous = this.caret
+            try {
+              const pasted = this.callApi("pasteData", mimeType, data)
+              if (!pasted) return false
+              this.renderAfterInput()
+              this.refreshCaret()
+              this.settleCaretAfterInput(previous, true)
+              this.markViewerMutated()
+              return true
+            } catch (error) {
+              console.warn("[office-wasm] rich paste failed; falling back to plain text", error)
+              return false
+            } finally {
+              if (this.imeProxy) this.imeProxy.value = ""
+            }
           },
 
           currentTextSelection() {
@@ -4827,6 +4855,15 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             strikethrough: ".uno:Strikeout",
             bullets: ".uno:DefaultBullet",
             numbering: ".uno:DefaultNumbering",
+            "indent-decrease": ".uno:DecrementIndent",
+            "indent-increase": ".uno:IncrementIndent",
+            "table-row-before": ".uno:InsertRowsBefore",
+            "table-row-after": ".uno:InsertRowsAfter",
+            "table-row-delete": ".uno:DeleteRows",
+            "table-column-before": ".uno:InsertColumnsBefore",
+            "table-column-after": ".uno:InsertColumnsAfter",
+            "table-column-delete": ".uno:DeleteColumns",
+            "table-merge": ".uno:MergeCells",
             "align-left": ".uno:LeftPara",
             "align-center": ".uno:CenterPara",
             "align-right": ".uno:RightPara",
@@ -4845,6 +4882,54 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
                   args: JSON.stringify({ "FontHeight.Height": { type: "float", value: size } })
                 }
               }
+              case "font-family-set": {
+                const family = String(detail.family || "").trim()
+                if (!family) return null
+                return {
+                  uno: ".uno:CharFontName",
+                  args: JSON.stringify({ "CharFontName.FamilyName": { type: "string", value: family } })
+                }
+              }
+              case "line-spacing-set": {
+                const spacing = Number(detail.spacing)
+                const uno = spacing === 1 ? ".uno:SpacePara1" : spacing === 1.5 ? ".uno:SpacePara15" : spacing === 2 ? ".uno:SpacePara2" : null
+                return uno ? { uno, args: "" } : null
+              }
+              case "named-style-set": {
+                const commands = {
+                  body: ".uno:DefaultParaStyle",
+                  title: ".uno:TitleParaStyle",
+                  subtitle: ".uno:SubtitleParaStyle",
+                  "heading-1": ".uno:Heading1ParaStyle",
+                  "heading-2": ".uno:Heading2ParaStyle",
+                  "heading-3": ".uno:Heading3ParaStyle",
+                  quote: ".uno:QuoteParaStyle",
+                  preformatted: ".uno:PreformattedParaStyle"
+                }
+                const uno = commands[detail.style]
+                return uno ? { uno, args: "" } : null
+              }
+              case "table-insert": {
+                const rows = Number(detail.rows)
+                const cols = Number(detail.cols)
+                if (!Number.isInteger(rows) || !Number.isInteger(cols) || rows < 1 || cols < 1) return null
+                return {
+                  uno: ".uno:InsertTable",
+                  args: JSON.stringify({
+                    Columns: { type: "short", value: cols },
+                    Rows: { type: "short", value: rows }
+                  })
+                }
+              }
+              case "table-split":
+                return {
+                  uno: ".uno:SplitCell",
+                  args: JSON.stringify({
+                    Amount: { type: "long", value: 2 },
+                    Horizontal: { type: "boolean", value: false },
+                    Proportional: { type: "boolean", value: true }
+                  })
+                }
               case "text-color": {
                 const value = this.colorToLong(detail.color)
                 if (typeof value !== "number") return null

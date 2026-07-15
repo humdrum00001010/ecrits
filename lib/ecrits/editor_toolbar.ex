@@ -10,7 +10,13 @@ defmodule Ecrits.EditorToolbar do
   @primary_key false
   @toggle_commands ~w(bold italic underline strikethrough bullets numbering)
   @alignment_commands ~w(align-left align-center align-right align-justify)
-  @commands @toggle_commands ++ @alignment_commands
+  @simple_commands ~w(
+    indent-decrease indent-increase
+    table-row-before table-row-after table-row-delete
+    table-column-before table-column-after table-column-delete
+    table-merge table-split
+  )
+  @commands @toggle_commands ++ @alignment_commands ++ @simple_commands
   @alignments ~w(left center right justify)
   @max_image_base64_bytes 28_000_000
 
@@ -24,6 +30,10 @@ defmodule Ecrits.EditorToolbar do
     field :numbering, :boolean, default: false
     field :alignment, :string, default: "left"
     field :font_size_pt, :float
+    field :font_family, :string
+    field :line_spacing, :float, default: 1.0
+    field :named_style, :string
+    field :table_context, :boolean, default: false
     field :text_color, :string, default: "#e11d48"
     field :highlight_color, :string, default: "#fde047"
   end
@@ -44,12 +54,19 @@ defmodule Ecrits.EditorToolbar do
       :numbering,
       :alignment,
       :font_size_pt,
+      :font_family,
+      :line_spacing,
+      :named_style,
+      :table_context,
       :text_color,
       :highlight_color
     ])
     |> validate_length(:document_id, max: 500)
     |> validate_inclusion(:alignment, @alignments)
     |> validate_number(:font_size_pt, greater_than: 0, less_than_or_equal_to: 400)
+    |> validate_length(:font_family, max: 100)
+    |> validate_number(:line_spacing, greater_than: 0, less_than_or_equal_to: 5)
+    |> validate_length(:named_style, max: 200)
     |> validate_format(:text_color, ~r/\A#[0-9a-f]{3}([0-9a-f]{3})?\z/i)
     |> validate_format(:highlight_color, ~r/\A#[0-9a-f]{3}([0-9a-f]{3})?\z/i)
   end
@@ -58,7 +75,11 @@ defmodule Ecrits.EditorToolbar do
     {%{}, %{command: :string}}
     |> cast(%{command: command}, [:command])
     |> validate_required([:command])
-    |> validate_inclusion(:command, @commands ++ ~w(font-size-set text-color highlight image))
+    |> validate_inclusion(
+      :command,
+      @commands ++
+        ~w(font-size-set font-family-set line-spacing-set named-style-set table-insert text-color highlight image)
+    )
   end
 
   def font_size_changeset(attrs) do
@@ -66,6 +87,38 @@ defmodule Ecrits.EditorToolbar do
     |> cast(attrs, [:size])
     |> validate_required([:size])
     |> validate_number(:size, greater_than: 0, less_than_or_equal_to: 400)
+  end
+
+  def font_family_changeset(attrs) do
+    {%{}, %{family: :string}}
+    |> cast(attrs, [:family])
+    |> validate_required([:family])
+    |> validate_length(:family, min: 1, max: 100)
+  end
+
+  def line_spacing_changeset(attrs) do
+    {%{}, %{spacing: :float}}
+    |> cast(attrs, [:spacing])
+    |> validate_required([:spacing])
+    |> validate_inclusion(:spacing, [1.0, 1.5, 2.0])
+  end
+
+  def named_style_changeset(attrs) do
+    {%{}, %{style: :string}}
+    |> cast(attrs, [:style])
+    |> validate_required([:style])
+    |> validate_inclusion(
+      :style,
+      ~w(body title subtitle heading-1 heading-2 heading-3 quote preformatted)
+    )
+  end
+
+  def table_size_changeset(attrs) do
+    {%{}, %{rows: :integer, cols: :integer}}
+    |> cast(attrs, [:rows, :cols])
+    |> validate_required([:rows, :cols])
+    |> validate_number(:rows, greater_than: 0, less_than_or_equal_to: 10)
+    |> validate_number(:cols, greater_than: 0, less_than_or_equal_to: 10)
   end
 
   def color_changeset(attrs) do
@@ -127,6 +180,7 @@ defmodule Ecrits.EditorToolbar do
   defdelegate reset(toolbar), to: Transition
   defdelegate put_engine_state(toolbar, attrs, active_document_id), to: Transition
   defdelegate command(toolbar, command, attrs, document), to: Transition
+  defdelegate remember_command(toolbar, command, attrs), to: Transition
   defdelegate shortcut_command(attrs), to: Transition
 
   defp apply_attrs(toolbar, attrs) do

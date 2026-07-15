@@ -1471,12 +1471,61 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           },
           handlePaste(event) {
             if (!this.doc || !this.caret) return;
+            const html = event.clipboardData && event.clipboardData.getData("text/html");
             const text = event.clipboardData && event.clipboardData.getData("text/plain");
-            if (!text) return;
+            if (!html && !text) return;
             event.preventDefault();
             this.pushHwpUndoCheckpoint("paste");
             if (this.hasSelection()) this.deleteSelection();
+            if (html && html.length <= 2e6 && this.pasteRichHtmlAtCaret(html)) return;
             this.insertPlainTextAtCaret(text);
+          },
+          pasteRichHtmlAtCaret(html) {
+            const c = this.caret;
+            if (!c || !this.doc) return false;
+            try {
+              let raw;
+              if (c.cell && Array.isArray(c.cell.cellPath) && c.cell.cellPath.length > 1 && typeof this.doc.pasteHtmlInCellByPath === "function") {
+                raw = this.doc.pasteHtmlInCellByPath(
+                  c.section,
+                  c.cell.parentParaIndex,
+                  JSON.stringify(c.cell.cellPath),
+                  c.offset,
+                  html
+                );
+              } else if (c.cell && typeof this.doc.pasteHtmlInCell === "function") {
+                raw = this.doc.pasteHtmlInCell(
+                  c.section,
+                  c.cell.parentParaIndex,
+                  c.cell.controlIndex,
+                  c.cell.cellIndex,
+                  c.cell.cellParaIndex,
+                  c.offset,
+                  html
+                );
+              } else if (!c.cell && typeof this.doc.pasteHtml === "function") {
+                raw = this.doc.pasteHtml(c.section, c.paragraph, c.offset, html);
+              } else {
+                return false;
+              }
+              const result = typeof raw === "string" ? JSON.parse(raw || "{}") : raw || {};
+              if (result.ok === false) return false;
+              if (c.cell) {
+                c.cell.cellParaIndex = Number.isInteger(result.cellParaIdx) ? result.cellParaIdx : c.cell.cellParaIndex;
+              } else {
+                c.paragraph = Number.isInteger(result.paraIdx) ? result.paraIdx : c.paragraph;
+              }
+              c.offset = Number.isInteger(result.charOffset) ? result.charOffset : c.offset;
+              c.preferredX = -1;
+              this.recordOp("RichHtmlPasted", { section: c.section, bytes: html.length });
+              this.finishAgentEdit({});
+              this.refreshCursorRect();
+              this.scheduleToolbarStateSync();
+              return true;
+            } catch (error) {
+              console.warn("[wasm-hwp] rich paste failed; falling back to plain text", error);
+              return false;
+            }
           },
           insertPlainTextAtCaret(text) {
             const value = String(text || "").replace(/\r\n?/g, "\n");
@@ -1661,7 +1710,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           TextColor: ["textColor", "verbatim"],
           FontSize: ["fontSize", "fontSize"],
           fontSize: ["fontSize", "fontSize"],
-          FontFamily: ["fontFamily", "verbatim"]
+          FontFamily: ["fontFamily", "verbatim"],
+          FontId: ["fontId", "int"]
         };
         var castCharProp = (type, v) => {
           switch (type) {
@@ -1673,6 +1723,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               return v === "bold" || Number(v) >= 600;
             case "positive":
               return Number(v) > 0;
+            case "int":
+              return Math.round(Number(v));
             case "verbatim":
               return v;
             // fontSize is 1/100 pt (10pt = 1000); a point-scale value (<=200) means
@@ -4121,6 +4173,42 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                   this.hwpToolbarApplyProps({ FontSize: Number(detail.size) });
                 }
                 break;
+              case "font-family-set":
+                if (detail.family && typeof this.doc.findOrCreateFontId === "function") {
+                  const fontId = this.doc.findOrCreateFontId(detail.family);
+                  if (Number.isInteger(fontId) && fontId >= 0) {
+                    this.hwpToolbarApplyProps({ FontId: fontId });
+                  }
+                }
+                break;
+              case "line-spacing-set":
+                if (Number.isFinite(Number(detail.spacing))) {
+                  this.hwpToolbarApplyParaProps({
+                    LineSpacing: Math.round(Number(detail.spacing) * 100),
+                    LineSpacingType: "Percent"
+                  }, "toolbar-line-spacing");
+                }
+                break;
+              case "named-style-set":
+                this.hwpToolbarApplyNamedStyle(detail.style);
+                break;
+              case "indent-decrease":
+                this.hwpToolbarAdjustIndent(-1e3);
+                break;
+              case "indent-increase":
+                this.hwpToolbarAdjustIndent(1e3);
+                break;
+              case "table-insert":
+              case "table-row-before":
+              case "table-row-after":
+              case "table-row-delete":
+              case "table-column-before":
+              case "table-column-after":
+              case "table-column-delete":
+              case "table-merge":
+              case "table-split":
+                this.hwpToolbarTableCommand(detail);
+                break;
               case "text-color":
                 if (detail.color) this.hwpToolbarApplyProps({ TextColor: detail.color });
                 break;
@@ -4399,6 +4487,160 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             if (applied > 0) {
               this.finishAgentEdit({});
               this.scheduleToolbarStateSync();
+            }
+          },
+          hwpToolbarApplyParaProps(props, checkpoint = "toolbar-paragraph") {
+            const refs = this.hwpToolbarParaRefs();
+            if (!refs.length) return;
+            this.pushHwpUndoCheckpoint(checkpoint);
+            let applied = 0;
+            for (const ref of refs) {
+              const result = this.applySetOne(ref, { kind: "para", ...props });
+              if (result && result.error) console.warn("[wasm-hwp] toolbar paragraph failed", result.error);
+              else applied++;
+            }
+            if (applied > 0) {
+              this.finishAgentEdit({});
+              this.scheduleToolbarStateSync();
+            }
+          },
+          hwpToolbarAdjustIndent(delta) {
+            const refs = this.hwpToolbarParaRefs();
+            if (!refs.length) return;
+            this.pushHwpUndoCheckpoint("toolbar-indent");
+            let applied = 0;
+            for (const ref of refs) {
+              const current = Number(this.hwpToolbarParaProps(ref).marginLeft || 0);
+              const result = this.applySetOne(ref, {
+                kind: "para",
+                marginLeft: Math.max(0, Math.min(5e4, current + delta))
+              });
+              if (result && result.error) console.warn("[wasm-hwp] toolbar indent failed", result.error);
+              else applied++;
+            }
+            if (applied > 0) {
+              this.finishAgentEdit({});
+              this.scheduleToolbarStateSync();
+            }
+          },
+          hwpToolbarApplyNamedStyle(style) {
+            if (!style || typeof this.doc.getStyleList !== "function" || typeof this.doc.applyStyle !== "function") return;
+            let styles = [];
+            try {
+              const raw = this.doc.getStyleList();
+              styles = typeof raw === "string" ? JSON.parse(raw || "[]") : raw || [];
+            } catch (_) {
+              return;
+            }
+            const aliases = {
+              body: ["normal", "body text", "default", "바탕글", "본문"],
+              title: ["title", "제목"],
+              subtitle: ["subtitle", "부제"],
+              "heading-1": ["heading 1", "heading1", "개요 1", "제목 1"],
+              "heading-2": ["heading 2", "heading2", "개요 2", "제목 2"],
+              "heading-3": ["heading 3", "heading3", "개요 3", "제목 3"],
+              quote: ["quote", "quotation", "인용"],
+              preformatted: ["preformatted text", "preformatted", "code", "고정폭"]
+            };
+            const wanted = aliases[style] || [String(style)];
+            const normalize = value => String(value || "").trim().toLowerCase();
+            let match = styles.find(item => wanted.includes(normalize(item.englishName)) || wanted.includes(normalize(item.name)));
+            if (!match && style === "body") match = styles.find(item => Number(item.id) === 0) || styles[0];
+            const styleId = Number(match && match.id);
+            if (!Number.isInteger(styleId) || styleId < 0) return;
+            const refs = this.hwpToolbarParaRefs().filter(ref => !ref.cell);
+            if (!refs.length) return;
+            this.pushHwpUndoCheckpoint("toolbar-style");
+            let applied = 0;
+            for (const ref of refs) {
+              try {
+                const raw = this.doc.applyStyle(ref.section, ref.paragraph, styleId);
+                const result = typeof raw === "string" ? JSON.parse(raw || "{}") : raw || {};
+                if (result.error) console.warn("[wasm-hwp] toolbar style failed", result.error);
+                else applied++;
+              } catch (error) {
+                console.warn("[wasm-hwp] toolbar style failed", error);
+              }
+            }
+            if (applied > 0) {
+              this.finishAgentEdit({});
+              this.scheduleToolbarStateSync();
+            }
+          },
+          hwpToolbarTableTarget() {
+            const c = this.caret;
+            if (!c || !c.cell || this.isNestedCell(c.cell.cellPath)) return null;
+            const rc = this.cellGridPos(c.section, c.cell.parentParaIndex, c.cell.controlIndex, c.cell.cellIndex);
+            return rc ? {
+              section: c.section,
+              paragraph: c.cell.parentParaIndex,
+              control: c.cell.controlIndex,
+              ...rc
+            } : null;
+          },
+          hwpToolbarTableCommand(detail) {
+            if (detail.command === "table-insert") {
+              const ref = this.hwpToolbarCaretRef() || this.hwpToolbarViewportRef();
+              const rows = Number(detail.rows);
+              const cols = Number(detail.cols);
+              if (!ref || ref.cell || !Number.isInteger(rows) || !Number.isInteger(cols)) return;
+              this.pushHwpUndoCheckpoint("toolbar-table-insert");
+              try {
+                const raw = this.doc.createTable(ref.section, ref.paragraph, ref.offset || 0, rows, cols);
+                const result = typeof raw === "string" ? JSON.parse(raw || "{}") : raw || {};
+                if (result.error || result.ok === false) return;
+                this.recordOp("ToolbarInsertTable", { section: ref.section, paragraph: ref.paragraph, rows, cols });
+                this.finishAgentEdit({});
+              } catch (error) {
+                console.warn("[wasm-hwp] toolbar table insert failed", error);
+              }
+              return;
+            }
+            const target = this.hwpToolbarTableTarget();
+            if (!target) return;
+            const selection = this.cellSel();
+            this.pushHwpUndoCheckpoint("toolbar-table-edit");
+            try {
+              switch (detail.command) {
+                case "table-row-before":
+                  this.doc.insertTableRow(target.section, target.paragraph, target.control, target.row, false);
+                  break;
+                case "table-row-after":
+                  this.doc.insertTableRow(target.section, target.paragraph, target.control, target.row, true);
+                  break;
+                case "table-row-delete":
+                  this.doc.deleteTableRow(target.section, target.paragraph, target.control, target.row);
+                  break;
+                case "table-column-before":
+                  this.doc.insertTableColumn(target.section, target.paragraph, target.control, target.col, false);
+                  break;
+                case "table-column-after":
+                  this.doc.insertTableColumn(target.section, target.paragraph, target.control, target.col, true);
+                  break;
+                case "table-column-delete":
+                  this.doc.deleteTableColumn(target.section, target.paragraph, target.control, target.col);
+                  break;
+                case "table-merge": {
+                  if (!selection) return;
+                  const startRow = Math.min(selection.anchor.row, selection.focus.row);
+                  const startCol = Math.min(selection.anchor.col, selection.focus.col);
+                  const endRow = Math.max(selection.anchor.row, selection.focus.row);
+                  const endCol = Math.max(selection.anchor.col, selection.focus.col);
+                  this.doc.mergeTableCells(target.section, target.paragraph, target.control, startRow, startCol, endRow, endCol);
+                  break;
+                }
+                case "table-split":
+                  this.doc.splitTableCell(target.section, target.paragraph, target.control, target.row, target.col);
+                  break;
+                default:
+                  return;
+              }
+              this.recordOp("ToolbarTableEdit", { command: detail.command, ...target });
+              this.clearSelection();
+              this.finishAgentEdit({});
+              this.scheduleToolbarStateSync();
+            } catch (error) {
+              console.warn("[wasm-hwp] toolbar table edit failed", error);
             }
           },
           activeToolbarTarget() {
@@ -5578,7 +5820,19 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 numbering: ["number", "outline"].includes(String(paraProps.headType || "").toLowerCase()),
                 alignment: paraProps.alignment || null,
                 // Engine stores 1/100pt; the toolbar size field displays points.
-                font_size_pt: Number.isFinite(Number(charProps.fontSize)) && Number(charProps.fontSize) > 0 ? Number(charProps.fontSize) / 100 : null
+                font_size_pt: Number.isFinite(Number(charProps.fontSize)) && Number(charProps.fontSize) > 0 ? Number(charProps.fontSize) / 100 : null,
+                font_family: charProps.fontFamily || null,
+                line_spacing: Number.isFinite(Number(paraProps.lineSpacing)) && Number(paraProps.lineSpacing) > 0 ? Number(paraProps.lineSpacing) / 100 : null,
+                named_style: !c.cell && typeof this.doc.getStyleAt === "function" ? (() => {
+                  try {
+                    const raw = this.doc.getStyleAt(c.section, c.paragraph);
+                    const style = typeof raw === "string" ? JSON.parse(raw || "{}") : raw || {};
+                    return style.name || style.englishName || null;
+                  } catch (_) {
+                    return null;
+                  }
+                })() : null,
+                table_context: !!c.cell
               }
             }));
           },

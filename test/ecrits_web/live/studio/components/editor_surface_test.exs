@@ -105,6 +105,16 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     assert "numbering" in commands
     assert "text-color" in commands
     assert "highlight" in commands
+    assert "font-family-set" in commands
+    assert "line-spacing-set" in commands
+    assert "named-style-set" in commands
+    assert "indent-decrease" in commands
+    assert "indent-increase" in commands
+    assert "table-insert" in commands
+    assert "table-row-before" in commands
+    assert "table-column-after" in commands
+    assert "table-merge" in commands
+    assert "table-split" in commands
     # The size field is the only size control — no A−/A+ stepper buttons.
     refute Enum.any?(commands, &String.starts_with?(&1, "font-size-"))
 
@@ -181,6 +191,24 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
       assert button
       assert button |> LazyHTML.attribute("aria-label") == [label]
       assert button |> LazyHTML.attribute("data-active") == ["false"]
+    end
+
+    for {id, label} <- [
+          {"editor-toolbar-style-menu", "Paragraph style"},
+          {"editor-toolbar-font-family-menu", "Font family"},
+          {"editor-toolbar-line-spacing-menu", "Line spacing"},
+          {"editor-toolbar-table-menu", "Table"}
+        ] do
+      menu = fragment |> LazyHTML.query("##{id}") |> Enum.at(0)
+      assert menu
+      assert menu |> LazyHTML.query(~s([aria-label="#{label}"])) |> Enum.to_list() != []
+    end
+
+    for id <- ~w(editor-toolbar-indent-decrease editor-toolbar-indent-increase) do
+      button = fragment |> LazyHTML.query("##{id}") |> Enum.at(0)
+      assert button
+      assert button |> LazyHTML.attribute("type") == ["button"]
+      assert button |> LazyHTML.attribute("aria-label") != []
     end
   end
 

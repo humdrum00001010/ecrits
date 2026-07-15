@@ -14,6 +14,38 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   alias EcritsWeb.Live.Studio.Components.Canvas.MarkdownEditor
   alias EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm
 
+  @font_families [
+    "Arial",
+    "Noto Sans",
+    "Noto Sans CJK KR",
+    "Noto Serif",
+    "Liberation Sans",
+    "Liberation Serif",
+    "Liberation Mono",
+    "DejaVu Sans"
+  ]
+  @named_styles [
+    {"body", "Body text", "hero-bars-3-bottom-left"},
+    {"title", "Title", "hero-document-text"},
+    {"subtitle", "Subtitle", "hero-minus"},
+    {"heading-1", "Heading 1", "hero-numbered-list"},
+    {"heading-2", "Heading 2", "hero-numbered-list"},
+    {"heading-3", "Heading 3", "hero-numbered-list"},
+    {"quote", "Quote", "hero-chat-bubble-bottom-center-text"},
+    {"preformatted", "Preformatted", "hero-code-bracket"}
+  ]
+  @line_spacings [{1.0, "Single"}, {1.5, "1.5 lines"}, {2.0, "Double"}]
+  @table_actions [
+    {"table-row-before", "Row above", "hero-arrow-up"},
+    {"table-row-after", "Row below", "hero-arrow-down"},
+    {"table-column-before", "Column left", "hero-arrow-left"},
+    {"table-column-after", "Column right", "hero-arrow-right"},
+    {"table-row-delete", "Delete row", "hero-minus-circle"},
+    {"table-column-delete", "Delete column", "hero-minus-circle"},
+    {"table-merge", "Merge selected cells", "hero-arrows-pointing-in"},
+    {"table-split", "Split cell", "hero-arrows-pointing-out"}
+  ]
+
   attr :id, :string, default: "studio-root"
   attr :shell_id, :string, required: true
   attr :toolbar_id, :string, required: true
@@ -266,6 +298,78 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 class="mx-1 h-4 w-px shrink-0 self-center bg-base-300"
               >
               </span>
+              <details
+                :if={not markdown_format?(@state.document.format)}
+                id="editor-toolbar-style-menu"
+                data-toolbar-menu
+                class="relative flex shrink-0"
+              >
+                <summary
+                  aria-label="Paragraph style"
+                  title="Paragraph style"
+                  class={quick_toolbar_select_class("w-24")}
+                >
+                  <span class="min-w-0 flex-1 truncate text-left">
+                    {toolbar_style_label(@state.editor_toolbar.named_style)}
+                  </span>
+                  <.icon name="hero-chevron-down" class="size-3 shrink-0 opacity-55" />
+                </summary>
+                <div
+                  role="menu"
+                  aria-label="Paragraph style"
+                  class={quick_toolbar_menu_class("w-48")}
+                >
+                  <button
+                    :for={{style, label, icon} <- named_styles()}
+                    type="button"
+                    role="menuitem"
+                    data-command="named-style-set"
+                    phx-click="document.toolbar.command"
+                    phx-value-command="named-style-set"
+                    phx-value-style={style}
+                    class={quick_toolbar_menu_item_class()}
+                  >
+                    <.icon name={icon} class="size-4 shrink-0" />
+                    <span class="truncate">{label}</span>
+                  </button>
+                </div>
+              </details>
+              <details
+                :if={not markdown_format?(@state.document.format)}
+                id="editor-toolbar-font-family-menu"
+                data-toolbar-menu
+                class="relative flex shrink-0"
+              >
+                <summary
+                  aria-label="Font family"
+                  title="Font family"
+                  class={quick_toolbar_select_class("w-28")}
+                >
+                  <span class="min-w-0 flex-1 truncate text-left">
+                    {@state.editor_toolbar.font_family || "Font"}
+                  </span>
+                  <.icon name="hero-chevron-down" class="size-3 shrink-0 opacity-55" />
+                </summary>
+                <div
+                  role="menu"
+                  aria-label="Font family"
+                  class={quick_toolbar_menu_class("w-52")}
+                >
+                  <button
+                    :for={family <- font_families()}
+                    type="button"
+                    role="menuitem"
+                    data-command="font-family-set"
+                    phx-click="document.toolbar.command"
+                    phx-value-command="font-family-set"
+                    phx-value-family={family}
+                    class={quick_toolbar_menu_item_class()}
+                    style={"font-family: #{family}"}
+                  >
+                    <span class="truncate">{family}</span>
+                  </button>
+                </div>
+              </details>
               <.form
                 :if={not markdown_format?(@state.document.format)}
                 for={@editor_toolbar_form}
@@ -461,12 +565,136 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
               >
                 <.quick_toolbar_numbering_icon />
               </button>
+              <details
+                :if={not markdown_format?(@state.document.format)}
+                id="editor-toolbar-line-spacing-menu"
+                data-toolbar-menu
+                class="relative flex shrink-0"
+              >
+                <summary
+                  aria-label="Line spacing"
+                  title="Line spacing"
+                  class={quick_toolbar_select_class("w-[4.5rem]")}
+                >
+                  <.icon name="hero-bars-arrow-down" class="size-4 shrink-0" />
+                  <span class="min-w-0 flex-1 text-center text-[11px] tabular-nums">
+                    {toolbar_line_spacing_label(@state.editor_toolbar.line_spacing)}
+                  </span>
+                  <.icon name="hero-chevron-down" class="size-3 shrink-0 opacity-55" />
+                </summary>
+                <div
+                  role="menu"
+                  aria-label="Line spacing"
+                  class={quick_toolbar_menu_class("w-40")}
+                >
+                  <button
+                    :for={{spacing, label} <- line_spacings()}
+                    type="button"
+                    role="menuitem"
+                    data-command="line-spacing-set"
+                    phx-click="document.toolbar.command"
+                    phx-value-command="line-spacing-set"
+                    phx-value-spacing={spacing}
+                    class={quick_toolbar_menu_item_class()}
+                  >
+                    <span class="w-7 shrink-0 text-right font-mono text-[11px]">
+                      {toolbar_line_spacing_label(spacing)}
+                    </span>
+                    <span>{label}</span>
+                  </button>
+                </div>
+              </details>
+              <button
+                :if={not markdown_format?(@state.document.format)}
+                id="editor-toolbar-indent-decrease"
+                type="button"
+                data-command="indent-decrease"
+                phx-click="document.toolbar.command"
+                phx-value-command="indent-decrease"
+                aria-label="Decrease indent"
+                title="Decrease indent"
+                class={quick_toolbar_button_class()}
+              >
+                <.icon name="hero-bars-3-bottom-left" class="size-4" />
+                <.icon name="hero-arrow-left" class="-ml-2.5 -mt-2 size-2.5 rounded bg-base-100" />
+              </button>
+              <button
+                :if={not markdown_format?(@state.document.format)}
+                id="editor-toolbar-indent-increase"
+                type="button"
+                data-command="indent-increase"
+                phx-click="document.toolbar.command"
+                phx-value-command="indent-increase"
+                aria-label="Increase indent"
+                title="Increase indent"
+                class={quick_toolbar_button_class()}
+              >
+                <.icon name="hero-bars-3-bottom-left" class="size-4" />
+                <.icon name="hero-arrow-right" class="-ml-2.5 -mt-2 size-2.5 rounded bg-base-100" />
+              </button>
               <span
                 :if={not markdown_format?(@state.document.format)}
                 aria-hidden="true"
                 class="mx-1 h-4 w-px shrink-0 self-center bg-base-300"
               >
               </span>
+              <details
+                :if={not markdown_format?(@state.document.format)}
+                id="editor-toolbar-table-menu"
+                data-toolbar-menu
+                class="relative flex shrink-0"
+              >
+                <summary
+                  aria-label="Table"
+                  title="Insert or edit table"
+                  class={quick_toolbar_button_class()}
+                >
+                  <.icon name="hero-table-cells" class="size-4" />
+                </summary>
+                <div
+                  role="menu"
+                  aria-label="Table"
+                  class={quick_toolbar_menu_class("w-56")}
+                >
+                  <div class="px-2 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-base-content/45">
+                    Insert table
+                  </div>
+                  <div class="grid grid-cols-3 gap-1 px-1 pb-1.5">
+                    <button
+                      :for={{rows, cols} <- [{2, 2}, {3, 3}, {4, 4}]}
+                      type="button"
+                      role="menuitem"
+                      data-command="table-insert"
+                      phx-click="document.toolbar.command"
+                      phx-value-command="table-insert"
+                      phx-value-rows={rows}
+                      phx-value-cols={cols}
+                      class="rounded border border-base-300 px-2 py-1.5 text-[12px] text-base-content/75 transition-colors hover:border-base-content/25 hover:bg-base-200 hover:text-base-content"
+                    >
+                      {rows}×{cols}
+                    </button>
+                  </div>
+                  <div class="mx-1 border-t border-base-300 px-1 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-base-content/45">
+                    Edit current table
+                  </div>
+                  <button
+                    :for={{command, label, icon} <- table_actions()}
+                    type="button"
+                    role="menuitem"
+                    data-command={command}
+                    phx-click="document.toolbar.command"
+                    phx-value-command={command}
+                    disabled={not @state.editor_toolbar.table_context}
+                    class={[
+                      quick_toolbar_menu_item_class(),
+                      "disabled:pointer-events-none disabled:opacity-35"
+                    ]}
+                  >
+                    <.icon name={icon} class="size-4 shrink-0" />
+                    <span>{label}</span>
+                  </button>
+                </div>
+              </details>
               <label
                 :if={not markdown_format?(@state.document.format)}
                 for="editor-toolbar-image-input"
@@ -932,6 +1160,11 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 natural_height_px: size.height
               })
             })
+
+            this.el.addEventListener("click", event => {
+              const item = event.target?.closest?.("[data-toolbar-menu] button")
+              if (item) item.closest("details")?.removeAttribute("open")
+            })
           }
         }
       </script>
@@ -1110,6 +1343,55 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
       "data-[active=true]:text-[var(--cs-blue)]"
     ]
   end
+
+  defp font_families, do: @font_families
+  defp named_styles, do: @named_styles
+  defp line_spacings, do: @line_spacings
+  defp table_actions, do: @table_actions
+
+  defp quick_toolbar_select_class(width) do
+    [
+      "inline-flex h-7 shrink-0 cursor-pointer list-none items-center gap-1 rounded-md border border-base-300 bg-base-100 px-2",
+      "text-[12px] text-base-content/70 transition-colors duration-150",
+      "hover:border-base-content/25 hover:bg-base-200 hover:text-base-content",
+      "focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cs-blue)]",
+      "[&::-webkit-details-marker]:hidden",
+      width
+    ]
+  end
+
+  defp quick_toolbar_menu_class(width) do
+    [
+      "absolute left-0 top-8 z-40 max-h-80 overflow-y-auto rounded-md border border-base-300 bg-base-100 p-1 shadow-lg",
+      width
+    ]
+  end
+
+  defp quick_toolbar_menu_item_class do
+    [
+      "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px]",
+      "text-base-content/75 transition-colors hover:bg-base-200 hover:text-base-content",
+      "focus:outline-none focus-visible:bg-base-200"
+    ]
+  end
+
+  defp toolbar_style_label(nil), do: "Style"
+
+  defp toolbar_style_label(style) do
+    case Enum.find(@named_styles, fn {key, label, _icon} -> style in [key, label] end) do
+      {_key, label, _icon} -> label
+      nil -> style
+    end
+  end
+
+  defp toolbar_line_spacing_label(spacing) when is_number(spacing) do
+    :erlang.float_to_binary(spacing / 1, decimals: 2)
+    |> String.trim_trailing("0")
+    |> String.trim_trailing(".")
+    |> Kernel.<>("×")
+  end
+
+  defp toolbar_line_spacing_label(_spacing), do: "1×"
 
   defp quick_toolbar_bold_icon(assigns) do
     ~H"""

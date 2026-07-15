@@ -5,7 +5,14 @@ defmodule Ecrits.EditorToolbar.Transition do
 
   alias Ecrits.EditorToolbar
 
-  @commands ~w(bold italic underline strikethrough bullets numbering align-left align-center align-right align-justify)
+  @commands ~w(
+    bold italic underline strikethrough bullets numbering
+    align-left align-center align-right align-justify
+    indent-decrease indent-increase
+    table-row-before table-row-after table-row-delete
+    table-column-before table-column-after table-column-delete
+    table-merge table-split
+  )
 
   def reset(%EditorToolbar{}), do: EditorToolbar.new()
 
@@ -57,11 +64,47 @@ defmodule Ecrits.EditorToolbar.Transition do
 
   def shortcut_command(_attrs), do: nil
 
+  def remember_command(%EditorToolbar{} = toolbar, "font-family-set", %{family: family}),
+    do: apply_changes(EditorToolbar.changeset(toolbar, %{font_family: family}))
+
+  def remember_command(%EditorToolbar{} = toolbar, "line-spacing-set", %{spacing: spacing}),
+    do: apply_changes(EditorToolbar.changeset(toolbar, %{line_spacing: spacing}))
+
+  def remember_command(%EditorToolbar{} = toolbar, "named-style-set", %{style: style}),
+    do: apply_changes(EditorToolbar.changeset(toolbar, %{named_style: style}))
+
+  def remember_command(%EditorToolbar{} = toolbar, _command, _attrs), do: toolbar
+
   defp command_payload(command, _attrs) when command in @commands, do: {:ok, %{}}
 
   defp command_payload("font-size-set", attrs) do
     changeset = EditorToolbar.font_size_changeset(attrs)
     if changeset.valid?, do: {:ok, %{size: get_change(changeset, :size)}}, else: :error
+  end
+
+  defp command_payload("font-family-set", attrs) do
+    changeset = EditorToolbar.font_family_changeset(attrs)
+    if changeset.valid?, do: {:ok, %{family: get_change(changeset, :family)}}, else: :error
+  end
+
+  defp command_payload("line-spacing-set", attrs) do
+    changeset = EditorToolbar.line_spacing_changeset(attrs)
+    if changeset.valid?, do: {:ok, %{spacing: get_change(changeset, :spacing)}}, else: :error
+  end
+
+  defp command_payload("named-style-set", attrs) do
+    changeset = EditorToolbar.named_style_changeset(attrs)
+    if changeset.valid?, do: {:ok, %{style: get_change(changeset, :style)}}, else: :error
+  end
+
+  defp command_payload("table-insert", attrs) do
+    changeset = EditorToolbar.table_size_changeset(attrs)
+
+    if changeset.valid? do
+      {:ok, %{rows: get_change(changeset, :rows), cols: get_change(changeset, :cols)}}
+    else
+      :error
+    end
   end
 
   defp command_payload(command, attrs) when command in ["text-color", "highlight"] do

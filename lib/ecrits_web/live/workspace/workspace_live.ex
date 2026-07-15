@@ -4629,8 +4629,16 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
              attrs,
              socket.assigns[:active_document]
            ) do
-        {:ok, payload} -> push_event(socket, "document.toolbar.command", payload)
-        :error -> socket
+        {:ok, payload} ->
+          toolbar =
+            EditorToolbar.remember_command(socket.assigns.editor_toolbar, command, payload)
+
+          socket
+          |> assign(:editor_toolbar, toolbar)
+          |> push_event("document.toolbar.command", payload)
+
+        :error ->
+          socket
       end
     end
   end

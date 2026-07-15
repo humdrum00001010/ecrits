@@ -1802,6 +1802,30 @@ describe("WasmHwpEditor preview patch safety", () => {
     })
   })
 
+  it("translates the native HWP font ID before applying character format", () => {
+    const calls: any[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        getTextRange: () => "sample",
+        applyCharFormat(...args: any[]) {
+          calls.push(args)
+          return JSON.stringify({ ok: true })
+        },
+      },
+      recordOp() {},
+    } as any
+
+    const result = editor.applySetOne(
+      { section: 0, paragraph: 2, offset: 0, length: 6 },
+      { kind: "char", FontId: 12 }
+    )
+
+    assert.deepEqual(result, { ok: true })
+    assert.equal(JSON.parse(calls[0][4]).fontId, 12)
+    assert.equal(JSON.parse(calls[0][4]).FontId, undefined)
+  })
+
   it("sets cell picture geometry with a JSON cell path for wasm", () => {
     const pictureProps: any[] = []
     const recorded: any[] = []
@@ -2086,6 +2110,101 @@ describe("WasmHwpEditor preview patch safety", () => {
     ])
   })
 
+  it("routes HWP font family, spacing, style, indent, and table toolbar commands through engine APIs", () => {
+    const calls: Array<{ name: string; args?: any[] }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      documentId: "doc-1",
+      format: "hwp",
+      el: { isConnected: true },
+      caret: {
+        section: 0,
+        paragraph: 2,
+        offset: 4,
+        cell: { parentParaIndex: 7, controlIndex: 1, cellIndex: 3, cellParaIndex: 0 },
+      },
+      doc: {
+        findOrCreateFontId: (family: string) => {
+          calls.push({ name: "findOrCreateFontId", args: [family] })
+          return 12
+        },
+        getStyleList: () => JSON.stringify([{ id: 4, name: "제목 1", englishName: "Heading 1" }]),
+        applyStyle: (...args: any[]) => {
+          calls.push({ name: "applyStyle", args })
+          return "{}"
+        },
+        insertTableRow: (...args: any[]) => calls.push({ name: "insertTableRow", args }),
+        insertTableColumn: (...args: any[]) => calls.push({ name: "insertTableColumn", args }),
+      },
+      hwpToolbarCharRefs: () => [{ section: 0, paragraph: 2, offset: 0, length: 4 }],
+      applySetOne: (ref: any, props: any) => {
+        calls.push({ name: "applySetOne", args: [ref, props] })
+        return { ok: true }
+      },
+      hwpToolbarParaProps: () => ({ marginLeft: 2e3 }),
+      cellGridPos: () => ({ row: 1, col: 2 }),
+      pushHwpUndoCheckpoint: (label: string) => calls.push({ name: "checkpoint", args: [label] }),
+      finishAgentEdit: () => calls.push({ name: "finishAgentEdit" }),
+      scheduleToolbarStateSync: () => calls.push({ name: "scheduleToolbarStateSync" }),
+      recordOp: (...args: any[]) => calls.push({ name: "recordOp", args }),
+      clearSelection() {},
+      cellSel: () => null,
+    } as any
+
+    editor.handleToolbarCommand({ command: "font-family-set", family: "Noto Sans", document_id: "doc-1" })
+    editor.handleToolbarCommand({ command: "line-spacing-set", spacing: 1.5, document_id: "doc-1" })
+    editor.handleToolbarCommand({ command: "indent-increase", document_id: "doc-1" })
+    editor.caret.cell = null
+    editor.handleToolbarCommand({ command: "named-style-set", style: "heading-1", document_id: "doc-1" })
+    editor.caret.cell = { parentParaIndex: 7, controlIndex: 1, cellIndex: 3, cellParaIndex: 0 }
+    editor.handleToolbarCommand({ command: "table-row-after", document_id: "doc-1" })
+    editor.handleToolbarCommand({ command: "table-column-before", document_id: "doc-1" })
+
+    assert.deepEqual(calls.find(call => call.name === "findOrCreateFontId")?.args, ["Noto Sans"])
+    assert.ok(calls.some(call => call.name === "applySetOne" && call.args?.[1].FontId === 12))
+    assert.ok(calls.some(call => call.name === "applySetOne" && call.args?.[1].LineSpacing === 150))
+    assert.ok(calls.some(call => call.name === "applySetOne" && call.args?.[1].marginLeft === 3e3))
+    assert.deepEqual(calls.find(call => call.name === "applyStyle")?.args, [0, 2, 4])
+    assert.deepEqual(calls.find(call => call.name === "insertTableRow")?.args, [0, 7, 1, 1, true])
+    assert.deepEqual(calls.find(call => call.name === "insertTableColumn")?.args, [0, 7, 1, 2, false])
+  })
+
+  it("inserts and merges HWP tables from toolbar commands", () => {
+    const calls: Array<{ name: string; args?: any[] }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      documentId: "doc-1",
+      format: "hwp",
+      el: { isConnected: true },
+      caret: { section: 0, paragraph: 2, offset: 4, cell: null },
+      doc: {
+        createTable: (...args: any[]) => {
+          calls.push({ name: "createTable", args })
+          return JSON.stringify({ ok: true, paraIdx: 2, controlIdx: 0 })
+        },
+        mergeTableCells: (...args: any[]) => calls.push({ name: "mergeTableCells", args }),
+      },
+      hwpToolbarCaretRef: () => ({ section: 0, paragraph: 2, offset: 4 }),
+      pushHwpUndoCheckpoint: () => {},
+      finishAgentEdit: () => {},
+      scheduleToolbarStateSync: () => {},
+      recordOp: () => {},
+      clearSelection: () => {},
+      cellGridPos: () => ({ row: 0, col: 0 }),
+      cellSel: () => ({
+        anchor: { row: 0, col: 0 },
+        focus: { row: 1, col: 2 },
+      }),
+    } as any
+
+    editor.handleToolbarCommand({ command: "table-insert", rows: 3, cols: 4, document_id: "doc-1" })
+    editor.caret.cell = { parentParaIndex: 2, controlIndex: 0, cellIndex: 0, cellParaIndex: 0 }
+    editor.handleToolbarCommand({ command: "table-merge", document_id: "doc-1" })
+
+    assert.deepEqual(calls.find(call => call.name === "createTable")?.args, [0, 2, 4, 3, 4])
+    assert.deepEqual(calls.find(call => call.name === "mergeTableCells")?.args, [0, 2, 0, 0, 0, 1, 2])
+  })
+
   it("syncs toolbar state even when rAF never fires (backgrounded tab)", async () => {
     const win = (globalThis as any).window
     const originalRaf = win.requestAnimationFrame
@@ -2127,8 +2246,9 @@ describe("WasmHwpEditor preview patch safety", () => {
         documentId: "doc-3",
         caret: { section: 0, paragraph: 1, offset: 2, cell: null },
         doc: {
-          getCharPropertiesAt: () => JSON.stringify({ bold: false, fontSize: 1150 }),
-          getParaPropertiesAt: () => JSON.stringify({ alignment: "left", headType: "Bullet" }),
+          getCharPropertiesAt: () => JSON.stringify({ bold: false, fontSize: 1150, fontFamily: "Noto Sans" }),
+          getParaPropertiesAt: () => JSON.stringify({ alignment: "left", headType: "Bullet", lineSpacing: 150 }),
+          getStyleAt: () => JSON.stringify({ id: 2, name: "Heading 1" }),
         },
       } as any
 
@@ -2136,6 +2256,10 @@ describe("WasmHwpEditor preview patch safety", () => {
       assert.equal(events[0].detail.font_size_pt, 11.5)
       assert.equal(events[0].detail.bullets, true)
       assert.equal(events[0].detail.numbering, false)
+      assert.equal(events[0].detail.font_family, "Noto Sans")
+      assert.equal(events[0].detail.line_spacing, 1.5)
+      assert.equal(events[0].detail.named_style, "Heading 1")
+      assert.equal(events[0].detail.table_context, false)
 
       // No engine size → null, so the toolbar keeps its last display.
       events.length = 0
