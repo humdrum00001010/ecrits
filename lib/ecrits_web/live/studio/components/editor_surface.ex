@@ -433,6 +433,34 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                   </button>
                 </div>
               </details>
+              <button
+                :if={not markdown_format?(@state.document.format)}
+                id="editor-toolbar-bullets"
+                type="button"
+                data-command="bullets"
+                data-active={to_string(@state.editor_toolbar.bullets)}
+                phx-click="document.toolbar.command"
+                phx-value-command="bullets"
+                aria-label="Toggle bulleted list"
+                title="Toggle bulleted list"
+                class={quick_toolbar_button_class()}
+              >
+                <.icon name="hero-list-bullet" class="size-4" />
+              </button>
+              <button
+                :if={not markdown_format?(@state.document.format)}
+                id="editor-toolbar-numbering"
+                type="button"
+                data-command="numbering"
+                data-active={to_string(@state.editor_toolbar.numbering)}
+                phx-click="document.toolbar.command"
+                phx-value-command="numbering"
+                aria-label="Toggle numbered list"
+                title="Toggle numbered list"
+                class={quick_toolbar_button_class()}
+              >
+                <.quick_toolbar_numbering_icon />
+              </button>
               <span
                 :if={not markdown_format?(@state.document.format)}
                 aria-hidden="true"
@@ -1151,6 +1179,25 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
       <path d="M16 4H9a3 3 0 0 0-2.83 4" />
       <path d="M14 12a4 4 0 0 1 0 8H6" />
       <line x1="4" x2="20" y1="12" y2="12" />
+    </svg>
+    """
+  end
+
+  defp quick_toolbar_numbering_icon(assigns) do
+    ~H"""
+    <svg
+      viewBox="0 0 24 24"
+      class="size-4"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      aria-hidden="true"
+    >
+      <path d="M10 6h11M10 12h11M10 18h11" />
+      <path d="M3.5 5h1v3M3.5 8h2" />
+      <path d="M3.5 11.5c.3-.35.7-.5 1.1-.5.75 0 1.25.42 1.25 1.05 0 .55-.35.9-1.15 1.55L3.5 14.5h2.5" />
+      <path d="M3.5 17h1.2c.7 0 1.15.35 1.15.9s-.45.9-1.15.9H3.5m1.2 0c.75 0 1.25.38 1.25 1 0 .65-.5 1.05-1.3 1.05H3.4" />
     </svg>
     """
   end

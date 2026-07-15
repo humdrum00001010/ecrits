@@ -8,7 +8,7 @@ defmodule Ecrits.EditorToolbar do
   alias __MODULE__.Transition
 
   @primary_key false
-  @toggle_commands ~w(bold italic underline strikethrough)
+  @toggle_commands ~w(bold italic underline strikethrough bullets numbering)
   @alignment_commands ~w(align-left align-center align-right align-justify)
   @commands @toggle_commands ++ @alignment_commands
   @alignments ~w(left center right justify)
@@ -20,6 +20,8 @@ defmodule Ecrits.EditorToolbar do
     field :italic, :boolean, default: false
     field :underline, :boolean, default: false
     field :strikethrough, :boolean, default: false
+    field :bullets, :boolean, default: false
+    field :numbering, :boolean, default: false
     field :alignment, :string, default: "left"
     field :font_size_pt, :float
     field :text_color, :string, default: "#e11d48"
@@ -38,6 +40,8 @@ defmodule Ecrits.EditorToolbar do
       :italic,
       :underline,
       :strikethrough,
+      :bullets,
+      :numbering,
       :alignment,
       :font_size_pt,
       :text_color,

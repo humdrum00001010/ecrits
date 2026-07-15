@@ -101,6 +101,8 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     assert "align-center" in commands
     assert "align-right" in commands
     assert "align-justify" in commands
+    assert "bullets" in commands
+    assert "numbering" in commands
     assert "text-color" in commands
     assert "highlight" in commands
     # The size field is the only size control — no A−/A+ stepper buttons.
@@ -170,6 +172,16 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
       |> List.first()
 
     assert bold |> LazyHTML.attribute("title") == ["Bold (⌘B)"]
+
+    for {id, label} <- [
+          {"editor-toolbar-bullets", "Toggle bulleted list"},
+          {"editor-toolbar-numbering", "Toggle numbered list"}
+        ] do
+      button = fragment |> LazyHTML.query("##{id}") |> Enum.at(0)
+      assert button
+      assert button |> LazyHTML.attribute("aria-label") == [label]
+      assert button |> LazyHTML.attribute("data-active") == ["false"]
+    end
   end
 
   test "HWP page scroll host is keyboard focusable outside mirror previews" do
@@ -293,6 +305,8 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     refute "underline" in commands
     refute "image" in commands
     refute Enum.any?(commands, &String.starts_with?(&1, "align-"))
+    refute "bullets" in commands
+    refute "numbering" in commands
     # The font row is not a markdown concept either.
     refute Enum.any?(commands, &String.starts_with?(&1, "font-size-"))
     refute "text-color" in commands

@@ -55,6 +55,8 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
     for (const [command, uno] of [
       ["bold", ".uno:Bold"],
       ["strikethrough", ".uno:Strikeout"],
+      ["bullets", ".uno:DefaultBullet"],
+      ["numbering", ".uno:DefaultNumbering"],
       ["align-center", ".uno:CenterPara"],
       ["align-justify", ".uno:JustifyPara"],
     ] as const) {
@@ -148,7 +150,10 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
           name === "getInteractionState"
             ? JSON.stringify({
                 seq: 4,
-                format: { bold: 1, italic: 0, underline: -1, strikeout: 0, align: "center" },
+                format: {
+                  bold: 1, italic: 0, underline: -1, strikeout: 0,
+                  bullets: 1, numbering: 0, align: "center",
+                },
               })
             : null,
       } as any
@@ -163,6 +168,8 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
         italic: false,
         underline: false, // tri-state -1 (no update yet) maps to unlit
         strikethrough: false,
+        bullets: true,
+        numbering: false,
         alignment: "center",
         font_size_pt: null, // old wasm: no fontSizePt key → toolbar no-op
       })
@@ -191,7 +198,8 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
             ? JSON.stringify({
                 seq: 9,
                 format: {
-                  bold: 0, italic: 0, underline: 0, strikeout: 0, align: null,
+                  bold: 0, italic: 0, underline: 0, strikeout: 0,
+                  bullets: 0, numbering: 1, align: null,
                   fontSizePt: 10.5, fontName: "Liberation Serif",
                 },
               })
@@ -210,7 +218,10 @@ describe("WasmOfficeEditor toolbar toggle state", () => {
           name === "getInteractionState"
             ? JSON.stringify({
                 seq: 10,
-                format: { bold: 0, italic: 0, underline: 0, strikeout: 0, align: null, fontSizePt },
+                format: {
+                  bold: 0, italic: 0, underline: 0, strikeout: 0,
+                  bullets: 0, numbering: 0, align: null, fontSizePt,
+                },
               })
             : null
         editor.emitToolbarState()

@@ -3320,6 +3320,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
                 italic: format.italic === 1,
                 underline: format.underline === 1,
                 strikethrough: format.strikeout === 1,
+                bullets: format.bullets === 1,
+                numbering: format.numbering === 1,
                 alignment: format.align || null,
                 // Caret font size mirrored from the .uno:FontHeight STATE_CHANGED feed
                 // (format.fontSizePt, points; null = no update seen yet). Old wasm
@@ -4823,6 +4825,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             italic: ".uno:Italic",
             underline: ".uno:Underline",
             strikethrough: ".uno:Strikeout",
+            bullets: ".uno:DefaultBullet",
+            numbering: ".uno:DefaultNumbering",
             "align-left": ".uno:LeftPara",
             "align-center": ".uno:CenterPara",
             "align-right": ".uno:RightPara",

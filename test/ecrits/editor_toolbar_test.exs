@@ -10,6 +10,7 @@ defmodule Ecrits.EditorToolbarTest do
         %{
           document_id: "active",
           bold: true,
+          bullets: true,
           alignment: "left",
           font_size_pt: 10.04
         },
@@ -17,6 +18,7 @@ defmodule Ecrits.EditorToolbarTest do
       )
 
     assert toolbar.bold
+    assert toolbar.bullets
     assert toolbar.alignment == "left"
     assert toolbar.font_size_pt == 10.04
 
@@ -51,6 +53,12 @@ defmodule Ecrits.EditorToolbarTest do
                %{color: "#AABBCC"},
                document
              )
+
+    assert {:ok, %{command: "bullets", document_id: "active"}} =
+             EditorToolbar.command(EditorToolbar.new(), "bullets", %{}, document)
+
+    assert {:ok, %{command: "numbering", document_id: "active"}} =
+             EditorToolbar.command(EditorToolbar.new(), "numbering", %{}, document)
   end
 
   test "shortcut payloads are mapped on the server" do

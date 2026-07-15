@@ -1977,6 +1977,84 @@ describe("WasmHwpEditor preview patch safety", () => {
     assert.deepEqual(sets[0].props, { kind: "para", Alignment: "center" })
   })
 
+  it("toggles HWP bullets and numbering with engine-owned default definitions", () => {
+    const sets: any[] = []
+    const checkpoints: string[] = []
+    let finished = 0
+    const paraProps = new Map<number, any>([
+      [4, { headType: "None" }],
+      [5, { headType: "None" }],
+    ])
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        ensureDefaultBullet: (char: string) => {
+          assert.equal(char, "•")
+          return 3
+        },
+        ensureDefaultNumbering: () => 7,
+        getParaPropertiesAt: (_section: number, paragraph: number) =>
+          JSON.stringify(paraProps.get(paragraph) || {}),
+      },
+      documentId: "doc-1",
+      format: "hwp",
+      el: { isConnected: true },
+      hwpToolbarCharRefs: () => [
+        { section: 0, paragraph: 4, offset: 0, length: 10 },
+        { section: 0, paragraph: 4, offset: 12, length: 3 },
+        { section: 0, paragraph: 5, offset: 0, length: 8 },
+      ],
+      applySetOne(ref: any, props: any) {
+        sets.push({ ref, props })
+        return { ok: true }
+      },
+      pushHwpUndoCheckpoint(label: string) { checkpoints.push(label) },
+      finishAgentEdit() { finished++ },
+      scheduleToolbarStateSync() {},
+    } as any
+
+    editor.handleToolbarCommand({ command: "bullets", document_id: "doc-1" })
+    assert.equal(sets.length, 2, "selection paragraphs are deduped")
+    assert.deepEqual(sets[0].props, {
+      kind: "para", HeadType: "Bullet", NumberingId: 3, ParaLevel: 0,
+    })
+
+    sets.length = 0
+    paraProps.set(4, { headType: "Number" })
+    paraProps.set(5, { headType: "Outline" })
+    editor.handleToolbarCommand({ command: "numbering", document_id: "doc-1" })
+    assert.equal(sets.length, 2)
+    assert.deepEqual(sets[0].props, {
+      kind: "para", HeadType: "None", NumberingId: 0, ParaLevel: 0,
+    })
+    assert.deepEqual(checkpoints, ["toolbar-list", "toolbar-list"])
+    assert.equal(finished, 2)
+  })
+
+  it("translates HWP list paragraph properties to the engine vocabulary", () => {
+    const paraFormats: any[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        applyParaFormat(...args: any[]) {
+          paraFormats.push(args)
+          return "{}"
+        },
+      },
+      recordOp() {},
+    } as any
+
+    const result = editor.applySetOne(
+      { section: 0, paragraph: 7, offset: 0 },
+      { kind: "para", HeadType: "Bullet", NumberingId: 2, ParaLevel: 1 }
+    )
+
+    assert.deepEqual(result, { ok: true })
+    assert.deepEqual(JSON.parse(paraFormats[0][2]), {
+      headType: "Bullet", numberingId: 2, paraLevel: 1,
+    })
+  })
+
   it("routes font-size-set, text color, and highlight commands to char props", () => {
     const sets: any[] = []
     const editor = {
@@ -2050,12 +2128,14 @@ describe("WasmHwpEditor preview patch safety", () => {
         caret: { section: 0, paragraph: 1, offset: 2, cell: null },
         doc: {
           getCharPropertiesAt: () => JSON.stringify({ bold: false, fontSize: 1150 }),
-          getParaPropertiesAt: () => JSON.stringify({ alignment: "left" }),
+          getParaPropertiesAt: () => JSON.stringify({ alignment: "left", headType: "Bullet" }),
         },
       } as any
 
       editor.emitToolbarState()
       assert.equal(events[0].detail.font_size_pt, 11.5)
+      assert.equal(events[0].detail.bullets, true)
+      assert.equal(events[0].detail.numbering, false)
 
       // No engine size → null, so the toolbar keeps its last display.
       events.length = 0
@@ -2090,7 +2170,7 @@ describe("WasmHwpEditor preview patch safety", () => {
           getCellCharPropertiesAt: () => JSON.stringify({ bold: true }),
           getCellParaPropertiesAt: (...args: any[]) => {
             cellParaCalls.push(args)
-            return JSON.stringify({ alignment: "center" })
+            return JSON.stringify({ alignment: "center", headType: "Number" })
           },
         },
       } as any
@@ -2100,6 +2180,7 @@ describe("WasmHwpEditor preview patch safety", () => {
       assert.deepEqual(cellParaCalls[0], [0, 0, 2, 0, 0])
       assert.equal(events[0].detail.alignment, "center")
       assert.equal(events[0].detail.bold, true)
+      assert.equal(events[0].detail.numbering, true)
     } finally {
       ;(globalThis as any).document.dispatchEvent = originalDispatch
     }

@@ -1699,7 +1699,13 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           alignment: ["alignment", "verbatim"],
           LineSpacing: ["lineSpacing", "int"],
           lineSpacing: ["lineSpacing", "int"],
-          LineSpacingType: ["lineSpacingType", "verbatim"]
+          LineSpacingType: ["lineSpacingType", "verbatim"],
+          HeadType: ["headType", "verbatim"],
+          headType: ["headType", "verbatim"],
+          ParaLevel: ["paraLevel", "int"],
+          paraLevel: ["paraLevel", "int"],
+          NumberingId: ["numberingId", "int"],
+          numberingId: ["numberingId", "int"]
         };
         var translateParaProps = (props) => {
           const out = {};
@@ -4104,6 +4110,12 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               case "strikethrough":
                 this.hwpToolbarToggleCharProp("Strikethrough", "strikethrough");
                 break;
+              case "bullets":
+                this.hwpToolbarToggleList("Bullet");
+                break;
+              case "numbering":
+                this.hwpToolbarToggleList("Number");
+                break;
               case "font-size-set":
                 if (Number.isFinite(Number(detail.size)) && Number(detail.size) > 0) {
                   this.hwpToolbarApplyProps({ FontSize: Number(detail.size) });
@@ -4301,13 +4313,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           // only reads section/paragraph/cell — but must be DEDUPED per paragraph
           // (a multi-run selection yields one char ref per paragraph already).
           hwpToolbarAlign(alignment) {
-            const seen = /* @__PURE__ */ new Set();
-            const refs = this.hwpToolbarCharRefs().filter((ref) => {
-              const key = JSON.stringify([ref.section, ref.paragraph, ref.cell || null]);
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            });
+            const refs = this.hwpToolbarParaRefs();
             if (!refs.length) return;
             this.pushHwpUndoCheckpoint("toolbar-align");
             let applied = 0;
@@ -4315,6 +4321,77 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               const result = this.applySetOne(ref, { kind: "para", Alignment: alignment });
               if (result && result.error) {
                 console.warn("[wasm-hwp] toolbar align failed", result.error);
+              } else {
+                applied++;
+              }
+            }
+            if (applied > 0) {
+              this.finishAgentEdit({});
+              this.scheduleToolbarStateSync();
+            }
+          },
+          hwpToolbarParaRefs() {
+            const seen = /* @__PURE__ */ new Set();
+            return this.hwpToolbarCharRefs().filter((ref) => {
+              const key = JSON.stringify([ref.section, ref.paragraph, ref.cell || null]);
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+          },
+          hwpToolbarParaProps(ref) {
+            const parsed = this.parseRef(ref);
+            if (!parsed) return {};
+            try {
+              const cl = parsed.cell;
+              const raw = cl && typeof this.doc.getCellParaPropertiesAt === "function"
+                ? this.doc.getCellParaPropertiesAt(
+                    parsed.section,
+                    cl.parentParaIndex,
+                    cl.controlIndex,
+                    cl.cellIndex,
+                    cl.cellParaIndex
+                  )
+                : !cl && typeof this.doc.getParaPropertiesAt === "function"
+                  ? this.doc.getParaPropertiesAt(parsed.section, parsed.paragraph)
+                  : null;
+              return typeof raw === "string" ? JSON.parse(raw || "{}") : raw || {};
+            } catch (_) {
+              return {};
+            }
+          },
+          hwpToolbarListActive(ref, headType) {
+            const current = String(this.hwpToolbarParaProps(ref).headType || "").toLowerCase();
+            if (headType === "Bullet") return current === "bullet";
+            return current === "number" || current === "outline";
+          },
+          hwpToolbarToggleList(headType) {
+            const refs = this.hwpToolbarParaRefs();
+            if (!refs.length) return;
+            const enabled = refs.every((ref) => this.hwpToolbarListActive(ref, headType));
+            let numberingId = 0;
+            if (!enabled) {
+              try {
+                numberingId = headType === "Bullet"
+                  ? Number(this.doc.ensureDefaultBullet("•"))
+                  : Number(this.doc.ensureDefaultNumbering());
+              } catch (error) {
+                console.warn("[wasm-hwp] toolbar list definition failed", error);
+                return;
+              }
+              if (!Number.isInteger(numberingId) || numberingId <= 0) return;
+            }
+            this.pushHwpUndoCheckpoint("toolbar-list");
+            let applied = 0;
+            for (const ref of refs) {
+              const result = this.applySetOne(ref, {
+                kind: "para",
+                HeadType: enabled ? "None" : headType,
+                NumberingId: enabled ? 0 : numberingId,
+                ParaLevel: 0
+              });
+              if (result && result.error) {
+                console.warn("[wasm-hwp] toolbar list failed", result.error);
               } else {
                 applied++;
               }
@@ -5497,6 +5574,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 italic: charProps.italic === true,
                 underline: charProps.underline === true,
                 strikethrough: charProps.strikethrough === true,
+                bullets: String(paraProps.headType || "").toLowerCase() === "bullet",
+                numbering: ["number", "outline"].includes(String(paraProps.headType || "").toLowerCase()),
                 alignment: paraProps.alignment || null,
                 // Engine stores 1/100pt; the toolbar size field displays points.
                 font_size_pt: Number.isFinite(Number(charProps.fontSize)) && Number(charProps.fontSize) > 0 ? Number(charProps.fontSize) / 100 : null

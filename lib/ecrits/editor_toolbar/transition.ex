@@ -5,7 +5,7 @@ defmodule Ecrits.EditorToolbar.Transition do
 
   alias Ecrits.EditorToolbar
 
-  @commands ~w(bold italic underline strikethrough align-left align-center align-right align-justify)
+  @commands ~w(bold italic underline strikethrough bullets numbering align-left align-center align-right align-justify)
 
   def reset(%EditorToolbar{}), do: EditorToolbar.new()
 
