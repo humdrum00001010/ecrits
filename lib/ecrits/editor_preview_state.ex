@@ -15,7 +15,6 @@ defmodule Ecrits.EditorPreviewState do
     embeds_one :document, Document, on_replace: :delete
     field :document_path, :string
     field :canvas_id, :string
-    field :preview_url, :string
     field :status, Ecto.Enum, values: @statuses, default: :running
     embeds_one :canvas, DocumentCanvasState, on_replace: :delete
   end
@@ -32,7 +31,7 @@ defmodule Ecrits.EditorPreviewState do
       documentPath: state.document_path,
       deltaCount: state.canvas.preview_delta_count,
       status: state.status,
-      mode: if(state.preview_url, do: "partial-render", else: "embedded-editor")
+      mode: "embedded-editor"
     })
   end
 
@@ -40,13 +39,12 @@ defmodule Ecrits.EditorPreviewState do
     attrs = deep_params(attrs)
 
     state
-    |> cast(attrs, [:document_path, :canvas_id, :preview_url, :status])
+    |> cast(attrs, [:document_path, :canvas_id, :status])
     |> cast_embed(:document, with: &Document.changeset/2, required: true)
     |> cast_embed(:canvas, with: &DocumentCanvasState.changeset/2, required: true)
     |> validate_required([:canvas_id])
     |> validate_length(:document_path, max: 4_096)
     |> validate_length(:canvas_id, max: 500)
-    |> validate_length(:preview_url, max: 8_192)
     |> put_derived_document_path()
   end
 

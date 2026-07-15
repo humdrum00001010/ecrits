@@ -2,7 +2,7 @@ defmodule Ecrits.Fuse.OpenDocs do
   @moduledoc """
   Per-workspace registry of documents the agent has explicitly opened for the
   doc VFS (`Ecrits.Fuse.DocFs`). The mount projects exactly this set — a document
-  appears under `<workspace>/.ecrits/mount/` only after the agent calls the
+  appears under `<workspace>/.ecrits/` only after the agent calls the
   `doc.open_doc` MCP tool, and disappears on `doc.close_doc`.
 
   Backed by a single public, named ETS set owned by this GenServer (started in
@@ -19,6 +19,7 @@ defmodule Ecrits.Fuse.OpenDocs do
   @table :ecrits_fuse_open_docs
   @access_key :__vfs_access__
   @stage_key :__vfs_stage__
+  @committed_key :__vfs_committed__
 
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
@@ -31,7 +32,13 @@ defmodule Ecrits.Fuse.OpenDocs do
   @doc "Register `name` as open under `root`."
   @spec open(String.t(), String.t(), keyword()) :: :ok
   def open(root, name, opts \\ []) do
-    :ets.insert(@table, {{expand(root), name}, open_metadata(opts)})
+    root = expand(root)
+
+    unless :ets.member(@table, {root, name}) do
+      :ets.delete(@table, {@committed_key, root, name})
+    end
+
+    :ets.insert(@table, {{root, name}, open_metadata(opts)})
     :ok
   rescue
     ArgumentError -> :ok
@@ -66,6 +73,7 @@ defmodule Ecrits.Fuse.OpenDocs do
     root = expand(root)
     :ets.delete(@table, {root, name})
     :ets.delete(@table, {@stage_key, root, name})
+    :ets.delete(@table, {@committed_key, root, name})
     :ok
   rescue
     ArgumentError -> :ok
@@ -177,6 +185,35 @@ defmodule Ecrits.Fuse.OpenDocs do
   @spec unstage(String.t(), String.t()) :: :ok
   def unstage(root, name) when is_binary(name) do
     :ets.delete(@table, {@stage_key, expand(root), name})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc "Cache the exact projected JSONL bytes accepted by a successful VFS write-back."
+  @spec cache_committed(String.t(), String.t(), binary()) :: :ok
+  def cache_committed(root, name, bytes) when is_binary(name) and is_binary(bytes) do
+    :ets.insert(@table, {{@committed_key, expand(root), name}, bytes})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc "Fetch the exact projected JSONL bytes from the latest successful VFS write-back."
+  @spec committed(String.t(), String.t()) :: {:ok, binary()} | :error
+  def committed(root, name) when is_binary(name) do
+    case :ets.lookup(@table, {@committed_key, expand(root), name}) do
+      [{_key, bytes}] when is_binary(bytes) -> {:ok, bytes}
+      _ -> :error
+    end
+  rescue
+    ArgumentError -> :error
+  end
+
+  @doc "Remove the cached successful VFS write-back for `name` under `root`."
+  @spec uncache_committed(String.t(), String.t()) :: :ok
+  def uncache_committed(root, name) when is_binary(name) do
+    :ets.delete(@table, {@committed_key, expand(root), name})
     :ok
   rescue
     ArgumentError -> :ok

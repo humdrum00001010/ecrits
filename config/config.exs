@@ -35,7 +35,7 @@ config :ecrits,
 config :ecrits, :local_agent, provider: "codex"
 
 # Document VFS (Ecrits.Fuse.*): mount the workspace's documents as grep-able/
-# editable JSONL IR files under <workspace>/.ecrits/mount via exfuse. Default ON;
+# editable JSONL IR files under <workspace>/.ecrits via exfuse. Default ON;
 # the header "FUSE" toggle flips it per-workspace at runtime. On macOS the native
 # backend is FSKit; on Linux/other Unix it is the FUSE/libfuse Rust port.
 # DocMount.ensure/1 verifies the kernel mount actually took, rolling back cleanly

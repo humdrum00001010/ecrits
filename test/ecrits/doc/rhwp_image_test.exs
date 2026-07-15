@@ -48,6 +48,36 @@ defmodule Ecrits.Doc.RhwpImageTest do
     assert op.height == 2400
   end
 
+  test "for_browser uses a compact contextual default for a picture inside a cell", %{
+    path: path
+  } do
+    assert {:ok, op} =
+             Image.for_browser(%{
+               op: "insert_picture",
+               ref: %{cell: %{cellIndex: 2}},
+               src: path,
+               inline_in_cell: true
+             })
+
+    assert op.width == 4_500
+    assert op.height == 4_500
+    assert op.inline_in_cell
+  end
+
+  test "resolve_src gives the server arm the same compact cell default", %{path: path} do
+    at = %Ehwp.Op.Ref{section: 0, paragraph: 4, offset: 3}
+
+    assert {:ok, %Ehwp.Op.InsertPicture{} = op, [_bytes]} =
+             Image.resolve_src(
+               %{op: "insert_picture", src: path, inline_in_cell: true},
+               at
+             )
+
+    assert op.width == 4_500
+    assert op.height == 4_500
+    assert op.inline_in_cell
+  end
+
   test "for_browser normalizes natural-pixel dimensions that would render tiny" do
     path =
       Path.join(

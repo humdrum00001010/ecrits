@@ -122,6 +122,7 @@ defmodule Ecrits.Doc.Rhwp.Image do
   # ── internals ──────────────────────────────────────────────────────────────
 
   @default_max_unit 22_000
+  @inline_cell_default_max_unit 4_500
 
   defp extension(src) do
     src
@@ -213,10 +214,11 @@ defmodule Ecrits.Doc.Rhwp.Image do
   defp placed_size(op, natural_width, natural_height) do
     width = positive_int(op[:width])
     height = positive_int(op[:height])
+    max_unit = default_max_unit(op)
 
     cond do
       pixel_sized?(width, height, natural_width, natural_height) ->
-        fit_size(natural_width, natural_height, @default_max_unit)
+        fit_size(natural_width, natural_height, max_unit)
 
       width && height ->
         {width, height}
@@ -228,9 +230,12 @@ defmodule Ecrits.Doc.Rhwp.Image do
         {scaled_width(height, natural_width, natural_height), height}
 
       true ->
-        fit_size(natural_width, natural_height, @default_max_unit)
+        fit_size(natural_width, natural_height, max_unit)
     end
   end
+
+  defp default_max_unit(%{inline_in_cell: true}), do: @inline_cell_default_max_unit
+  defp default_max_unit(_op), do: @default_max_unit
 
   defp pixel_sized?(width, height, natural_width, natural_height) do
     is_integer(width) and is_integer(height) and

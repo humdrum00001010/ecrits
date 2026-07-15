@@ -113,7 +113,7 @@ defmodule Ecrits.AcpAgent.AcpStreamTest do
         "toolCallId" => "edit-1",
         "title" => "Edit File",
         "kind" => "edit",
-        "rawInput" => %{"path" => ".ecrits/mount/template.hwpx.jsonl", "diff" => "@@ edit @@"}
+        "rawInput" => %{"path" => ".ecrits/template.hwpx.jsonl", "diff" => "@@ edit @@"}
       }
 
       assert {:event, event, state} =
@@ -122,7 +122,7 @@ defmodule Ecrits.AcpAgent.AcpStreamTest do
       assert event == %{
                type: :edit_delta,
                edit_id: "edit-1",
-               path: ".ecrits/mount/template.hwpx.jsonl",
+               path: ".ecrits/template.hwpx.jsonl",
                delta: "@@ edit @@"
              }
 
@@ -134,7 +134,7 @@ defmodule Ecrits.AcpAgent.AcpStreamTest do
         "content" => [
           %{
             "type" => "diff",
-            "path" => ".ecrits/mount/template.hwpx.jsonl",
+            "path" => ".ecrits/template.hwpx.jsonl",
             "newText" => "@@ edit @@"
           }
         ]

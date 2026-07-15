@@ -24,6 +24,7 @@ defmodule Ecrits.DocumentCanvasState do
     field :preview_text, :string, default: ""
     field :preview_delta_count, :integer, default: 0
     field :preview_highlights, :string, default: "[]"
+    field :preview_steps, :string, default: "[]"
     field :markdown_preview_html, :string, default: ""
     embeds_one :spec, DocumentSpec, on_replace: :delete
     embeds_one :markdown_editor, MarkdownEditorState, on_replace: :delete
@@ -70,6 +71,7 @@ defmodule Ecrits.DocumentCanvasState do
       previewText: state.preview_text,
       previewDeltaCount: state.preview_delta_count,
       previewHighlights: state.preview_highlights,
+      previewSteps: state.preview_steps,
       markdownEditor: markdown_editor_payload(state.markdown_editor)
     }
   end
@@ -91,6 +93,7 @@ defmodule Ecrits.DocumentCanvasState do
       :preview_text,
       :preview_delta_count,
       :preview_highlights,
+      :preview_steps,
       :markdown_preview_html
     ])
     |> cast_embed(:spec, with: &DocumentSpec.changeset/2)

@@ -951,7 +951,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
     1. First action for this/current/open-document file work: call
        `doc.open_doc {path}` (path = current/active, a workspace-relative path,
       or a filename for the current document). It mounts the doc and returns a
-      `mounted_at` path under `.ecrits/mount/`. Nested workspace documents may use
+      `mounted_at` path under `.ecrits/`. Nested workspace documents may use
       a flat disambiguated mount filename, so use the returned `mounted_at`
       exactly.
       The JSONL file itself is IR-only; it does NOT contain `mounted_at`,
@@ -962,7 +962,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
       verification; do not use `doc.close_doc` as cleanup.
       NEVER create, copy, or edit a JSONL projection anywhere else. A file like
       `/tmp/<mount>.jsonl`, `<workspace>/<mount>.jsonl`, or any scratch/staged JSONL
-      outside `.ecrits/mount/` is fake and does NOT route to the document. If
+      outside `.ecrits/` is fake and does NOT route to the document. If
       the returned `mounted_at` file is missing after `doc.open_doc`, stop and
       report that exact blocker; do not invent a fallback JSONL file.
     2. That file is the document's IR as one compact nested JSON value, not
@@ -986,10 +986,12 @@ defmodule Ecrits.AcpAgent.AcpStream do
        order stable unless you are intentionally inserting or deleting one
        supported native payload.
       For whole-file rewrites, create the temp file inside the same
-      `.ecrits/mount/` directory, validate the temp with `jq -c . "$tmp"`,
+      `.ecrits/` directory, validate that the temp contains exactly one nested
+      root value with
+      `jq -e -s 'length == 1 and (.[0] | type == "array")' "$tmp" >/dev/null`,
       then rename it over the target only if JSON validation succeeds. Do NOT
       use `mktemp`, `dd`, or any temp path outside the mount. Example:
-       `target="$mounted_at"; tmp="$target.tmp"; jq -c '...' "$target" > "$tmp" && jq -c . "$tmp" >/dev/null && mv "$tmp" "$target"`
+       `target="$mounted_at"; tmp="$target.tmp"; jq -c '...' "$target" > "$tmp" && jq -e -s 'length == 1 and (.[0] | type == "array")' "$tmp" >/dev/null && mv "$tmp" "$target"`
        This keeps the write on the VFS `create`/`write`/`rename` path.
        To CREATE a native table, insert one new payload object at the desired
        nested-list position inside an existing paragraph list (the innermost
@@ -1046,7 +1048,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
     [System] Use doc MCP tools for documents; never shell-read the RAW binary doc
     files (.hwp/.docx/.pptx/.xlsx are not text). EXCEPTION: only if `doc.open_doc`
     returns a non-null `mounted_at`, read/edit that mounted `.jsonl` IR file
-    under `.ecrits/mount/` directly; it routes to the document.
+    under `.ecrits/` directly; it routes to the document.
     For "this/current/open document", call `doc.context` first and use
     `current_document.document` as the `document` param. Tool names are dotted.
     Read tools: `doc.context`, `doc.list`, `doc.open`, `doc.find`, `doc.read`,

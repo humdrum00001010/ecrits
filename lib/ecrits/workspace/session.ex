@@ -570,7 +570,7 @@ defmodule Ecrits.Workspace.Session do
 
   @doc "Canonicalize a workspace path so the key is stable regardless of trailing slash etc."
   @spec canonical_path(String.t()) :: String.t()
-  def canonical_path(path) when is_binary(path), do: Path.expand(path)
+  def canonical_path(path) when is_binary(path), do: Ecrits.Fuse.DocMount.canonical_root(path)
 
   @doc "Whereis the per-path Session GenServer (nil when none)."
   def whereis(path) when is_binary(path) do
@@ -1001,7 +1001,7 @@ defmodule Ecrits.Workspace.Session do
 
   def handle_info({:file_event, pid, {path, _events}}, %{fs_watcher_pid: pid} = state)
       when is_binary(path) do
-    # Ignore churn from the document VFS mount itself (<root>/.ecrits/mount); it
+    # Ignore churn from the document VFS mount itself (<root>/.ecrits); it
     # is never user content and would otherwise trigger pointless tree refreshes.
     unless String.contains?(path, "/.ecrits/") do
       Phoenix.PubSub.broadcast(

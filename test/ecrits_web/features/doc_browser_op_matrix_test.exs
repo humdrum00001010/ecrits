@@ -68,6 +68,10 @@ defmodule EcritsWeb.DocBrowserOpMatrixTest do
                   cell: { parentParaIndex: tableHome.p, controlIndex: tableHome.c, cellIndex: 0, cellParaIndex: 0 } };
       const body = { section: 0, paragraph: 1, offset: 0 };
 
+      out.push(["delete_range_batch_order", {
+        ok: ctx.opShiftsBodyIndices({ op: "delete_range", ref: body, count: 1 }) === false
+      }]);
+
       run("insert_text", { op: "insert_text", ref: body, text: "BRMX_TOKEN" });
       run("replace_text", { op: "replace_text", ref: body, query: "BRMX_TOKEN", replacement: "BRMX_TOKEN2" });
       run("delete_range", { op: "delete_range", ref: body, count: 1 });
@@ -106,6 +110,9 @@ defmodule EcritsWeb.DocBrowserOpMatrixTest do
     results = Jason.decode!(raw)
     failures = Enum.filter(results, fn [_label, r] -> r["error"] end)
     assert failures == [], "hwp browser verbs failed: #{inspect(failures)}"
+
+    assert ["delete_range_batch_order", %{"ok" => true}] in results,
+           "delete_range must preserve its batch position before a paired insert_text"
   end
 
   feature "office browser arm: relinked soffice.wasm accepts the full op set",

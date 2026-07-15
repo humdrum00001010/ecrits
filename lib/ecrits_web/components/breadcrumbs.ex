@@ -1,7 +1,6 @@
 defmodule EcritsWeb.Components.Breadcrumbs do
   @moduledoc """
-  Consistent navigation trail rendered above the main content of every
-  authenticated page (Storage, Settings, Studio).
+  Consistent navigation trail rendered above local workspace content.
 
   The component is intentionally dumb: it is fed a list of crumb maps and
   paints them. The shape is fixed:
@@ -12,11 +11,9 @@ defmodule EcritsWeb.Components.Breadcrumbs do
   `navigate: nil`, so it renders as plain text with `aria-current="page"`
   rather than a link.
 
-  `build/2` is the small helper LiveViews call on mount to construct that
-  list from a `Ecrits.Context` scope and a tiny opts map. The Studio
-  LV (Wave 3C1) calls `build/2` and stuffs the result into
-  `socket.assigns.breadcrumbs`; Storage / Settings do the same. The
-  layout reads `@breadcrumbs` and passes it as `trail={...}`.
+  `build/2` remains a compatibility helper for callers constructing local
+  workspace and document trails. The layout reads `@breadcrumbs` and passes
+  it as `trail={...}`.
 
   Truncation: crumb labels longer than 40 characters are displayed with
   an ellipsis, but the full label is preserved verbatim in the `title`
@@ -79,8 +76,7 @@ defmodule EcritsWeb.Components.Breadcrumbs do
 
   Recognised opts:
 
-    * `:page` — `:storage | :settings | :studio`
-    * `:settings_label` — label for the settings sub-page (defaults to "Account")
+    * `:page` — `:storage | :studio` (legacy names for workspace surfaces)
     * `:matter` — `%{name: String.t()}` or `nil`, accepted for backwards
       compatibility but no longer rendered as its own crumb (Document
       pivot). Studio trails are now `Storage > Document.title` (or
@@ -94,16 +90,7 @@ defmodule EcritsWeb.Components.Breadcrumbs do
   def build(%{user: %{}} = _scope, opts) do
     case Keyword.get(opts, :page) do
       :storage ->
-        [%{label: "Storage", navigate: nil, current?: true}]
-
-      :settings ->
-        page_label = Keyword.get(opts, :settings_label, "Account")
-
-        [
-          %{label: "Storage", navigate: "/storage", current?: false},
-          %{label: "Settings", navigate: "/users/settings", current?: false},
-          %{label: page_label, navigate: nil, current?: true}
-        ]
+        [%{label: "Workspace", navigate: nil, current?: true}]
 
       :studio ->
         matter = Keyword.get(opts, :matter)
@@ -118,19 +105,19 @@ defmodule EcritsWeb.Components.Breadcrumbs do
   def build(_scope, _opts), do: []
 
   # Document-pivot studio trails: Matter is internal context, not a
-  # breadcrumb step. The trail is always two levels — Storage then
-  # the current Document (or "Studio" when no document is loaded).
+  # breadcrumb step. The trail is always two levels — Workspace then
+  # the current Document (or "Document" when no document is loaded).
   # The `matter` arg is accepted but ignored.
   defp studio_trail(_matter, nil) do
     [
-      %{label: "Storage", navigate: "/storage", current?: false},
-      %{label: "Studio", navigate: nil, current?: true}
+      %{label: "Workspace", navigate: "/workspace", current?: false},
+      %{label: "Document", navigate: nil, current?: true}
     ]
   end
 
   defp studio_trail(_matter, %{title: doc_title}) do
     [
-      %{label: "Storage", navigate: "/storage", current?: false},
+      %{label: "Workspace", navigate: "/workspace", current?: false},
       %{label: doc_title, navigate: nil, current?: true}
     ]
   end

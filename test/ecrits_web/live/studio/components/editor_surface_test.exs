@@ -303,7 +303,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
            |> Enum.any?()
   end
 
-  test "embedded document renders a partial image without an office mirror" do
+  test "embedded document renders with the browser office mirror" do
     html =
       render_component(&EditorSurface.embedded_document/1,
         id: "agent-preview",
@@ -312,7 +312,6 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
             canvas_id: "agent-preview-canvas",
             document: %{id: "doc-1", relative_path: "calc.xlsx", format: "xlsx"},
             document_path: "calc.xlsx",
-            preview_url: "/local/edit-preview?document=doc-1",
             status: :running,
             canvas: %{
               document_id: "doc-1",
@@ -340,20 +339,15 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
 
     assert preview_state["documentId"] == "doc-1"
     assert preview_state["deltaCount"] == 2
+    assert preview_state["mode"] == "embedded-editor"
 
-    image =
-      fragment
-      |> LazyHTML.query(~s([data-role="editor-preview-image"]))
-      |> Enum.to_list()
-      |> List.first()
-
-    assert image
-    assert image |> LazyHTML.attribute("src") == ["/local/edit-preview?document=doc-1"]
+    refute fragment
+           |> LazyHTML.query(~s([data-role="editor-preview-image"]))
+           |> Enum.any?()
 
     assert fragment
            |> LazyHTML.query(~s([data-component="canvas-local-office-wasm"]))
-           |> Enum.to_list() ==
-             []
+           |> Enum.any?()
 
     assert fragment |> LazyHTML.query(~s([data-role="editor-preview-open"])) |> Enum.to_list() !=
              []

@@ -81,6 +81,17 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     previous_agent = Application.get_env(:ecrits, :local_agent)
     previous_agent_ui = Application.get_env(:ecrits, :local_agent_ui)
     previous_local_ehwp_opts = Application.get_env(:ecrits, :local_ehwp_opts)
+
+    previous_workspace_adapter_stub_path =
+      Application.get_env(:ecrits, :workspace_adapter_stub_path)
+
+    workspace_path =
+      Path.join(
+        System.tmp_dir!(),
+        "ecrits-local-ui-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    Application.put_env(:ecrits, :workspace_adapter_stub_path, workspace_path)
     Application.put_env(:ecrits, :local_workspace_adapter, WorkspaceAdapterStub)
     Application.put_env(:ecrits, :local_directory_picker, WorkspaceDirectoryPickerStub)
     Application.put_env(:ecrits, :local_ehwp_opts, runtime: EcritsWeb.WorkspaceEhwpRuntimeStub)
@@ -148,6 +159,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
         Application.put_env(:ecrits, :local_ehwp_opts, previous_local_ehwp_opts)
       else
         Application.delete_env(:ecrits, :local_ehwp_opts)
+      end
+
+      if previous_workspace_adapter_stub_path do
+        Application.put_env(
+          :ecrits,
+          :workspace_adapter_stub_path,
+          previous_workspace_adapter_stub_path
+        )
+      else
+        Application.delete_env(:ecrits, :workspace_adapter_stub_path)
       end
     end)
 
@@ -373,6 +394,11 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert has_element?(
              workspace_lv,
              "#local-workspace-grid[class*='--workspace-chat-rail-width']"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "#local-workspace-grid[class*='--workspace-chat-rail-live-width']"
            )
 
     assert has_element?(
@@ -613,6 +639,25 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
            )
 
     assert has_element?(workspace_lv, "#local-agent-submit", "Send")
+  end
+
+  test "panel resize persists only the final browser measurement", %{conn: conn} do
+    {:ok, lv, _html} = open_workspace(conn)
+
+    render_hook(lv, "workspace.layout.resize.finish", %{
+      "panel" => "chat_rail",
+      "start_x" => 800.4,
+      "x" => 700.2,
+      "panel_width" => 339.6,
+      "viewport_width" => 1_200.1
+    })
+
+    assert has_element?(
+             lv,
+             "#local-workspace-grid[style*='--workspace-chat-rail-width: 440px']"
+           )
+
+    assert has_element?(lv, "#local-agent-rail-resizer[data-dragging='false']")
   end
 
   test "workspace chat rail reasoning option is selectable", %{conn: conn} do
@@ -1303,6 +1348,32 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     })
   end
 
+  test "non-ASCII documents of the same format keep distinct tabs", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    request_path = "프로젝트_요청서.hwpx"
+    contract_path = "표준_계약서.hwpx"
+
+    for path <- [request_path, contract_path] do
+      File.cp!("test/fixtures/hwpx/real_contract.hwpx", Path.join(root, path))
+    end
+
+    {:ok, lv, _html} = open_workspace(conn)
+    open_document(lv, request_path)
+    open_document(lv, contract_path)
+
+    assert has_element?(
+             lv,
+             ~s([data-role="document-tab"][title="#{request_path}"][data-active="false"]),
+             Path.basename(request_path)
+           )
+
+    assert has_element?(
+             lv,
+             ~s([data-role="document-tab"][title="#{contract_path}"][data-active="true"]),
+             Path.basename(contract_path)
+           )
+  end
+
   test "document query binds XLSX as the current doc MCP handle on send", %{conn: conn} do
     use_test_agent_adapter!(
       adapter_opts: [
@@ -1690,9 +1761,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
         assert prompt =~ "not as a metadata object"
 
         assert normalized_prompt =~
-                 "create the temp file inside the same `.ecrits/mount/` directory"
+                 "create the temp file inside the same `.ecrits/` directory"
 
-        assert prompt =~ "validate the temp with `jq -c . \"$tmp\"`"
+        assert prompt =~ "validate that the temp contains exactly one nested"
+        assert prompt =~ "length == 1"
         assert prompt =~ "only if JSON validation succeeds"
 
         assert normalized_prompt =~
@@ -1842,12 +1914,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
         assert has_element?(
                  lv,
-                 ~s([data-role="editor-preview-image"][src*="/local/edit-preview?"])
+                 ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
                )
 
-        refute_canvas_state(lv, ~s([data-role="local-hwp-editor"]), %{
-          "editorMirror" => true
-        })
+        refute has_element?(lv, ~s([data-role="editor-preview-image"]))
 
         assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
         assert Enum.any?(items, &(Map.get(&1, :role) == :edit_preview))
@@ -1892,10 +1962,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="editor-preview-image"][src*="/local/edit-preview?"])
+             ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
            )
 
-    refute_canvas_state(lv, ~s([data-role="local-hwp-editor"]), %{"editorMirror" => true})
+    refute has_element?(lv, ~s([data-role="editor-preview-image"]))
 
     refute has_element?(lv, ~s([data-role="edit-preview-card"]))
     refute has_element?(lv, ~s([data-role="doc-edit-card"]))
@@ -1929,15 +1999,255 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv2,
-             ~s([data-role="editor-preview-image"][src*="/local/edit-preview?"])
+             ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
            )
 
-    refute_canvas_state(lv2, ~s([data-role="local-hwp-editor"]), %{"editorMirror" => true})
+    refute has_element?(lv2, ~s([data-role="editor-preview-image"]))
 
     refute has_element?(lv2, ~s([data-role="doc-edit-card"]))
   end
 
-  test "VFS edit for a large active document keeps one partial rail image", %{
+  test "VFS preview persists edit composition and scroll without rendered image payloads", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    session_id = subscribe_agent(lv)
+
+    render_hook(lv, "document.viewport.changed", %{
+      "document_path" => "template.hwpx",
+      "top" => 321,
+      "left" => 7
+    })
+
+    sync_workspace_session(root)
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 2,
+         preview_base_url: "blob:http://localhost/transient-preview",
+         ops: [
+           %{
+             "op" => "insert_picture",
+             "image_base64" => "data:image/png;base64,live-playback-bytes"
+           }
+         ],
+         composition_ops: [
+           %{
+             "op" => "insert_picture",
+             "src" => "/tmp/brand.png",
+             "image_base64" => "data:image/png;base64,rendered-bytes",
+             "nested" => %{"bytes" => <<1, 2, 3>>}
+           }
+         ],
+         sets: [
+           %{
+             "ref" => "picture[brand]",
+             "props" => %{"x" => 42, "imageBase64" => "rendered-bytes"}
+           }
+         ],
+         highlights: [
+           %{
+             "kind" => "picture",
+             "ref" => %{"section" => 0, "paragraph" => 0, "controlIndex" => 0},
+             "text" => "brand mark",
+             "bytes_base64" => "rendered-highlight-bytes"
+           }
+         ]
+       }}
+    )
+
+    sync_liveview(lv)
+
+    transcript_items =
+      session_id
+      |> AcpAgent.agent_snapshot()
+      |> Map.fetch!(:transcript)
+      |> Enum.flat_map(&Map.get(&1, :items, []))
+
+    persisted = Enum.find(transcript_items, &(Map.get(&1, :role) == :edit_preview))
+
+    assert persisted.scroll == %{scroll_top: 321, scroll_left: 7}
+
+    assert [%{"op" => "insert_picture", "src" => "/tmp/brand.png", "nested" => %{}}] =
+             persisted.ops
+
+    assert [%{"ref" => "picture[brand]", "props" => %{"x" => 42}}] = persisted.sets
+
+    assert [
+             %{
+               "kind" => "picture",
+               "ref" => %{"section" => 0, "paragraph" => 0, "controlIndex" => 0},
+               "text" => "brand mark"
+             }
+           ] = persisted.highlights
+
+    serialized = inspect(persisted, limit: :infinity, printable_limit: :infinity)
+    refute serialized =~ "data:image"
+    refute serialized =~ "blob:"
+    refute serialized =~ "image_base64"
+    refute serialized =~ "imageBase64"
+    refute serialized =~ "bytes_base64"
+    refute serialized =~ "rendered-bytes"
+
+    assert has_element?(
+             lv,
+             ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
+           )
+
+    refute has_element?(lv, ~s([data-role="editor-preview-image"]))
+
+    assert_canvas_state(
+      lv,
+      ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]),
+      %{"scrollTop" => 321, "scrollLeft" => 7}
+    )
+  end
+
+  test "VFS preview selects a visible text range after a delete highlight", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root)
+    _session_id = subscribe_agent(lv)
+
+    ref = %{"section" => 0, "paragraph" => 2}
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 2,
+         marker: "VISIBLE_PREVIEW_RANGE",
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "delete_range",
+             "ref" => ref,
+             "offset" => 4
+           },
+           %{
+             "kind" => "text",
+             "op" => "insert_text",
+             "ref" => ref,
+             "offset" => 4,
+             "length" => 21,
+             "text" => "VISIBLE_PREVIEW_RANGE"
+           }
+         ]
+       }}
+    )
+
+    sync_liveview(lv)
+
+    highlights =
+      lv
+      |> canvas_state(~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+      |> Map.fetch!("previewHighlights")
+      |> Jason.decode!()
+
+    assert Enum.any?(highlights, &(&1["op"] == "insert_text" and &1["length"] == 21))
+  end
+
+  test "VFS preview prefers a ranged body edit over a stale cell ref", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root)
+    _session_id = subscribe_agent(lv)
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 2,
+         marker: "VISIBLE_BODY_RANGE",
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "set_cell",
+             "ref" => %{
+               "section" => 0,
+               "paragraph" => 862,
+               "cell" => %{
+                 "parentParaIndex" => 862,
+                 "controlIndex" => 0,
+                 "cellIndex" => 2,
+                 "cellParaIndex" => 0
+               }
+             },
+             "offset" => 0,
+             "length" => 148,
+             "text" => "STALE_CELL_RANGE"
+           },
+           %{
+             "kind" => "text",
+             "op" => "insert_text",
+             "ref" => %{"section" => 0, "paragraph" => 73},
+             "offset" => 0,
+             "length" => 18,
+             "text" => "VISIBLE_BODY_RANGE"
+           }
+         ]
+       }}
+    )
+
+    sync_liveview(lv)
+
+    highlights =
+      lv
+      |> canvas_state(~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+      |> Map.fetch!("previewHighlights")
+      |> Jason.decode!()
+
+    assert Enum.any?(highlights, &(&1["ref"]["paragraph"] == 73))
+    assert Enum.any?(highlights, &(&1["ref"]["cell"]["parentParaIndex"] == 862))
+  end
+
+  test "VFS preview sends the exact saved text as a native highlight anchor", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root)
+    _session_id = subscribe_agent(lv)
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 1,
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "insert_text",
+             "ref" => %{"section" => 0, "paragraph" => 81},
+             "offset" => 0,
+             "length" => 30,
+             "text" => "          3. 산출내역서 및 마일스톤 지급계획"
+           }
+         ]
+       }}
+    )
+
+    sync_liveview(lv)
+
+    highlights =
+      lv
+      |> canvas_state(~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+      |> Map.fetch!("previewHighlights")
+      |> Jason.decode!()
+
+    assert [highlight] = highlights
+    assert highlight["ref"]["paragraph"] == 81
+    assert highlight["length"] == 30
+    assert highlight["text"] == "          3. 산출내역서 및 마일스톤 지급계획"
+  end
+
+  test "VFS edit for a large active document keeps one embedded rail preview", %{
     conn: conn
   } do
     root = WorkspaceAdapterStub.valid_path()
@@ -1974,10 +2284,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="editor-preview-image"][src*="/local/edit-preview?"])
+             ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
            )
 
-    refute_canvas_state(lv, ~s([data-role="local-hwp-editor"]), %{"editorMirror" => true})
+    refute has_element?(lv, ~s([data-role="editor-preview-image"]))
 
     refute has_element?(lv, ~s([data-role="doc-edit-card"]))
 
@@ -1991,7 +2301,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
            end)
   end
 
-  test "repeated VFS edits replace the previous partial rail image", %{conn: conn} do
+  test "repeated VFS edits replace the previous embedded rail preview", %{conn: conn} do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
     _session_id = subscribe_agent(lv)
@@ -2041,9 +2351,134 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       |> length()
 
     assert preview_count == 1
-    assert image_count == 1
-    refute_canvas_state(lv, ~s([data-role="local-hwp-editor"]), %{"editorMirror" => true})
+    assert image_count == 0
+
+    assert has_element?(
+             lv,
+             ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
+           )
+
     refute has_element?(lv, ~s([data-role="doc-edit-card"]))
+  end
+
+  test "one VFS write streams grapheme edit tokens through one stable preview", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    session_id = subscribe_agent(lv)
+    edit_id = "streamed-vfs-edit"
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         edit_id: edit_id,
+         progress_index: 0,
+         progress_total: 2,
+         preview_only: true,
+         applied: 0,
+         marker: "STREAMED_TOKEN_PENDING",
+         highlights: []
+       }}
+    )
+
+    sync_liveview(lv)
+
+    refute Enum.any?(AcpAgent.agent_snapshot(session_id).transcript, fn turn ->
+             Enum.any?(Map.get(turn, :items, []), &(Map.get(&1, :role) == :edit_preview))
+           end)
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         edit_id: edit_id,
+         progress_index: 1,
+         progress_total: 2,
+         applied: 2,
+         marker: "STREAMED_TOKEN_ONE",
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "insert_text",
+             "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+             "length" => 18,
+             "text" => "STREAMED_TOKEN_ONE"
+           }
+         ]
+       }}
+    )
+
+    sync_liveview(lv)
+
+    assert_preview_state(lv, %{
+      "documentPath" => "template.hwpx",
+      "deltaCount" => 1,
+      "status" => "running"
+    })
+
+    assert has_element?(
+             lv,
+             ~s([data-role="editor-preview"][id^="local-agent-editor-preview-#{edit_id}-"])
+           )
+
+    refute Enum.any?(AcpAgent.agent_snapshot(session_id).transcript, fn turn ->
+             Enum.any?(Map.get(turn, :items, []), &(Map.get(&1, :role) == :edit_preview))
+           end)
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         edit_id: edit_id,
+         progress_index: 2,
+         progress_total: 2,
+         applied: 4,
+         marker: "STREAMED_TOKEN_TWO",
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "insert_text",
+             "ref" => %{"section" => 0, "paragraph" => 1, "offset" => 0},
+             "length" => 18,
+             "text" => "STREAMED_TOKEN_TWO"
+           }
+         ]
+       }}
+    )
+
+    sync_liveview(lv)
+
+    assert_preview_state(lv, %{
+      "documentPath" => "template.hwpx",
+      "deltaCount" => 2,
+      "status" => "sent"
+    })
+
+    preview_ids =
+      lv
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(
+        ~s([data-role="editor-preview"][id^="local-agent-editor-preview-#{edit_id}-"])
+      )
+      |> LazyHTML.attribute("id")
+
+    assert length(preview_ids) == 1
+
+    transcript_items =
+      session_id
+      |> AcpAgent.agent_snapshot()
+      |> Map.fetch!(:transcript)
+      |> Enum.flat_map(&Map.get(&1, :items, []))
+
+    assert Enum.count(transcript_items, &(Map.get(&1, :role) == :edit_preview)) == 1
+    assert Enum.find(transcript_items, &(Map.get(&1, :role) == :edit_preview)).applied == 4
   end
 
   test "VFS property writes are pushed to the open HWP browser editor", %{conn: conn} do
@@ -3618,7 +4053,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
           %{
             type: :edit_delta,
             id: "acp-edit-1",
-            path: Path.join(root, ".ecrits/mount/template.hwpx.jsonl"),
+            path: Path.join(root, ".ecrits/template.hwpx.jsonl"),
             delta: "@@ -1 +1 @@\n-old\n+new"
           },
           %{type: :anonymous_tool_call, id: "anonymous-after-edit"},
@@ -4101,6 +4536,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert_receive {:local_agent_event,
                     %{type: :turn_completed, session_id: ^session_id, text: "done"}},
                    1_000
+
+    sync_liveview(lv)
+    stop_pid(lv.pid)
   end
 
   test "queued turn waits for the running turn before taking over", %{conn: conn} do
@@ -4441,11 +4879,6 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     end
 
     assert_canvas_state(lv, selector, expected)
-  end
-
-  defp refute_canvas_state(lv, selector, expected) do
-    refute encoded_state?(lv, selector, "data-canvas-state", expected),
-           "expected #{selector} canvas state not to include #{inspect(expected)}"
   end
 
   defp assert_preview_state(lv, expected) do

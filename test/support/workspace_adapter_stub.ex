@@ -3,19 +3,22 @@ defmodule EcritsWeb.WorkspaceAdapterStub do
 
   @valid_path "/tmp/ecrits-local-ui"
 
-  def valid_path, do: @valid_path
+  def valid_path,
+    do: Application.get_env(:ecrits, :workspace_adapter_stub_path, @valid_path)
 
   @impl true
-  def mount(@valid_path) do
-    {:ok,
-     %{
-       root_path: @valid_path,
-       title: "ecrits-local-ui",
-       tree: tree()
-     }}
+  def mount(path) do
+    if path == valid_path() do
+      {:ok,
+       %{
+         root_path: path,
+         title: Path.basename(path),
+         tree: tree()
+       }}
+    else
+      {:error, {:invalid_path, "Workspace path does not exist."}}
+    end
   end
-
-  def mount(_path), do: {:error, {:invalid_path, "Workspace path does not exist."}}
 
   @impl true
   def list_tree(%{tree: tree}, _expanded_paths), do: {:ok, tree}

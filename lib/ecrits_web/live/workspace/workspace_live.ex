@@ -279,8 +279,26 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     {:noreply, update(socket, :workspace_layout, &WorkspaceLayout.resize(&1, params))}
   end
 
-  def handle_event("workspace.layout.resize.finish", _params, socket) do
-    {:noreply, update(socket, :workspace_layout, &WorkspaceLayout.finish_resize/1)}
+  def handle_event("workspace.layout.resize.finish", params, socket) do
+    start_params =
+      Map.put(params, "x", Map.get(params, "start_x", Map.get(params, "x")))
+
+    layout =
+      socket.assigns.workspace_layout
+      |> WorkspaceLayout.begin_resize(start_params)
+      |> WorkspaceLayout.resize(params)
+      |> WorkspaceLayout.finish_resize()
+
+    width =
+      case Map.get(params, "panel", Map.get(params, :panel)) do
+        panel when panel in ["file_tree", :file_tree] ->
+          WorkspaceLayout.file_tree_render_width(layout)
+
+        _panel ->
+          layout.chat_rail_width
+      end
+
+    {:reply, %{width: width}, assign(socket, :workspace_layout, layout)}
   end
 
   def handle_event("chat.viewport.scrolled", params, socket) do
@@ -1086,7 +1104,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # A DIRECT edit of a mounted `.jsonl` was routed onto the document (doc VFS
   # write-back). Drop a file-viewer card in the chat rail showing where it landed.
   def handle_info({:vfs_doc_edited, info}, socket) when is_map(info) do
-    turn_id = vfs_doc_edit_turn_id()
+    turn_id = vfs_doc_edit_turn_id(info)
 
     socket =
       socket
@@ -1099,15 +1117,28 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp maybe_route_vfs_doc_edit_preview(socket, info, turn_id) do
     if vfs_doc_edit_preview_for_active_agent?(socket, info) do
-      item = vfs_doc_edit_item(socket, info, turn_id)
+      socket = maybe_persist_vfs_edit_preview(socket, info, turn_id)
 
-      socket
-      |> maybe_persist_vfs_edit_preview(info, turn_id)
-      |> replace_live_vfs_editor_preview(item)
-      |> maybe_stream_agent_item(item)
+      if continuing_live_vfs_preview?(socket, info, turn_id) do
+        socket
+      else
+        item = vfs_doc_edit_item(socket, info, turn_id)
+
+        socket
+        |> replace_live_vfs_editor_preview(item)
+        |> maybe_stream_agent_item(item)
+      end
     else
       socket
     end
+  end
+
+  defp continuing_live_vfs_preview?(socket, info, turn_id) do
+    item_field(info, :preview_continuation) == true and
+      match?(
+        %{role: :editor_preview, turn_id: ^turn_id},
+        socket.assigns[:local_agent_vfs_preview_item]
+      )
   end
 
   defp vfs_doc_edit_preview_for_active_agent?(socket, info) do
@@ -1142,6 +1173,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     sets = Map.get(info, :sets, [])
 
     cond do
+      item_field(info, :preview_only) == true ->
+        socket
+
+      item_field(info, :browser_authority) == true ->
+        socket
+
       renderer not in [:rhwp_wasm, :office_wasm] ->
         socket
 
@@ -1292,44 +1329,181 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
             if(@workspace_layout.editor_fullscreen?,
               do: "grid-cols-[0_minmax(0,1fr)_0]",
               else:
-                "grid-cols-[var(--workspace-file-tree-width,260px)_minmax(0,1fr)_var(--workspace-chat-rail-width,340px)]"
+                "grid-cols-[var(--workspace-file-tree-live-width,var(--workspace-file-tree-width,260px))_minmax(0,1fr)_var(--workspace-chat-rail-live-width,var(--workspace-chat-rail-width,340px))]"
             )
           ]}
         >
           <script :type={Phoenix.LiveView.ColocatedHook} name=".WorkspacePanelResize">
+            const panelResizeModels = new WeakMap()
+
+            const panelConfig = panel => panel === "file_tree" ? {
+              cssVariable: "--workspace-file-tree-width",
+              liveCssVariable: "--workspace-file-tree-live-width",
+              direction: 1,
+              minimum: 220,
+              maximum: 520,
+              oppositeId: "local-agent-sidebar"
+            } : {
+              cssVariable: "--workspace-chat-rail-width",
+              liveCssVariable: "--workspace-chat-rail-live-width",
+              direction: -1,
+              minimum: 280,
+              maximum: 720,
+              oppositeId: "local-file-tree-panel"
+            }
+
+            const serverWidth = (grid, panel) => {
+              try {
+                const layout = JSON.parse(grid.dataset.workspaceLayout || "{}")
+                const width = panel === "file_tree"
+                  ? layout.fileTreeWidth
+                  : layout.chatRailWidth
+                return Number.isFinite(width) ? Math.round(width) : null
+              } catch (_error) {
+                return null
+              }
+            }
+
+            const createPanelResizeModel = hook => {
+              let drag = null
+
+              const syncServerWidth = () => {
+                if (drag) return
+                const panel = hook.el.dataset.panel
+                const config = panelConfig(panel)
+                const grid = document.getElementById("local-workspace-grid")
+                if (!grid) return
+                const width = serverWidth(grid, panel)
+                if (width !== null) grid.style.setProperty(config.cssVariable, `${width}px`)
+                grid.style.removeProperty(config.liveCssVariable)
+              }
+
+              const applyLocalWidth = x => {
+                if (!drag) return null
+                const viewportWidth = Math.max(window.innerWidth, 1024)
+                const oppositeWidth = document.getElementById(drag.config.oppositeId)
+                  ?.getBoundingClientRect().width || 0
+                const maximum = Math.max(
+                  drag.config.minimum,
+                  Math.min(drag.config.maximum, viewportWidth - oppositeWidth - 360)
+                )
+                const width = Math.round(Math.max(
+                  drag.config.minimum,
+                  Math.min(
+                    maximum,
+                    drag.startWidth + (x - drag.startX) * drag.config.direction
+                  )
+                ))
+                drag.lastX = x
+                drag.grid.style.setProperty(drag.config.liveCssVariable, `${width}px`)
+                return width
+              }
+
+              const onPointerDown = event => {
+                if (event.button !== 0 && event.pointerType !== "touch") return
+                event.preventDefault()
+                const panel = hook.el.dataset.panel
+                const controlled = document.getElementById(hook.el.getAttribute("aria-controls"))
+                const grid = document.getElementById("local-workspace-grid")
+                if (!controlled || !grid) return
+                drag = {
+                  panel,
+                  config: panelConfig(panel),
+                  grid,
+                  pointerId: event.pointerId,
+                  startX: event.clientX,
+                  lastX: event.clientX,
+                  startWidth: Math.round(controlled.getBoundingClientRect().width)
+                }
+                hook.el.dataset.dragging = "true"
+                hook.el.setPointerCapture(event.pointerId)
+              }
+
+              const onPointerMove = event => {
+                if (!hook.el.hasPointerCapture(event.pointerId)) return
+                event.preventDefault()
+                applyLocalWidth(event.clientX)
+              }
+
+              const finishPointerResize = event => {
+                const finishedDrag = drag
+                if (!finishedDrag) return
+                if (Number.isFinite(event.pointerId) && event.pointerId !== finishedDrag.pointerId) return
+                const x = Number.isFinite(event.clientX) ? event.clientX : finishedDrag.lastX
+                const width = applyLocalWidth(x)
+                drag = null
+                hook.el.dataset.dragging = "false"
+                if (hook.el.hasPointerCapture(finishedDrag.pointerId)) {
+                  hook.el.releasePointerCapture(finishedDrag.pointerId)
+                }
+                let settled = false
+                const settle = reply => {
+                  if (settled) return
+                  settled = true
+                  window.clearTimeout(finishedDrag.settleTimer)
+                  const confirmedWidth = Number.isFinite(reply?.width)
+                    ? Math.round(reply.width)
+                    : serverWidth(finishedDrag.grid, finishedDrag.panel)
+                  if (confirmedWidth !== null) {
+                    finishedDrag.grid.style.setProperty(finishedDrag.config.cssVariable, `${confirmedWidth}px`)
+                  }
+                  finishedDrag.grid.style.removeProperty(finishedDrag.config.liveCssVariable)
+                }
+                finishedDrag.settleTimer = window.setTimeout(() => settle({width}), 1000)
+                hook.pushEvent("workspace.layout.resize.finish", {
+                  panel: finishedDrag.panel,
+                  start_x: finishedDrag.startX,
+                  x,
+                  panel_width: finishedDrag.startWidth,
+                  viewport_width: window.innerWidth
+                }, settle)
+              }
+
+              const onLostPointerCapture = event => finishPointerResize(event)
+              const onWindowPointerUp = event => finishPointerResize(event)
+              const onWindowPointerCancel = event => finishPointerResize(event)
+
+              return {
+                mount() {
+                  syncServerWidth()
+                  hook.el.addEventListener("pointerdown", onPointerDown)
+                  hook.el.addEventListener("pointermove", onPointerMove)
+                  hook.el.addEventListener("pointerup", finishPointerResize)
+                  hook.el.addEventListener("pointercancel", finishPointerResize)
+                  hook.el.addEventListener("lostpointercapture", onLostPointerCapture)
+                  window.addEventListener("pointerup", onWindowPointerUp)
+                  window.addEventListener("pointercancel", onWindowPointerCancel)
+                },
+                updated: syncServerWidth,
+                destroy() {
+                  hook.el.removeEventListener("pointerdown", onPointerDown)
+                  hook.el.removeEventListener("pointermove", onPointerMove)
+                  hook.el.removeEventListener("pointerup", finishPointerResize)
+                  hook.el.removeEventListener("pointercancel", finishPointerResize)
+                  hook.el.removeEventListener("lostpointercapture", onLostPointerCapture)
+                  window.removeEventListener("pointerup", onWindowPointerUp)
+                  window.removeEventListener("pointercancel", onWindowPointerCancel)
+                  if (drag) {
+                    drag.grid.style.removeProperty(drag.config.liveCssVariable)
+                    drag = null
+                  }
+                  syncServerWidth()
+                }
+              }
+            }
+
             export default {
               mounted() {
-                const payload = event => ({
-                  panel: this.el.dataset.panel,
-                  x: event.clientX,
-                  panel_width: document.getElementById(this.el.getAttribute("aria-controls"))
-                    ?.getBoundingClientRect().width,
-                  viewport_width: window.innerWidth
-                })
-
-                this.el.addEventListener("pointerdown", event => {
-                  if (event.button !== 0 && event.pointerType !== "touch") return
-                  event.preventDefault()
-                  this.el.setPointerCapture(event.pointerId)
-                  this.pushEvent("workspace.layout.resize.start", payload(event))
-                })
-
-                this.el.addEventListener("pointermove", event => {
-                  if (!this.el.hasPointerCapture(event.pointerId)) return
-                  event.preventDefault()
-                  this.pushEvent("workspace.layout.resize.move", payload(event))
-                })
-
-                const finish = event => {
-                  if (!this.el.hasPointerCapture(event.pointerId)) return
-                  this.el.releasePointerCapture(event.pointerId)
-                  this.pushEvent("workspace.layout.resize.finish", {
-                    panel: this.el.dataset.panel
-                  })
-                }
-
-                this.el.addEventListener("pointerup", finish)
-                this.el.addEventListener("pointercancel", finish)
+                const model = createPanelResizeModel(this)
+                panelResizeModels.set(this, model)
+                model.mount()
+              },
+              updated() {
+                panelResizeModels.get(this)?.updated()
+              },
+              destroyed() {
+                panelResizeModels.get(this)?.destroy()
+                panelResizeModels.delete(this)
               }
             }
           </script>
@@ -1419,7 +1593,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
               aria-controls="local-file-tree-panel"
               hidden={@workspace_layout.file_tree_collapsed?}
               data-dragging={
-                to_string(@workspace_layout.drag && @workspace_layout.drag.panel == :file_tree)
+                to_string(
+                  not is_nil(@workspace_layout.drag) and
+                    @workspace_layout.drag.panel == :file_tree
+                )
               }
               class={[
                 "absolute -right-1 top-0 z-10 block h-full w-2 cursor-col-resize touch-none select-none",
@@ -1502,7 +1679,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
               aria-label="Resize chat rail"
               aria-controls="local-agent-sidebar"
               data-dragging={
-                to_string(@workspace_layout.drag && @workspace_layout.drag.panel == :chat_rail)
+                to_string(
+                  not is_nil(@workspace_layout.drag) and
+                    @workspace_layout.drag.panel == :chat_rail
+                )
               }
               class={[
                 "absolute -left-1 top-0 z-10 block h-full w-2 cursor-col-resize touch-none select-none",
@@ -2582,11 +2762,21 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     assign(socket, :doc_vfs_topic, nil)
   end
 
-  defp sync_doc_vfs_subscription(socket, root, true) when is_binary(root),
+  # Subscribe while the workspace owns the VFS feature, even during the short
+  # interval before the asynchronous OS mount is observable. `doc.open_doc` can
+  # make that same mount available from another process; tying the subscription
+  # to a stale `mounted? == false` snapshot would then drop its edit preview.
+  defp sync_doc_vfs_subscription(socket, root, _mounted?) when is_binary(root),
     do: subscribe_doc_vfs(socket, root)
 
-  defp sync_doc_vfs_subscription(socket, _root, _mounted?),
-    do: unsubscribe_doc_vfs(socket)
+  defp sync_doc_vfs_subscription(socket, _root, _mounted?), do: unsubscribe_doc_vfs(socket)
+
+  defp vfs_doc_edit_turn_id(info) when is_map(info) do
+    case item_field(info, :edit_id) do
+      edit_id when is_binary(edit_id) and edit_id != "" -> edit_id
+      _other -> vfs_doc_edit_turn_id()
+    end
+  end
 
   defp vfs_doc_edit_turn_id do
     "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
@@ -2601,9 +2791,15 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp replace_live_vfs_editor_preview(socket, item) do
     socket =
-      case socket.assigns[:local_agent_vfs_preview_item] do
-        %{role: :editor_preview} = previous -> stream_delete(socket, :local_agent_items, previous)
-        _other -> socket
+      case {socket.assigns[:local_agent_vfs_preview_item], item} do
+        {%{role: :editor_preview, dom_id: dom_id}, %{role: :editor_preview, dom_id: dom_id}} ->
+          socket
+
+        {%{role: :editor_preview} = previous, _item} ->
+          stream_delete(socket, :local_agent_items, previous)
+
+        {_previous, _item} ->
+          socket
       end
 
     case item do
@@ -2626,7 +2822,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
            Document.ehwp_format?(document.format) or Document.libreoffice_format?(document.format) or
              Document.markdown_format?(document.format) do
       highlights = vfs_preview_highlights(info)
-      preview_ref = edit_preview_ref(highlights)
 
       state = %{
         turn_id: turn_id,
@@ -2637,22 +2832,18 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         canvas_id:
           "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-canvas",
         bytes_url:
-          workspace_path
-          |> local_document_bytes_url(relative_path)
-          |> cache_bust_url(),
-        preview_url:
-          local_edit_preview_url(
-            workspace_path,
-            relative_path,
-            preview_ref,
-            vfs_edit_preview_file_version(edited_abs)
-          ),
+          item_field(info, :preview_base_url) ||
+            workspace_path
+            |> local_document_bytes_url(relative_path)
+            |> cache_bust_url(),
         text: "",
-        delta_count: info[:applied] || 1,
+        delta_count: item_field(info, :progress_index) || info[:applied] || 1,
         highlights: highlights,
+        preview_steps: vfs_preview_steps(info),
+        scroll: session_document_viewport(socket, relative_path),
         marker: info[:marker] || "",
         summary: vfs_edit_summary(info),
-        status: :sent
+        status: if(vfs_edit_progress_complete?(info), do: :sent, else: :running)
       }
 
       agent_editor_preview_item(state)
@@ -2684,7 +2875,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         Enum.map(List.wrap(info[:ops]), fn op -> to_string(op["op"] || op[:op] || "edit") end)
 
     details = Enum.reject(details, &(&1 in [nil, ""]))
-    count = info[:applied] || length(details)
+
+    {count, unit, progress} =
+      case {item_field(info, :progress_index), item_field(info, :progress_total)} do
+        {index, total}
+        when is_integer(index) and is_integer(total) and index >= 0 and total >= index ->
+          {index, if(index == 1, do: "token", else: "tokens"), " · #{index}/#{total}"}
+
+        _other ->
+          count = info[:applied] || length(details)
+          {count, if(count == 1, do: "change", else: "changes"), ""}
+      end
 
     suffix =
       case Enum.take(details, 2) do
@@ -2692,7 +2893,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         shown -> " — " <> Enum.join(shown, "; ")
       end
 
-    "#{doc}: #{count} #{if count == 1, do: "change", else: "changes"}#{suffix}"
+    "#{doc}: #{count} #{unit}#{progress}#{suffix}"
   end
 
   # "page[page1]/shape[title]" -> "shape[title]"; sensible for short/nil refs.
@@ -2741,6 +2942,13 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp vfs_preview_highlights(_info), do: []
 
+  defp vfs_preview_steps(info) when is_map(info) do
+    case item_field(info, :preview_steps) do
+      steps when is_list(steps) -> steps
+      _ -> []
+    end
+  end
+
   defp vfs_preview_marker(info) when is_map(info) do
     case item_field(info, :marker) ||
            vfs_preview_marker_from_highlights(vfs_preview_highlights(info)) do
@@ -2781,18 +2989,34 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp cache_bust_url(url), do: url
 
   defp maybe_persist_vfs_edit_preview(socket, info, turn_id) do
-    case socket.assigns[:local_agent_session_id] do
-      session_id when is_binary(session_id) ->
-        if item = vfs_edit_preview_transcript_item(socket, info, turn_id) do
-          _ = ACP.append_transcript_item(session_id, item)
-        end
+    if vfs_edit_progress_complete?(info) do
+      case socket.assigns[:local_agent_session_id] do
+        session_id when is_binary(session_id) ->
+          if item = vfs_edit_preview_transcript_item(socket, info, turn_id) do
+            _ = ACP.append_transcript_item(session_id, item)
+          end
 
-        socket
+          socket
 
-      _ ->
-        socket
+        _ ->
+          socket
+      end
+    else
+      socket
     end
   end
+
+  defp vfs_edit_progress_complete?(info) when is_map(info) do
+    case {item_field(info, :progress_index), item_field(info, :progress_total)} do
+      {index, total} when is_integer(index) and is_integer(total) and total >= 1 ->
+        index >= 1 and index >= total
+
+      _other ->
+        true
+    end
+  end
+
+  defp vfs_edit_progress_complete?(_info), do: true
 
   defp vfs_edit_preview_transcript_item(socket, %{path: edited_abs} = info, turn_id)
        when is_binary(edited_abs) do
@@ -2814,10 +3038,15 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         document_path: relative_path,
         backend: edit_preview_backend(format),
         format: format,
-        marker: vfs_preview_marker(info),
         applied: item_field(info, :applied) |> preview_positive_int(1),
-        highlights: highlights,
-        ref: preview_ref,
+        ops:
+          persistable_preview_payload(
+            item_field(info, :composition_ops) || item_field(info, :ops)
+          ),
+        sets: persistable_preview_payload(item_field(info, :sets)),
+        highlights: persistable_preview_payload(highlights),
+        ref: strip_transient_preview_bytes(preview_ref),
+        scroll: session_document_viewport(socket, relative_path),
         hash: edit_preview_hash(highlights),
         version: version,
         mode: "descriptor"
@@ -2868,16 +3097,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
           socket.assigns.workspace_path
           |> local_document_bytes_url(relative_path)
           |> cache_bust_url(),
-        preview_url:
-          local_edit_preview_url(
-            socket.assigns.workspace_path,
-            relative_path,
-            item_field(item, :ref) || edit_preview_ref(vfs_preview_highlights(item)),
-            item_field(item, :version)
-          ),
         text: "",
         delta_count: applied,
         highlights: vfs_preview_highlights(item),
+        preview_steps: [],
+        scroll: item_field(item, :scroll) || session_document_viewport(socket, relative_path),
         marker: vfs_preview_marker(item),
         status: :sent
       }
@@ -2911,6 +3135,36 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   defp preview_positive_int(_value, default), do: default
+
+  defp persistable_preview_payload(value) do
+    value
+    |> List.wrap()
+    |> Enum.map(&strip_transient_preview_bytes/1)
+  end
+
+  defp strip_transient_preview_bytes(%{} = map) do
+    map
+    |> Map.drop([
+      "image_base64",
+      :image_base64,
+      "imageBase64",
+      :imageBase64,
+      "bins",
+      :bins,
+      "bytes",
+      :bytes,
+      "bytes_base64",
+      :bytes_base64,
+      "preview_base_url",
+      :preview_base_url
+    ])
+    |> Map.new(fn {key, nested} -> {key, strip_transient_preview_bytes(nested)} end)
+  end
+
+  defp strip_transient_preview_bytes(list) when is_list(list),
+    do: Enum.map(list, &strip_transient_preview_bytes/1)
+
+  defp strip_transient_preview_bytes(value), do: value
 
   defp do_mount_workspace(socket, path) do
     case Adapter.mount(path) do
@@ -3134,7 +3388,22 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp scroll_coordinate(_value), do: 0
 
-  defp tab_id(path), do: dom_token(path)
+  defp tab_id(path) do
+    path = to_string(path)
+    token = dom_token(path)
+
+    if String.match?(path, ~r/[^\x00-\x7F]/u) do
+      digest =
+        :sha256
+        |> :crypto.hash(path)
+        |> binary_part(0, 6)
+        |> Base.url_encode64(padding: false)
+
+      "#{token}-#{digest}"
+    else
+      token
+    end
+  end
 
   # Drop a tab. When it was the active tab we tear down the live document
   # (stream + edit handle) and focus a neighbor; if it was the last tab we fall
@@ -4630,33 +4899,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       _ -> nil
     end
   end
-
-  defp local_edit_preview_url(workspace_path, relative_path, ref, version)
-       when is_binary(workspace_path) and is_binary(relative_path) do
-    ref = if is_map(ref), do: Jason.encode!(ref), else: ref
-
-    params =
-      %{"path" => workspace_path, "document" => relative_path}
-      |> maybe_put_query_param("ref", ref)
-      |> maybe_put_query_param("v", edit_preview_version_token(version))
-
-    "/local/edit-preview?" <> URI.encode_query(params)
-  end
-
-  defp local_edit_preview_url(_workspace_path, _relative_path, _ref, _version), do: nil
-
-  defp maybe_put_query_param(params, _key, nil), do: params
-  defp maybe_put_query_param(params, _key, ""), do: params
-  defp maybe_put_query_param(params, key, value), do: Map.put(params, key, to_string(value))
-
-  defp edit_preview_version_token(version) when is_map(version) do
-    version
-    |> Jason.encode!()
-    |> Base.url_encode64(padding: false)
-  end
-
-  defp edit_preview_version_token(version) when is_binary(version), do: version
-  defp edit_preview_version_token(_version), do: nil
 
   # Office (docx/pptx/xlsx) rendering. Office documents render SOLELY through the
   # in-browser LibreOffice WASM editor (the `WasmOfficeEditor` hook): the server
@@ -6232,10 +6474,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       document_spec: state.document_spec,
       canvas_id: state.canvas_id,
       bytes_url: state.bytes_url,
-      preview_url: Map.get(state, :preview_url),
       body: state.text,
       delta_count: state.delta_count,
       highlights: Map.get(state, :highlights, []),
+      preview_steps: Map.get(state, :preview_steps, []),
+      scroll: Map.get(state, :scroll, %{scroll_top: 0, scroll_left: 0}),
       marker: Map.get(state, :marker, ""),
       summary: Map.get(state, :summary, "")
     }
@@ -6255,7 +6498,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
            Document.ehwp_format?(document.format) or Document.libreoffice_format?(document.format) or
              Document.markdown_format?(document.format) do
       highlights = doc_edit_preview_highlights(op, marker)
-      preview_ref = edit_preview_ref(highlights)
 
       state = %{
         dom_id: "local-agent-docedit-preview-#{dom_token(tool_call_id)}",
@@ -6269,13 +6511,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
           socket.assigns.workspace_path
           |> local_document_bytes_url(relative_path)
           |> cache_bust_url(),
-        preview_url:
-          local_edit_preview_url(
-            socket.assigns.workspace_path,
-            relative_path,
-            preview_ref,
-            vfs_edit_preview_file_version(path)
-          ),
         text: "",
         delta_count: doc_edit_delta_count(result),
         highlights: highlights,
@@ -6306,21 +6541,44 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     ]
   end
 
-  defp edit_preview_ref([highlight | _]) when is_map(highlight) do
+  defp edit_preview_ref(highlights) when is_list(highlights) do
+    ranged =
+      Enum.filter(highlights, fn highlight ->
+        is_map(highlight) and
+          (Map.get(highlight, "length") || Map.get(highlight, :length) || 0) > 0
+      end)
+
+    highlight =
+      Enum.find(ranged, fn highlight ->
+        ref = Map.get(highlight, "ref") || Map.get(highlight, :ref)
+        is_map(ref) and not is_map(Map.get(ref, "cell") || Map.get(ref, :cell))
+      end) || List.first(ranged) || List.first(highlights)
+
+    edit_preview_ref_from_highlight(highlight)
+  end
+
+  defp edit_preview_ref_from_highlight(highlight) when is_map(highlight) do
     ref = Map.get(highlight, "ref") || Map.get(highlight, :ref)
     offset = Map.get(highlight, "offset") || Map.get(highlight, :offset)
     length = Map.get(highlight, "length") || Map.get(highlight, :length)
+    text = Map.get(highlight, "text") || Map.get(highlight, :text)
 
     if is_map(ref) and is_integer(offset) and is_integer(length) and length > 0 do
       ref
       |> Map.put("offset", offset)
       |> Map.put("highlightLength", length)
+      |> maybe_put_preview_anchor(text)
     else
       ref
     end
   end
 
-  defp edit_preview_ref(_highlights), do: nil
+  defp edit_preview_ref_from_highlight(_highlight), do: nil
+
+  defp maybe_put_preview_anchor(ref, text) when is_binary(text) and text != "",
+    do: Map.put(ref, "anchorText", text)
+
+  defp maybe_put_preview_anchor(ref, _text), do: ref
 
   defp doc_edit_delta_count(result) when is_map(result) do
     case result["applied"] || result[:applied] || result["count"] || result[:count] do
@@ -6469,7 +6727,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       document: document,
       document_path: document_path,
       canvas_id: agent_editor_preview_canvas_id(item),
-      preview_url: agent_editor_preview_url(item),
       status: agent_editor_preview_status(item),
       canvas: %{
         document_id: document.id,
@@ -6481,6 +6738,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         preview_text: preview_text,
         preview_delta_count: agent_editor_preview_delta_count(item),
         preview_highlights: Jason.encode!(agent_editor_preview_highlights(item)),
+        preview_steps: Jason.encode!(agent_editor_preview_steps(item)),
+        scroll_top: agent_editor_preview_scroll(item).scroll_top,
+        scroll_left: agent_editor_preview_scroll(item).scroll_left,
         spec: agent_editor_preview_spec(item),
         markdown_editor:
           MarkdownEditorState.new(%{
@@ -6505,9 +6765,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp agent_editor_preview_bytes_url(%{bytes_url: url}) when is_binary(url), do: url
   defp agent_editor_preview_bytes_url(_item), do: nil
 
-  defp agent_editor_preview_url(%{preview_url: url}) when is_binary(url), do: url
-  defp agent_editor_preview_url(_item), do: nil
-
   defp agent_editor_preview_status(%{status: status}) when is_atom(status), do: status
   defp agent_editor_preview_status(_item), do: :running
 
@@ -6524,6 +6781,19 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     do: highlights
 
   defp agent_editor_preview_highlights(_item), do: []
+
+  defp agent_editor_preview_steps(%{preview_steps: steps}) when is_list(steps), do: steps
+  defp agent_editor_preview_steps(_item), do: []
+
+  defp agent_editor_preview_scroll(%{scroll: scroll}) when is_map(scroll) do
+    %{
+      scroll_top: scroll_coordinate(item_field(scroll, :scroll_top) || item_field(scroll, :top)),
+      scroll_left:
+        scroll_coordinate(item_field(scroll, :scroll_left) || item_field(scroll, :left))
+    }
+  end
+
+  defp agent_editor_preview_scroll(_item), do: %{scroll_top: 0, scroll_left: 0}
 
   # Chip label: the picked snippet only. An empty element (blank paragraph,
   # image, ...) keeps the chip compact — icon + type, ref on hover — instead of

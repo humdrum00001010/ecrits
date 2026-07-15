@@ -82,6 +82,7 @@ defmodule Ecrits.Fuse.DocFs do
           case Projection.write_back(source, bytes, root: root) do
             {:ok, _info} ->
               OpenDocs.unstage(root, name)
+              refresh_committed_projection(root, name, source)
               Map.update!(acc, :committed, &[name | &1])
 
             {:error, reason} ->
@@ -197,6 +198,7 @@ defmodule Ecrits.Fuse.DocFs do
           |> put_buf(key, next_buf)
           |> mark_dirty(key)
           |> maybe_commit_live_buffer(state.root, name, key, next_buf)
+          |> maybe_preview_temp_buffer(state.root, name, next_buf)
 
         {:reply, byte_size(event.data), socket}
     end
@@ -212,6 +214,19 @@ defmodule Ecrits.Fuse.DocFs do
 
       true ->
         {:noreply, truncate_buffers(socket, state.root, name, event.size)}
+    end
+  end
+
+  chmod "/:name" do
+    cond do
+      not OpenDocs.writable?(state.root) ->
+        {:error, :erofs, socket}
+
+      not target_known?(state.root, socket, name) ->
+        {:error, :enoent, socket}
+
+      true ->
+        {:noreply, socket}
     end
   end
 
@@ -238,19 +253,28 @@ defmodule Ecrits.Fuse.DocFs do
         {:ok, target_source} = source_path(state.root, target)
         target_name = mounted_source_name(target)
         buf = name_buffer(socket, name) || ""
-        result = commit_buffer(state.root, target_source, target_name, buf)
-        socket = socket |> clear_name(name) |> clear_name(target)
+        preview_started? = is_binary(preview_edit_id(socket, name))
+        edit_id = preview_edit_id(socket, name) || buffer_edit_id(target_name, buf)
+
+        result =
+          commit_buffer(state.root, target_source, target_name, buf,
+            edit_id: edit_id,
+            preview_continuation: preview_started?
+          )
 
         case result do
           {:ok, _} ->
-            {:noreply, socket}
+            {:noreply, socket |> clear_name(name) |> clear_name(target)}
 
           {:error, reason} ->
             Logger.error(
               "[DocFs] write_back rename failed for #{Path.join(state.root, target)} via #{name}: #{inspect(reason)}"
             )
 
-            {:error, :eio, socket}
+            # POSIX rename failure leaves the source in place. Preserve the temp
+            # buffer so the caller can inspect/correct it and report malformed
+            # projections as EINVAL rather than an opaque I/O failure.
+            {:error, rename_errno(reason), socket}
         end
 
       true ->
@@ -406,7 +430,9 @@ defmodule Ecrits.Fuse.DocFs do
     socket =
       Enum.reduce(keys_for_name(socket, name), socket, fn key, acc -> clear_key(acc, key) end)
 
-    Exfuse.Socket.assign(socket, :pending_truncate, Map.delete(pending_truncates(socket), name))
+    socket
+    |> Exfuse.Socket.assign(:pending_truncate, Map.delete(pending_truncates(socket), name))
+    |> clear_preview_metadata(name)
   end
 
   defp truncate_buffers(socket, root, name, size) do
@@ -496,10 +522,80 @@ defmodule Ecrits.Fuse.DocFs do
     end
   end
 
-  defp commit_buffer(root, source, source_name, buf) do
-    case Projection.write_back(source, buf, root: root) do
+  # Temp+rename editors write the replacement buffer before the authoritative
+  # rename. FSKit may deliver those chunks out of order, so only attempt a
+  # semantic preview when the accumulated bytes form a complete valid
+  # projection. `Projection.preview_write_back/3` does not mutate the source; it
+  # publishes browser-side grapheme playback under an edit id that the later
+  # rename reuses.
+  defp maybe_preview_temp_buffer(socket, root, name, buf) do
+    with {:ok, target_name} <- preview_target_name(name),
+         {:ok, source} <- source_path(root, target_name),
+         hash <- :erlang.phash2(buf),
+         false <- preview_hash(socket, name) == hash,
+         {edit_id, socket} <- ensure_preview_edit_id(socket, name),
+         {:ok, _info} <-
+           Projection.preview_write_back(source, buf, root: root, edit_id: edit_id) do
+      put_preview_hash(socket, name, hash)
+    else
+      _reason -> socket
+    end
+  end
+
+  defp preview_target_name(name) when is_binary(name) do
+    case String.split(name, ".jsonl", parts: 2) do
+      [base, suffix] when suffix != "" ->
+        if String.ends_with?(suffix, ".tmp"), do: {:ok, base <> ".jsonl"}, else: :error
+
+      _ ->
+        :error
+    end
+  end
+
+  defp preview_target_name(_name), do: :error
+
+  defp preview_edit_ids(socket),
+    do: Exfuse.Socket.get_assign(socket, :preview_edit_ids, %{})
+
+  defp preview_edit_id(socket, name), do: Map.get(preview_edit_ids(socket), name)
+
+  defp ensure_preview_edit_id(socket, name) do
+    case preview_edit_id(socket, name) do
+      edit_id when is_binary(edit_id) ->
+        {edit_id, socket}
+
+      _ ->
+        edit_id = "vfs-edit-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
+        {edit_id,
+         Exfuse.Socket.assign(
+           socket,
+           :preview_edit_ids,
+           Map.put(preview_edit_ids(socket), name, edit_id)
+         )}
+    end
+  end
+
+  defp preview_hashes(socket), do: Exfuse.Socket.get_assign(socket, :preview_hashes, %{})
+  defp preview_hash(socket, name), do: Map.get(preview_hashes(socket), name)
+
+  defp put_preview_hash(socket, name, hash),
+    do: Exfuse.Socket.assign(socket, :preview_hashes, Map.put(preview_hashes(socket), name, hash))
+
+  defp clear_preview_metadata(socket, name) do
+    socket
+    |> Exfuse.Socket.assign(:preview_edit_ids, Map.delete(preview_edit_ids(socket), name))
+    |> Exfuse.Socket.assign(:preview_hashes, Map.delete(preview_hashes(socket), name))
+  end
+
+  defp buffer_edit_id(target_name, buf),
+    do: "vfs-edit-#{:erlang.phash2({target_name, buf})}"
+
+  defp commit_buffer(root, source, source_name, buf, opts \\ []) do
+    case Projection.write_back(source, buf, Keyword.put(opts, :root, root)) do
       {:ok, _info} = ok ->
         OpenDocs.unstage(root, source_name)
+        refresh_committed_projection(root, source_name, source)
         ok
 
       {:error, reason} = error ->
@@ -512,9 +608,31 @@ defmodule Ecrits.Fuse.DocFs do
     end
   end
 
+  defp refresh_committed_projection(root, source_name, source) do
+    OpenDocs.uncache_committed(root, source_name)
+
+    case Projection.project_file(source) do
+      {:ok, bytes} -> OpenDocs.cache_committed(root, source_name, bytes)
+      {:error, _reason} -> :ok
+    end
+  end
+
   defp retryable_commit_error?({:invalid_ir_json, _line}), do: true
   defp retryable_commit_error?(:structural_change), do: true
   defp retryable_commit_error?(_reason), do: false
+
+  defp rename_errno({:multiple_nested_projection_values, _count}), do: :einval
+
+  defp rename_errno(reason)
+       when reason in [
+              :invalid_payload_node,
+              :invalid_section_list,
+              :invalid_paragraph_list,
+              :invalid_ir_jsonl
+            ],
+       do: :einval
+
+  defp rename_errno(_reason), do: :eio
 
   defp discard_staged_error?({:invalid_ir_json, _line}), do: true
   defp discard_staged_error?(_reason), do: false
@@ -523,13 +641,19 @@ defmodule Ecrits.Fuse.DocFs do
     with {:ok, source} <- source_path(root, name) do
       source_name = mounted_source_name(name)
 
-      case OpenDocs.staged(root, source_name) do
-        {:ok, _bytes, _reason} ->
-          OpenDocs.unstage(root, source_name)
-          Projection.project_file(source)
+      case OpenDocs.committed(root, source_name) do
+        {:ok, bytes} ->
+          {:ok, bytes}
 
         :error ->
-          Projection.project_file(source)
+          case OpenDocs.staged(root, source_name) do
+            {:ok, _bytes, _reason} ->
+              OpenDocs.unstage(root, source_name)
+              Projection.project_file(source)
+
+            :error ->
+              Projection.project_file(source)
+          end
       end
     end
   end
@@ -543,8 +667,7 @@ defmodule Ecrits.Fuse.DocFs do
   # (browser UI, doc.* tools, write-back). Rendering the projection here
   # costs the same as one `read` op — which already re-projects per call.
   defp projected_attrs(socket, root, name) do
-    with {:ok, source} <- source_path(root, name),
-         {:ok, bytes} <- Projection.project_file(source) do
+    with {:ok, bytes} <- projected_bytes(root, name) do
       {mtime, socket} = content_mtime(socket, name, bytes)
       {byte_size(bytes), mtime, socket}
     else

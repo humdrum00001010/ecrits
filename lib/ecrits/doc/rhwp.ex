@@ -77,6 +77,10 @@ defmodule Ecrits.Doc.Rhwp do
   def close(%{ehwp: ehwp_handle}), do: Ehwp.close(ehwp_handle)
   def close(_handle), do: :ok
 
+  @doc false
+  def render_preview(%{ehwp: ehwp_handle}, target, opts),
+    do: Ehwp.render_preview(ehwp_handle, target, opts)
+
   # Hard cap on `doc.read`: a single call NEVER returns more than this many
   # paragraphs (the user's explicit limit, design §4.4). The agent pages
   # through long documents via the returned `next_at` cursor. Enforced below

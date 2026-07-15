@@ -106,4 +106,12 @@ defmodule Ecrits.Workspace.SessionDocumentStateTest do
     assert {:error, :invalid_path} = Session.open_document(ws, %{path: "/tmp/outside.docx"})
     assert {:error, :invalid_path} = Session.update_document_scroll(ws, "../outside.docx", top: 1)
   end
+
+  test "canonicalizes the macOS /tmp alias the same way as the VFS mount" do
+    assert Session.canonical_path("/tmp/ecrits-session-alias") ==
+             Ecrits.Fuse.DocMount.canonical_root("/tmp/ecrits-session-alias")
+
+    assert Session.canonical_path("/tmp/ecrits-session-alias") ==
+             Session.canonical_path("/private/tmp/ecrits-session-alias")
+  end
 end

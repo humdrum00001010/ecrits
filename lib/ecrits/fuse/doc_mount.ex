@@ -2,7 +2,7 @@ defmodule Ecrits.Fuse.DocMount do
   @moduledoc """
   Stateless facade over `Exfuse` for the per-workspace document VFS mount.
 
-  One mount per workspace, living at `<workspace_root>/.ecrits/mount`, serving
+  One mount per workspace, living at `<workspace_root>/.ecrits`, serving
   `Ecrits.Fuse.DocFs` over the workspace root. There is NO GenServer here — this
   module only holds the `ensure`/`teardown` bookkeeping; `exfuse`'s own
   `Exfuse.MountSup` owns the port processes.
@@ -31,9 +31,9 @@ defmodule Ecrits.Fuse.DocMount do
   @fskit_extension_id "org.exfuse.fskit.extension"
   @fskit_settings_url "x-apple.systempreferences:com.apple.ExtensionsPreferences?extension-points"
 
-  @doc "The mount point for a workspace root: `<root>/.ecrits/mount` (root realpathed)."
+  @doc "The mount point for a workspace root: `<root>/.ecrits` (root realpathed)."
   @spec mount_point(String.t()) :: String.t()
-  def mount_point(root), do: Path.join(canonical_root(root), ".ecrits/mount")
+  def mount_point(root), do: Path.join(canonical_root(root), ".ecrits")
 
   @doc false
   @spec canonical_root(String.t()) :: String.t()
@@ -124,6 +124,7 @@ defmodule Ecrits.Fuse.DocMount do
 
     with_mount_lock(fn ->
       status = status()
+      _ = remove_legacy_mount(root)
 
       cond do
         not status.enabled? -> :disabled
@@ -141,6 +142,32 @@ defmodule Ecrits.Fuse.DocMount do
       {:error, {kind, reason}}
   end
 
+  @doc "Remount the workspace doc VFS so FSKit sees a changed open-document set."
+  @spec refresh(String.t()) :: :disabled | {:ok, :mounted} | {:error, term()}
+  def refresh(root) do
+    root = canonical_root(root)
+
+    with_mount_lock(fn ->
+      status = status()
+      _ = remove_legacy_mount(root)
+
+      if status.enabled? do
+        :ok = unmount_point(mount_point(root))
+        do_mount(root, status.backend)
+      else
+        :disabled
+      end
+    end)
+  rescue
+    error ->
+      Logger.error("[DocMount] refresh crashed for #{inspect(root)}: #{inspect(error)}")
+      {:error, error}
+  catch
+    kind, reason ->
+      Logger.error("[DocMount] refresh crashed for #{inspect(root)}: #{inspect({kind, reason})}")
+      {:error, {kind, reason}}
+  end
+
   @doc """
   Unmount the workspace's doc VFS. Treats absent/unmounted as success. Never
   raises. `Exfuse.unmount/1` handles the native detach; the workspace filesystem
@@ -150,7 +177,10 @@ defmodule Ecrits.Fuse.DocMount do
   def teardown(root) do
     point = mount_point(root)
 
-    with_mount_lock(fn -> unmount_point(point) end)
+    with_mount_lock(fn ->
+      :ok = unmount_point(point)
+      remove_legacy_mount(canonical_root(root))
+    end)
   rescue
     error ->
       Logger.error("[DocMount] teardown crashed for #{inspect(root)}: #{inspect(error)}")
@@ -204,10 +234,9 @@ defmodule Ecrits.Fuse.DocMount do
   end
 
   defp mount_error(point, reason) do
-    # Exfuse rolled the mount back; just don't leave an empty `.ecrits`
-    # skeleton behind (rmdir refuses a non-empty parent, so a real workspace
-    # store is never touched).
-    clean_empty_parent(point)
+    # Exfuse rolled the mount back; do not leave an empty mount-point directory.
+    # `rmdir` refuses non-empty paths, so user content is never removed.
+    clean_empty_mount_point(point)
     Logger.error("[DocMount] mount failed at #{point}: #{inspect(reason)}")
     {:error, reason}
   end
@@ -227,8 +256,15 @@ defmodule Ecrits.Fuse.DocMount do
     Enum.filter(Exfuse.list(), fn {_mount, status} -> status.mount_point == point end)
   end
 
-  defp clean_empty_parent(point) do
-    _ = File.rmdir(Path.dirname(point))
+  defp remove_legacy_mount(root) do
+    point = Path.join(root, ".ecrits/mount")
+    :ok = unmount_point(point)
+    _ = File.rmdir(point)
+    :ok
+  end
+
+  defp clean_empty_mount_point(point) do
+    _ = File.rmdir(point)
     :ok
   rescue
     _ -> :ok

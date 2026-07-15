@@ -29,14 +29,16 @@ defmodule Ecrits.Doc.MCPToolPolicy do
           "(cat/grep/sed). Never replace " <>
           "the file with one payload object and never look for mounted_at inside " <>
           "the JSONL; it is IR-only. Never create, copy, or edit fallback JSONL " <>
-          "outside `.ecrits/mount`; `/tmp/<mount>.jsonl` and workspace-root " <>
+          "outside `.ecrits`; `/tmp/<mount>.jsonl` and workspace-root " <>
           "<mount>.jsonl are fake scratch files that do not route to the document. " <>
           "If the returned `mounted_at` file is missing after `doc.open_doc`, stop " <>
           "and report that blocker. For whole-file rewrites on FSKit, never write " <>
           "directly to the target projection and never use `cp` to seed a temp file " <>
           "because FSKit may reject chmod/fchmod on virtual files. Seed a temp file " <>
-          "inside `.ecrits/mount` with plain redirection (`cat \"$target\" > " <>
-          "\"$tmp\"`), edit only that temp file, validate it with `jq -c .`, and " <>
+          "inside `.ecrits` with plain redirection (`cat \"$target\" > " <>
+          "\"$tmp\"`), edit only that temp file, validate exactly one nested " <>
+          "root value with `jq -e -s 'length == 1 and (.[0] | type == \"array\")' " <>
+          "\"$tmp\" >/dev/null`, and " <>
           "`mv -f \"$tmp\" \"$target\"` only if JSON validation succeeds; do not " <>
           "use mktemp outside the mount or dd over the target. Insert pictures as a payload node inside an " <>
           "existing paragraph list such as " <>

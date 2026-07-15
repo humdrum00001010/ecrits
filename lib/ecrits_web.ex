@@ -86,8 +86,6 @@ defmodule EcritsWeb do
       import Phoenix.HTML
       # Core UI components
       import EcritsWeb.CoreComponents
-      import EcritsWeb.Components.AppShell
-
       # Common modules used in templates
       alias Phoenix.LiveView.JS
       alias EcritsWeb.{Brand, Layouts}

@@ -551,12 +551,161 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
         </section>
       </div>
       <script :type={Phoenix.LiveView.ColocatedHook} name=".DocumentSearchBridge">
+        const editorZoomAnimations = new WeakMap()
+        const editorZoomUninstallers = new WeakMap()
+        const editorZoomSmoothingMs = 36
+        const editorZoomMin = 0.5
+        const editorZoomMax = 4
+        const editorZoomMaxStep = 0.8
+        const editorZoomSensitivity = 0.01
+        const editorZoomSelector = "[data-editor-zoomable]"
+
+        function installEditorZoom(root) {
+          const host = root.ownerDocument.defaultView
+          const onWheel = event => {
+            if (!event.ctrlKey || !event.target || typeof event.target.closest !== "function") return
+            const content = event.target.closest(editorZoomSelector)
+            if (!content || !root.contains(content)) return
+
+            event.preventDefault()
+            const scroller = findEditorZoomScroller(content, host)
+            const rect = scroller.getBoundingClientRect()
+            const scale = readEditorZoom(content, host)
+            const state = editorZoomAnimations.get(content) || {
+              scale,
+              target: scale,
+              frame: null,
+              lastTime: null
+            }
+            const step = Math.min(
+              editorZoomMaxStep,
+              Math.abs(event.deltaY) * editorZoomSensitivity
+            )
+            const factor = 1 + step
+            const next = clampEditorZoom(
+              event.deltaY < 0 ? state.target * factor : state.target / factor
+            )
+
+            state.host = host
+            state.scroller = scroller
+            state.anchorX = event.clientX - rect.left
+            state.anchorY = event.clientY - rect.top
+            state.target = next
+
+            content.dataset.editorZoom = formatEditorZoom(next)
+            content.style.zoom = ""
+            content.style.transformOrigin = "0 0"
+            content.style.transition = ""
+            content.style.willChange = "transform"
+
+            editorZoomAnimations.set(content, state)
+            if (!state.frame) {
+              state.lastTime = host.performance.now()
+              state.frame = host.requestAnimationFrame(time => animateEditorZoom(content, time))
+            }
+          }
+
+          const uninstall = () => root.removeEventListener("wheel", onWheel, true)
+          root.addEventListener("wheel", onWheel, {passive: false, capture: true})
+          editorZoomUninstallers.set(root, uninstall)
+          return uninstall
+        }
+
+        function animateEditorZoom(content, time) {
+          const state = editorZoomAnimations.get(content)
+          if (!state || !content.isConnected) {
+            editorZoomAnimations.delete(content)
+            return
+          }
+
+          const dt = Math.min(40, Math.max(0, time - (state.lastTime || time)))
+          const alpha = 1 - Math.exp(-dt / editorZoomSmoothingMs)
+          const scale = Math.exp(
+            Math.log(state.scale) +
+              (Math.log(state.target) - Math.log(state.scale)) * alpha
+          )
+          applyEditorZoom(content, state, scale)
+          state.lastTime = time
+
+          if (Math.abs(state.target - state.scale) > 0.001) {
+            state.frame = state.host.requestAnimationFrame(
+              nextTime => animateEditorZoom(content, nextTime)
+            )
+          } else {
+            applyEditorZoom(content, state, state.target)
+            state.frame = null
+            state.lastTime = null
+            content.style.willChange = ""
+          }
+        }
+
+        function applyEditorZoom(content, state, scale) {
+          const previous = state.scale || scale
+          const ratio = previous > 0 ? scale / previous : 1
+          const scroller = state.scroller?.isConnected
+            ? state.scroller
+            : findEditorZoomScroller(content, state.host)
+
+          content.style.transform = `scale(${formatEditorZoom(scale)})`
+          updateEditorZoomFootprint(content, scale)
+          if (ratio !== 1) {
+            scroller.scrollLeft = (scroller.scrollLeft + state.anchorX) * ratio - state.anchorX
+            scroller.scrollTop = (scroller.scrollTop + state.anchorY) * ratio - state.anchorY
+          }
+          state.scroller = scroller
+          state.scale = scale
+        }
+
+        function updateEditorZoomFootprint(content, scale) {
+          const delta = content.offsetHeight * (scale - 1)
+          const overviewInset = scale < 1 ? content.offsetWidth * (1 - scale) / 2 : 0
+          content.style.marginBottom = Math.abs(delta) > 0.5 ? `${delta}px` : ""
+          content.style.marginLeft = overviewInset > 0.5 ? `${overviewInset}px` : ""
+          content.style.marginRight = overviewInset > 0.5 ? `${-overviewInset}px` : ""
+        }
+
+        function readEditorZoom(content, host) {
+          const transform = host.getComputedStyle(content).transform
+          if (transform && transform !== "none") {
+            try {
+              const scale = new host.DOMMatrixReadOnly(transform).a
+              if (Number.isFinite(scale) && scale > 0) return scale
+            } catch (_error) {
+              // Fall back to the stored zoom value.
+            }
+          }
+          return Number.parseFloat(content.dataset.editorZoom || "1") || 1
+        }
+
+        function clampEditorZoom(scale) {
+          return Math.min(editorZoomMax, Math.max(editorZoomMin, scale))
+        }
+
+        function formatEditorZoom(scale) {
+          return String(Number(scale.toFixed(4)))
+        }
+
+        function findEditorZoomScroller(content, host) {
+          for (let element = content.parentElement; element; element = element.parentElement) {
+            const style = host.getComputedStyle(element)
+            const overflow = `${style.overflow}${style.overflowX}${style.overflowY}`
+            const scrollable =
+              element.scrollHeight > element.clientHeight ||
+              element.scrollWidth > element.clientWidth
+            if (/(auto|scroll)/.test(overflow) && scrollable) return element
+          }
+          return host.document.scrollingElement || host.document.documentElement
+        }
+
         export default {
           searchState() {
             try { return JSON.parse(this.el.dataset.searchState || "{}") }
             catch (_error) { return {} }
           },
           mounted() {
+            editorZoomUninstallers.get(this.el)?.()
+            installEditorZoom(this.el)
+
             document.addEventListener("keydown", event => {
               if (event.isComposing || event.altKey || event.repeat) return
 
@@ -614,6 +763,11 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
             if (input && document.activeElement !== input) {
               input.focus({preventScroll: true})
             }
+          },
+
+          destroyed() {
+            editorZoomUninstallers.get(this.el)?.()
+            editorZoomUninstallers.delete(this.el)
           }
         }
       </script>
@@ -870,42 +1024,27 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
         </button>
       </div>
       <div class="min-h-0 overflow-hidden bg-base-200">
-        <%= if @state.preview_url do %>
-          <img
-            data-role="editor-preview-image"
-            src={@state.preview_url}
-            alt={
-              "Edited region in " <>
-                embedded_document_title(@state.document, @state.document_path)
-            }
-            loading="lazy"
-            class={[
-              "block max-h-64 min-h-20 w-full bg-white object-contain object-left-top"
-            ]}
+        <div class="h-64">
+          <HwpPages.render
+            :if={ehwp_format?(@state.document.format)}
+            id={@state.canvas_id}
+            pages={[]}
+            state={@state.canvas}
           />
-        <% else %>
-          <div class="h-64">
-            <HwpPages.render
-              :if={ehwp_format?(@state.document.format)}
-              id={@state.canvas_id}
-              pages={[]}
-              state={@state.canvas}
-            />
-            <MarkdownEditor.render
-              :if={markdown_format?(@state.document.format)}
-              id={@state.canvas_id}
-              state={@state.canvas}
-            />
-            <OfficeWasm.render
-              :if={
-                not ehwp_format?(@state.document.format) and
-                  not markdown_format?(@state.document.format)
-              }
-              id={@state.canvas_id}
-              state={@state.canvas}
-            />
-          </div>
-        <% end %>
+          <MarkdownEditor.render
+            :if={markdown_format?(@state.document.format)}
+            id={@state.canvas_id}
+            state={@state.canvas}
+          />
+          <OfficeWasm.render
+            :if={
+              not ehwp_format?(@state.document.format) and
+                not markdown_format?(@state.document.format)
+            }
+            id={@state.canvas_id}
+            state={@state.canvas}
+          />
+        </div>
       </div>
     </div>
     """

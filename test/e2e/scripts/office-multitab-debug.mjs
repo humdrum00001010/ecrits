@@ -36,19 +36,20 @@ const probe = () =>
     let lok = null;
     try { if (M && typeof M.lok_is_ready === "function") lok = M.lok_is_ready() === true; } catch (e) { lok = "throw"; }
     const ed = window.__officeWasmEditor;
+    const viewer = document.querySelector("[data-role='office-wasm-viewer']");
+    let canvasState = {};
+    try { canvasState = JSON.parse(viewer?.dataset.canvasState || "{}"); } catch (_error) {}
     return {
       status: s ? s.textContent.trim() : null,
       canvas: !!document.querySelector("[data-role='office-wasm-canvas']"),
       parts: ed && ed.parts ? ed.parts.length : 0,
       lok,
-      doc: (document.querySelector("[data-role='office-wasm-viewer']") || {}).getAttribute
-        ? document.querySelector("[data-role='office-wasm-viewer']").getAttribute("data-document-id")
-        : null,
+      doc: canvasState.documentId || null,
     };
   });
 
 // Open/switch a doc via LiveView LIVE NAVIGATION (same JS context, engine
-// singleton persists) — exactly what tab_switch/open_file do (push_patch to the
+// singleton persists) — exactly what tab_switch/workspace.document.open do (push_patch to the
 // workspace document URL). Inject a data-phx-link anchor and click it so the
 // LiveView client intercepts and patches without a full page reload.
 async function liveNav(name) {

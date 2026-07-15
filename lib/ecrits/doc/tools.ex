@@ -56,6 +56,7 @@ defmodule Ecrits.Doc.Tools do
   mirroring the design's example payloads.
   """
 
+  alias Ecrits.Doc.BrowserBridge
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
   alias Ecrits.Fuse.DocMount
@@ -81,7 +82,6 @@ defmodule Ecrits.Doc.Tools do
   # How long to wait for the viewing LiveView (browser WASM model) to reply. Keep
   # this below ExMCP's 10s GenServer.call boundary so slow viewer replies surface
   # as structured tool errors instead of HTTP 500s.
-  @browser_timeout_ms 8_000
   @viewer_state_timeout_ms 500
   @find_text_limit 48
   @office_element_metadata_fields ~w(sheet address display value value_type valueType
@@ -129,7 +129,7 @@ defmodule Ecrits.Doc.Tools do
       "description" =>
         "Expose a workspace document as an editable JSONL IR file in the doc VFS, " <>
           "mounted at the returned `mounted_at` path under " <>
-          "<workspace>/.ecrits/mount/. Call this to make a " <>
+          "<workspace>/.ecrits/. Call this to make a " <>
           "document readable/greppable as a normal file (cat, rg, sed, grep) from " <>
           "the shell; the projected JSONL is the whole document IR as one nested " <>
           "list value: sections -> paragraphs -> payload nodes. Paths may be " <>
@@ -138,14 +138,16 @@ defmodule Ecrits.Doc.Tools do
           "disambiguated mount name; always use the returned `mounted_at` path. " <>
           "The JSONL is IR-only and does not contain mounted_at " <>
           "metadata. Never create, copy, or edit fallback JSONL outside " <>
-          ".ecrits/mount; /tmp/<mount>.jsonl and workspace-root <mount>.jsonl are fake " <>
+          ".ecrits; /tmp/<mount>.jsonl and workspace-root <mount>.jsonl are fake " <>
           "scratch files that do not route to the document. If mounted_at is null " <>
           "or the returned mounted_at file is missing, report the blocker " <>
           "instead of editing. For whole-file rewrites on FSKit, never write directly " <>
           "to the target projection and never use `cp` to seed a temp file because " <>
           "FSKit may reject chmod/fchmod on virtual files. Seed a temp file inside " <>
-          ".ecrits/mount with plain redirection (`cat \"$target\" > \"$tmp\"`), " <>
-          "edit only that temp file, validate it with `jq -c .`, then `mv -f " <>
+          ".ecrits with plain redirection (`cat \"$target\" > \"$tmp\"`), " <>
+          "edit only that temp file, validate exactly one nested root value with " <>
+          "`jq -e -s 'length == 1 and (.[0] | type == \"array\")' \"$tmp\" " <>
+          ">/dev/null`, then `mv -f " <>
           "\"$tmp\" \"$target\"` only if JSON validation succeeds; do not use " <>
           "mktemp outside the mount or dd over the target. Never replace it with one payload object. Insert a " <>
           "picture by adding a payload node inside an existing paragraph list " <>
@@ -183,7 +185,7 @@ defmodule Ecrits.Doc.Tools do
       "name" => "close_doc",
       "description" =>
         "Remove a document from the doc VFS mount (reverse of doc.open_doc): the " <>
-          "projected <name>.jsonl disappears from <workspace>/.ecrits/mount/. " <>
+          "projected <name>.jsonl disappears from <workspace>/.ecrits/. " <>
           "This is for explicit unmount requests only, not normal edit cleanup or " <>
           "verification; closing mid-turn removes the file the agent needs to edit. " <>
           "Returns {closed}.",
@@ -753,15 +755,24 @@ defmodule Ecrits.Doc.Tools do
          :ok <- ensure_projectable(abs) do
       name = vfs_mount_source_name(root, abs)
 
+      refresh_mount? =
+        Ecrits.Fuse.DocMount.mounted?(root) and
+          not Ecrits.Fuse.OpenDocs.member?(root, name)
+
       Ecrits.Fuse.OpenDocs.open(root, name,
         agent_id: Map.get(ctx, :agent_id),
         source_path: abs
       )
 
+      sync_vfs_write_policy(ctx, root)
+
       mount_status = Ecrits.Fuse.DocMount.status()
 
       {mounted_at, mount_error} =
-        case Ecrits.Fuse.DocMount.ensure(root) do
+        case if(refresh_mount?,
+               do: Ecrits.Fuse.DocMount.refresh(root),
+               else: Ecrits.Fuse.DocMount.ensure(root)
+             ) do
           {:ok, _} ->
             mounted =
               Path.join(
@@ -3186,39 +3197,11 @@ defmodule Ecrits.Doc.Tools do
   # result back to us as `{:doc_browser_reply, ref, result}`. Runs in the agent's
   # MCP process (NOT the LiveView), so we use a tagged send + selective receive.
   defp browser_call(lv, _args, verb, payload) when is_pid(lv) do
-    ref = make_ref()
-    started_at = System.monotonic_time(:millisecond)
-    send(lv, {:doc_browser_request, self(), ref, verb, payload})
-
-    result =
-      receive do
-        {:doc_browser_reply, ^ref, {:ok, result}} -> {:ok, stringify(result)}
-        {:doc_browser_reply, ^ref, {:error, reason}} -> {:error, error_json(reason)}
-      after
-        @browser_timeout_ms ->
-          {:error, error_json({:browser_timeout, "viewer did not reply in time"})}
-      end
-
-    log_browser_timing(verb, result, started_at)
-    result
+    case BrowserBridge.call(lv, verb, payload) do
+      {:ok, result} -> {:ok, stringify(result)}
+      {:error, reason} -> {:error, error_json(reason)}
+    end
   end
-
-  defp log_browser_timing(verb, result, started_at) do
-    duration_ms = System.monotonic_time(:millisecond) - started_at
-    status = browser_result_status(result)
-
-    Logger.debug(fn ->
-      "[doc_tools] browser_call verb=#{verb} status=#{status} duration_ms=#{duration_ms}"
-    end)
-  end
-
-  defp browser_result_status({:ok, _result}), do: "ok"
-
-  defp browser_result_status({:error, %{} = error}),
-    do: "error:#{Map.get(error, "error", "structured")}"
-
-  defp browser_result_status({:error, reason}) when is_atom(reason), do: "error:#{reason}"
-  defp browser_result_status({:error, _reason}), do: "error"
 
   defp with_server_editor(ctx, document, fun) do
     case Pool.with_doc(pool(ctx), document, fun) do
@@ -3702,6 +3685,16 @@ defmodule Ecrits.Doc.Tools do
       "message" => status.message,
       "settings_url" => status.settings_url
     }
+  end
+
+  defp sync_vfs_write_policy(ctx, root) do
+    case Map.fetch(ctx, :read_only) do
+      {:ok, read_only?} when is_boolean(read_only?) ->
+        Ecrits.Fuse.OpenDocs.set_writable(root, not read_only?)
+
+      _ ->
+        :ok
+    end
   end
 
   defp get(args, keys), do: get_in_args(args, keys)

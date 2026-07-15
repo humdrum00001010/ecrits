@@ -152,6 +152,40 @@ describe("WasmHwpEditor view_state carrier boundary", () => {
   })
 })
 
+describe("WasmHwpEditor document load coalescing", () => {
+  it("reuses the in-flight load for the same bytes URL", async () => {
+    const editor = Object.create(WasmHwpEditor)
+    let releaseLoad: (() => void) | undefined
+    const inFlight = new Promise<void>((resolve) => {
+      releaseLoad = resolve
+    })
+    const oldFetch = (globalThis as any).fetch
+    let fetchCalls = 0
+
+    ;(globalThis as any).fetch = () => {
+      fetchCalls += 1
+      throw new Error("a coalesced load must not fetch again")
+    }
+
+    editor.doc = null
+    editor.loadedUrl = null
+    editor._loadingUrl = "/bytes/same.hwp"
+    editor._loadInFlight = inFlight
+
+    try {
+      const reused = editor.loadDocument({ url: "/bytes/same.hwp" })
+      await Promise.resolve()
+      assert.equal(fetchCalls, 0)
+      releaseLoad?.()
+      await reused
+      assert.equal(fetchCalls, 0)
+    } finally {
+      if (oldFetch) (globalThis as any).fetch = oldFetch
+      else delete (globalThis as any).fetch
+    }
+  })
+})
+
 describe("WasmHwpEditor text hover cursor", () => {
   it("uses an I-beam only when the pointer is near the engine text cursor rect", () => {
     const editor = Object.create(WasmHwpEditor)
@@ -319,6 +353,82 @@ describe("WasmHwpEditor scroll preservation", () => {
         },
       },
     ])
+  })
+})
+
+describe("WasmHwpEditor mirror resize anchoring", () => {
+  it("reframes a saved edit after the preview surface changes size", () => {
+    const win = (globalThis as any).window
+    const oldRaf = win.requestAnimationFrame
+    const oldCancelRaf = win.cancelAnimationFrame
+    const oldSetTimeout = win.setTimeout
+    const oldClearTimeout = win.clearTimeout
+    const oldResizeObserver = (globalThis as any).ResizeObserver
+    let resizeCallback: (() => void) | null = null
+    let frameCallback: (() => void) | null = null
+    let renderCallback: (() => void) | null = null
+    let observed: any = null
+
+    win.requestAnimationFrame = (callback: () => void) => {
+      frameCallback = callback
+      return 41
+    }
+    win.cancelAnimationFrame = () => {}
+    win.setTimeout = (callback: () => void) => {
+      renderCallback = callback
+      return 73
+    }
+    win.clearTimeout = () => {}
+    ;(globalThis as any).ResizeObserver = class {
+      constructor(callback: () => void) {
+        resizeCallback = callback
+      }
+      observe(element: any) {
+        observed = element
+      }
+      disconnect() {}
+    }
+
+    try {
+      withMountedHook((editor) => {
+        const rects = [{ pageIndex: 3, x: 150, y: 406, width: 220, height: 13, savedHighlightHasCell: true }]
+        let rendered = 0
+        let framed: any = null
+        editor.previewSavedHighlight = { rects }
+        editor.renderVisiblePages = () => {
+          rendered += 1
+        }
+        editor.frameSavedEditHighlights = (value: any) => {
+          framed = value
+        }
+
+        assert.equal(observed, editor.el)
+        resizeCallback?.()
+        resizeCallback?.()
+        assert.equal(typeof frameCallback, "function")
+        assert.equal(rendered, 0)
+
+        frameCallback?.()
+
+        assert.equal(rendered, 0)
+        assert.equal(framed, rects)
+
+        renderCallback?.()
+
+        assert.equal(rendered, 1)
+      })
+    } finally {
+      if (oldRaf) win.requestAnimationFrame = oldRaf
+      else delete win.requestAnimationFrame
+      if (oldCancelRaf) win.cancelAnimationFrame = oldCancelRaf
+      else delete win.cancelAnimationFrame
+      if (oldSetTimeout) win.setTimeout = oldSetTimeout
+      else delete win.setTimeout
+      if (oldClearTimeout) win.clearTimeout = oldClearTimeout
+      else delete win.clearTimeout
+      if (oldResizeObserver) (globalThis as any).ResizeObserver = oldResizeObserver
+      else delete (globalThis as any).ResizeObserver
+    }
   })
 })
 
@@ -1357,6 +1467,8 @@ describe("WasmHwpEditor preview patch safety", () => {
     assert.equal(editor.el.dataset.previewHighlightMode, "saved-edit-regions")
     assert.equal(editor.el.dataset.previewHighlightCount, "3")
     assert.equal(editor.el.dataset.previewHighlightPages, "0,2,3")
+    assert.equal(editor.el.dataset.previewHighlightAuthority, "selection:1,selection-cell:2")
+    assert.equal(editor.el.dataset.previewHighlightFallbackCount, "0")
     assert.equal(editor.el.dataset.previewFrameMode, "saved-cell")
     assert.equal(editor.el.dataset.previewFramePage, "2")
     assert.equal(editor.el.scrollTop, 2016)
@@ -1432,6 +1544,8 @@ describe("WasmHwpEditor preview patch safety", () => {
 
     assert.deepEqual(calls, [[0, 0, title.length, 0, title.length + marker.length]])
     assert.equal(editor.el.dataset.previewHighlightCount, "1")
+    assert.equal(editor.el.dataset.previewHighlightAuthority, "selection:1")
+    assert.equal(editor.el.dataset.previewHighlightFallbackCount, "0")
     assert.equal(fills.length, 1)
   })
 
@@ -1502,6 +1616,8 @@ describe("WasmHwpEditor preview patch safety", () => {
     editor.renderSavedEditHighlights()
 
     assert.equal(editor.el.dataset.previewHighlightCount, "1")
+    assert.equal(editor.el.dataset.previewHighlightAuthority, "cursor:1")
+    assert.equal(editor.el.dataset.previewHighlightFallbackCount, "1")
     assert.equal(editor.el.dataset.previewFrameMode, "saved-text")
     assert.equal(editor.el.dataset.previewFramePage, "4")
     assert.equal(editor.el.scrollTop, 596)
@@ -1579,6 +1695,8 @@ describe("WasmHwpEditor preview patch safety", () => {
     editor.renderSavedEditHighlights()
 
     assert.equal(editor.el.dataset.previewHighlightCount, "1")
+    assert.equal(editor.el.dataset.previewHighlightAuthority, "element-estimate:1")
+    assert.equal(editor.el.dataset.previewHighlightFallbackCount, "1")
     assert.equal(editor.el.dataset.previewFrameMode, "saved-text")
     assert.equal(editor.el.dataset.previewFramePage, "2")
     assert.equal(editor.el.scrollTop, 376)
@@ -2117,7 +2235,7 @@ describe("WasmHwpEditor preview patch safety", () => {
     const rects = editor.rectsForSavedEditHighlight(highlight)
 
     assert.deepEqual(rects, [
-      { pageIndex: 2, x: 210, y: 320, width: 48, height: 17, savedHighlightNative: true },
+      { pageIndex: 2, x: 210, y: 320, width: 48, height: 17, savedHighlightNative: true, savedHighlightAuthority: "saved-edit-api" },
     ])
     assert.deepEqual(JSON.parse(nativeInput), highlight)
   })
@@ -2202,7 +2320,7 @@ describe("WasmHwpEditor preview patch safety", () => {
         width: Math.round(rects[0].width * 10) / 10,
         height: Math.round(rects[0].height * 10) / 10,
       },
-      { pageIndex: 10, x: 98.3, y: 264.3, width: 93, height: 17 }
+      { pageIndex: 10, x: 98.3, y: 264.3, width: 93, height: 17, savedHighlightAuthority: "cell-bbox" }
     )
   })
 
@@ -2276,7 +2394,40 @@ describe("WasmHwpEditor preview patch safety", () => {
       text: "정상 셀",
     })
 
-    assert.deepEqual(rects, [{ pageIndex: 2, x: 120, y: 210, width: 64, height: 18 }])
+    assert.deepEqual(rects, [
+      { pageIndex: 2, x: 120, y: 210, width: 64, height: 18, savedHighlightNative: true, savedHighlightAuthority: "selection-cell" },
+    ])
+  })
+
+  it("asks the engine for every paragraph changed by a multiline saved cell edit", () => {
+    let requested: number[] = []
+    const editor = {
+      ...WasmHwpEditor,
+      doc: {
+        getSelectionRectsInCell(...args: number[]) {
+          requested = args
+          return JSON.stringify([
+            { pageIndex: 3, x: 400, y: 360, width: 220, height: 13 },
+            { pageIndex: 3, x: 400, y: 380, width: 150, height: 13 },
+          ])
+        },
+      },
+    } as any
+
+    const rects = editor.rectsForSavedEditHighlight({
+      op: "set_cell",
+      ref: {
+        section: 0,
+        paragraph: 76,
+        offset: 0,
+        cell: { parentParaIndex: 76, controlIndex: 0, cellIndex: 3, cellParaIndex: 0 },
+      },
+      text: "첫째 줄\n둘째 줄\n마지막",
+    })
+
+    assert.deepEqual(requested, [0, 76, 0, 3, 0, 0, 2, 3])
+    assert.equal(rects.length, 2)
+    assert.ok(rects.every((rect: any) => rect.savedHighlightNative === true))
   })
 
   it("restores saved VFS edit highlights when caret blink clears the overlay", () => {

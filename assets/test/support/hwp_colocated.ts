@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 
 const sourceUrl = new URL(
   "../../../lib/ecrits_web/live/studio/components/canvas/hwp_pages.ex",
@@ -23,8 +26,17 @@ export const loadHwpColocatedHook = () => {
       'ensureWasm().catch((error) => console.error("[wasm-hwp] init failed", error));',
       'if (typeof location !== "undefined") ensureWasm().catch((error) => console.error("[wasm-hwp] init failed", error));',
     )
-    const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
-    loaded = import(moduleUrl)
+    loaded = (async () => {
+      const dir = mkdtempSync(join(tmpdir(), "ecrits-hwp-hook-"))
+      const modulePath = join(dir, "hwp_colocated.mjs")
+      writeFileSync(modulePath, source)
+
+      try {
+        return await import(pathToFileURL(modulePath).href)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })()
   }
 
   return loaded

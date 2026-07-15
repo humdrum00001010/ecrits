@@ -27,7 +27,7 @@ defmodule Ecrits.Fuse.DocFsTest do
 
       assert OpenDocs.member?(real_root, "doc.hwpx")
       assert OpenDocs.writable?(real_root)
-      assert DocMount.mount_point(root) == Path.join(real_root, ".ecrits/mount")
+      assert DocMount.mount_point(root) == Path.join(real_root, ".ecrits")
 
       assert Pool.document_id_for(Path.join(root, "doc.hwpx"), :hwpx) ==
                Pool.document_id_for(Path.join(real_root, "doc.hwpx"), :hwpx)
@@ -70,6 +70,41 @@ defmodule Ecrits.Fuse.DocFsTest do
 
     assert {:reply, names, _socket} = DocFs.handle_event(:readdir, %{path: "/"}, socket)
     assert names == [{"drafts%2Fdoc.hwpx.jsonl", {0o0644, 2, 0}}]
+  end
+
+  test "chmod accepts writable projected files and atomic rewrite temps" do
+    root = tmp_root("doc_fs_chmod")
+
+    on_exit(fn ->
+      OpenDocs.close(root, "doc.hwpx")
+      File.rm_rf(root)
+    end)
+
+    OpenDocs.open(root, "doc.hwpx")
+    OpenDocs.set_writable(root, true)
+
+    socket = Exfuse.Socket.new(DocMount.mount_point(root), %{root: root})
+
+    assert {:noreply, socket} =
+             DocFs.handle_event(
+               :chmod,
+               %{path: "/doc.hwpx.jsonl", mode: 0o0644},
+               socket
+             )
+
+    assert {:reply, _handle, socket} =
+             DocFs.handle_event(
+               :create,
+               %{path: "/doc.hwpx.jsonl.tmp", flags: 0, mode: 0o0600},
+               socket
+             )
+
+    assert {:noreply, _socket} =
+             DocFs.handle_event(
+               :chmod,
+               %{path: "/doc.hwpx.jsonl.tmp", mode: 0o0644},
+               socket
+             )
   end
 
   test "chunked in-place rewrite commits once the buffer is valid" do
@@ -316,6 +351,29 @@ defmodule Ecrits.Fuse.DocFsTest do
       assert OpenDocs.staged(root, "doc.hwpx") == :error
       assert {:ok, after_bytes} = Projection.project_file(path)
       assert after_bytes =~ "DOCFS_STAGED_RENAME_OK"
+      assert {:ok, ^after_bytes} = OpenDocs.committed(root, "doc.hwpx")
+
+      {:reply, visible_after_commit, socket} =
+        DocFs.handle_event(
+          :read,
+          %{path: "/" <> projected, offset: 0, size: byte_size(after_bytes)},
+          socket
+        )
+
+      assert visible_after_commit == after_bytes
+
+      {:reply, attrs, _socket} =
+        DocFs.handle_event(:getattr, %{path: "/" <> projected}, socket)
+
+      assert {_mode, _nlink, size, _mtime} = attrs
+      assert size == byte_size(after_bytes)
+
+      OpenDocs.open(root, "doc.hwpx")
+      assert {:ok, ^after_bytes} = OpenDocs.committed(root, "doc.hwpx")
+
+      OpenDocs.close(root, "doc.hwpx")
+      OpenDocs.open(root, "doc.hwpx")
+      assert OpenDocs.committed(root, "doc.hwpx") == :error
     end
   end
 
@@ -372,6 +430,63 @@ defmodule Ecrits.Fuse.DocFsTest do
 
       assert visible == binary_part(projected_bytes, 0, 3)
       assert visible == "[[["
+    end
+  end
+
+  test "multiple nested projection values reject rename as EINVAL and preserve the temp" do
+    if not ehwp_available?(@hwpx_fixture) do
+      IO.puts("\n[skip] ehwp NIF unavailable; skipping DocFs multiple-root rename e2e")
+    else
+      root = tmp_root("doc_fs_multiple_roots")
+      path = Path.join(root, "doc.hwpx")
+      File.cp!(@hwpx_fixture, path)
+
+      on_exit(fn ->
+        _ = Pool.close_by_path(path)
+        OpenDocs.close(root, "doc.hwpx")
+        File.rm_rf(root)
+      end)
+
+      OpenDocs.open(root, "doc.hwpx")
+      OpenDocs.set_writable(root, true)
+
+      projected = Projection.projected_name("doc.hwpx")
+      temp = "/doc.hwpx.jsonl.tmp"
+      socket = Exfuse.Socket.new(DocMount.mount_point(root), %{root: root})
+      {:ok, bytes} = Projection.project_file(path)
+      invalid_bytes = bytes <> "\n" <> bytes
+
+      {:reply, temp_handle, socket} =
+        DocFs.handle_event(:create, %{path: temp, flags: 0}, socket)
+
+      {:reply, size, socket} =
+        DocFs.handle_event(
+          :write,
+          %{path: temp, handle: temp_handle, offset: 0, data: invalid_bytes},
+          socket
+        )
+
+      assert size == byte_size(invalid_bytes)
+
+      {:noreply, socket} =
+        DocFs.handle_event(:release, %{path: temp, flags: 0, handle: temp_handle}, socket)
+
+      assert {:error, 22, socket} =
+               DocFs.handle_event(
+                 :rename,
+                 %{path: temp, target: "/" <> projected},
+                 socket
+               )
+
+      assert {:reply, ^invalid_bytes, _socket} =
+               DocFs.handle_event(
+                 :read,
+                 %{path: temp, offset: 0, size: byte_size(invalid_bytes)},
+                 socket
+               )
+
+      assert {:ok, ^bytes} = Projection.project_file(path)
+      assert OpenDocs.staged(root, "doc.hwpx") == :error
     end
   end
 
@@ -528,13 +643,20 @@ defmodule Ecrits.Fuse.DocFsTest do
   defp replace_first_cell_text_in_doc(sections, text, changed?) do
     Enum.map_reduce(sections, changed?, fn section, changed? ->
       Enum.map_reduce(section, changed?, fn paragraph, changed? ->
-        Enum.map_reduce(paragraph, changed?, fn
-          %{"type" => "cell", "text" => old} = node, false when is_binary(old) and old != "" ->
-            {Map.put(node, "text", text), true}
+        {paragraph, {changed?, _cell_seen?}} =
+          Enum.map_reduce(paragraph, {changed?, false}, fn
+            %{"type" => "cell"} = node, {changed?, _cell_seen?} ->
+              {node, {changed?, true}}
 
-          node, changed? ->
-            {node, changed?}
-        end)
+            %{"type" => "paragraph", "text" => old} = node, {false, true}
+            when is_binary(old) and old != "" ->
+              {Map.put(node, "text", text), {true, true}}
+
+            node, state ->
+              {node, state}
+          end)
+
+        {paragraph, changed?}
       end)
     end)
   end

@@ -79,7 +79,8 @@ defmodule Ecrits.Doc.ToolsTest do
       assert open_doc_tool["description"] =~ "do not route to the document"
       assert open_doc_tool["description"] =~ "For whole-file rewrites on FSKit"
       assert open_doc_tool["description"] =~ "plain redirection"
-      assert open_doc_tool["description"] =~ "validate it with `jq -c .`"
+      assert open_doc_tool["description"] =~ "validate exactly one nested root value"
+      assert open_doc_tool["description"] =~ "length == 1"
       assert open_doc_tool["description"] =~ "mv -f"
       assert open_doc_tool["description"] =~ "do not use mktemp"
       assert open_doc_tool["description"] =~ "or dd over the target"
@@ -1241,6 +1242,14 @@ defmodule Ecrits.Doc.ToolsTest do
                Tools.call(ws_ctx(pool, root), "doc.open_doc", %{"path" => "drafts/nested.hwp"})
 
       assert OpenDocs.source_path(root, "drafts%2Fnested.hwp") == {:ok, abs}
+      assert OpenDocs.writable?(root)
+
+      assert {:ok, _result} =
+               Tools.call(%{ws_ctx(pool, root) | read_only: true}, "doc.open_doc", %{
+                 "path" => "drafts/nested.hwp"
+               })
+
+      refute OpenDocs.writable?(root)
     end
 
     test "doc.open_doc resolves a bare filename to the active nested document",

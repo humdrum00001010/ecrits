@@ -776,24 +776,17 @@ defmodule EcritsWeb.Components.CommandPalette do
     [
       # --- Navigation
       %Command{
-        id: :nav_storage,
-        label: "Go to storage",
-        hint: "/storage",
-        action: {:navigate, "/storage"},
+        id: :nav_workspace,
+        label: "Go to workspace",
+        hint: "/workspace",
+        action: {:navigate, "/workspace"},
         group: :navigation
       },
       %Command{
-        id: :nav_landing,
-        label: "Go to landing",
+        id: :nav_mount,
+        label: "Mount another workspace",
         hint: "/",
         action: {:navigate, "/"},
-        group: :navigation
-      },
-      %Command{
-        id: :nav_settings,
-        label: "Account settings",
-        hint: "/users/settings",
-        action: {:navigate, "/users/settings"},
         group: :navigation
       },
 

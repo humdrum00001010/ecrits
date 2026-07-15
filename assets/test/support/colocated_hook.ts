@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 
 let officeWasmModule: Promise<Record<string, any>> | null = null
 
@@ -20,7 +23,16 @@ export function importOfficeWasmInternals() {
     hook[1].replace(/\bexport default OfficeWasmHook\s*$/, "") +
     "\nexport { OfficeWasmHook, WasmOfficeEditor, rewriteOfficeOp, OFFICE_OPS, normalizeOfficeNearby, officeReadRefCandidates, readOfficeElements }\n"
 
-  const url = `data:text/javascript;base64,${Buffer.from(moduleSource).toString("base64")}`
-  officeWasmModule = import(url)
+  officeWasmModule = (async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ecrits-office-hook-"))
+    const modulePath = join(dir, "office_colocated.mjs")
+    writeFileSync(modulePath, moduleSource)
+
+    try {
+      return await import(pathToFileURL(modulePath).href)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })()
   return officeWasmModule
 }

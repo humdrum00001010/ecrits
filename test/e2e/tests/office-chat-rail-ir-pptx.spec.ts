@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 // #276 reflection-codec finding (verified 2026-07-08: FillColor 1614595→dark navy,
 // CharColor→white persisted to the real file).
 //
-// The agent edits via the doc VFS (a file WRITE to .ecrits/mount/<doc>.jsonl), NOT
+// The agent edits via the doc VFS (a file WRITE to .ecrits/<doc>.jsonl), NOT
 // a doc.edit MCP tool — so the correct assertion is the MOUNTED FILE BYTES, not a
 // doc.edit card. We DON'T boot the office WASM viewer (it needs a cross-origin-
 // isolated context; see task #317) — the chat-rail agent path is independent of it.
@@ -87,7 +87,7 @@ test.describe("chat-rail IR: recolor a pptx shape (per-shape property edit)", ()
 
   test("agent recolors the title shape on slide 1 (verified via mount bytes)", async ({ page }, testInfo) => {
     const { dir, doc } = stage("picture.pptx");
-    const mountFile = join(dir, ".ecrits", "mount", `${doc}.jsonl`);
+    const mountFile = join(dir, ".ecrits", `${doc}.jsonl`);
 
     await openWorkspace(page, dir);
     // Wait for the CHAT RAIL (not the viewer) — the agent path needs no WASM boot.

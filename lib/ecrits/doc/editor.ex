@@ -69,7 +69,7 @@ defmodule Ecrits.Doc.Editor do
 
   @doc "Persist (export) the document."
   @spec save(t(), keyword()) :: :ok | {:error, term()}
-  def save(editor, opts \\ []), do: GenServer.call(editor, {:save, opts})
+  def save(editor, opts \\ []), do: GenServer.call(editor, {:save, opts}, :infinity)
 
   @doc """
   Export the in-memory document to bytes WITHOUT touching disk. `format`
@@ -101,6 +101,12 @@ defmodule Ecrits.Doc.Editor do
   @spec render(t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def render(editor, page, path, opts \\ []),
     do: GenServer.call(editor, {:render, page, path, opts}, 60_000)
+
+  @doc "Render a native partial preview from the current in-memory document."
+  @spec render_preview(t(), map(), keyword()) ::
+          {:ok, binary(), map()} | {:error, term()}
+  def render_preview(editor, target, opts \\ []),
+    do: GenServer.call(editor, {:render_preview, target, opts}, 60_000)
 
   @doc """
   Whether the document has unsaved edits.
@@ -247,6 +253,17 @@ defmodule Ecrits.Doc.Editor do
         st.backend.render_page(st.handle, page, path, Keyword.get(opts, :width, 1280))
       else
         {:error, {:not_supported, "render is not supported by this document backend"}}
+      end
+
+    {:reply, result, st}
+  end
+
+  def handle_call({:render_preview, target, opts}, _from, st) do
+    result =
+      if function_exported?(st.backend, :render_preview, 3) do
+        st.backend.render_preview(st.handle, target, opts)
+      else
+        {:error, {:not_supported, "partial preview is not supported by this document backend"}}
       end
 
     {:reply, result, st}

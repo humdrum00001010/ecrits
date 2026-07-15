@@ -80,6 +80,69 @@ defmodule Ecrits.Doc.ProjectionTest do
   end
 
   describe "VFS edit highlight ranges" do
+    test "browser playback follows document order instead of ehwp writeback order" do
+      changes = [
+        {:text,
+         %{
+           "op" => "insert_text",
+           "ref" => %{"section" => 0, "paragraph" => 20, "offset" => 4},
+           "text" => "뒤"
+         }, "뒤"},
+        {:text,
+         %{
+           "op" => "insert_text",
+           "ref" => %{"section" => 0, "paragraph" => 11, "offset" => 2},
+           "text" => "앞쪽"
+         }, "앞쪽"}
+      ]
+
+      groups = Projection.__browser_preview_groups_for_test__(changes)
+
+      assert Enum.map(groups, fn [{:text, op, _marker}] ->
+               {op["ref"]["paragraph"], op["ref"]["offset"], op["text"]}
+             end) == [
+               {11, 2, "앞"},
+               {11, 3, "쪽"},
+               {20, 4, "뒤"}
+             ]
+    end
+
+    test "browser structural preview steps use the applied table control ref" do
+      change =
+        {:insert_table,
+         %{
+           "op" => "insert_table",
+           "ref" => %{"section" => 0, "paragraph" => 8, "offset" => 0},
+           "rows" => 1,
+           "cols" => 2,
+           "cells" => [["항목", "내용"]]
+         }, "항목"}
+
+      applied = %{"paraIdx" => 9, "controlIdx" => 2}
+
+      assert [%{"highlights" => highlights}] =
+               Projection.__browser_preview_steps_for_test__(
+                 [[change]],
+                 [change],
+                 [applied]
+               )
+
+      assert Enum.map(highlights, & &1["ref"]["cell"]) == [
+               %{
+                 "parentParaIndex" => 9,
+                 "controlIndex" => 2,
+                 "cellIndex" => 0,
+                 "cellParaIndex" => 0
+               },
+               %{
+                 "parentParaIndex" => 9,
+                 "controlIndex" => 2,
+                 "cellIndex" => 1,
+                 "cellParaIndex" => 0
+               }
+             ]
+    end
+
     test "replace_text highlights only the changed replacement span" do
       title = "범용(용역[지식ㆍ정보성과물]업 분야) 표준하도급계약서 "
       marker = "CHATRAIL_FSKIT_HWP_OK"
@@ -102,6 +165,86 @@ defmodule Ecrits.Doc.ProjectionTest do
 
       assert offset == String.length(title)
       assert length == String.length(marker)
+    end
+
+    test "set_cell highlights the new cell text" do
+      ref = %{
+        "section" => 0,
+        "paragraph" => 16,
+        "offset" => 0,
+        "cell" => %{
+          "parentParaIndex" => 16,
+          "controlIndex" => 0,
+          "cellIndex" => 1,
+          "cellParaIndex" => 0
+        }
+      }
+
+      op = %{"op" => "set_cell", "ref" => ref, "text" => "성과물"}
+
+      assert %{
+               "kind" => "text",
+               "op" => "set_cell",
+               "ref" => ^ref,
+               "offset" => 0,
+               "length" => 3,
+               "text" => "성과물"
+             } = Projection.__text_highlight_for_test__(op, "성과물")
+    end
+
+    test "persisted highlights follow paragraphs shifted by structural inserts" do
+      table_ref = %{"section" => 0, "paragraph" => 16}
+      picture_ref = %{"section" => 0, "paragraph" => 75}
+
+      changes = [
+        {:insert_table, %{"op" => "insert_table", "ref" => table_ref}, "단계"},
+        {:insert_picture, %{"op" => "insert_picture", "ref" => picture_ref}, "brand", %{}}
+      ]
+
+      cell_ref = %{
+        "section" => 0,
+        "paragraph" => 76,
+        "cell" => %{"parentParaIndex" => 76, "controlIndex" => 0, "cellIndex" => 2}
+      }
+
+      highlights = [
+        %{"op" => "insert_text", "ref" => %{"section" => 0, "paragraph" => 630}},
+        %{"op" => "insert_text", "ref" => %{"section" => 0, "paragraph" => 74}},
+        %{"op" => "set_cell", "ref" => cell_ref},
+        %{"op" => "insert_picture", "ref" => picture_ref}
+      ]
+
+      assert [jurisdiction, date, signature, picture] =
+               Projection.__remap_persisted_highlights_for_test__(highlights, changes)
+
+      assert jurisdiction["ref"]["paragraph"] == 632
+      assert date["ref"]["paragraph"] == 76
+      assert signature["ref"]["paragraph"] == 78
+      assert signature["ref"]["cell"]["parentParaIndex"] == 78
+      assert picture["ref"] == picture_ref
+    end
+
+    test "persisted highlight remapping applies later insertion coordinates sequentially" do
+      changes = [
+        {:insert_picture,
+         %{"op" => "insert_picture", "ref" => %{"section" => 0, "paragraph" => 859}}, "brand",
+         %{}},
+        {:insert_table, %{"op" => "insert_table", "ref" => %{"section" => 0, "paragraph" => 16}},
+         "단계"}
+      ]
+
+      highlights = [
+        %{
+          "op" => "insert_text",
+          "ref" => %{"section" => 0, "paragraph" => 858},
+          "offset" => 0,
+          "length" => 12,
+          "text" => "2026년 7월 15일"
+        }
+      ]
+
+      assert [%{"ref" => %{"paragraph" => 860}}] =
+               Projection.__remap_persisted_highlights_for_test__(highlights, changes)
     end
   end
 
@@ -127,11 +270,73 @@ defmodule Ecrits.Doc.ProjectionTest do
           |> replace_payload_node(node_path, Map.put(node, "text", new_text))
           |> encode_projection()
 
-        assert {:ok, %{applied: 1, doc: doc}} = Projection.write_back(path, new_bytes)
+        assert {:ok, %{applied: 2, doc: doc}} = Projection.write_back(path, new_bytes)
         assert doc == Path.basename(path)
 
         assert {:ok, after_bytes} = Projection.project_file(path)
         assert after_bytes =~ new_text
+      end
+    end
+
+    test "streams multi-node write-back as ordered grapheme edit tokens", %{ehwp: ehwp} do
+      if not ehwp do
+        IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection streaming write_back e2e")
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_writeback_stream", ".hwpx")
+        root = Path.dirname(path)
+        on_exit(fn -> cleanup_tmp(path) end)
+
+        Phoenix.PubSub.subscribe(
+          Ecrits.PubSub,
+          "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+        )
+
+        {:ok, bytes} = Projection.project_file(path)
+        {_lines, doc} = decode_projection(bytes)
+        {first_path, first_node} = first_text_paragraph(doc)
+        {_section, first_paragraph, _payload} = first_path
+        {second_path, second_node} = text_paragraph_after(doc, first_paragraph + 1)
+
+        new_bytes =
+          doc
+          |> replace_payload_node(
+            first_path,
+            Map.put(first_node, "text", "STREAMED_WRITEBACK_TOKEN_ONE")
+          )
+          |> replace_payload_node(
+            second_path,
+            Map.put(second_node, "text", "STREAMED_WRITEBACK_TOKEN_TWO")
+          )
+          |> encode_projection()
+
+        assert {:ok, %{applied: applied_total}} =
+                 Projection.write_back(path, new_bytes, root: root)
+
+        assert_receive {:vfs_doc_edited, first}
+
+        expected_total =
+          length(String.graphemes("STREAMED_WRITEBACK_TOKEN_ONE")) +
+            length(String.graphemes("STREAMED_WRITEBACK_TOKEN_TWO"))
+
+        assert first.progress_total == expected_total
+
+        events =
+          Enum.reduce(2..expected_total, [first], fn _index, acc ->
+            assert_receive {:vfs_doc_edited, event}
+            [event | acc]
+          end)
+          |> Enum.reverse()
+
+        assert events |> Enum.map(& &1.edit_id) |> Enum.uniq() == [first.edit_id]
+        assert Enum.map(events, & &1.progress_index) == Enum.to_list(1..expected_total)
+        assert Enum.all?(events, &(&1.progress_total == expected_total))
+        assert List.last(events).applied >= applied_total
+
+        markers = MapSet.new(events, & &1.marker)
+        assert MapSet.member?(markers, "STREAMED_WRITEBACK_TOKEN_ONE")
+        assert MapSet.member?(markers, "STREAMED_WRITEBACK_TOKEN_TWO")
+
+        refute_receive {:vfs_doc_edited, _info}
       end
     end
 
@@ -152,7 +357,7 @@ defmodule Ecrits.Doc.ProjectionTest do
           |> replace_payload_node(node_path, Map.put(node, "text", new_text))
           |> Jason.encode!(pretty: true)
 
-        assert {:ok, %{applied: 1}} = Projection.write_back(path, pretty_bytes)
+        assert {:ok, %{applied: 2}} = Projection.write_back(path, pretty_bytes)
 
         assert {:ok, after_bytes} = Projection.project_file(path)
         assert after_bytes =~ new_text
@@ -175,8 +380,8 @@ defmodule Ecrits.Doc.ProjectionTest do
         section_def = first_payload_node(doc, &(&1["type"] == "section_def"))
         refute Map.has_key?(section_def, "ref")
 
-        {_path, cell} = first_text_cell(doc)
-        refute Map.has_key?(cell, "ref")
+        {_path, cell_paragraph} = first_text_cell_paragraph(doc)
+        refute Map.has_key?(cell_paragraph, "ref")
 
         refute Enum.any?(payload_nodes(doc), &match?(%{"ref" => ref} when is_list(ref), &1))
       end
@@ -212,7 +417,7 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         {:ok, bytes} = Projection.project_file(path)
         {_lines, doc} = decode_projection(bytes)
-        {node_path, node} = first_text_cell(doc)
+        {node_path, node} = first_text_cell_paragraph(doc)
         new_text = "JSONL_WRITEBACK_CELL_OK"
 
         new_bytes =
@@ -266,7 +471,9 @@ defmodule Ecrits.Doc.ProjectionTest do
         inserted_cells =
           after_doc
           |> payload_nodes()
-          |> Enum.filter(&(&1["type"] == "cell" and &1["text"] in List.flatten(table["cells"])))
+          |> Enum.filter(
+            &(&1["type"] == "paragraph" and &1["text"] in List.flatten(table["cells"]))
+          )
           |> Enum.map(& &1["text"])
 
         assert inserted_cells == List.flatten(table["cells"])
@@ -324,7 +531,7 @@ defmodule Ecrits.Doc.ProjectionTest do
         {:ok, bytes} = Projection.project_file(path)
         {_lines, doc} = decode_projection(bytes)
         original_count = picture_count(doc)
-        {cell_path, _cell} = first_text_cell(doc)
+        {cell_path, _cell} = first_cell(doc)
 
         picture = %{
           "type" => "picture",
@@ -468,6 +675,21 @@ defmodule Ecrits.Doc.ProjectionTest do
           "type" => "cell"
         },
         %{
+          "ref" => %{
+            "section" => 0,
+            "paragraph" => 0,
+            "offset" => 0,
+            "cell" => %{
+              "parentParaIndex" => 0,
+              "controlIndex" => 0,
+              "cellIndex" => 0,
+              "cellParaIndex" => 0
+            }
+          },
+          "text" => "AUTH_TBL",
+          "type" => "paragraph"
+        },
+        %{
           "description" => "AGENT_APPEND_RED",
           "height" => 22_000,
           "ref" => %{"section" => 2, "paragraph" => 10, "control" => 0, "type" => "picture"},
@@ -489,13 +711,14 @@ defmodule Ecrits.Doc.ProjectionTest do
 
       new_nodes = [
         %{"text" => "", "type" => "paragraph"},
-        %{"text" => "AUTH_TBL", "type" => "table"},
+        %{"type" => "table"},
         %{
           "description" => "DBG_BIRD_INSERT",
           "src" => "/tmp/ecrits-fuse-hwpx-tidewave/bird_song_sparrow.jpg",
           "type" => "picture"
         },
-        %{"col" => 0, "row" => 0, "text" => "AUTH_TBL", "type" => "cell"},
+        %{"col" => 0, "row" => 0, "type" => "cell"},
+        %{"text" => "AUTH_TBL", "type" => "paragraph"},
         %{
           "description" => "AGENT_APPEND_RED",
           "height" => 22_000,
@@ -549,18 +772,24 @@ defmodule Ecrits.Doc.ProjectionTest do
           "row" => 0,
           "text" => "AUTH_TBL_R1C3",
           "type" => "cell"
+        },
+        %{
+          "ref" => cell_ref,
+          "text" => "AUTH_TBL_R1C3",
+          "type" => "paragraph"
         }
       ]
 
       new_nodes = [
         %{"text" => "", "type" => "paragraph"},
-        %{"text" => "AUTH_TBL", "type" => "table"},
-        %{"col" => 2, "row" => 0, "text" => "AUTH_TBL_R1C3", "type" => "cell"},
+        %{"type" => "table"},
+        %{"col" => 2, "row" => 0, "type" => "cell"},
         %{
           "description" => "JSONL_CELL_IMAGE",
           "src" => "/tmp/ecrits-fuse-hwpx-tidewave/bird_song_sparrow.jpg",
           "type" => "picture"
-        }
+        },
+        %{"text" => "AUTH_TBL_R1C3", "type" => "paragraph"}
       ]
 
       assert [
@@ -571,7 +800,7 @@ defmodule Ecrits.Doc.ProjectionTest do
       assert ref == %{
                "section" => 0,
                "paragraph" => 4,
-               "offset" => String.length("AUTH_TBL_R1C3"),
+               "offset" => 0,
                "cell" => %{
                  "parentParaIndex" => 4,
                  "controlIndex" => 1,
@@ -805,9 +1034,43 @@ defmodule Ecrits.Doc.ProjectionTest do
     end)
   end
 
-  defp first_text_cell(doc) do
-    first_payload(doc, fn node ->
-      node["type"] == "cell" and is_binary(node["text"]) and node["text"] != ""
+  defp first_cell(doc) do
+    first_payload(doc, &(&1["type"] == "cell"))
+  end
+
+  defp first_text_cell_paragraph(doc) do
+    doc
+    |> Enum.with_index()
+    |> Enum.reduce_while(nil, fn {section, section_index}, _acc ->
+      found =
+        section
+        |> Enum.with_index()
+        |> Enum.find_value(fn {paragraph, paragraph_index} ->
+          paragraph
+          |> Enum.with_index()
+          |> Enum.reduce_while(false, fn {node, payload_index}, cell_seen? ->
+            cond do
+              node["type"] == "cell" ->
+                {:cont, true}
+
+              cell_seen? and node["type"] == "paragraph" and is_binary(node["text"]) and
+                  node["text"] != "" ->
+                {:halt, {{section_index, paragraph_index, payload_index}, node}}
+
+              true ->
+                {:cont, cell_seen?}
+            end
+          end)
+          |> case do
+            {{_, _, _}, %{}} = found -> found
+            _not_found -> nil
+          end
+        end)
+
+      case found do
+        nil -> {:cont, nil}
+        found -> {:halt, found}
+      end
     end)
   end
 

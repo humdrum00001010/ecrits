@@ -56,9 +56,12 @@ defmodule Ecrits.Doc.Projection do
   `fingerprint/1`).
   """
 
+  alias Ecrits.Doc.BrowserBridge
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
+  alias Ecrits.Document.ByteSpool
   alias Ecrits.Fuse.DocMount
+  alias Ecrits.Workspace.Session
   alias Libreofficex.LokBackend.Ir, as: OfficeIr
 
   @typedoc "A byte offset range `{start, length}` into the projected blob."
@@ -129,12 +132,9 @@ defmodule Ecrits.Doc.Projection do
   `{:ok, bytes}` on success, or `{:error, reason}` for an unsupported extension,
   an open/parse failure, or a backend (NIF/UNO) error. Never raises.
 
-  `opts` is reserved for future projection knobs and is currently ignored.
   """
-  @spec project_file(String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
-  def project_file(abs_path, opts \\ [])
-
-  def project_file(abs_path, opts) when is_binary(abs_path) and is_list(opts) do
+  @spec project_file(String.t()) :: {:ok, binary()} | {:error, term()}
+  def project_file(abs_path) when is_binary(abs_path) do
     abs_path = canonical_file_path(abs_path)
 
     case build_projection(abs_path) do
@@ -158,7 +158,7 @@ defmodule Ecrits.Doc.Projection do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  def project_file(_abs_path, _opts), do: {:error, :invalid_path}
+  def project_file(_abs_path), do: {:error, :invalid_path}
 
   @doc """
   A stable fingerprint of the document's projected content: it changes iff the
@@ -378,12 +378,12 @@ defmodule Ecrits.Doc.Projection do
 
     result =
       with {:ok, kind} <- kind_for(abs_path),
-           {:ok, old_nodes} <- ir_nodes(abs_path),
+           {:ok, old_nodes, document_id} <- ir_nodes(abs_path, kind),
            {:ok, new_nodes} <- parse_ir_jsonl(new_bytes) do
         case ir_changes(kind, old_nodes, new_nodes) do
           {:error, reason} -> {:error, reason}
           [] -> {:ok, %{applied: 0, doc: Path.basename(abs_path)}}
-          changes -> apply_changes(abs_path, changes, opts)
+          changes -> apply_changes(abs_path, kind, document_id, changes, opts)
         end
       end
 
@@ -406,13 +406,62 @@ defmodule Ecrits.Doc.Projection do
       {:error, reason}
   end
 
-  # The document's current IR nodes — the OLD state write-back diffs against.
-  defp ir_nodes(abs_path) do
+  @doc """
+  Validate and diff a complete VFS temp buffer, then publish its browser-mirror
+  playback without mutating or saving the authoritative document.
+
+  `DocFs` calls this as soon as an out-of-order FSKit write sequence first forms
+  a valid projection. The later atomic rename still performs `write_back/3`
+  synchronously with the same `:edit_id`; the rail therefore starts animating
+  while the agent is validating/renaming the temp file, and the final event
+  updates that same preview card instead of creating a second one.
+  """
+  @spec preview_write_back(String.t(), binary(), keyword()) ::
+          {:ok, %{previewed: non_neg_integer(), tokens: non_neg_integer(), doc: String.t()}}
+          | {:error, term()}
+  def preview_write_back(abs_path, new_bytes, opts \\ [])
+      when is_binary(abs_path) and is_binary(new_bytes) do
     abs_path = canonical_file_path(abs_path)
 
     with {:ok, kind} <- kind_for(abs_path),
-         {:ok, document_id} <- Pool.open(abs_path, kind: kind) do
-      elements(document_id)
+         {:ok, old_nodes, _document_id} <- ir_nodes(abs_path, kind),
+         {:ok, new_nodes} <- parse_ir_jsonl(new_bytes) do
+      case ir_changes(kind, old_nodes, new_nodes) do
+        {:error, reason} ->
+          {:error, reason}
+
+        [] ->
+          {:ok, %{previewed: 0, tokens: 0, doc: Path.basename(abs_path)}}
+
+        changes ->
+          groups = browser_preview_groups(changes)
+          applied = List.duplicate(%{}, length(changes))
+
+          preview_opts =
+            opts
+            |> Keyword.put(:progress_index, 0)
+            |> Keyword.put(:progress_total, length(groups))
+            |> Keyword.put(:applied_total, 0)
+            |> Keyword.put(:preview_steps, browser_preview_steps(groups, changes, applied))
+            |> Keyword.put(:preview_only, true)
+
+          broadcast_edit(abs_path, changes, applied, preview_opts)
+
+          {:ok,
+           %{previewed: length(changes), tokens: length(groups), doc: Path.basename(abs_path)}}
+      end
+    end
+  rescue
+    error -> {:error, {:preview_writeback_raised, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  # The document's current IR nodes — the OLD state write-back diffs against.
+  defp ir_nodes(abs_path, kind) do
+    with {:ok, document_id} <- Pool.open(abs_path, kind: kind),
+         {:ok, nodes} <- elements(document_id) do
+      {:ok, nodes, document_id}
     end
   end
 
@@ -444,16 +493,25 @@ defmodule Ecrits.Doc.Projection do
   defp parse_projection_values([]), do: {:ok, []}
   defp parse_projection_values([nested]) when is_list(nested), do: parse_nested_projection(nested)
 
+  defp parse_projection_values(values) when is_list(values) and length(values) > 1 do
+    if Enum.all?(values, &is_list/1) do
+      {:error, {:multiple_nested_projection_values, length(values)}}
+    else
+      parse_legacy_projection_values(values)
+    end
+  end
+
   defp parse_projection_values(values) do
+    parse_legacy_projection_values(values)
+  end
+
+  defp parse_legacy_projection_values(values) do
     cond do
       Enum.all?(values, &raw_ir_node?/1) ->
         {:ok, Enum.map(values, &expand_projected_node/1)}
 
       Enum.all?(values, &layer_record?/1) ->
         parse_layered_records(values)
-
-      Enum.all?(values, &is_list/1) ->
-        parse_nested_projection(values)
 
       true ->
         {:error, :invalid_ir_jsonl}
@@ -1275,6 +1333,17 @@ defmodule Ecrits.Doc.Projection do
 
     @doc false
     def __text_highlight_for_test__(op, marker), do: text_highlight(op, marker)
+
+    @doc false
+    def __remap_persisted_highlights_for_test__(highlights, changes),
+      do: remap_persisted_highlights(highlights, changes)
+
+    @doc false
+    def __browser_preview_steps_for_test__(groups, changes, applied),
+      do: browser_preview_steps(groups, changes, applied)
+
+    @doc false
+    def __browser_preview_groups_for_test__(changes), do: browser_preview_groups(changes)
   end
 
   defp normalize_ir_value(%{} = map) do
@@ -1293,25 +1362,344 @@ defmodule Ecrits.Doc.Projection do
     |> Enum.find(&(is_binary(&1) and &1 != ""))
   end
 
-  # A VFS write is a FILE-LEVEL modification of the document, NOT a `doc.edit`.
-  # We apply each changed line straight onto the document's SERVER model
-  # (`Editor.apply` -> `backend.edit`) and persist its bytes (`Editor.save`) —
-  # the agent-facing `doc.edit`/`doc.save` MCP tools are deliberately NOT on this
-  # path. The Pool's server `Editor` is the authoritative file model
-  # (`Pool.route/2` is server-only since Phase 3; viewers re-derive from it), so
-  # writing it directly IS the file modification.
-  defp apply_changes(abs_path, changes, opts) do
-    with {:ok, kind} <- kind_for(abs_path),
-         {:ok, document_id} <- Pool.open(abs_path, kind: kind),
-         {:server, editor} <- Pool.route(Pool, document_id),
-         {:ok, applied} <- apply_changes_directly(editor, changes),
-         :ok <- save_editor(editor, abs_path, kind) do
-      broadcast_edit(abs_path, changes, applied, opts)
+  # VFS is a file-level modification, but authority still belongs to the
+  # workspace Session: an open viewer owns the live WASM model; a cold document
+  # owns its server Editor. Never bypass Session and mutate the cold twin while a
+  # browser is displaying a different authoritative model.
+  defp apply_changes(abs_path, kind, document_id, changes, opts) do
+    case writeback_route(opts[:root], document_id) do
+      {:browser, lv} ->
+        apply_browser_changes(lv, abs_path, kind, changes, opts)
+
+      {:server, editor} ->
+        with {:ok, _applied} <-
+               apply_change_groups(
+                 editor,
+                 abs_path,
+                 kind,
+                 logical_change_groups(changes),
+                 opts
+               ) do
+          {:ok, %{applied: length(changes), doc: Path.basename(abs_path)}}
+        end
+
+      other ->
+        {:error, {:writeback_unroutable, other}}
+    end
+  end
+
+  defp writeback_route(root, document_id) when is_binary(root) and root != "",
+    do: Session.route(root, document_id)
+
+  defp writeback_route(_root, document_id), do: Pool.route(Pool, document_id)
+
+  defp apply_browser_changes(lv, abs_path, kind, changes, opts) do
+    edit_id =
+      Keyword.get_lazy(opts, :edit_id, fn ->
+        "vfs-edit-#{System.unique_integer([:positive, :monotonic])}"
+      end)
+
+    groups = browser_preview_groups(changes)
+    ops = browser_ops(changes)
+    sets = browser_sets(changes)
+
+    payload = %{edit_id: edit_id, ops: ops, sets: sets}
+
+    with {:ok, result} <- BrowserBridge.call(lv, :vfs_write, payload, timeout: 30_000),
+         {:ok, bytes} <- ByteSpool.decode(result),
+         :ok <- File.write(abs_path, bytes),
+         {:ok, _committed} <-
+           BrowserBridge.call(lv, :vfs_commit, %{edit_id: edit_id}, timeout: 8_000) do
+      # The browser export is now the durable source of truth. Drop the cold
+      # server twin so the next projection/diff reopens those exact bytes rather
+      # than comparing against the pre-write Editor model.
+      _ = Pool.close_by_path(abs_path)
+      applied = browser_applied_results(changes, result)
+
+      preview_opts =
+        opts
+        |> Keyword.put(:edit_id, edit_id)
+        |> Keyword.put(:progress_index, length(groups))
+        |> Keyword.put(:progress_total, length(groups))
+        |> Keyword.put(:applied_total, length(changes))
+        |> Keyword.put(:preview_steps, browser_preview_steps(groups, changes, applied))
+        |> Keyword.put(:preview_base_url, value(result, "preview_base_url"))
+        |> Keyword.put(:browser_authority, true)
+
+      broadcast_edit(abs_path, changes, applied, preview_opts)
       {:ok, %{applied: length(changes), doc: Path.basename(abs_path)}}
     else
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:writeback_unroutable, other}}
+      {:error, _reason} = error ->
+        _ = BrowserBridge.call(lv, :vfs_rollback, %{edit_id: edit_id}, timeout: 8_000)
+        error
+
+      other ->
+        _ = BrowserBridge.call(lv, :vfs_rollback, %{edit_id: edit_id}, timeout: 8_000)
+        {:error, {:browser_writeback_failed, kind, other}}
     end
+  end
+
+  defp browser_ops(changes) do
+    Enum.flat_map(changes, fn
+      {:text, op, _marker} -> [browser_edit_op(op)]
+      {:insert_table, op, _marker} -> [browser_edit_op(op)]
+      {:insert_picture, op, _marker, _props} -> [browser_edit_op(op)]
+      {:delete_node, op, _marker} -> [browser_edit_op(op)]
+      {:set, _ref, _type, _props} -> []
+    end)
+  end
+
+  defp browser_sets(changes) do
+    Enum.flat_map(changes, fn
+      {:set, ref, type, props} ->
+        props =
+          if is_binary(type) and type != "", do: Map.put_new(props, "kind", type), else: props
+
+        [%{"ref" => ref, "props" => props}]
+
+      _change ->
+        []
+    end)
+  end
+
+  defp browser_preview_steps(groups, changes, applied) do
+    applied_by_change = Enum.zip(changes, applied)
+
+    Enum.map(groups, fn group ->
+      group_applied =
+        Enum.map(group, fn change ->
+          Enum.find_value(applied_by_change, %{}, fn
+            {^change, result} -> result
+            _entry -> nil
+          end)
+        end)
+
+      %{
+        "ops" => browser_ops(group),
+        "sets" => browser_sets(group),
+        "highlights" => highlights_for_changes(group, group_applied)
+      }
+    end)
+  end
+
+  defp browser_applied_results(changes, result) do
+    edit_results =
+      result
+      |> value("edit")
+      |> value("results")
+      |> List.wrap()
+
+    set_results =
+      result
+      |> value("set")
+      |> value("results")
+      |> List.wrap()
+
+    {applied, _edit_results, _set_results} =
+      Enum.reduce(changes, {[], edit_results, set_results}, fn
+        {:set, _ref, _type, _props}, {acc, edits, [set | sets]} ->
+          {[set | acc], edits, sets}
+
+        {:set, _ref, _type, _props}, {acc, edits, []} ->
+          {[%{} | acc], edits, []}
+
+        _change, {acc, [edit | edits], sets} ->
+          {[edit | acc], edits, sets}
+
+        _change, {acc, [], sets} ->
+          {[%{} | acc], [], sets}
+      end)
+
+    Enum.reverse(applied)
+  end
+
+  defp value(nil, _key), do: nil
+
+  defp value(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, value_atom(key))
+  end
+
+  defp value(_other, _key), do: nil
+
+  defp value_atom("preview_base_url"), do: :preview_base_url
+  defp value_atom("edit"), do: :edit
+  defp value_atom("set"), do: :set
+  defp value_atom("results"), do: :results
+  defp value_atom(_key), do: :__missing__
+
+  defp apply_change_groups(editor, abs_path, kind, groups, opts) do
+    edit_id =
+      Keyword.get_lazy(opts, :edit_id, fn ->
+        "vfs-edit-#{System.unique_integer([:positive, :monotonic])}"
+      end)
+
+    total = length(groups)
+
+    groups
+    |> Enum.with_index(1)
+    |> Enum.reduce_while({:ok, [], 0}, fn {group, index}, {:ok, acc, applied_total} ->
+      with {:ok, group_applied} <- apply_changes_directly(editor, group),
+           :ok <- maybe_save_final_group(editor, abs_path, kind, index, total) do
+        applied_total = applied_total + length(group)
+
+        step_opts =
+          opts
+          |> Keyword.put(:edit_id, edit_id)
+          |> Keyword.put(:progress_index, index)
+          |> Keyword.put(:progress_total, total)
+          |> Keyword.put(:applied_total, applied_total)
+
+        broadcast_edit(abs_path, group, group_applied, step_opts)
+
+        {:cont, {:ok, Enum.reverse(group_applied, acc), applied_total}}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, applied, _applied_total} -> {:ok, Enum.reverse(applied)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp maybe_save_final_group(editor, abs_path, kind, index, total) when index == total,
+    do: save_editor(editor, abs_path, kind)
+
+  defp maybe_save_final_group(_editor, _abs_path, _kind, _index, _total), do: :ok
+
+  # A text replacement is represented by a delete_range + insert_text pair.
+  # Keep the delete and first inserted grapheme atomic so the rail never flashes
+  # an empty document, then stream every remaining Unicode grapheme as one native
+  # edit token. Independent structural nodes remain one preview update apiece.
+  defp logical_change_groups(changes) do
+    changes
+    |> logical_change_groups([])
+    |> Enum.chunk_by(&logical_group_marker/1)
+    |> Enum.map(&List.flatten/1)
+    |> Enum.flat_map(&stream_text_group_by_grapheme/1)
+  end
+
+  # Ehwp.Ir deliberately orders authoritative positional writes from the end of
+  # the document so earlier refs cannot be shifted by later structural edits.
+  # That engine-safe order is not the order a person reads or watches a document
+  # being filled. Keep it for the single authoritative batch, but play the
+  # non-authoritative browser mirror in document order.
+  defp browser_preview_groups(changes) do
+    changes
+    |> logical_change_groups()
+    |> Enum.with_index()
+    |> Enum.sort_by(fn {group, index} -> {preview_group_position(group), index} end)
+    |> Enum.map(&elem(&1, 0))
+  end
+
+  defp preview_group_position(group) do
+    Enum.find_value(group, {1, 0, 0, 0, 0, 0, 0, 0}, fn change ->
+      case preview_change_ref(change) do
+        %{} = ref ->
+          section = Map.get(ref, "section", 0)
+          cell = Map.get(ref, "cell")
+
+          paragraph =
+            if is_map(cell),
+              do: Map.get(cell, "parentParaIndex", Map.get(ref, "paragraph", 0)),
+              else: Map.get(ref, "paragraph", 0)
+
+          if is_integer(section) and is_integer(paragraph) do
+            {
+              0,
+              section,
+              paragraph,
+              if(is_map(cell), do: 1, else: 0),
+              if(is_map(cell), do: Map.get(cell, "controlIndex", 0), else: 0),
+              if(is_map(cell), do: Map.get(cell, "cellIndex", 0), else: 0),
+              if(is_map(cell), do: Map.get(cell, "cellParaIndex", 0), else: 0),
+              Map.get(ref, "offset", 0)
+            }
+          end
+
+        _other ->
+          nil
+      end
+    end)
+  end
+
+  defp preview_change_ref({:text, %{"ref" => ref}, _marker}), do: ref
+  defp preview_change_ref({:insert_table, %{"ref" => ref}, _marker}), do: ref
+  defp preview_change_ref({:insert_picture, %{"ref" => ref}, _marker, _props}), do: ref
+  defp preview_change_ref({:delete_node, %{"ref" => ref}, _marker}), do: ref
+  defp preview_change_ref({:set, ref, _type, _props}), do: ref
+  defp preview_change_ref(_change), do: nil
+
+  defp stream_text_group_by_grapheme(group) do
+    inserts =
+      Enum.filter(group, fn
+        {:text, %{"op" => "insert_text", "text" => text}, _marker} when is_binary(text) ->
+          true
+
+        _other ->
+          false
+      end)
+
+    texts = Enum.map(inserts, fn {:text, op, _marker} -> op["text"] end) |> Enum.uniq()
+
+    case texts do
+      [text] when text != "" ->
+        graphemes = String.graphemes(text)
+        deletes_and_other = group -- inserts
+
+        graphemes
+        |> Enum.with_index()
+        |> Enum.map(fn {grapheme, index} ->
+          prefix = graphemes |> Enum.take(index + 1) |> Enum.join()
+
+          token_inserts =
+            Enum.map(inserts, fn {:text, op, _marker} ->
+              {:text, token_insert_op(op, grapheme, index), prefix}
+            end)
+
+          if index == 0, do: deletes_and_other ++ token_inserts, else: token_inserts
+        end)
+
+      _other ->
+        [group]
+    end
+  end
+
+  defp token_insert_op(op, grapheme, index) do
+    ref = Map.get(op, "ref", %{})
+    offset = ref_offset(ref) + index
+
+    op
+    |> Map.put("text", grapheme)
+    |> Map.put("ref", Map.put(ref, "offset", offset))
+  end
+
+  defp logical_change_groups([first, second | rest], acc) do
+    if text_replacement_pair?(first, second) do
+      logical_change_groups(rest, [[first, second] | acc])
+    else
+      logical_change_groups([second | rest], [[first] | acc])
+    end
+  end
+
+  defp logical_change_groups([change], acc), do: Enum.reverse([[change] | acc])
+  defp logical_change_groups([], acc), do: Enum.reverse(acc)
+
+  defp text_replacement_pair?(
+         {:text, %{"op" => "delete_range"} = delete, _old_marker},
+         {:text, %{"op" => "insert_text"} = insert, _new_marker}
+       ) do
+    normalize_ir_value(delete["ref"]) == normalize_ir_value(insert["ref"]) and
+      Map.get(delete, "offset", 0) == Map.get(insert, "offset", 0)
+  end
+
+  defp text_replacement_pair?(_first, _second), do: false
+
+  defp logical_group_marker(group) do
+    Enum.find_value(group, fn
+      {:text, _op, marker} when is_binary(marker) -> {:text, marker}
+      _other -> nil
+    end) || make_ref()
   end
 
   defp apply_changes_directly(editor, changes) do
@@ -1390,58 +1778,36 @@ defmodule Ecrits.Doc.Projection do
     if is_binary(root) do
       hit =
         Enum.find_value(changes, fn
-          {:text, _op, marker} -> marker
-          {:insert_table, _op, marker} -> marker
-          {:insert_picture, _op, marker, _props} -> marker
-          {:delete_node, _op, marker} -> marker
+          {:text, %{"op" => "insert_text"}, marker} -> marker
           _other -> nil
-        end)
+        end) ||
+          Enum.find_value(changes, fn
+            {:text, _op, marker} -> marker
+            {:insert_table, _op, marker} -> marker
+            {:insert_picture, _op, marker, _props} -> marker
+            {:delete_node, _op, marker} -> marker
+            _other -> nil
+          end)
 
-      # Carry the applied edits as `replace_text` ops so the viewer can LIVE-STREAM
-      # the change into the open editor incrementally (apply op + repaint the one
-      # page) instead of reloading the whole document.
-      ops =
+      composition_ops =
         Enum.flat_map(changes, fn
           {:text, op, _marker} -> [op]
           {:insert_table, op, _marker} -> [op]
-          {:insert_picture, op, _marker, _props} -> [browser_edit_op(op)]
+          {:insert_picture, op, _marker, _props} -> [op]
           {:delete_node, op, _marker} -> [op]
           _other -> []
         end)
 
-      highlights =
-        changes
-        |> Enum.zip(applied)
-        |> Enum.flat_map(fn
-          {{:text, op, marker}, _applied} ->
-            [text_highlight(op, marker)]
-
-          {{:insert_table, op, _marker}, applied} ->
-            table_insert_highlights(op, applied)
-
-          {{:insert_picture, op, marker, _props}, applied} ->
-            picture_insert_highlights(op, marker, applied)
-
-          {{:delete_node, op, marker}, _applied} ->
-            [
-              %{
-                "kind" => "delete",
-                "op" => op["op"],
-                "ref" => op["ref"],
-                "text" => marker
-              }
-            ]
-
-          {{:set, ref, type, props}, _applied} ->
-            [
-              %{
-                "kind" => "set",
-                "ref" => ref,
-                "type" => type,
-                "props" => props
-              }
-            ]
+      # The live browser cannot read a server-side picture `src`, so its playback
+      # op carries transient inline bytes. The composition copy above remains
+      # byte-free and is the only copy persisted in the ACP session descriptor.
+      ops =
+        Enum.map(composition_ops, fn
+          %{"op" => "insert_picture"} = op -> browser_edit_op(op)
+          op -> op
         end)
+
+      highlights = highlights_for_changes(changes, applied)
 
       sets =
         changes
@@ -1483,12 +1849,22 @@ defmodule Ecrits.Doc.Projection do
         %{
           path: abs_path,
           doc: Path.basename(abs_path),
-          applied: length(changes),
+          applied: opts[:applied_total] || length(changes),
+          delta_applied: length(changes),
+          edit_id: opts[:edit_id],
+          progress_index: opts[:progress_index],
+          progress_total: opts[:progress_total],
           marker: hit,
           ops: ops,
+          composition_ops: composition_ops,
           highlights: highlights,
           sets: sets
         }
+        |> maybe_put_info(:preview_steps, opts[:preview_steps])
+        |> maybe_put_info(:preview_base_url, opts[:preview_base_url])
+        |> maybe_put_info(:browser_authority, opts[:browser_authority])
+        |> maybe_put_info(:preview_only, opts[:preview_only])
+        |> maybe_put_info(:preview_continuation, opts[:preview_continuation])
         |> maybe_put_vfs_agent_id(vfs_agent_id(root, abs_path, opts))
 
       Phoenix.PubSub.broadcast(
@@ -1504,6 +1880,47 @@ defmodule Ecrits.Doc.Projection do
   catch
     _, _ -> :ok
   end
+
+  defp highlights_for_changes(changes, applied) do
+    changes
+    |> Enum.zip(applied)
+    |> Enum.flat_map(fn
+      {{:text, op, marker}, _applied} ->
+        [text_highlight(op, marker)]
+
+      {{:insert_table, op, _marker}, applied} ->
+        table_insert_highlights(op, applied)
+
+      {{:insert_picture, op, marker, _props}, applied} ->
+        picture_insert_highlights(op, marker, applied)
+
+      {{:delete_node, op, marker}, _applied} ->
+        [
+          %{
+            "kind" => "delete",
+            "op" => op["op"],
+            "ref" => op["ref"],
+            "text" => marker
+          }
+        ]
+
+      {{:set, ref, type, props}, _applied} ->
+        [
+          %{
+            "kind" => "set",
+            "ref" => ref,
+            "type" => type,
+            "props" => props
+          }
+        ]
+    end)
+    |> remap_persisted_highlights(changes)
+  end
+
+  defp maybe_put_info(info, _key, nil), do: info
+  defp maybe_put_info(info, _key, []), do: info
+  defp maybe_put_info(info, _key, ""), do: info
+  defp maybe_put_info(info, key, value), do: Map.put(info, key, value)
 
   defp vfs_agent_id(root, abs_path, opts) do
     case Keyword.get(opts, :agent_id) do
@@ -1533,6 +1950,84 @@ defmodule Ecrits.Doc.Projection do
     |> Map.merge(text_highlight_range(op, marker))
   end
 
+  defp remap_persisted_highlights(highlights, changes) do
+    insertions = positional_insertions(changes)
+
+    Enum.map(highlights, fn
+      %{"op" => op} = highlight when op in ["insert_table", "insert_picture"] ->
+        highlight
+
+      %{"ref" => %{} = ref} = highlight ->
+        Map.put(highlight, "ref", remap_persisted_ref(ref, insertions))
+
+      highlight ->
+        highlight
+    end)
+  end
+
+  defp positional_insertions(changes) do
+    changes
+    |> Enum.flat_map(fn
+      {:insert_table, %{"ref" => %{} = ref}, _marker} ->
+        positional_insertion(ref, :after)
+
+      {:insert_picture, %{"ref" => %{} = ref}, _marker, _props} ->
+        positional_insertion(ref, :at)
+
+      _change ->
+        []
+    end)
+    |> Enum.sort_by(fn {section, paragraph, _mode} -> {section, paragraph} end)
+  end
+
+  defp positional_insertion(ref, mode) do
+    section = Map.get(ref, "section")
+    paragraph = Map.get(ref, "paragraph")
+
+    if is_integer(section) and is_integer(paragraph),
+      do: [{section, paragraph, mode}],
+      else: []
+  end
+
+  defp remap_persisted_ref(ref, insertions) do
+    section = Map.get(ref, "section")
+    paragraph = Map.get(ref, "paragraph")
+
+    if is_integer(section) and is_integer(paragraph) do
+      delta = positional_paragraph_delta(insertions, section, paragraph)
+
+      ref
+      |> Map.put("paragraph", paragraph + delta)
+      |> remap_cell_parent_paragraph(insertions, section)
+    else
+      ref
+    end
+  end
+
+  defp positional_paragraph_delta(insertions, section, paragraph) do
+    remapped_paragraph =
+      Enum.reduce(insertions, paragraph, fn
+        {^section, anchor, :after}, current when current > anchor -> current + 1
+        {^section, anchor, :at}, current when current >= anchor -> current + 1
+        _insertion, current -> current
+      end)
+
+    remapped_paragraph - paragraph
+  end
+
+  defp remap_cell_parent_paragraph(%{"cell" => %{} = cell} = ref, insertions, section) do
+    case Map.get(cell, "parentParaIndex") do
+      paragraph when is_integer(paragraph) ->
+        delta = positional_paragraph_delta(insertions, section, paragraph)
+        put_in(ref, ["cell", "parentParaIndex"], paragraph + delta)
+
+      _paragraph ->
+        ref
+    end
+  end
+
+  defp remap_cell_parent_paragraph(ref, _insertions, _section), do: ref
+
   defp text_highlight_range(
          %{"op" => "replace_text", "ref" => ref, "query" => query, "replacement" => replacement},
          _marker
@@ -1548,7 +2043,7 @@ defmodule Ecrits.Doc.Projection do
   end
 
   defp text_highlight_range(%{"op" => op, "ref" => ref} = edit, marker)
-       when op in ["insert_text", "set_char"] do
+       when op in ["insert_text", "set_char", "set_cell"] do
     text = Map.get(edit, "text", marker)
 
     if is_binary(text) do
@@ -1586,8 +2081,7 @@ defmodule Ecrits.Doc.Projection do
   defp ref_offset(_ref), do: 0
 
   defp table_insert_highlights(op, applied) do
-    with [%{"controlIdx" => control, "paraIdx" => paragraph} | _] <-
-           Map.get(applied, :native) || Map.get(applied, "native"),
+    with {:ok, paragraph, control} <- applied_control_ref(applied),
          section <- table_insert_section(op),
          cells when is_list(cells) <- Map.get(op, "cells") do
       cols = Map.get(op, "cols") || cells |> Enum.map(&length/1) |> Enum.max(fn -> 0 end)
@@ -1656,10 +2150,8 @@ defmodule Ecrits.Doc.Projection do
   end
 
   defp inserted_control_ref(op, applied) do
-    with [%{"controlIdx" => control, "paraIdx" => paragraph} | _] <-
-           Map.get(applied, :native) || Map.get(applied, "native"),
-         section <- table_insert_section(op),
-         true <- is_integer(control) and is_integer(paragraph) do
+    with {:ok, paragraph, control} <- applied_control_ref(applied),
+         section <- table_insert_section(op) do
       case inserted_cell_picture_ref(op, section, paragraph, control) do
         {:ok, ref} ->
           {:ok, ref}
@@ -1677,6 +2169,25 @@ defmodule Ecrits.Doc.Projection do
       _ -> {:error, :missing_inserted_control_ref}
     end
   end
+
+  defp applied_control_ref(applied) when is_map(applied) do
+    native = Map.get(applied, :native) || Map.get(applied, "native")
+
+    candidate =
+      case native do
+        [first | _] when is_map(first) -> first
+        _ -> applied
+      end
+
+    paragraph = Map.get(candidate, "paraIdx") || Map.get(candidate, :paraIdx)
+    control = Map.get(candidate, "controlIdx") || Map.get(candidate, :controlIdx)
+
+    if is_integer(paragraph) and is_integer(control),
+      do: {:ok, paragraph, control},
+      else: {:error, :missing_inserted_control_ref}
+  end
+
+  defp applied_control_ref(_applied), do: {:error, :missing_inserted_control_ref}
 
   defp inserted_cell_picture_ref(op, section, paragraph, control) do
     ref = op |> Map.get("ref") |> normalize_ir_value()
