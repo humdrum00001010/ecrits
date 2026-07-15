@@ -4525,6 +4525,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           },
           hwpToolbarApplyNamedStyle(style) {
             if (!style || typeof this.doc.getStyleList !== "function" || typeof this.doc.applyStyle !== "function") return;
+            const refs = this.hwpToolbarParaRefs().filter(ref => !ref.cell);
+            if (!refs.length) return;
             let styles = [];
             try {
               const raw = this.doc.getStyleList();
@@ -4546,11 +4548,10 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             const normalize = value => String(value || "").trim().toLowerCase();
             let match = styles.find(item => wanted.includes(normalize(item.englishName)) || wanted.includes(normalize(item.name)));
             if (!match && style === "body") match = styles.find(item => Number(item.id) === 0) || styles[0];
+            this.pushHwpUndoCheckpoint("toolbar-style");
+            if (!match) match = this.hwpToolbarCreateNamedStyle(style);
             const styleId = Number(match && match.id);
             if (!Number.isInteger(styleId) || styleId < 0) return;
-            const refs = this.hwpToolbarParaRefs().filter(ref => !ref.cell);
-            if (!refs.length) return;
-            this.pushHwpUndoCheckpoint("toolbar-style");
             let applied = 0;
             for (const ref of refs) {
               try {
@@ -4565,6 +4566,84 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             if (applied > 0) {
               this.finishAgentEdit({});
               this.scheduleToolbarStateSync();
+            }
+          },
+          hwpToolbarCreateNamedStyle(style) {
+            if (typeof this.doc.createStyle !== "function") return null;
+            const presets = {
+              title: {
+                name: "제목",
+                englishName: "Title",
+                char: { fontSize: 2200, bold: true },
+                para: { alignment: "center", spacingBefore: 400, spacingAfter: 300, keepWithNext: true }
+              },
+              subtitle: {
+                name: "부제",
+                englishName: "Subtitle",
+                char: { fontSize: 1500, italic: true },
+                para: { alignment: "center", spacingAfter: 250, keepWithNext: true }
+              },
+              "heading-1": {
+                name: "제목 1",
+                englishName: "Heading 1",
+                char: { fontSize: 1800, bold: true },
+                para: { spacingBefore: 300, spacingAfter: 150, keepWithNext: true }
+              },
+              "heading-2": {
+                name: "제목 2",
+                englishName: "Heading 2",
+                char: { fontSize: 1600, bold: true },
+                para: { spacingBefore: 250, spacingAfter: 120, keepWithNext: true }
+              },
+              "heading-3": {
+                name: "제목 3",
+                englishName: "Heading 3",
+                char: { fontSize: 1400, bold: true },
+                para: { spacingBefore: 200, spacingAfter: 100, keepWithNext: true }
+              },
+              quote: {
+                name: "인용",
+                englishName: "Quote",
+                char: { italic: true },
+                para: { marginLeft: 2000, marginRight: 2000, spacingBefore: 100, spacingAfter: 100 }
+              },
+              preformatted: {
+                name: "고정폭",
+                englishName: "Preformatted",
+                char: { fontSize: 1000 },
+                para: { marginLeft: 1000, marginRight: 1000 }
+              }
+            };
+            const preset = presets[style];
+            if (!preset) return null;
+            const charMods = { ...preset.char };
+            if (style === "preformatted" && typeof this.doc.findOrCreateFontId === "function") {
+              const fontId = Number(this.doc.findOrCreateFontId("Liberation Mono"));
+              if (Number.isInteger(fontId) && fontId >= 0) charMods.fontId = fontId;
+            }
+            try {
+              const id = Number(this.doc.createStyle(JSON.stringify({
+                name: preset.name,
+                englishName: preset.englishName,
+                type: 0,
+                nextStyleId: 0
+              })));
+              if (!Number.isInteger(id) || id < 0) return null;
+              if (typeof this.doc.updateStyleShapes === "function") {
+                const updated = this.doc.updateStyleShapes(
+                  id,
+                  JSON.stringify(charMods),
+                  JSON.stringify(preset.para)
+                );
+                if (updated === false) {
+                  if (typeof this.doc.deleteStyle === "function") this.doc.deleteStyle(id);
+                  return null;
+                }
+              }
+              return { id, name: preset.name, englishName: preset.englishName };
+            } catch (error) {
+              console.warn("[wasm-hwp] toolbar style creation failed", error);
+              return null;
             }
           },
           hwpToolbarTableTarget() {

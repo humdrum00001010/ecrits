@@ -2169,6 +2169,52 @@ describe("WasmHwpEditor preview patch safety", () => {
     assert.deepEqual(calls.find(call => call.name === "insertTableColumn")?.args, [0, 7, 1, 2, false])
   })
 
+  it("creates and applies a missing HWP named style instead of silently ignoring it", () => {
+    const calls: Array<{ name: string; args?: any[] }> = []
+    const editor = {
+      ...WasmHwpEditor,
+      documentId: "doc-1",
+      format: "hwp",
+      el: { isConnected: true },
+      doc: {
+        getStyleList: () => JSON.stringify([{ id: 0, name: "바탕글", englishName: "Normal" }]),
+        createStyle: (json: string) => {
+          calls.push({ name: "createStyle", args: [JSON.parse(json)] })
+          return 7
+        },
+        updateStyleShapes: (id: number, charJson: string, paraJson: string) => {
+          calls.push({ name: "updateStyleShapes", args: [id, JSON.parse(charJson), JSON.parse(paraJson)] })
+          return true
+        },
+        applyStyle: (...args: any[]) => {
+          calls.push({ name: "applyStyle", args })
+          return "{}"
+        },
+      },
+      hwpToolbarParaRefs: () => [{ section: 0, paragraph: 2, offset: 0 }],
+      pushHwpUndoCheckpoint: (label: string) => calls.push({ name: "checkpoint", args: [label] }),
+      finishAgentEdit: () => calls.push({ name: "finishAgentEdit" }),
+      scheduleToolbarStateSync: () => calls.push({ name: "scheduleToolbarStateSync" }),
+    } as any
+
+    editor.handleToolbarCommand({ command: "named-style-set", style: "title", document_id: "doc-1" })
+
+    assert.deepEqual(calls.find(call => call.name === "createStyle")?.args, [{
+      name: "제목",
+      englishName: "Title",
+      type: 0,
+      nextStyleId: 0,
+    }])
+    assert.deepEqual(calls.find(call => call.name === "updateStyleShapes")?.args, [
+      7,
+      { fontSize: 2200, bold: true },
+      { alignment: "center", spacingBefore: 400, spacingAfter: 300, keepWithNext: true },
+    ])
+    assert.deepEqual(calls.find(call => call.name === "applyStyle")?.args, [0, 2, 7])
+    assert.ok(calls.some(call => call.name === "finishAgentEdit"))
+    assert.ok(calls.some(call => call.name === "scheduleToolbarStateSync"))
+  })
+
   it("inserts and merges HWP tables from toolbar commands", () => {
     const calls: Array<{ name: string; args?: any[] }> = []
     const editor = {
