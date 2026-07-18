@@ -213,6 +213,7 @@ defmodule Ecrits.Fuse.DocMount do
     with_mount_lock(fn ->
       :ok = unmount_point(point)
       :ok = close_pooled_documents(root)
+      :ok = Ecrits.Fuse.OpenDocs.close_root(root)
       remove_legacy_mount(root)
     end)
   rescue

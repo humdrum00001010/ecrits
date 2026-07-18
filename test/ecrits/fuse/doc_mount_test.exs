@@ -124,6 +124,38 @@ defmodule Ecrits.Fuse.DocMountTest do
     refute remounted_projection =~ "변조"
   end
 
+  test "teardown sweeps every OpenDocs entry so the workspace is the whole lifetime" do
+    # A document's runtime state lives exactly as long as its workspace: after
+    # teardown, no open-doc bookkeeping (entry, committed cache, staged bytes,
+    # write failures) may linger to be compensated for by the next open.
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "ecrits-doc-mount-close-root-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    for name <- ["a.hwp", "b.hwp"] do
+      OpenDocs.open(root, name, source_path: Path.join(root, name))
+      OpenDocs.cache_committed(root, name, ~s([[[{"type":"paragraph","text":"x"}]]]))
+    end
+
+    assert Enum.sort(OpenDocs.list(root)) == ["a.hwp", "b.hwp"]
+
+    assert :ok = DocMount.teardown(root)
+
+    assert OpenDocs.list(root) == []
+
+    for name <- ["a.hwp", "b.hwp"] do
+      refute OpenDocs.member?(root, name)
+      assert OpenDocs.committed(root, name) == :error
+      assert OpenDocs.staged(root, name) == :error
+      assert OpenDocs.write_failure(root, name) == :error
+    end
+  end
+
   defp fskit_extension_enabled_for_test? do
     case System.cmd(
            "pluginkit",

@@ -522,6 +522,19 @@ defmodule Ecrits.Fuse.OpenDocs do
     end
   end
 
+  @doc """
+  Unregister every open doc under `root` — the workspace-teardown sweep.
+
+  A document's runtime state lives exactly as long as its workspace: teardown
+  closes the Pool twins, and this clears the matching OpenDocs bookkeeping
+  (entry, stage, committed cache, echoes, failure markers) in the same breath,
+  so nothing lingers to be compensated for by the next open.
+  """
+  @spec close_root(String.t()) :: :ok
+  def close_root(root) do
+    Enum.each(list(root), &close(root, &1))
+  end
+
   @doc "All open document names under `root`."
   @spec list(String.t()) :: [String.t()]
   def list(root) do
