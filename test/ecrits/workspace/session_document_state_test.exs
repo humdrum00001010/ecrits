@@ -43,14 +43,14 @@ defmodule Ecrits.Workspace.SessionDocumentStateTest do
     assert {:ok,
             %Document{
               path: "drafts/reference.docx",
-              id: "local-doc-id",
+              id: "doc-id",
               pool_document_id: "pool-doc-id",
               scroll_top: 0,
               scroll_left: 0
             }} =
              Session.open_document(ws, %{
                path: "drafts/reference.docx",
-               id: "local-doc-id",
+               id: "doc-id",
                pool_document_id: "pool-doc-id"
              })
 
@@ -60,7 +60,7 @@ defmodule Ecrits.Workspace.SessionDocumentStateTest do
              documents: [
                %Document{
                  path: "drafts/reference.docx",
-                 id: "local-doc-id",
+                 id: "doc-id",
                  pool_document_id: "pool-doc-id",
                  scroll_top: 321,
                  scroll_left: 7

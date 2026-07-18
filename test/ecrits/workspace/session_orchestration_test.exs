@@ -71,8 +71,8 @@ defmodule Ecrits.Workspace.SessionOrchestrationTest do
     :ok = Session.subscribe_agent(worker.id)
     {:ok, %{id: turn_id}} = Ecrits.AcpAgent.send_turn(nil, worker.id, "do the thing")
 
-    assert_receive {:local_agent_event, %{type: :turn_started, turn_id: ^turn_id}}, 2_000
-    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+    assert_receive {:agent_event, %{type: :turn_started, turn_id: ^turn_id}}, 2_000
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
 
     # The foreground agent did NOT receive the worker's turn (isolation): its
     # transcript is empty (no fg turn was sent).

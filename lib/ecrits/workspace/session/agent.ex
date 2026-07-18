@@ -6,11 +6,13 @@ defmodule Ecrits.Workspace.Session.Agent do
   runner can be restarted or resumed from it, but does not own this state.
   """
 
+  alias Ecrits.Agent.Dialog
+
   @type id :: String.t()
   @type role :: :foreground | :background
   @type provider_id :: String.t()
   @type adapter_opts :: keyword()
-  @type transcript_item :: map()
+  @type transcript_item :: Dialog.t()
   @type queued_turn :: map()
   @type current_turn :: %{id: String.t(), status: atom()} | map()
   @type mcp_server :: %{required(String.t()) => String.t()}
