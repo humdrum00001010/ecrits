@@ -2,7 +2,7 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
   @moduledoc """
   The MCP-isolation resolution (Phase 2): `Ecrits.Doc.MCPServer.handle_call_tool/3`
   takes the `_agent_id` the per-agent url's plug splices into the tool arguments,
-  resolves it via `Ecrits.Workspace.Session.fetch_agent/1` to the live AgentLive,
+  resolves it via `Ecrits.Workspace.Session.fetch_agent/1` to the live agent session,
   and dispatches the tool in THAT agent's document context (its own active doc) —
   never a global `Pool.active`. An unknown/dead agent id is rejected.
   """
@@ -10,7 +10,7 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
 
   alias Ecrits.Doc.MCPServer
   alias Ecrits.Doc.Pool
-  alias Ecrits.AcpAgent.Session, as: AgentLive
+  alias Ecrits.AcpAgent.Session, as: AgentSession
   alias Ecrits.Test.FakeEhwpRuntime
 
   setup do
@@ -27,11 +27,11 @@ defmodule Ecrits.Doc.MCPServerAgentContextTest do
     :ok
   end
 
-  # Start a headless AgentLive (no provider turn needed; we only read its
+  # Start a headless agent session (no provider turn needed; we only read its
   # tool_context), bound to `pool_document_id`.
   defp start_agent(id, pool_document_id, opts \\ []) do
     start_supervised!(
-      {AgentLive,
+      {AgentSession,
        id: id,
        ctx: nil,
        provider: %{id: "codex"},

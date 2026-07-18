@@ -3,6 +3,8 @@ defmodule Ecrits.Doc.ToolsTest do
 
   alias Ecrits.Doc.Pool
   alias Ecrits.Doc.Tools
+  alias Ecrits.Fuse.DocFs
+  alias Ecrits.Fuse.DocMount
   alias Ecrits.Fuse.OpenDocs
   alias Ecrits.Test.FakeEhwpRuntime
   alias Ecrits.Workspace.Session
@@ -54,8 +56,7 @@ defmodule Ecrits.Doc.ToolsTest do
       # The consolidated surface is thirteen tools: the original doc.* surface,
       # doc.render, plus the VFS mount-control pair doc.open_doc/doc.close_doc.
       # The former doc.inspect and doc.apply_style are folded into doc.get /
-      # doc.set. The authoring guide is NOT a tool — it is the MCP server's
-      # `instructions` (one global copy per session).
+      # doc.set.
       assert "doc.read_table" not in names
       assert "doc.inspect" not in names
       assert "doc.apply_style" not in names
@@ -71,27 +72,8 @@ defmodule Ecrits.Doc.ToolsTest do
       assert create_tool["annotations"] == %{"readOnlyHint" => false}
 
       open_doc_tool = Enum.find(Tools.tools(), &(&1["name"] == "open_doc"))
-      assert open_doc_tool["description"] =~ "JSONL is IR-only"
-      assert open_doc_tool["description"] =~ "does not contain mounted_at"
-      assert open_doc_tool["description"] =~ "Never create, copy, or edit fallback JSONL outside"
-      assert open_doc_tool["description"] =~ "always use the returned `mounted_at` path"
-      assert open_doc_tool["description"] =~ "/tmp/<mount>.jsonl"
-      assert open_doc_tool["description"] =~ "do not route to the document"
-      assert open_doc_tool["description"] =~ "For whole-file rewrites on FSKit"
-      assert open_doc_tool["description"] =~ "plain redirection"
-      assert open_doc_tool["description"] =~ "validate exactly one nested root value"
-      assert open_doc_tool["description"] =~ "length == 1"
-      assert open_doc_tool["description"] =~ "mv -f"
-      assert open_doc_tool["description"] =~ "do not use mktemp"
-      assert open_doc_tool["description"] =~ "or dd over the target"
-      assert open_doc_tool["description"] =~ "inside an existing paragraph list"
-      assert open_doc_tool["description"] =~ "immediately after the target cell payload"
-      assert open_doc_tool["description"] =~ "do not edit/reuse an existing picture"
-      assert open_doc_tool["description"] =~ "Structural inserts are one-shot"
-      assert open_doc_tool["description"] =~ "picture appears at the intended nested position"
-      assert open_doc_tool["description"] =~ "ref.cellPath"
-      assert open_doc_tool["description"] =~ "Picture src is embed input"
-      assert open_doc_tool["description"] =~ "never insert another copy"
+      assert open_doc_tool["description"] =~ "primary editing surface"
+      refute open_doc_tool["description"] =~ "JSONL"
 
       close_doc_tool = Enum.find(Tools.tools(), &(&1["name"] == "close_doc"))
       assert close_doc_tool["description"] =~ "explicit unmount requests only"
@@ -103,19 +85,11 @@ defmodule Ecrits.Doc.ToolsTest do
       end
     end
 
-    test "the authoring guide is the server instructions — one global copy, any entry point" do
-      # Sessions that never touch doc.create (open an existing deck, or a path
-      # auto-open) still get the design lessons: they ride the MCP initialize
-      # `instructions`, once per session.
-      instructions = Tools.instructions()
-      assert instructions =~ "deck's actual canvas"
-      assert instructions =~ "FillColor"
-      assert instructions =~ "insert_paragraph"
-
+    test "MCP initialization does not inject authoring recipes" do
       {:ok, state} = Ecrits.Doc.MCPServer.init([])
 
-      assert {:ok, %{instructions: ^instructions}, _state} =
-               Ecrits.Doc.MCPServer.handle_initialize(%{}, state)
+      assert {:ok, initialized, _state} = Ecrits.Doc.MCPServer.handle_initialize(%{}, state)
+      refute Map.has_key?(initialized, :instructions)
     end
 
     test "read tools are read risk, write tools are write risk" do
@@ -142,14 +116,6 @@ defmodule Ecrits.Doc.ToolsTest do
       assert props["w"]["description"] =~ "insert_picture"
       assert props["h"]["description"] =~ "insert_picture"
       assert props["name"]["description"] =~ "XLSX"
-    end
-
-    test "instructions include native xlsx picture guidance" do
-      instructions = Tools.instructions()
-
-      assert instructions =~ "XLSX guide"
-      assert instructions =~ "sheet[Sheet1]/cell[A1]"
-      assert instructions =~ "insert_picture {ref, src"
     end
   end
 
@@ -329,6 +295,344 @@ defmodule Ecrits.Doc.ToolsTest do
       assert is_binary(m["ref"])
     end
 
+    test "doc.find returns a canonical ref immediately before a generic cell marker", %{
+      pool: pool
+    } do
+      text = "Approved by Alex [[STAMP]] on file"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "stamp-marker.hwp",
+          "open_opts" => [
+            __text__: text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => text,
+                "ref" => %{
+                  "section" => 0,
+                  "paragraph" => 78,
+                  "offset" => 0,
+                  "cell" => %{
+                    "parentParaIndex" => 78,
+                    "controlIndex" => 0,
+                    "cellIndex" => 3,
+                    "cellParaIndex" => 3
+                  }
+                }
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => text,
+                 "type" => "paragraph",
+                 "marker" => "[[STAMP]]"
+               })
+
+      assert match["text"] == text
+      assert match["marker"] == "[[STAMP]]"
+      assert match["marker_offset"] == 17
+
+      assert Jason.decode!(match["before_marker_ref"]) == %{
+               "section" => 0,
+               "paragraph" => 78,
+               "offset" => 17,
+               "cellPath" => [
+                 %{"controlIndex" => 0, "cellIndex" => 3, "cellParaIndex" => 3}
+               ]
+             }
+    end
+
+    test "doc.find returns a canonical ref before a non-cell marker", %{pool: pool} do
+      text = "Place the seal before <SEAL> in this paragraph"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "paragraph-marker.hwp",
+          "open_opts" => [
+            __text__: text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => text,
+                "ref" => %{"section" => 2, "paragraph" => 14, "offset" => 0}
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => text,
+                 "type" => "paragraph",
+                 "marker" => "<SEAL>"
+               })
+
+      assert match["marker_offset"] == 22
+
+      assert Jason.decode!(match["before_marker_ref"]) == %{
+               "section" => 2,
+               "paragraph" => 14,
+               "offset" => 22
+             }
+    end
+
+    test "doc.find canonicalizes a live HWP cell ref at a Unicode marker offset", %{pool: pool} do
+      text = "수급사업자 한빛 (인)"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "native-cell-marker.hwp",
+          "open_opts" => [
+            __text__: text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => text,
+                "ref" => "hwp:s0/p77/tbl0/cell3/cp3/c0+18"
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => text,
+                 "type" => "paragraph",
+                 "marker" => "(인)"
+               })
+
+      assert match["marker_offset"] == 9
+
+      assert Jason.decode!(match["before_marker_ref"]) == %{
+               "section" => 0,
+               "paragraph" => 77,
+               "offset" => 9,
+               "cellPath" => [
+                 %{"controlIndex" => 0, "cellIndex" => 3, "cellParaIndex" => 3}
+               ]
+             }
+    end
+
+    test "doc.find canonicalizes a live HWP non-cell char ref", %{pool: pool} do
+      text = "한글 도장 <SEAL>"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "native-paragraph-marker.hwp",
+          "open_opts" => [
+            __text__: text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => text,
+                "ref" => "hwp:s2/p14/c0+12"
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => text,
+                 "type" => "paragraph",
+                 "marker" => "<SEAL>"
+               })
+
+      assert match["marker_offset"] == 6
+
+      assert Jason.decode!(match["before_marker_ref"]) == %{
+               "section" => 2,
+               "paragraph" => 14,
+               "offset" => 6
+             }
+    end
+
+    test "doc.find adds a native HWP char ref base offset to its marker offset", %{pool: pool} do
+      text = "계약"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "native-offset-paragraph-marker.hwp",
+          "open_opts" => [
+            __text__: text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => text,
+                "ref" => "hwp:s0/p41/c5+2"
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => text,
+                 "type" => "paragraph",
+                 "marker" => "약"
+               })
+
+      assert match["marker_offset"] == 1
+
+      assert Jason.decode!(match["before_marker_ref"]) == %{
+               "section" => 0,
+               "paragraph" => 41,
+               "offset" => 6
+             }
+    end
+
+    test "doc.find adds a native HWP cell ref base offset to its marker offset", %{pool: pool} do
+      text = "서명"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "native-offset-cell-marker.hwp",
+          "open_opts" => [
+            __text__: text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => text,
+                "ref" => "hwp:s0/p77/tbl0/cell3/cp3/c10+2"
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => text,
+                 "type" => "paragraph",
+                 "marker" => "명"
+               })
+
+      assert match["marker_offset"] == 1
+
+      assert Jason.decode!(match["before_marker_ref"]) == %{
+               "section" => 0,
+               "paragraph" => 77,
+               "offset" => 11,
+               "cellPath" => [
+                 %{"controlIndex" => 0, "cellIndex" => 3, "cellParaIndex" => 3}
+               ]
+             }
+    end
+
+    test "doc.find counts decomposed Unicode in native HWP codepoint offsets", %{pool: pool} do
+      text = "e\u0301A"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "native-decomposed-marker.hwp",
+          "open_opts" => [
+            __text__: text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => text,
+                "ref" => "hwp:s0/p0/c0+3"
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => text,
+                 "type" => "paragraph",
+                 "marker" => "A"
+               })
+
+      assert match["marker_offset"] == 2
+
+      assert Jason.decode!(match["before_marker_ref"]) == %{
+               "section" => 0,
+               "paragraph" => 0,
+               "offset" => 2
+             }
+    end
+
+    test "case-insensitive native marker lookup keeps offsets in the original text", %{pool: pool} do
+      text = "İA"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "native-casefold-marker.hwp",
+          "open_opts" => [
+            __text__: text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => text,
+                "ref" => "hwp:s0/p0/c0+2"
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => text,
+                 "type" => "paragraph",
+                 "marker" => "a",
+                 "case_sensitive" => false
+               })
+
+      assert match["marker_offset"] == 1
+
+      assert Jason.decode!(match["before_marker_ref"]) == %{
+               "section" => 0,
+               "paragraph" => 0,
+               "offset" => 1
+             }
+    end
+
+    test "doc.find rejects a malformed live HWP ref instead of deriving a marker ref", %{
+      pool: pool
+    } do
+      text = "수급사업자 한빛 (인)"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "malformed-native-marker.hwp",
+          "open_opts" => [
+            __text__: text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => text,
+                "ref" => "hwp:s0/p77/tbl0/cellx/cp3/c0+18"
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => text,
+                 "type" => "paragraph",
+                 "marker" => "(인)"
+               })
+
+      refute Map.has_key?(match, "marker")
+      refute Map.has_key?(match, "marker_found")
+      refute Map.has_key?(match, "marker_offset")
+      refute Map.has_key?(match, "before_marker_ref")
+    end
+
     test "doc.find returns bounded snippets for long matches", %{pool: pool} do
       text =
         String.duplicate("Intro ", 40) <>
@@ -480,11 +784,11 @@ defmodule Ecrits.Doc.ToolsTest do
       assert {:error,
               %{"error" => "document_not_found", "open_documents" => docs, "document" => bogus}} =
                Tools.call(ctx(pool), "doc.read", %{
-                 "document" => "local-stale-viewer-id",
+                 "document" => "stale-viewer-id",
                  "ref" => "hwp:s0/p0/c0+0"
                })
 
-      assert bogus == "local-stale-viewer-id"
+      assert bogus == "stale-viewer-id"
       assert Enum.any?(docs, &(&1["document"] == doc_id))
       assert Enum.any?(docs, &(&1["path"] =~ "service_contract.hwp"))
     end
@@ -598,6 +902,115 @@ defmodule Ecrits.Doc.ToolsTest do
                Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "ARTICLE2"})
     end
 
+    test "native edit defers canonical bytes without invalidating the mounted ACP pre-image", %{
+      path: root
+    } do
+      File.mkdir_p!(root)
+      source = Path.join(root, "native-fallback.hwp")
+      File.write!(source, "fake-hwp-bytes")
+      mount_name = "native-fallback.hwp"
+      projected_name = "/#{mount_name}.jsonl"
+
+      ctx = %{
+        pool: Pool,
+        agent_id: "native-fallback-agent",
+        instance_id: "native-fallback-instance",
+        turn_id: "native-fallback-turn",
+        session_path: root,
+        read_only: false
+      }
+
+      on_exit(fn ->
+        _ = Pool.close_by_path(source)
+        OpenDocs.close(root, mount_name)
+        File.rm_rf(root)
+      end)
+
+      assert {:ok, %{"document" => doc_id}} =
+               Tools.call(ctx, "doc.open", %{
+                 "path" => source,
+                 "open_opts" => [__text__: "제2조 본문"]
+               })
+
+      OpenDocs.open(root, mount_name, source_path: source)
+      OpenDocs.cache_committed(root, mount_name, "ACP_PRE_IMAGE")
+
+      socket = Exfuse.Socket.new(DocMount.mount_point(root), %{root: root})
+
+      assert {:reply, "ACP_PRE_IMAGE", socket} =
+               DocFs.handle_event(
+                 :read,
+                 %{path: projected_name, offset: 0, size: 1_024},
+                 socket
+               )
+
+      assert {:error, _reason} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc_id,
+                 "op" => %{"op" => "replace_text", "query" => "제2조"}
+               })
+
+      assert {:ok, "ACP_PRE_IMAGE"} = OpenDocs.committed(root, mount_name)
+
+      assert {:ok, %{"native" => [%{"ok" => false, "replaced" => 0}]}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc_id,
+                 "op" => %{
+                   "op" => "replace_text",
+                   "query" => "없는 문구",
+                   "replacement" => "NOOP"
+                 }
+               })
+
+      assert {:ok, "ACP_PRE_IMAGE"} = OpenDocs.committed(root, mount_name)
+
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc_id,
+                 "op" => %{
+                   "op" => "replace_text",
+                   "query" => "제2조",
+                   "replacement" => "ARTICLE2"
+                 }
+               })
+
+      assert {:ok, "ACP_PRE_IMAGE"} = OpenDocs.committed(root, mount_name)
+
+      assert {:ok,
+              %{
+                accepted_bytes: "ACP_PRE_IMAGE",
+                bytes: canonical_bytes,
+                agent_id: "native-fallback-agent",
+                instance_id: "native-fallback-instance",
+                turn_id: "native-fallback-turn"
+              }} = OpenDocs.pending_canonical(root, mount_name)
+
+      assert canonical_bytes =~ "ARTICLE2"
+
+      assert {:reply, "ACP_PRE_IMAGE", socket} =
+               DocFs.handle_event(
+                 :read,
+                 %{path: projected_name, offset: 0, size: 1_024 * 1_024},
+                 socket
+               )
+
+      assert %{published: [^mount_name], pending: []} =
+               DocFs.flush_canonical(root,
+                 agent_id: "native-fallback-agent",
+                 mounted?: false
+               )
+
+      assert {:reply, refreshed, _socket} =
+               DocFs.handle_event(
+                 :read,
+                 %{path: projected_name, offset: 0, size: 1_024 * 1_024},
+                 socket
+               )
+
+      assert refreshed == canonical_bytes
+      assert refreshed =~ "ARTICLE2"
+    end
+
     test "returns native write details for no-op replacements", %{pool: pool} do
       {:ok, %{"document" => doc_id}} =
         Tools.call(ctx(pool), "doc.open", %{
@@ -644,17 +1057,16 @@ defmodule Ecrits.Doc.ToolsTest do
                Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "첫째 줄 둘째 줄"})
     end
 
-    test "batch edit applies all ops when revision metadata is present", %{pool: pool} do
+    test "batch edit rejects retired metadata before applying any operation", %{pool: pool} do
       {:ok, %{"document" => doc_id}} =
         Tools.call(ctx(pool), "doc.open", %{
           "path" => "batch-revision-metadata.hwp",
           "open_opts" => [__text__: "A B"]
         })
 
-      assert {:ok, %{"applied" => 2, "failed" => 0} = result} =
+      assert {:error, %{"error" => "invalid_op", "message" => message}} =
                Tools.call(ctx(pool), "doc.edit", %{
                  "document" => doc_id,
-                 "base_revision" => 7,
                  "ops" => [
                    %{
                      "op" => "replace_text",
@@ -672,10 +1084,10 @@ defmodule Ecrits.Doc.ToolsTest do
                  "verbose" => true
                })
 
-      refute Map.has_key?(result, "failed_results")
+      assert message =~ "base_revision"
 
       assert {:ok, %{"matches" => [_]}} =
-               Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "AA BB"})
+               Tools.call(ctx(pool), "doc.find", %{"document" => doc_id, "pattern" => "A B"})
     end
 
     test "batch edit with any failed op returns a tool error", %{pool: pool} do
@@ -754,7 +1166,14 @@ defmodule Ecrits.Doc.ToolsTest do
       File.mkdir_p!(root)
       on_exit(fn -> File.rm_rf(root) end)
 
-      ctx = %{pool: pool, session_path: root, agent_id: "agent", read_only: false}
+      ctx = %{
+        pool: pool,
+        session_path: root,
+        agent_id: "agent",
+        instance_id: "agent-instance",
+        turn_id: "agent-turn",
+        read_only: false
+      }
 
       {:ok, %{"document" => doc_id}} =
         Tools.call(ctx, "doc.open", %{
@@ -947,7 +1366,14 @@ defmodule Ecrits.Doc.ToolsTest do
   # keeps the legacy pool-only behaviour the rest of the suite relies on.
   describe "per-agent context (isolation + invariants)" do
     defp agent_ctx(pool, path, agent_id, active_doc \\ nil),
-      do: %{pool: pool, agent_id: agent_id, active_doc: active_doc, session_path: path}
+      do: %{
+        pool: pool,
+        agent_id: agent_id,
+        instance_id: "#{agent_id}-instance",
+        turn_id: "#{agent_id}-turn",
+        active_doc: active_doc,
+        session_path: path
+      }
 
     test "doc.context returns THIS agent's OWN active doc (there is no global active)", %{
       pool: pool,
@@ -1020,6 +1446,11 @@ defmodule Ecrits.Doc.ToolsTest do
                  "op" => %{"op" => "replace_text", "query" => "제2조", "replacement" => "제3조"}
                })
 
+      assert {:server, editor} = Pool.route(pool, doc_id)
+
+      assert %{owner: %{agent_id: "owner", instance_id: "owner-instance", turn_id: "owner-turn"}} =
+               Ecrits.Doc.Editor.dirty_snapshot(editor)
+
       # A different agent is fenced out.
       assert {:error, %{"error" => "forbidden", "document" => ^doc_id, "owned_by" => owned}} =
                Tools.call(agent_ctx(pool, path, "intruder", doc_id), "doc.edit", %{
@@ -1028,6 +1459,49 @@ defmodule Ecrits.Doc.ToolsTest do
                })
 
       assert owned == %{"agent_id" => "owner"}
+    end
+
+    test "doc.set is fenced before another agent can property-write the document", %{
+      pool: pool,
+      path: path
+    } do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(agent_ctx(pool, path, "owner"), "doc.open", %{
+          "path" => "owned-set.hwp",
+          "open_opts" => [__text__: "제1조"]
+        })
+
+      assert {:error, %{"error" => "forbidden", "document" => ^doc_id}} =
+               Tools.call(agent_ctx(pool, path, "intruder", doc_id), "doc.set", %{
+                 "document" => doc_id,
+                 "ref" => "hwp:s0/p0",
+                 "props" => %{"Bold" => true}
+               })
+    end
+
+    test "agent writes with a partial turn identity fail closed", %{pool: pool, path: path} do
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "partial-turn.hwp",
+          "open_opts" => [__text__: "제1조"]
+        })
+
+      partial_ctx = %{
+        pool: pool,
+        agent_id: "agent",
+        instance_id: "instance",
+        session_path: path,
+        active_doc: doc_id,
+        read_only: false
+      }
+
+      assert {:error, %{"error" => "invalid_params", "message" => message}} =
+               Tools.call(partial_ctx, "doc.edit", %{
+                 "document" => doc_id,
+                 "op" => %{"op" => "insert_text", "ref" => "hwp:s0/p0", "text" => "x"}
+               })
+
+      assert message =~ "instance_id and turn_id"
     end
 
     test "doc.edit of an UNOWNED (human-opened) doc lazily claims it and succeeds", %{
@@ -1090,10 +1564,24 @@ defmodule Ecrits.Doc.ToolsTest do
   describe "access control: read-only session" do
     # ctx mirroring a read-only agent (session_path set, read_only true).
     defp ro_ctx(pool, root),
-      do: %{pool: pool, agent_id: "ro", session_path: root, read_only: true}
+      do: %{
+        pool: pool,
+        agent_id: "ro",
+        instance_id: "ro-instance",
+        turn_id: "ro-turn",
+        session_path: root,
+        read_only: true
+      }
 
     defp rw_ctx(pool, root),
-      do: %{pool: pool, agent_id: "rw", session_path: root, read_only: false}
+      do: %{
+        pool: pool,
+        agent_id: "rw",
+        instance_id: "rw-instance",
+        turn_id: "rw-turn",
+        session_path: root,
+        read_only: false
+      }
 
     setup do
       root = Path.join(System.tmp_dir!(), "ws_ac_#{System.unique_integer([:positive])}")
@@ -1182,7 +1670,14 @@ defmodule Ecrits.Doc.ToolsTest do
     end
 
     defp ws_ctx(pool, root),
-      do: %{pool: pool, agent_id: "ws", session_path: root, read_only: false}
+      do: %{
+        pool: pool,
+        agent_id: "ws",
+        instance_id: "ws-instance",
+        turn_id: "ws-turn",
+        session_path: root,
+        read_only: false
+      }
 
     test "doc.create OUTSIDE the workspace root is refused", %{pool: pool, root: root} do
       outside = Path.join(System.tmp_dir!(), "outside_#{System.unique_integer([:positive])}.hwp")
@@ -1231,7 +1726,7 @@ defmodule Ecrits.Doc.ToolsTest do
       File.write!(abs, "fake-hwp-bytes")
 
       assert {:ok,
-              %{
+              result = %{
                 "opened" => "drafts/nested.hwp",
                 "mount_name" => "drafts%2Fnested.hwp",
                 "projected" => "drafts%2Fnested.hwp.jsonl",
@@ -1240,6 +1735,122 @@ defmodule Ecrits.Doc.ToolsTest do
                 "vfs_enabled" => false
               }} =
                Tools.call(ws_ctx(pool, root), "doc.open_doc", %{"path" => "drafts/nested.hwp"})
+
+      assert %{
+               "version" => 2,
+               "kind" => "jsonl_projection",
+               "available" => false,
+               "addressing" => "nested_payload_position",
+               "format" => %{
+                 "encoding" => "one_json_value_one_paragraph_group_per_line",
+                 "line_addressing" => %{
+                   "locate" => "line_based_search_finds_the_target_paragraph_group_line",
+                   "edit" =>
+                     "replace_whole_lines_keeping_one_paragraph_group_per_line_and_the_trailing_comma",
+                   "newlines" =>
+                     "raw_newlines_are_reserved_record_separators_content_newlines_stay_escaped"
+                 },
+                 "structure" => ["sections", "paragraphs", "payloads"],
+                 "commit" => %{
+                   "mode" => "same_directory_temp_then_rename",
+                   "target_path" => nil,
+                   "temp_path" => nil,
+                   "temp_scope" => "mounted_projection_directory_only",
+                   "external_temp" => false,
+                   "rename" => "same_filesystem_atomic",
+                   "unsupported_structural_change" => %{
+                     "committed" => false,
+                     "errno" => "EINVAL"
+                   }
+                 }
+               },
+               "preserve" => ["payload_type", "unknown_fields", "nested_order"],
+               "payloads" => %{
+                 "text" => %{"edit" => true},
+                 "table" => %{
+                   "insert" => %{
+                     "required" => ["type", "cells"],
+                     "mode" => "insert_compact_payload_node",
+                     "preserve_existing_payloads" => true
+                   }
+                 },
+                 "picture" => %{
+                   "insert" => false,
+                   "route" => "native_fallback"
+                 }
+               },
+               "operations" => %{
+                 "set_text" => %{
+                   "target_types" => ["paragraph", "char", "cell"],
+                   "field" => "text",
+                   "mode" => "in_place",
+                   "select" => "type_and_current_text",
+                   "reuse_blank_payloads" => true
+                 },
+                 "insert_table" => %{
+                   "container" => "existing_paragraph_payload_array",
+                   "at" => "after_existing_anchor_payload",
+                   "action" => "insert_new_payload_node",
+                   "replace_container" => false,
+                   "insert_paragraph_arrays" => false,
+                   "copy_expanded_table_payloads" => false,
+                   "node" => %{
+                     "type" => "table",
+                     "cells" => "string_matrix",
+                     "header" => "boolean_optional"
+                   }
+                 }
+               },
+               "native_fallbacks" => %{
+                 "insert_picture" => %{
+                   "tool" => "doc.edit",
+                   "reason" => "unrepresentable",
+                   "supported_placement" => "picture_at_exact_existing_marker",
+                   "derive_from" => "current_engine_ref_after_primary_commit",
+                   "resolve_ref" => %{
+                     "tool" => "doc.find",
+                     "when" => "after_primary_commit",
+                     "arguments" => %{
+                       "document" => %{
+                         "from" => "doc.open_doc.document"
+                       },
+                       "type" => "paragraph",
+                       "pattern" => %{
+                         "from" => "copy_exact_committed_target_paragraph_text"
+                       },
+                       "marker" => %{
+                         "from" => "existing_literal_immediately_after_picture",
+                         "must_already_exist" => true,
+                         "create_placeholder" => false
+                       },
+                       "case_sensitive" => true,
+                       "limit" => 1
+                     },
+                     "select" => "unique_exact_text_match_containing_existing_marker",
+                     "use" => "match.before_marker_ref_verbatim",
+                     "manual_ref_derivation" => false
+                   },
+                   "op" => %{
+                     "op" => "insert_picture",
+                     "src" => "absolute_file_path",
+                     "ref" => "json_string",
+                     "ref_value" => %{
+                       "section" => "non_negative_integer",
+                       "paragraph" => "non_negative_integer",
+                       "offset" => "non_negative_character_index",
+                       "cellPath" => "optional_nonempty_canonical_cell_path"
+                     }
+                   },
+                   "derive_ref_from_doc_find_match" => true,
+                   "fallback" => %{
+                     "attempted" => "vfs",
+                     "reason" => "unrepresentable",
+                     "detail" => "describe_the_exact_existing_marker_picture_placement",
+                     "mounted_at" => "exact_value_returned_by_doc.open_doc"
+                   }
+                 }
+               }
+             } = result["surface"]
 
       assert OpenDocs.source_path(root, "drafts%2Fnested.hwp") == {:ok, abs}
       assert OpenDocs.writable?(root)
@@ -1266,11 +1877,15 @@ defmodule Ecrits.Doc.ToolsTest do
       abs = Path.join(root, "drafts/active.hwp")
       File.write!(abs, "fake-hwp-bytes")
 
-      ctx = ws_ctx(pool, root) |> Map.put(:document_path, "drafts/active.hwp")
+      ctx =
+        ws_ctx(pool, root)
+        |> Map.put(:document_path, "drafts/active.hwp")
+        |> Map.put(:active_doc, "d_current")
 
       assert {:ok,
               %{
                 "opened" => "drafts/active.hwp",
+                "document" => "d_current",
                 "mount_name" => "drafts%2Factive.hwp",
                 "path" => ^abs
               }} = Tools.call(ctx, "doc.open_doc", %{"path" => "active.hwp"})

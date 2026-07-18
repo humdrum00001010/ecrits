@@ -49,6 +49,19 @@ defmodule Ecrits.Doc.ToolPayloadSanitizerTest do
     assert ToolPayloadSanitizer.sanitize_tool_payload("doc.context", payload) == payload
   end
 
+  test "redacts only exact retired metadata names" do
+    payload = %{
+      "revision" => 7,
+      "asset_version" => "2026.07",
+      "nested" => %{"current_version" => 8, "asset_version" => "source-v2"}
+    }
+
+    assert ToolPayloadSanitizer.sanitize_tool_payload("doc.context", payload) == %{
+             "asset_version" => "2026.07",
+             "nested" => %{"asset_version" => "source-v2"}
+           }
+  end
+
   test "doc.create deck arguments are compacted for transcript proof" do
     payload = %{
       "path" => "/tmp/deck.pptx",

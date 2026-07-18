@@ -58,10 +58,13 @@ defmodule Ecrits.Doc.Tools do
 
   alias Ecrits.Doc.BrowserBridge
   alias Ecrits.Doc.Editor
+  alias Ecrits.Doc.Op
   alias Ecrits.Doc.Pool
   alias Ecrits.Fuse.DocMount
+  alias Ecrits.Fuse.OpenDocs
   alias Ecrits.Document.ByteSpool
   alias Ecrits.Workspace.Session
+  alias Ecrits.Workspace.FileIndex
   require Logger
 
   @namespace "doc"
@@ -126,52 +129,7 @@ defmodule Ecrits.Doc.Tools do
     %{
       "namespace" => @namespace,
       "name" => "open_doc",
-      "description" =>
-        "Expose a workspace document as an editable JSONL IR file in the doc VFS, " <>
-          "mounted at the returned `mounted_at` path under " <>
-          "<workspace>/.ecrits/. Call this to make a " <>
-          "document readable/greppable as a normal file (cat, rg, sed, grep) from " <>
-          "the shell; the projected JSONL is the whole document IR as one nested " <>
-          "list value: sections -> paragraphs -> payload nodes. Paths may be " <>
-          "workspace-relative, nested, current/active, or the basename of the " <>
-          "current document. Nested documents are projected with a flat " <>
-          "disambiguated mount name; always use the returned `mounted_at` path. " <>
-          "The JSONL is IR-only and does not contain mounted_at " <>
-          "metadata. Never create, copy, or edit fallback JSONL outside " <>
-          ".ecrits; /tmp/<mount>.jsonl and workspace-root <mount>.jsonl are fake " <>
-          "scratch files that do not route to the document. If mounted_at is null " <>
-          "or the returned mounted_at file is missing, report the blocker " <>
-          "instead of editing. For whole-file rewrites on FSKit, never write directly " <>
-          "to the target projection and never use `cp` to seed a temp file because " <>
-          "FSKit may reject chmod/fchmod on virtual files. Seed a temp file inside " <>
-          ".ecrits with plain redirection (`cat \"$target\" > \"$tmp\"`), " <>
-          "edit only that temp file, validate exactly one nested root value with " <>
-          "`jq -e -s 'length == 1 and (.[0] | type == \"array\")' \"$tmp\" " <>
-          ">/dev/null`, then `mv -f " <>
-          "\"$tmp\" \"$target\"` only if JSON validation succeeds; do not use " <>
-          "mktemp outside the mount or dd over the target. Never replace it with one payload object. Insert a " <>
-          "picture by adding a payload node inside an existing paragraph list " <>
-          "like " <>
-          "{\"type\":\"picture\",\"src\":\"/abs/img.png\"}; ecrits chooses a readable " <>
-          "default size from the image aspect, and width/height are only needed " <>
-          "for intentional HWPUNIT resizing. New pictures are inline unless the " <>
-          "payload explicitly sets treatAsChar:false with x/y; move an existing " <>
-          "picture by editing x/y/treatAsChar, resize by editing width/height, " <>
-          "and delete one by removing its " <>
-          "payload from the paragraph list. To put a new picture inside a table cell, " <>
-          "insert the picture payload immediately after the target cell payload in " <>
-          "the same paragraph list; do not edit/reuse an existing picture and do not " <>
-          "invent ref. Structural inserts are one-shot: " <>
-          "after writing one requested table/picture payload, re-read the mount once " <>
-          "and stop when the requested table marker exists or the picture appears at " <>
-          "the intended nested position (for table-cell pictures, immediately after " <>
-          "the cell payload with a ref.cellPath). Picture src is embed input and may " <>
-          "normalize away after write-back; never insert another copy when the target " <>
-          "position already has that picture node. Returns {opened, " <>
-          "path, mounted_at, mount_status}; when " <>
-          "mounted_at is null, mount_status/mount_error explain the doc VFS blocker. " <>
-          "Keep the document open while editing and verifying the mounted file; " <>
-          "do not use doc.close_doc as cleanup during an edit turn.",
+      "description" => "Open a workspace document on the primary editing surface.",
       "risk" => "read",
       "inputSchema" => %{
         "type" => "object",
@@ -329,6 +287,14 @@ defmodule Ecrits.Doc.Tools do
               "Document id/path. For the current/open document, call doc.context and use current_document.document."
           },
           "pattern" => %{"type" => "string"},
+          "marker" => %{
+            "type" => "string",
+            "minLength" => 1,
+            "description" =>
+              "Optional literal marker inside a matched element. Each match then returns " <>
+                "marker_offset and a canonical before_marker_ref whose offset is immediately " <>
+                "before that marker. Pass before_marker_ref verbatim for native insertion."
+          },
           "patterns" => %{
             "type" => "array",
             "description" =>
@@ -761,6 +727,9 @@ defmodule Ecrits.Doc.Tools do
 
       Ecrits.Fuse.OpenDocs.open(root, name,
         agent_id: Map.get(ctx, :agent_id),
+        agent_session: Map.get(ctx, :agent_session),
+        instance_id: Map.get(ctx, :instance_id),
+        turn_id: Map.get(ctx, :turn_id),
         source_path: abs
       )
 
@@ -789,16 +758,22 @@ defmodule Ecrits.Doc.Tools do
             {nil, inspect(reason)}
         end
 
+      {mounted_at, mount_error} =
+        cache_open_projection(root, name, abs, mounted_at, mount_error)
+
       {:ok,
        %{
          "opened" => vfs_relative_path(root, abs),
+         "document" => Map.get(ctx, :active_doc),
          "mount_name" => name,
          "projected" => Ecrits.Doc.Projection.projected_name(name),
          "path" => abs,
          "mounted_at" => mounted_at,
          "mount_error" => mount_error,
          "mount_status" => doc_mount_status_json(mount_status),
-         "vfs_enabled" => mount_status.enabled?
+         "vfs_enabled" => mount_status.enabled?,
+         "workspace_files" => workspace_file_index(root),
+         "surface" => vfs_surface_contract(mounted_at)
        }}
     else
       {:error, reason} -> {:error, error_json(reason)}
@@ -860,6 +835,7 @@ defmodule Ecrits.Doc.Tools do
       patterns when is_list(patterns) ->
         with {:ok, patterns} <- normalize_find_patterns(patterns) do
           route_doc(ctx, args,
+            authority: Map.get(ctx, :doc_find_authority),
             browser: fn lv ->
               browser_call(lv, args, :find, %{
                 patterns: patterns,
@@ -879,6 +855,7 @@ defmodule Ecrits.Doc.Tools do
         with {:ok, pattern} <-
                find_pattern(args, all || regex || (is_binary(type) and type != "")) do
           route_doc(ctx, args,
+            authority: Map.get(ctx, :doc_find_authority),
             browser: fn lv ->
               browser_call(lv, args, :find, %{
                 pattern: pattern,
@@ -935,29 +912,14 @@ defmodule Ecrits.Doc.Tools do
 
   # `sets:[{ref,props}, ...]` (batch) takes precedence over `ref`+`props` (single).
   def call(ctx, "doc.set", args) do
-    with :ok <- enforce_writable(ctx) do
-      case get(args, ["sets"]) do
-        sets when is_list(sets) ->
-          # Batch form: set many elements in one call, best-effort per-set result.
-          route_doc(ctx, args,
-            browser: fn lv -> browser_set_batch(lv, args, sets) end,
-            server: fn editor -> set_batch_server(editor, sets) end
-          )
-
-        _ ->
-          with {:ok, ref} <- require_string(args, "ref"),
-               {:ok, props} <- require_map(args, "props") do
-            route_doc(ctx, args,
-              # Viewed-HWP authority is the browser WASM model (design §6.2): deliver the
-              # property set to the owning LiveView -> WasmHwpEditor applies it
-              # (setCellProperties / applyCharFormat) so the change RENDERS in the viewer.
-              # A server-NIF set would mutate the unedited server copy the user never
-              # sees — invisible — so set MUST route to the browser for an open doc.
-              browser: fn lv -> browser_set(lv, args, ref, props) end,
-              server: fn editor -> write_result(Editor.set(editor, ref, props)) end
-            )
-          end
-      end
+    with :ok <- enforce_writable(ctx),
+         :ok <- enforce_complete_turn_identity(ctx),
+         {:ok, document} <- require_string(args, "document"),
+         {:ok, document} <- canonical_document(ctx, document),
+         :ok <- enforce_ownership(ctx, document) do
+      ctx
+      |> do_set(args)
+      |> maybe_uncache_projection_after_edit(ctx, document)
     else
       {:error, reason} -> {:error, error_json(reason)}
     end
@@ -971,10 +933,14 @@ defmodule Ecrits.Doc.Tools do
     # so the common single-agent flow keeps working while a 2nd agent is fenced
     # out. A bare pool-only context skips the check entirely.
     with :ok <- enforce_writable(ctx),
+         :ok <- enforce_complete_turn_identity(ctx),
+         :ok <- reject_retired_edit_metadata(args),
          {:ok, document} <- require_string(args, "document"),
          {:ok, document} <- canonical_document(ctx, document),
          :ok <- enforce_ownership(ctx, document) do
-      do_edit(ctx, args)
+      ctx
+      |> do_edit(args)
+      |> maybe_uncache_projection_after_edit(ctx, document)
     else
       {:error, reason} -> {:error, error_json(reason)}
     end
@@ -982,8 +948,10 @@ defmodule Ecrits.Doc.Tools do
 
   def call(ctx, "doc.save", args) do
     with :ok <- enforce_writable(ctx),
+         :ok <- enforce_complete_turn_identity(ctx),
          {:ok, document} <- require_string(args, "document"),
          {:ok, document, info} <- resolve_save_document(ctx, document),
+         :ok <- enforce_ownership(ctx, document),
          {:ok, path} <- confine_path(ctx, get(args, ["path"]) || info.path) do
       args = Map.put(args, "document", document)
 
@@ -992,7 +960,7 @@ defmodule Ecrits.Doc.Tools do
         # and write them to disk (the server Editor copy is unedited).
         browser: fn lv -> save_browser(lv, args, path) end,
         # Headless doc: the NIF holds the edits — export via Ehwp + write.
-        server: fn editor -> save_server(editor, info, path) end
+        server: fn editor -> save_server(editor, info, path, ctx) end
       )
     else
       {:error, reason} -> {:error, error_json(reason)}
@@ -1026,6 +994,162 @@ defmodule Ecrits.Doc.Tools do
   end
 
   def call(_ctx, tool_name, _args), do: {:error, {:unknown_tool, tool_name}}
+
+  # The VFS contract is returned as data, not injected into the ACP prompt. This
+  # lets a client discover the primary surface's real payload vocabulary and
+  # derive the one precise native ref that is not representable there, without
+  # prescribing a shell-specific editing recipe.
+  defp vfs_surface_contract(mounted_at) do
+    %{
+      "version" => 2,
+      "kind" => "jsonl_projection",
+      "available" => is_binary(mounted_at),
+      "addressing" => "nested_payload_position",
+      "format" => %{
+        "encoding" => "one_json_value_one_paragraph_group_per_line",
+        "line_addressing" => %{
+          "locate" => "line_based_search_finds_the_target_paragraph_group_line",
+          "edit" =>
+            "replace_whole_lines_keeping_one_paragraph_group_per_line_and_the_trailing_comma",
+          "newlines" =>
+            "raw_newlines_are_reserved_record_separators_content_newlines_stay_escaped"
+        },
+        "structure" => ["sections", "paragraphs", "payloads"],
+        "commit" => projection_commit_contract(mounted_at)
+      },
+      "preserve" => ["payload_type", "unknown_fields", "nested_order"],
+      "payloads" => %{
+        "text" => %{"edit" => true},
+        "table" => %{
+          "insert" => %{
+            "required" => ["type", "cells"],
+            "mode" => "insert_compact_payload_node",
+            "preserve_existing_payloads" => true
+          }
+        },
+        "picture" => %{
+          "insert" => false,
+          "route" => "native_fallback"
+        }
+      },
+      "operations" => %{
+        "set_text" => %{
+          "target_types" => ["paragraph", "char", "cell"],
+          "field" => "text",
+          "mode" => "in_place",
+          "select" => "type_and_current_text",
+          "reuse_blank_payloads" => true
+        },
+        "insert_table" => %{
+          "container" => "existing_paragraph_payload_array",
+          "at" => "after_existing_anchor_payload",
+          "action" => "insert_new_payload_node",
+          "replace_container" => false,
+          "insert_paragraph_arrays" => false,
+          "copy_expanded_table_payloads" => false,
+          "node" => %{
+            "type" => "table",
+            "cells" => "string_matrix",
+            "header" => "boolean_optional"
+          }
+        }
+      },
+      "native_fallbacks" => %{
+        "insert_picture" => %{
+          "tool" => "doc.edit",
+          "reason" => "unrepresentable",
+          "supported_placement" => "picture_at_exact_existing_marker",
+          "derive_from" => "current_engine_ref_after_primary_commit",
+          "resolve_ref" => %{
+            "tool" => "doc.find",
+            "when" => "after_primary_commit",
+            "arguments" => %{
+              "document" => %{"from" => "doc.open_doc.document"},
+              "type" => "paragraph",
+              "pattern" => %{"from" => "copy_exact_committed_target_paragraph_text"},
+              "marker" => %{
+                "from" => "existing_literal_immediately_after_picture",
+                "must_already_exist" => true,
+                "create_placeholder" => false
+              },
+              "case_sensitive" => true,
+              "limit" => 1,
+              "occurrence" => %{
+                "optional" => true,
+                "use" => "1_based_document_order_index_when_the_exact_paragraph_text_repeats"
+              }
+            },
+            "select" => "unique_exact_text_match_containing_existing_marker",
+            "use" => "match.before_marker_ref_verbatim",
+            "manual_ref_derivation" => false
+          },
+          "op" => %{
+            "op" => "insert_picture",
+            "src" => "absolute_file_path",
+            "ref" => "json_string",
+            "ref_value" => %{
+              "section" => "non_negative_integer",
+              "paragraph" => "non_negative_integer",
+              "offset" => "non_negative_character_index",
+              "cellPath" => "optional_nonempty_canonical_cell_path"
+            }
+          },
+          "derive_ref_from_doc_find_match" => true,
+          "fallback" => %{
+            "attempted" => "vfs",
+            "reason" => "unrepresentable",
+            "detail" => "describe_the_exact_existing_marker_picture_placement",
+            "mounted_at" => "exact_value_returned_by_doc.open_doc"
+          }
+        }
+      }
+    }
+  end
+
+  defp workspace_file_index(root) do
+    case FileIndex.list(root) do
+      {:ok, files} -> files
+      {:error, _reason} -> []
+    end
+  end
+
+  defp projection_commit_contract(mounted_at) do
+    %{
+      "mode" => "same_directory_temp_then_rename",
+      "target_path" => mounted_at,
+      "temp_path" => if(is_binary(mounted_at), do: mounted_at <> ".tmp", else: nil),
+      "temp_scope" => "mounted_projection_directory_only",
+      "external_temp" => false,
+      "rename" => "same_filesystem_atomic",
+      "unsupported_structural_change" => %{"committed" => false, "errno" => "EINVAL"},
+      "on_einval" => %{
+        "likely_cause" => "staged_bytes_built_from_a_read_older_than_the_last_commit",
+        "recover" => "reread_the_mounted_file_now_and_restage_the_same_change_from_that_fresh_read"
+      }
+    }
+  end
+
+  defp cache_open_projection(root, name, abs, mounted_at, nil) when is_binary(mounted_at) do
+    case OpenDocs.committed(root, name) do
+      {:ok, _already_served_bytes} ->
+        # Reopening an already-mounted document is not a fresh FSKit vnode
+        # boundary. Preserve the exact bytes that inode currently serves.
+        {mounted_at, nil}
+
+      :error ->
+        case Ecrits.Doc.Projection.project_file(abs) do
+          {:ok, bytes} ->
+            OpenDocs.cache_committed(root, name, bytes)
+            {mounted_at, nil}
+
+          {:error, reason} ->
+            {nil, inspect({:projection_unavailable, reason})}
+        end
+    end
+  end
+
+  defp cache_open_projection(_root, _name, _abs, mounted_at, mount_error),
+    do: {mounted_at, mount_error}
 
   # ── doc.render, browser (viewed) arm ────────────────────────────────────
   # Pull the viewer's CURRENT bytes and render headless. The throwaway handle
@@ -1498,6 +1622,27 @@ defmodule Ecrits.Doc.Tools do
 
   # --- doc.edit dispatch (after the ownership gate) ------------------------
 
+  defp do_set(ctx, args) do
+    case get(args, ["sets"]) do
+      sets when is_list(sets) ->
+        route_doc(ctx, args,
+          browser: fn lv -> browser_set_batch(lv, args, sets) end,
+          server: fn editor -> set_batch_server(editor, sets, editor_write_opts(ctx)) end
+        )
+
+      _other ->
+        with {:ok, ref} <- require_string(args, "ref"),
+             {:ok, props} <- require_map(args, "props") do
+          route_doc(ctx, args,
+            browser: fn lv -> browser_set(lv, args, ref, props) end,
+            server: fn editor ->
+              write_result(Editor.set(editor, ref, props, editor_write_opts(ctx)))
+            end
+          )
+        end
+    end
+  end
+
   defp do_edit(ctx, args) do
     case get(args, ["ops"]) do
       ops when is_list(ops) ->
@@ -1506,7 +1651,14 @@ defmodule Ecrits.Doc.Tools do
         # the single path), so a malformed op is rejected individually.
         route_doc(ctx, args,
           browser: fn lv -> browser_write_batch(lv, args, ops) end,
-          server: fn editor -> edit_batch_server(editor, ops, get(args, ["verbose"]) == true) end
+          server: fn editor ->
+            edit_batch_server(
+              editor,
+              ops,
+              get(args, ["verbose"]) == true,
+              editor_write_opts(ctx)
+            )
+          end
         )
 
       _ ->
@@ -1517,9 +1669,98 @@ defmodule Ecrits.Doc.Tools do
             # WASM doc. We do NOT touch the server NIF
             # for a browser-backed doc (design §6.2) so the two models can't diverge.
             browser: fn lv -> browser_write(lv, args, op) end,
-            server: fn editor -> write_result(Editor.apply(editor, op)) end
+            server: fn editor ->
+              write_result(Editor.apply(editor, op, editor_write_opts(ctx)))
+            end
           )
         end
+    end
+  end
+
+  # A successful native edit changes the engine model behind an already-served
+  # FSKit inode. Keep that inode's exact bytes stable and stage the new canonical
+  # projection for the same fresh-sibling terminal publication used by ACP VFS
+  # edits. An OpenDocs cache delete alone cannot invalidate FSKit page state.
+  defp maybe_uncache_projection_after_edit(result, ctx, document) do
+    if edit_mutated?(result) do
+      with {:ok, root} <- vfs_root(ctx),
+           {:ok, source_path} <- edited_document_path(ctx, document),
+           {:ok, name} <- OpenDocs.name_for_source(root, source_path),
+           metadata = %{
+             agent_id: Map.get(ctx, :agent_id),
+             instance_id: Map.get(ctx, :instance_id),
+             turn_id: Map.get(ctx, :turn_id),
+             source_path: source_path
+           },
+           {:ok, accepted_bytes, generation} <-
+             OpenDocs.begin_canonical_stage(root, name, metadata),
+           {:ok, canonical_bytes} <- Ecrits.Doc.Projection.project_file(source_path) do
+        OpenDocs.complete_canonical_stage(
+          root,
+          name,
+          accepted_bytes,
+          canonical_bytes,
+          generation,
+          metadata
+        )
+      end
+    end
+
+    result
+  end
+
+  defp edit_mutated?({status, %{"applied" => applied}})
+       when status in [:ok, :error] and is_integer(applied),
+       do: applied > 0
+
+  defp edit_mutated?({:ok, %{"native" => native}}), do: native_edit_mutated?(native)
+  defp edit_mutated?({:ok, %{"replaced" => 0}}), do: false
+  defp edit_mutated?({:ok, _result}), do: true
+  defp edit_mutated?(_result), do: false
+
+  defp native_edit_mutated?(results) when is_list(results),
+    do: Enum.any?(results, &native_edit_mutated?/1)
+
+  defp native_edit_mutated?(%{} = result), do: get(result, ["ok"]) != false
+  defp native_edit_mutated?(_result), do: true
+
+  defp edited_document_path(ctx, document) do
+    case Pool.info(pool(ctx), document) do
+      {:ok, %{path: path}} when is_binary(path) and path != "" ->
+        {:ok, path}
+
+      _ ->
+        active_doc = Map.get(ctx, :active_doc)
+        path = Map.get(ctx, :document_path)
+
+        if active_doc == document and is_binary(path) and path != "" do
+          confine_path(ctx, path)
+        else
+          :error
+        end
+    end
+  end
+
+  # Reject the old protocol at the envelope and each selected operation before
+  # routing. In particular, a batch must not partially mutate a document merely
+  # because one of its operations still carries retired metadata.
+  defp reject_retired_edit_metadata(args) do
+    with :ok <- Op.reject_retired_metadata(args) do
+      args
+      |> edit_ops()
+      |> Enum.reduce_while(:ok, fn op, :ok ->
+        case Op.reject_retired_metadata(op) do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp edit_ops(args) do
+    case get(args, ["ops"]) do
+      ops when is_list(ops) -> ops
+      _ -> List.wrap(get(args, ["op"]))
     end
   end
 
@@ -1639,6 +1880,22 @@ defmodule Ecrits.Doc.Tools do
 
   defp enforce_ownership(_ctx, _document), do: :ok
 
+  defp enforce_complete_turn_identity(%{agent_id: agent_id, session_path: session_path} = ctx)
+       when is_binary(agent_id) and agent_id != "" and is_binary(session_path) and
+              session_path != "" do
+    if Enum.all?([:instance_id, :turn_id], fn key ->
+         value = Map.get(ctx, key)
+         is_binary(value) and value != ""
+       end) do
+      :ok
+    else
+      {:error,
+       {:invalid_params, "an agent document write requires the active instance_id and turn_id"}}
+    end
+  end
+
+  defp enforce_complete_turn_identity(_ctx), do: :ok
+
   # --- doc.create helpers --------------------------------------------------
 
   # doc.create without `from`: a blank engine template whose save target is `path`.
@@ -1737,72 +1994,6 @@ defmodule Ecrits.Doc.Tools do
     else
       _ -> {:error, {:create_unsupported, backend}}
     end
-  end
-
-  # doc.create WITH `from`: CLONE a template. Resolve `from` (an open document id OR
-  # a file path) to a source path, byte-copy it to `path` (so the clone inherits
-  # EVERY bit of the template's formatting), then open the copy as an editable doc
-  # whose save target is `path`. The agent then REPLACES content cell-by-cell.
-  @doc """
-  The ONE global copy of the document-authoring lessons, served as the MCP
-  server's `instructions` (initialize result) — the client injects it once per
-  session, so it costs nothing per turn and reaches the agent regardless of how
-  the authoring session starts (doc.create, doc.open, or a path auto-open).
-  Every line was bought with a live failure (#15-#18: green default fill,
-  off-canvas clipping, text overlap, footnote-in-columns).
-  """
-  @spec instructions() :: String.t()
-  def instructions do
-    "Authoring guides (apply when inserting slides/shapes/paragraphs/tables):\n\n" <>
-      authoring_guide(:pptx) <>
-      "\n\n" <>
-      authoring_guide(:docx) <>
-      "\n\n" <>
-      authoring_guide(:xlsx)
-  end
-
-  defp authoring_guide(:pptx) do
-    "PPTX guide. Blank deck starts with ONE empty slide page[page1]: design it " <>
-      "first, insert_slide {name} for the rest. insert_shape {page, service, name, " <>
-      "x, y, w, h, text?, ...} in 1/100 mm; use doc.render slide_size for the " <>
-      "deck's actual canvas and keep x+w/y+h inside it or content CLIPS. service: " <>
-      "com.sun.star.drawing.RectangleShape / .EllipseShape / .TextShape / .LineShape. " <>
-      "All other keys are raw UNO props: FillColor/LineColor/CharColor (int 0xRRGGBB " <>
-      "or \"#RRGGBB\"), CharHeight (pt), CharWeight (150=bold), CharPosture (2=italic), " <>
-      "CharFontName, TextHorizontalAdjust. ALWAYS set FillColor on Rectangle/Ellipse " <>
-      "(engine default fill is an ugly green); no outline unless LineColor/LineStyle. " <>
-      "Text wraps at box width and grows DOWN over content below: box height ~= " <>
-      "lines x CharHeight x 45; ~4.5 x CharHeight of width per char (full-width at " <>
-      "CharHeight 20 ~= 46 chars/line) — leave vertical gaps. insert_picture {page, " <>
-      "name, src, x, y, w, h} embeds real images (use them for hero visuals/logos). " <>
-      "New shape ref = page[<page>]/shape[<name>]: set_geometry moves/resizes, " <>
-      "doc.set restyles, delete_node removes (page[<name>] deletes a slide). " <>
-      "Design like a real deck: background rects, accent bars, big titles, aligned " <>
-      "grids, one palette. Batch ONE slide per doc.edit call (8-12 ops), then " <>
-      "doc.render {page} and LOOK: text overlap? edge clipping? contrast? grid " <>
-      "alignment? Fix and re-render before the next slide — overlap is never ok."
-  end
-
-  defp authoring_guide(:docx) do
-    "DOCX guide. Ops anchor on a body paragraph ref (\"p3\" from doc.find) or " <>
-      "\"end\". insert_paragraph {ref, text, style?} (Writer styles: \"Heading 1\", " <>
-      "\"Text Body\"); insert_table {ref, rows, cols, name} then fill " <>
-      "tbl[<name>]/cell[A1] refs via set_cell/replace_text; insert_picture {ref, src, " <>
-      "w?, h?, name?} inline image (1/100 mm; give ONE of w/h to keep aspect; ref " <>
-      "img[<name>]; set_geometry resizes, delete_node removes); insert_footnote " <>
-      "{ref, text}; set_columns {count, from, to} — footnoted paragraphs must stay " <>
-      "OUTSIDE the range (engine refuses). Structure: delete_paragraph/merge/split, " <>
-      "insert_endnote, insert_equation {ref, script} (StarMath). After each section " <>
-      "doc.render {page:\"1\"} (PDF-backed) and LOOK at the result before moving on."
-  end
-
-  defp authoring_guide(:xlsx) do
-    "XLSX guide. Use doc.find {all:true} to discover sheet cells; refs look like " <>
-      "sheet[Sheet1]/cell[A1]. set_cell {ref, text} writes a cell. insert_picture " <>
-      "{ref, src, w?, h?, name?} anchors a native image to that cell; w/h are " <>
-      "1/100 mm and the new shape is named for later set_geometry/delete_node. " <>
-      "For a quick top-left image, use ref \"sheet[Sheet1]/cell[A1]\" when that " <>
-      "sheet exists."
   end
 
   defp create_from(ctx, path, kind, from) do
@@ -1945,13 +2136,17 @@ defmodule Ecrits.Doc.Tools do
   defp compact_find_entry(entry, _args), do: entry
 
   defp compact_find_match(%{} = match, pattern, args) do
+    raw_text =
+      match
+      |> map_field(["text", :text])
+      |> to_string()
+
+    match = maybe_put_before_marker_ref(match, raw_text, args)
+
     if map_field(match, ["text_truncated", :text_truncated]) == true do
       match
     else
-      full_text =
-        match
-        |> map_field(["text", :text])
-        |> compact_find_normalize_text()
+      full_text = compact_find_normalize_text(raw_text)
 
       text = compact_find_text(full_text, pattern, args)
 
@@ -1969,6 +2164,171 @@ defmodule Ecrits.Doc.Tools do
   end
 
   defp compact_find_match(match, _pattern, _args), do: match
+
+  defp maybe_put_before_marker_ref(match, text, args) do
+    marker = get(args, ["marker"])
+
+    with marker when is_binary(marker) and marker != "" <- marker,
+         {:ok, offset} <- literal_marker_offset(text, marker, args),
+         {:ok, ref} <- canonical_before_marker_ref(map_field(match, ["ref", :ref]), offset) do
+      match
+      |> Map.put("marker", marker)
+      |> Map.put("marker_offset", offset)
+      |> Map.put("before_marker_ref", ref)
+    else
+      marker when is_binary(marker) and marker != "" ->
+        match
+        |> Map.put("marker", marker)
+        |> Map.put("marker_found", false)
+
+      _ ->
+        match
+    end
+  end
+
+  defp literal_marker_offset(text, marker, args) do
+    case literal_marker_byte_offset(text, marker, find_case_sensitive?(args)) do
+      {:ok, byte_index} -> {:ok, byte_index_to_codepoint_index(text, byte_index)}
+      :error -> :error
+    end
+  end
+
+  defp literal_marker_byte_offset(text, marker, true) do
+    case :binary.match(text, marker) do
+      {byte_index, _length} -> {:ok, byte_index}
+      :nomatch -> :error
+    end
+  end
+
+  defp literal_marker_byte_offset(text, marker, false) do
+    with {:ok, regex} <- Regex.compile(Regex.escape(marker), "iu"),
+         [{byte_index, _length} | _] <- Regex.run(regex, text, return: :index) do
+      {:ok, byte_index}
+    else
+      _ -> :error
+    end
+  end
+
+  defp byte_index_to_codepoint_index(text, byte_index) do
+    text
+    |> binary_part(0, byte_index)
+    |> String.codepoints()
+    |> length()
+  rescue
+    ArgumentError -> 0
+  end
+
+  defp canonical_before_marker_ref("hwp:" <> _ = ref, offset) when is_integer(offset) do
+    with {:ok, decoded} <- Ecrits.Doc.Rhwp.Ref.decode(ref) do
+      canonical_hwp_before_marker_ref(decoded, offset)
+    else
+      _ -> :error
+    end
+  end
+
+  defp canonical_before_marker_ref(ref, offset) when is_binary(ref) and is_integer(offset) do
+    with {:ok, decoded} <- Jason.decode(ref),
+         section when is_integer(section) and section >= 0 <-
+           int_field(decoded, ["section", :section], nil),
+         cell when is_map(cell) <- map_field(decoded, ["cell", :cell]) || %{},
+         paragraph when is_integer(paragraph) and paragraph >= 0 <-
+           int_field(
+             cell,
+             ["parentParaIndex", :parentParaIndex],
+             int_field(decoded, ["paragraph", :paragraph], nil)
+           ) do
+      marker_ref = %{"section" => section, "paragraph" => paragraph, "offset" => offset}
+
+      marker_ref =
+        case canonical_cell_path(decoded, cell) do
+          [_ | _] = cell_path -> Map.put(marker_ref, "cellPath", cell_path)
+          _no_cell -> marker_ref
+        end
+
+      {:ok, Jason.encode!(marker_ref)}
+    else
+      _ -> :error
+    end
+  end
+
+  defp canonical_before_marker_ref(_ref, _offset), do: :error
+
+  defp canonical_hwp_before_marker_ref(
+         %{kind: :char, sec: section, para: paragraph, off: base_offset},
+         offset
+       ) do
+    {:ok,
+     Jason.encode!(%{
+       "section" => section,
+       "paragraph" => paragraph,
+       "offset" => base_offset + offset
+     })}
+  end
+
+  defp canonical_hwp_before_marker_ref(
+         %{
+           kind: :cell_char,
+           sec: section,
+           para: paragraph,
+           control: control,
+           cell: cell,
+           cell_para: cell_paragraph,
+           off: base_offset
+         },
+         offset
+       ) do
+    {:ok,
+     Jason.encode!(%{
+       "section" => section,
+       "paragraph" => paragraph,
+       "offset" => base_offset + offset,
+       "cellPath" => [
+         %{
+           "controlIndex" => control,
+           "cellIndex" => cell,
+           "cellParaIndex" => cell_paragraph
+         }
+       ]
+     })}
+  end
+
+  defp canonical_hwp_before_marker_ref(_decoded, _offset), do: :error
+
+  defp canonical_cell_path(ref, cell) do
+    path =
+      map_field(ref, ["cellPath", :cellPath, "cell_path", :cell_path]) ||
+        map_field(cell, ["cellPath", :cellPath, "cell_path", :cell_path])
+
+    case path do
+      [_ | _] = steps ->
+        case steps |> Enum.map(&canonical_cell_path_step/1) |> Enum.reject(&is_nil/1) do
+          [] -> nil
+          normalized -> normalized
+        end
+
+      _ ->
+        case canonical_cell_path_step(cell) do
+          nil -> nil
+          step -> [step]
+        end
+    end
+  end
+
+  defp canonical_cell_path_step(step) when is_map(step) do
+    control = int_field(step, ["controlIndex", :controlIndex, "control", :control], nil)
+    cell = int_field(step, ["cellIndex", :cellIndex], nil)
+    paragraph = int_field(step, ["cellParaIndex", :cellParaIndex], nil)
+
+    if Enum.all?([control, cell, paragraph], &(is_integer(&1) and &1 >= 0)) do
+      %{
+        "controlIndex" => control,
+        "cellIndex" => cell,
+        "cellParaIndex" => paragraph
+      }
+    end
+  end
+
+  defp canonical_cell_path_step(_step), do: nil
 
   defp compact_find_text(text, pattern, args) do
     if String.length(text) <= @find_text_limit do
@@ -2807,20 +3167,67 @@ defmodule Ecrits.Doc.Tools do
     with {:ok, document} <- require_string(args, "document") do
       case canonical_document(ctx, document) do
         {:ok, document} ->
-          case route(ctx, document) do
-            {:browser, lv} ->
-              Keyword.fetch!(opts, :browser).(lv)
+          case Keyword.get(opts, :authority) do
+            :committed_server ->
+              with_committed_server_editor(ctx, document, Keyword.fetch!(opts, :server))
 
-            {:server, editor} ->
-              Keyword.fetch!(opts, :server).(editor)
+            _normal_authority ->
+              case route(ctx, document) do
+                {:browser, lv} ->
+                  Keyword.fetch!(opts, :browser).(lv)
 
-            {:error, :not_found} ->
-              {:error, error_json({:document_not_found, document, known_documents(ctx)})}
+                {:server, editor} ->
+                  Keyword.fetch!(opts, :server).(editor)
+
+                {:error, :not_found} ->
+                  {:error, error_json({:document_not_found, document, known_documents(ctx)})}
+              end
           end
 
         {:error, reason} ->
           {:error, error_json(reason)}
       end
+    end
+  end
+
+  # Reopen the server twin from the durable file before a post-ACP lookup. The
+  # browser-authority write path deliberately closes its old cold twin after
+  # saving, while the server-authority path may leave one cached; handling both
+  # cases here prevents either a stale browser or a stale pool editor from
+  # supplying the requested marker ref.
+  defp with_committed_server_editor(ctx, document, fun) when is_function(fun, 1) do
+    with {:ok, path, kind} <- committed_document_path(ctx, document),
+         :ok <- Pool.close_by_path(pool(ctx), path),
+         {:ok, ^document} <-
+           Pool.open(pool(ctx), path, kind: kind, document_id: document),
+         {:server, editor} <- Pool.route(pool(ctx), document) do
+      fun.(editor)
+    else
+      {:error, :not_found} ->
+        {:error, error_json({:document_not_found, document, known_documents(ctx)})}
+
+      {:error, reason} ->
+        {:error, error_json(reason)}
+
+      other ->
+        {:error, error_json({:committed_document_unavailable, inspect(other)})}
+    end
+  end
+
+  defp committed_document_path(ctx, document) do
+    case Pool.info(pool(ctx), document) do
+      {:ok, %{path: path, kind: kind}} when is_binary(path) and is_atom(kind) ->
+        {:ok, path, kind}
+
+      _missing_twin ->
+        with ^document <- Map.get(ctx, :active_doc),
+             path when is_binary(path) and path != "" <- Map.get(ctx, :document_path),
+             {:ok, path} <- confine_path(ctx, path),
+             kind when is_atom(kind) <- kind_from_path(path) do
+          {:ok, path, kind}
+        else
+          _ -> {:error, :not_found}
+        end
     end
   end
 
@@ -3010,17 +3417,22 @@ defmodule Ecrits.Doc.Tools do
       |> Enum.split_with(&match?({:ok, _}, &1))
 
     normalized_ops = Enum.map(ok_ops, fn {:ok, op} -> op end)
-    local_failures = Enum.map(bad_results, fn {:error, res} -> res end)
+    validation_failures = Enum.map(bad_results, fn {:error, res} -> res end)
 
     if normalized_ops == [] do
       batch_reply(
-        batch_result(local_failures, 0, length(local_failures), get(args, ["verbose"]) == true)
+        batch_result(
+          validation_failures,
+          0,
+          length(validation_failures),
+          get(args, ["verbose"]) == true
+        )
       )
     else
       case browser_call(lv, args, :edit, %{ops: normalized_ops}) do
         {:ok, %{} = applied} ->
           batch_reply(
-            merge_browser_batch(applied, local_failures, get(args, ["verbose"]) == true)
+            merge_browser_batch(applied, validation_failures, get(args, ["verbose"]) == true)
           )
 
         {:error, _reason} = error ->
@@ -3031,12 +3443,14 @@ defmodule Ecrits.Doc.Tools do
 
   # Merge the browser's batch result with any locally-rejected (un-normalisable)
   # ops so `failed`/`results` account for EVERY op the agent submitted.
-  defp merge_browser_batch(applied, local_failures, verbose) do
-    results = (Map.get(applied, "results") || Map.get(applied, :results) || []) ++ local_failures
+  defp merge_browser_batch(applied, validation_failures, verbose) do
+    results =
+      (Map.get(applied, "results") || Map.get(applied, :results) || []) ++ validation_failures
+
     applied_n = Map.get(applied, "applied") || Map.get(applied, :applied) || 0
 
     failed_n =
-      (Map.get(applied, "failed") || Map.get(applied, :failed) || 0) + length(local_failures)
+      (Map.get(applied, "failed") || Map.get(applied, :failed) || 0) + length(validation_failures)
 
     batch_result(results, applied_n, failed_n, verbose)
   end
@@ -3147,8 +3561,26 @@ defmodule Ecrits.Doc.Tools do
   end
 
   # doc.save for a headless (server NIF) doc: Ehwp.export + write, via the Editor.
-  defp save_server(editor, info, path) do
-    case Editor.save(editor, format: save_format(info.kind), path: path) do
+  defp save_server(editor, info, path, ctx) do
+    opts = [format: save_format(info.kind), path: path]
+
+    result =
+      case editor_owner(ctx) do
+        nil ->
+          Editor.save(editor, opts)
+
+        owner ->
+          snapshot = Editor.dirty_snapshot(editor)
+
+          case Editor.owner_status(snapshot, owner) do
+            :clean -> Editor.save(editor, opts)
+            :exclusive -> Editor.save_if_owner(editor, snapshot, opts)
+            :mixed -> {:error, :document_has_mixed_unsaved_writers}
+            :other -> {:error, :document_has_other_unsaved_writers}
+          end
+      end
+
+    case result do
       :ok ->
         broadcast_file_written(path)
         {:ok, %{"ok" => true}}
@@ -3159,6 +3591,9 @@ defmodule Ecrits.Doc.Tools do
 
       {:error, reason} ->
         {:error, error_json(reason)}
+
+      {:skipped, reason} ->
+        {:error, error_json({:save_raced, reason})}
     end
   end
 
@@ -3240,12 +3675,12 @@ defmodule Ecrits.Doc.Tools do
   # Server-arm batch doc.edit: apply each op via Editor.apply best-effort,
   # collect per-op results, and return the same shape the browser batch does.
   # A per-op failure is recorded but does NOT abort the rest.
-  defp edit_batch_server(editor, ops, verbose) do
+  defp edit_batch_server(editor, ops, verbose, editor_opts) do
     {results, applied, failed} =
       Enum.reduce(ops, {[], 0, 0}, fn op, {acc, ok_n, bad_n} ->
         op_ref = op_ref(op)
 
-        case Editor.apply(editor, op) do
+        case Editor.apply(editor, op, editor_opts) do
           {:ok, _applied_map} ->
             {[%{"ref" => op_ref, "ok" => true} | acc], ok_n + 1, bad_n}
 
@@ -3258,13 +3693,13 @@ defmodule Ecrits.Doc.Tools do
   end
 
   # Server-arm batch doc.set: apply each {ref, props} via Editor.set best-effort.
-  defp set_batch_server(editor, sets) do
+  defp set_batch_server(editor, sets, editor_opts) do
     {results, applied, failed} =
       Enum.reduce(sets, {[], 0, 0}, fn entry, {acc, ok_n, bad_n} ->
         ref = get(entry, ["ref"])
         props = get(entry, ["props"])
 
-        case set_one_server(editor, ref, props) do
+        case set_one_server(editor, ref, props, editor_opts) do
           {:ok, _applied_map} ->
             {[%{"ref" => ref, "ok" => true} | acc], ok_n + 1, bad_n}
 
@@ -3278,13 +3713,28 @@ defmodule Ecrits.Doc.Tools do
 
   # One server set with the same ref/props validation the single path uses, so a
   # malformed entry in the batch is an :invalid_params error for THAT entry only.
-  defp set_one_server(_editor, ref, _props) when not is_binary(ref) or ref == "",
+  defp set_one_server(_editor, ref, _props, _editor_opts) when not is_binary(ref) or ref == "",
     do: {:error, {:invalid_params, "ref (non-empty string) is required"}}
 
-  defp set_one_server(_editor, _ref, props) when not is_map(props),
+  defp set_one_server(_editor, _ref, props, _editor_opts) when not is_map(props),
     do: {:error, {:invalid_params, "props (object) is required"}}
 
-  defp set_one_server(editor, ref, props), do: Editor.set(editor, ref, props)
+  defp set_one_server(editor, ref, props, editor_opts),
+    do: Editor.set(editor, ref, props, editor_opts)
+
+  defp editor_write_opts(ctx) do
+    [owner: editor_owner(ctx)]
+  end
+
+  defp editor_owner(ctx) do
+    owner =
+      Map.take(ctx, [:agent_id, :instance_id, :turn_id])
+
+    if map_size(owner) == 3 and
+         Enum.all?(Map.values(owner), &(is_binary(&1) and &1 != "")) do
+      owner
+    end
+  end
 
   # The ref carried on an op (for the per-op result label); nil when absent.
   defp op_ref(op) when is_map(op), do: get(op, ["ref"])
@@ -3435,6 +3885,9 @@ defmodule Ecrits.Doc.Tools do
 
   defp error_json({:invalid_params, message}),
     do: %{"error" => "invalid_params", "message" => to_string(message)}
+
+  defp error_json({:invalid_op, message}),
+    do: %{"error" => "invalid_op", "message" => to_string(message)}
 
   defp error_json(:read_only),
     do: %{

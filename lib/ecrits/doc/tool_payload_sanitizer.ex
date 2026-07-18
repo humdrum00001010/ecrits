@@ -2,9 +2,9 @@ defmodule Ecrits.Doc.ToolPayloadSanitizer do
   @moduledoc """
   Presentation guard for `doc.*` tool payloads shown in chat rails.
 
-  The document API is addressed by path/ref/attrs. Any legacy optimistic
-  concurrency fields in old agent payloads are display noise and should not
-  survive into public/tool payloads.
+  The document API is addressed by path/ref/attrs. Old transcript blobs can
+  still carry retired edit metadata, which is hidden at this display boundary;
+  ordinary payload fields are retained.
   """
 
   def encode_tool_payload(name, payload) when is_binary(payload) do
@@ -67,7 +67,7 @@ defmodule Ecrits.Doc.ToolPayloadSanitizer do
 
   defp scrub(%{} = map) do
     map
-    |> Enum.reject(fn {key, _value} -> legacy_doc_payload_key?(key) end)
+    |> Enum.reject(fn {key, _value} -> Ecrits.Doc.Op.retired_metadata_key?(key) end)
     |> Map.new(fn {key, value} -> {key, scrub(value)} end)
   end
 
@@ -101,19 +101,6 @@ defmodule Ecrits.Doc.ToolPayloadSanitizer do
     |> String.trim_leading()
     |> String.starts_with?(["{", "["])
   end
-
-  defp legacy_doc_payload_key?(key) when is_atom(key) do
-    key
-    |> Atom.to_string()
-    |> legacy_doc_payload_key?()
-  end
-
-  defp legacy_doc_payload_key?(key) when is_binary(key) do
-    key == "version" or key == "revision" or key == "rebased" or
-      String.ends_with?(key, "_version") or String.ends_with?(key, "_revision")
-  end
-
-  defp legacy_doc_payload_key?(_key), do: false
 
   defp compact_save_payload(%{} = payload) do
     cond do

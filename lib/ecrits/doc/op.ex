@@ -28,33 +28,141 @@ defmodule Ecrits.Doc.Op do
             delete_node insert_picture set_cell
             insert_equation insert_footnote insert_endnote insert_shape set_columns
             insert_slide set_geometry)
-  @protocol_metadata_keys ~w(base_revision base_version revision version current_revision
-                             current_version stale_revision stale_version saved_revision
-                             saved_version rebased)a
+  # These keys belonged to the retired optimistic-concurrency protocol. A
+  # document edit always targets the Session's current model now; accepting one
+  # and silently dropping it falsely suggests that the value still participates
+  # in conflict resolution.
+  @retired_metadata_keys ~w(base_revision base_version revision version current_revision
+                            current_version stale_revision stale_version saved_revision
+                            saved_version rebased)
+
+  # Only transport/schema keys become atoms. Raw engine properties must retain
+  # their supplied string keys (for example, UNO's `CharHeight` or `FillColor`),
+  # and agent input must never create atoms.
+  @known_op_keys [
+    :op,
+    :ref,
+    :at,
+    :text,
+    :query,
+    :replacement,
+    :page,
+    :name,
+    :service,
+    :x,
+    :y,
+    :w,
+    :h,
+    :src,
+    :path,
+    :width,
+    :height,
+    :bins,
+    :bin_index,
+    :image_base64,
+    :extension,
+    :natural_width_px,
+    :natural_height_px,
+    :description,
+    :inline_in_cell,
+    :overlay_marker_length,
+    :rows,
+    :cols,
+    :cells,
+    :header,
+    :header_color,
+    :row,
+    :col,
+    :count,
+    :below,
+    :right,
+    :start_row,
+    :start_col,
+    :end_row,
+    :end_col,
+    :script,
+    :index,
+    :style,
+    :value,
+    :value_type,
+    :formula,
+    :from,
+    :to,
+    :gap,
+    :data,
+    :spacing,
+    :font_size,
+    :color,
+    :shape_type,
+    :column_type,
+    :same_width,
+    :props,
+    :kind,
+    :section,
+    :paragraph,
+    :offset,
+    :length,
+    :control,
+    :cell,
+    :cell_para,
+    :sub_paragraph,
+    :sub_control,
+    :container_type,
+    :cell_path,
+    :style_id,
+    :numbering_id,
+    :bullet_id
+  ]
+  @known_op_key_by_name Map.new(@known_op_keys, &{Atom.to_string(&1), &1})
 
   @doc "The full set of recognised op verbs."
   @spec verbs() :: [String.t()]
   def verbs, do: @verbs
 
+  @doc false
+  @spec reject_retired_metadata(map()) :: :ok | {:error, {:invalid_op, String.t()}}
+  def reject_retired_metadata(map) when is_map(map) do
+    case Enum.find(Map.keys(map), &retired_metadata_key?/1) do
+      nil ->
+        :ok
+
+      key ->
+        {:error,
+         {:invalid_op,
+          "#{metadata_key_name(key)} is retired metadata; remove it and submit doc.edit against the current document state"}}
+    end
+  end
+
+  def reject_retired_metadata(_), do: :ok
+
+  @doc false
+  @spec retired_metadata_key?(term()) :: boolean()
+  def retired_metadata_key?(key) when is_atom(key), do: retired_metadata_key?(Atom.to_string(key))
+  def retired_metadata_key?(key) when is_binary(key), do: key in @retired_metadata_keys
+  def retired_metadata_key?(_key), do: false
+
   @doc """
-  Normalise a string- or atom-keyed op map into an atom-keyed map with a
-  validated `:op` discriminator.
+  Normalise a string- or atom-keyed op map into a validated operation. Schema
+  keys are atom-keyed internally; arbitrary raw engine-property keys stay
+  strings.
   """
   @spec normalize(map()) :: {:ok, map()} | {:error, term()}
   def normalize(op) when is_map(op) do
-    case fetch(op, :op) do
-      {:ok, verb} when is_binary(verb) ->
-        if verb in @verbs do
-          validate(verb, op |> atomize() |> strip_protocol_metadata() |> Map.put(:op, verb))
-        else
-          {:error, {:unknown_op, verb}}
-        end
+    with :ok <- reject_retired_metadata(op) do
+      case fetch(op, :op) do
+        {:ok, verb} when is_binary(verb) ->
+          if verb in @verbs do
+            validate(verb, op |> atomize() |> Map.put(:op, verb))
+          else
+            {:error, {:unknown_op, verb}}
+          end
 
-      {:ok, verb} when is_atom(verb) ->
-        normalize(Map.put(op, :op, Atom.to_string(verb)))
+        {:ok, verb} when is_atom(verb) ->
+          normalize(Map.put(op, :op, Atom.to_string(verb)))
 
-      :error ->
-        {:error, {:invalid_op, "missing \"op\" discriminator"}}
+        :error ->
+          {:error, {:invalid_op, "missing \"op\" discriminator"}}
+      end
     end
   end
 
@@ -244,10 +352,6 @@ defmodule Ecrits.Doc.Op do
 
   defp validate(_verb, op), do: {:ok, op}
 
-  defp strip_protocol_metadata(op) do
-    Map.drop(op, @protocol_metadata_keys)
-  end
-
   defp single_paragraph_text(text) do
     text
     |> String.replace(~r/\R+/u, " ")
@@ -265,8 +369,12 @@ defmodule Ecrits.Doc.Op do
 
   defp atomize(map) do
     Map.new(map, fn
-      {k, v} when is_binary(k) -> {String.to_atom(k), v}
+      {k, v} when is_binary(k) -> {Map.get(@known_op_key_by_name, k, k), v}
       {k, v} -> {k, v}
     end)
   end
+
+  defp metadata_key_name(key) when is_atom(key), do: Atom.to_string(key)
+  defp metadata_key_name(key) when is_binary(key), do: key
+  defp metadata_key_name(key), do: inspect(key)
 end

@@ -19,19 +19,46 @@ defmodule Ecrits.Doc.OpTest do
       assert op.count == 3
     end
 
-    test "strips protocol revision metadata from backend edit ops" do
-      assert {:ok, op} =
+    test "rejects retired metadata instead of silently ignoring it" do
+      assert {:error, {:invalid_op, message}} =
                Op.normalize(%{
                  "op" => "insert_text",
                  "ref" => "hwp:s0/p1",
                  "text" => "hi",
-                 "base_revision" => 12,
-                 "current_version" => 13
+                 "base_revision" => 12
                })
 
-      assert op.op == "insert_text"
-      refute Map.has_key?(op, :base_revision)
-      refute Map.has_key?(op, :current_version)
+      assert message =~ "base_revision"
+      assert message =~ "current document state"
+    end
+
+    test "keeps arbitrary raw engine property keys as strings" do
+      assert {:ok, op} =
+               Op.normalize(%{
+                 "op" => "insert_shape",
+                 "page" => "summary",
+                 "name" => "title",
+                 "x" => 100,
+                 "y" => 100,
+                 "w" => 1_000,
+                 "h" => 500,
+                 "CharHeight" => 32
+               })
+
+      assert op["CharHeight"] == 32
+    end
+
+    test "normalizes the internal signature overlay transport key" do
+      assert {:ok, op} =
+               Op.normalize(%{
+                 "op" => "insert_picture",
+                 "ref" => "hwp:s0/p76/tbl0/cell3/cp3/c0+21",
+                 "src" => "/tmp/signature.png",
+                 "overlay_marker_length" => 3
+               })
+
+      assert op.overlay_marker_length == 3
+      refute Map.has_key?(op, "overlay_marker_length")
     end
 
     test "replace_text folds multiline replacement into one paragraph" do
