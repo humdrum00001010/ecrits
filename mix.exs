@@ -28,7 +28,7 @@ defmodule Ecrits.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test]
+      preferred_envs: [precommit: :test, "test.edit_failures": :test]
     ]
   end
 
@@ -47,9 +47,12 @@ defmodule Ecrits.MixProject do
       {:ecto, "~> 3.13"},
       {:ecto_sqlite3, "~> 0.23.0"},
       {:phoenix_html, "~> 4.1"},
-      {:mdex, "~> 0.12"},
+      {:mdex, "~> 0.13"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
-      {:phoenix_live_view, "~> 1.1.0"},
+      {:phoenix_live_view, "~> 1.2"},
+      # Binary ingress over Phoenix Channels with credit-based flow control;
+      # extracted from this app (github.com/humdrum00001010/phoenix_octet).
+      {:phoenix_octet, github: "humdrum00001010/phoenix_octet"},
       {:lazy_html, ">= 0.1.0", only: :test},
       {:phoenix_live_dashboard, "~> 0.8.3"},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
@@ -142,7 +145,6 @@ defmodule Ecrits.MixProject do
       "assets.setup": [
         "tailwind.install --if-missing",
         "esbuild.install --if-missing",
-        "cmd npm ci --prefix assets",
         "assets.observex"
       ],
       # The HWP wasm-bindgen ES module and `rhwp_bg.wasm` are served directly
@@ -173,12 +175,17 @@ defmodule Ecrits.MixProject do
       ],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test test"],
       "test.pure": ["test --no-start"],
-      # Auto-advance our own branch-pinned fork (`exfuse`) to its HEAD on every
-      # `mix deps.get`. A plain deps.get honors the SHA in `mix.lock`, so it would
-      # silently keep an old commit after we push the fork; `deps.update` first
-      # re-resolves the branch. The trailing `deps.get` is the real task (Mix runs
-      # the underlying task, not this alias, so there is no recursion).
-      "deps.get": ["deps.update exfuse", "deps.get"]
+      "test.edit_failures": [
+        "cmd --cd deps/phoenix_octet env MIX_DEPS_PATH=.. MIX_BUILD_PATH=../../_build/octet_failure_test mix test",
+        "test --only edit_failure"
+      ],
+      # Auto-advance our own branch-pinned repos (`exfuse`, `phoenix_octet`) to
+      # their HEAD on every `mix deps.get`. A plain deps.get honors the SHA in
+      # `mix.lock`, so it would silently keep an old commit after we push; a
+      # `deps.update` first re-resolves the branch. The trailing `deps.get` is
+      # the real task (Mix runs the underlying task, not this alias, so there
+      # is no recursion).
+      "deps.get": ["deps.update exfuse phoenix_octet", "deps.get"]
     ]
   end
 end

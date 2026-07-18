@@ -32,7 +32,7 @@ end
 config :ecrits,
   generators: [timestamp_type: :utc_datetime, binary_id: true]
 
-config :ecrits, :local_agent, provider: "codex"
+config :ecrits, :agent, provider: "codex"
 
 # Document VFS (Ecrits.Fuse.*): mount the workspace's documents as grep-able/
 # editable JSONL IR files under <workspace>/.ecrits via exfuse. Default ON;

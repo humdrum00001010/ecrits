@@ -7,8 +7,8 @@ defmodule Ecrits.SupervisionTest do
              :http_clients,
              :document_services,
              :web,
-             :local_document_runtime,
-             :local_agent_runtime
+             :document_runtime,
+             :agent_runtime
            ]
   end
 
@@ -21,6 +21,8 @@ defmodule Ecrits.SupervisionTest do
              Ecrits.Finch.OpenAI,
              Ecrits.RhwpSnapshot.Materializer,
              Ecrits.Doc.Office.Instance,
+             Ecrits.Doc.PreviewTaskSupervisor,
+             Ecrits.Doc.BrowserTransactionSupervisor,
              Ecrits.Doc.Pool,
              Ecrits.Fuse.OpenDocs,
              EcritsWeb.Endpoint,

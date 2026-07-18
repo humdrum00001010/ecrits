@@ -43,8 +43,8 @@ defmodule Ecrits.Supervision do
       {:web, web_children()},
       # Local editor runtimes: document sessions first, ACP/agent sessions after,
       # because agents bind to the active document session by id.
-      {:local_document_runtime, local_document_runtime_children()},
-      {:local_agent_runtime, local_agent_runtime_children()}
+      {:document_runtime, document_runtime_children()},
+      {:agent_runtime, agent_runtime_children()}
     ]
   end
 
@@ -84,6 +84,16 @@ defmodule Ecrits.Supervision do
       # with an LRU budget (save-then-close eviction, transparent reopen). HWP/
       # ehwp is cheap-per-doc and parallel, so it is NOT routed through here.
       Ecrits.Doc.Office.Instance,
+      # Durable chat-rail preview snapshots are persisted after an FSKit
+      # callback returns. Keeping those workers supervised prevents mounted
+      # File.rename callers from waiting on their own file_server-owned vnode.
+      {Task.Supervisor, name: Ecrits.Doc.PreviewTaskSupervisor},
+      # A browser-backed VFS edit must keep one stable process identity from
+      # vfs_write through the durable source replace and vfs_commit. In
+      # particular, the ACP request process may be cancelled after the source
+      # replace; an unlinked supervised coordinator still completes the browser
+      # commit (or restores and rolls back) before releasing the turn fence.
+      {Task.Supervisor, name: Ecrits.Doc.BrowserTransactionSupervisor},
       # Multi-document MCP registry: one Editor per open document, browser/server
       # backing. See `Ecrits.Doc.Pool` (doc-editing MCP design §4.3).
       Ecrits.Doc.Pool,
@@ -100,14 +110,14 @@ defmodule Ecrits.Supervision do
     ]
   end
 
-  defp local_document_runtime_children do
+  defp document_runtime_children do
     [
       {Registry, keys: :unique, name: Ecrits.Document.Registry},
       Ecrits.Document.Supervisor
     ]
   end
 
-  defp local_agent_runtime_children do
+  defp agent_runtime_children do
     [
       Ecrits.WorkspaceHandoff,
       {Registry, keys: :unique, name: Ecrits.AcpAgent.SessionRegistry},

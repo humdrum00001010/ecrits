@@ -1,10 +1,5 @@
 import Config
 
-# Playwright e2e: enables the `/test/personas/:p/sign_in` + `/test/reset`
-# routes (gated by `Application.compile_env(:ecrits, :test_auth)`).
-# Mirrored in `:dev`; explicitly `false` in `:prod`.
-config :ecrits, :test_auth, true
-
 # Tests assert on English msgid (source-of-truth) — override the
 # config.exs Korean default so `mix test` matches the literal English
 # strings embedded in gen.auth tests + dashboard / settings_hub tests.
