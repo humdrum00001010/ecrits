@@ -9,7 +9,7 @@ defmodule Ecrits.PathFSWorkspaceTest do
     root = tmp_root()
 
     outside =
-      Path.join(System.tmp_dir!(), "ecrits-local-outside-#{System.unique_integer([:positive])}")
+      Path.join(System.tmp_dir!(), "ecrits-outside-#{System.unique_integer([:positive])}")
 
     link = Path.join(root, "linked")
 
@@ -69,7 +69,7 @@ defmodule Ecrits.PathFSWorkspaceTest do
 
   test "workspace server starts under supervisor with configured root only" do
     root = tmp_root()
-    name = :"ecrits_local_workspace_#{System.unique_integer([:positive])}"
+    name = :"ecrits_workspace_#{System.unique_integer([:positive])}"
 
     assert Workspace.children([]) == []
     assert [{Ecrits.Workspace.Server, opts}] = Workspace.children(root: root, name: name)
@@ -82,7 +82,7 @@ defmodule Ecrits.PathFSWorkspaceTest do
   end
 
   defp tmp_root do
-    root = Path.join(System.tmp_dir!(), "ecrits-local-fs-#{System.unique_integer([:positive])}")
+    root = Path.join(System.tmp_dir!(), "ecrits-fs-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(root) end)
     root
   end

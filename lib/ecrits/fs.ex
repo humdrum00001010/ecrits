@@ -93,6 +93,67 @@ defmodule Ecrits.FS do
     end
   end
 
+  @doc """
+  Read an already-resolved file without entering OTP's global `file_server_2`.
+
+  Doc VFS callbacks can run while an outer mounted `File.rename/2` is waiting on
+  FSKit. Re-entering `File.read/1` from that callback would wait on the same
+  `file_server_2` process and deadlock the rename. A raw descriptor is owned by
+  the caller and keeps this callback-critical path independent.
+  """
+  @spec raw_read(String.t()) :: {:ok, binary()} | {:error, File.posix()}
+  def raw_read(path) when is_binary(path) do
+    with {:ok, io} <- :file.open(String.to_charlist(path), [:raw, :binary, :read]) do
+      result = raw_read_chunks(io, [])
+      close_result = :file.close(io)
+
+      case {result, close_result} do
+        {{:ok, bytes}, :ok} -> {:ok, bytes}
+        {{:error, _reason} = error, _close_result} -> error
+        {{:ok, _bytes}, {:error, reason}} -> {:error, reason}
+      end
+    end
+  end
+
+  @doc """
+  Atomically replace an already-resolved file without `file_server_2`.
+
+  The destination's directory must already exist. This is the narrow companion
+  to `raw_read/1` for FSKit callback paths; ordinary workspace writes should
+  continue to use `atomic_write/2`.
+  """
+  @spec raw_atomic_write(String.t(), binary()) :: :ok | {:error, File.posix()}
+  def raw_atomic_write(path, contents) when is_binary(path) and is_binary(contents) do
+    tmp = tmp_path(path)
+    tmp_chars = String.to_charlist(tmp)
+    path_chars = String.to_charlist(path)
+
+    result =
+      with {:ok, io} <-
+             :file.open(tmp_chars, [:raw, :binary, :write, :exclusive]) do
+        write_result =
+          with :ok <- :file.write(io, contents),
+               :ok <- :file.sync(io) do
+            :ok
+          end
+
+        close_result = :file.close(io)
+
+        with :ok <- write_result,
+             :ok <- close_result,
+             :ok <- :prim_file.rename(tmp_chars, path_chars) do
+          :ok
+        end
+      end
+
+    if result == :ok do
+      :ok
+    else
+      _ = :prim_file.delete(tmp_chars)
+      result
+    end
+  end
+
   defp entry(dir, relative, name) do
     path = Path.join(dir, name)
 
@@ -126,6 +187,14 @@ defmodule Ecrits.FS do
   defp entry_type_rank(:file), do: 1
   defp entry_type_rank(:symlink), do: 2
   defp entry_type_rank(_type), do: 3
+
+  defp raw_read_chunks(io, chunks) do
+    case :file.read(io, 1024 * 1024) do
+      {:ok, bytes} -> raw_read_chunks(io, [bytes | chunks])
+      :eof -> {:ok, chunks |> Enum.reverse() |> IO.iodata_to_binary()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp tmp_path(path) do
     dir = Path.dirname(path)
