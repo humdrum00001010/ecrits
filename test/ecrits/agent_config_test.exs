@@ -26,4 +26,26 @@ defmodule Ecrits.AgentConfigTest do
 
     assert AgentConfig.put(updated, %{reasoning_effort: "invalid"}) == updated
   end
+
+  # Board #459: the ACP write authorization reads these exact fields from the
+  # turn opts. A Full-workspace config must emit BOTH redundant signals
+  # (approval "never" + permission_mode "dontAsk") so losing one in transit
+  # cannot silently downgrade the rail to write-refusing.
+  test "session opts carry both full-workspace write signals end-to-end" do
+    base = %{provider: %{key: "codex", label: "Codex", favicon_src: "/codex.svg"}}
+
+    full = AgentConfig.new(Map.put(base, :access, Access.resolve("full-workspace")))
+    opts = AgentConfig.session_opts(full)
+
+    assert opts[:sandbox] == "workspace-write"
+    assert opts[:approval_policy] == "never"
+    assert opts[:permission_mode] == "dontAsk"
+    assert Ecrits.AcpAgent.AcpStream.acp_write_authorized?(opts)
+
+    ask = AgentConfig.new(Map.put(base, :access, Access.resolve("ask")))
+    refute Ecrits.AcpAgent.AcpStream.acp_write_authorized?(AgentConfig.session_opts(ask))
+
+    read_only = AgentConfig.new(Map.put(base, :access, Access.resolve("read-only")))
+    refute Ecrits.AcpAgent.AcpStream.acp_write_authorized?(AgentConfig.session_opts(read_only))
+  end
 end

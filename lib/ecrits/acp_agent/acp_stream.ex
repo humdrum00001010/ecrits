@@ -11,7 +11,8 @@ defmodule Ecrits.AcpAgent.AcpStream do
     * creates or reuses a session, forwarding the `doc.*` MCP server(s) so the
       agent can discover and call them (`new_session(..., mcp_servers: ...)`);
     * issues the prompt and streams `session/update` notifications, mapping them
-      to `%{type: :text_delta | :reasoning_delta | :tool_call_started |
+      to `%{type: :text_delta | :reasoning_delta | :file_operation_started |
+      :file_operation_completed | :file_operation_failed | :tool_call_started |
       :tool_call_completed | :tool_call_failed, ...}`;
     * on cleanup, cancels the in-flight turn; one-off clients are disconnected,
       while durable clients stay alive for the next turn.
@@ -21,6 +22,11 @@ defmodule Ecrits.AcpAgent.AcpStream do
   alias ExMCP.ACP.Adapters.Claude
   alias ExMCP.ACP.Adapters.Codex
   alias ExMCP.ACP.Client
+  alias Ecrits.AcpAgent.CodexAdapter
+  alias Ecrits.AcpAgent.CodexHome
+  alias Ecrits.AcpAgent.Content
+  alias Ecrits.AcpAgent.WorkspaceFileHandler
+  alias Ecrits.Prompt
   require Logger
 
   # Total ceiling for one turn (the ExMCP `prompt` RPC stays open for the whole
@@ -40,6 +46,9 @@ defmodule Ecrits.AcpAgent.AcpStream do
   # alive. Before the first session/update, a wedged provider can otherwise leave
   # the rail spinning for the full idle window with no visible progress.
   @initial_activity_timeout 90_000
+  @mcp_startup_timeout 15_000
+  @file_operation_names ~w(read_text_file search_text_file edit_text_file)
+  @file_operation_reason_max_chars 1_000
 
   @doc """
   Returns a `Stream` of normalized chat-rail events for one turn.
@@ -72,6 +81,9 @@ defmodule Ecrits.AcpAgent.AcpStream do
       saw_text?: false,
       tool_titles: %{},
       tool_kinds: %{},
+      file_operation_ids: MapSet.new(),
+      file_operation_started_ids: MapSet.new(),
+      file_operations: %{},
       edit_payloads: %{},
       edit_paths: %{}
     }
@@ -83,41 +95,56 @@ defmodule Ecrits.AcpAgent.AcpStream do
   end
 
   @doc false
+  def file_operation_name?(name), do: name in @file_operation_names
+
+  @doc false
   def open_client_session(exmcp_adapter, turn, opts, event_listener \\ self()) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     cwd = working_dir(turn, opts)
-    adapter_opts = exmcp_adapter_opts(exmcp_adapter, cwd, opts)
-
-    client_opts = [
-      transport_mod: AdapterTransport,
-      adapter: exmcp_adapter,
-      adapter_opts: adapter_opts,
-      event_listener: event_listener
-    ]
-
     started_at = System.monotonic_time(:millisecond)
 
-    case Client.start_link(client_opts) do
-      {:ok, client} ->
-        case open_provider_session_for_client(client, cwd, turn, opts, timeout) do
-          {:ok, session_id} ->
-            log_acp_timing("session_open", started_at,
-              status: "ok",
-              resumed: is_binary(prior_provider_session_id(turn)),
-              mcp_servers: length(mcp_servers_param(Keyword.get(opts, :mcp_servers)))
-            )
+    case adapter_isolation(exmcp_adapter, turn, opts) do
+      {:ok, isolation} ->
+        adapter_opts = exmcp_adapter_opts(exmcp_adapter, cwd, opts) ++ isolation.adapter_opts
 
-            {:ok, %{client: client, session_id: session_id, cwd: cwd}}
+        client_opts =
+          [
+            transport_mod: AdapterTransport,
+            adapter: exmcp_adapter,
+            adapter_opts: adapter_opts,
+            event_listener: event_listener
+          ]
+          |> file_handler_client_opts(exmcp_adapter, turn, opts, cwd)
+
+        case Client.start_link(client_opts) do
+          {:ok, client} ->
+            case open_provider_session_for_client(client, cwd, turn, opts, timeout) do
+              {:ok, session_id} ->
+                log_acp_timing("session_open", started_at,
+                  status: "ok",
+                  resumed: is_binary(prior_provider_session_id(turn)),
+                  mcp_servers: length(mcp_servers_param(Keyword.get(opts, :mcp_servers)))
+                )
+
+                {:ok, %{client: client, session_id: session_id, cwd: cwd}}
+
+              {:error, _reason} = error ->
+                log_acp_timing("session_open", started_at, status: "error")
+                _ = safe_disconnect(client)
+                isolation.cleanup.()
+                error
+
+              other ->
+                log_acp_timing("session_open", started_at, status: "unexpected")
+                _ = safe_disconnect(client)
+                isolation.cleanup.()
+                {:error, {:unexpected_session_open, other}}
+            end
 
           {:error, _reason} = error ->
             log_acp_timing("session_open", started_at, status: "error")
-            _ = safe_disconnect(client)
+            isolation.cleanup.()
             error
-
-          other ->
-            log_acp_timing("session_open", started_at, status: "unexpected")
-            _ = safe_disconnect(client)
-            {:error, {:unexpected_session_open, other}}
         end
 
       {:error, _reason} = error ->
@@ -148,28 +175,119 @@ defmodule Ecrits.AcpAgent.AcpStream do
 
     case open_client_session(exmcp_adapter, turn, opts, event_listener) do
       {:ok, %{client: client, session_id: session_id}} ->
-        persist_client? = Keyword.get(opts, :persist_client?, false)
-        if persist_client?, do: Process.unlink(client)
+        case await_configured_mcp_startup(exmcp_adapter, session_id, turn, opts) do
+          :ok ->
+            persist_client? = Keyword.get(opts, :persist_client?, false)
+            if persist_client?, do: Process.unlink(client)
 
-        start_prompt_with_session(
-          client,
-          session_id,
-          turn,
-          opts,
-          timeout,
-          persist_client?,
-          pending_start_events(
-            client,
-            session_id,
-            persist_client?,
-            Keyword.get(opts, :acp_client_key)
-          )
-        )
+            start_prompt_with_session(
+              client,
+              session_id,
+              turn,
+              opts,
+              timeout,
+              persist_client?,
+              pending_start_events(
+                client,
+                session_id,
+                persist_client?,
+                Keyword.get(opts, :acp_client_key)
+              )
+            )
+
+          {:error, reason} ->
+            _ = safe_disconnect(client)
+            raise "ex_mcp ACP MCP startup failed: #{inspect(reason)}"
+        end
 
       {:error, reason} ->
         raise "ex_mcp ACP session open failed: #{inspect(reason)}"
     end
   end
+
+  @doc false
+  def await_mcp_startup(session_id, server_names, timeout)
+      when is_binary(session_id) and is_list(server_names) and is_integer(timeout) do
+    pending = server_names |> Enum.filter(&is_binary/1) |> MapSet.new()
+    await_mcp_startup_loop(session_id, pending, deadline(timeout))
+  end
+
+  defp await_configured_mcp_startup(CodexAdapter, session_id, turn, opts) do
+    names = mcp_server_names(Keyword.get(opts, :mcp_servers))
+
+    if document_lane?(turn, opts) and names != [] do
+      await_mcp_startup(
+        session_id,
+        names,
+        Keyword.get(opts, :mcp_startup_timeout, @mcp_startup_timeout)
+      )
+    else
+      :ok
+    end
+  end
+
+  defp await_configured_mcp_startup(_adapter, _session_id, _turn, _opts), do: :ok
+
+  defp await_mcp_startup_loop(session_id, pending, deadline) do
+    if MapSet.size(pending) == 0 do
+      :ok
+    else
+      receive do
+        {:acp_stream_activity, update} ->
+          handle_mcp_startup_update(session_id, pending, deadline, update)
+
+        {:acp_session_update, ^session_id, update} ->
+          handle_mcp_startup_update(session_id, pending, deadline, update)
+      after
+        remaining(deadline) -> {:error, {:mcp_startup_timeout, MapSet.to_list(pending)}}
+      end
+    end
+  end
+
+  defp handle_mcp_startup_update(
+         session_id,
+         pending,
+         deadline,
+         %{
+           "sessionUpdate" => "mcp_server_startup",
+           "serverName" => name,
+           "status" => "ready"
+         }
+       ) do
+    await_mcp_startup_loop(session_id, MapSet.delete(pending, name), deadline)
+  end
+
+  defp handle_mcp_startup_update(
+         session_id,
+         pending,
+         deadline,
+         %{
+           "sessionUpdate" => "mcp_server_startup",
+           "serverName" => name,
+           "status" => status
+         } = update
+       )
+       when status in ["failed", "error"] do
+    if MapSet.member?(pending, name),
+      do: {:error, {:mcp_server_unavailable, name, update["error"]}},
+      else: await_mcp_startup_loop(session_id, pending, deadline)
+  end
+
+  defp handle_mcp_startup_update(session_id, pending, deadline, _update),
+    do: await_mcp_startup_loop(session_id, pending, deadline)
+
+  defp mcp_server_names(servers) when is_list(servers) do
+    servers
+    |> Enum.map(fn
+      %{"name" => name} -> name
+      %{name: name} -> name
+      _ -> nil
+    end)
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+  end
+
+  defp mcp_server_names(_servers), do: []
 
   defp reusable_client(opts) do
     client = Keyword.get(opts, :client)
@@ -520,6 +638,82 @@ defmodule Ecrits.AcpAgent.AcpStream do
     end
   end
 
+  defp map_update(%{"sessionUpdate" => "file_operation"} = update, state) do
+    file_operation_id = file_operation_id(update)
+    operation = file_operation_name(update)
+
+    state = track_file_operation(state, file_operation_id, operation, update)
+
+    cond do
+      not file_operation_call?(state, file_operation_id) ->
+        {:skip, state}
+
+      file_operation_started?(state, file_operation_id) ->
+        {:skip, state}
+
+      true ->
+        state = mark_file_operation_started(state, file_operation_id)
+
+        {:event,
+         file_operation_event(
+           :file_operation_started,
+           file_operation_id,
+           :running,
+           update,
+           state
+         ), state}
+    end
+  end
+
+  defp map_update(%{"sessionUpdate" => "file_operation_update"} = update, state) do
+    file_operation_id = file_operation_id(update)
+    operation = file_operation_name(update)
+    state = track_file_operation(state, file_operation_id, operation, update)
+
+    if file_operation_call?(state, file_operation_id) do
+      case file_operation_status(update) do
+        "completed" ->
+          {:event,
+           file_operation_event(
+             :file_operation_completed,
+             file_operation_id,
+             :completed,
+             update,
+             state
+           ), state}
+
+        "failed" ->
+          {:event,
+           file_operation_event(
+             :file_operation_failed,
+             file_operation_id,
+             :failed,
+             update,
+             state
+           )
+           |> Map.put(:reason, tool_failure_reason(update)), state}
+
+        _non_terminal ->
+          if file_operation_started?(state, file_operation_id) do
+            {:skip, state}
+          else
+            state = mark_file_operation_started(state, file_operation_id)
+
+            {:event,
+             file_operation_event(
+               :file_operation_started,
+               file_operation_id,
+               :running,
+               update,
+               state
+             ), state}
+          end
+      end
+    else
+      {:skip, state}
+    end
+  end
+
   defp map_update(%{"sessionUpdate" => "tool_call"} = update, state) do
     tool_call_id = tool_call_id(update)
     name = tool_name(update)
@@ -529,8 +723,25 @@ defmodule Ecrits.AcpAgent.AcpStream do
       state
       |> put_in([:tool_kinds, tool_call_id], kind)
       |> maybe_put_tool_title(tool_call_id, name)
+      |> track_file_operation(tool_call_id, name, update)
 
     cond do
+      file_operation_call?(state, tool_call_id) ->
+        if file_operation_started?(state, tool_call_id) do
+          {:skip, state}
+        else
+          state = mark_file_operation_started(state, tool_call_id)
+
+          {:event,
+           file_operation_event(
+             :file_operation_started,
+             tool_call_id,
+             :running,
+             update,
+             state
+           ), state}
+        end
+
       kind == "edit" ->
         map_edit_update(update, tool_call_id, state)
 
@@ -540,6 +751,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
            type: :tool_call_started,
            tool_call_id: tool_call_id,
            name: name,
+           kind: kind,
            arguments: tool_arguments(update)
          }, state}
 
@@ -550,61 +762,113 @@ defmodule Ecrits.AcpAgent.AcpStream do
 
   defp map_update(%{"sessionUpdate" => "tool_call_update"} = update, state) do
     tool_call_id = tool_call_id(update)
-    name = tool_name(update) || Map.get(state.tool_titles, tool_call_id)
+    reported_name = tool_name(update)
+    cached_name = Map.get(state.tool_titles, tool_call_id)
+    name = reported_name || cached_name
     kind = tool_kind(update) || Map.get(state.tool_kinds, tool_call_id)
-    state = put_in(state.tool_kinds[tool_call_id], kind)
 
-    if kind == "edit" do
-      map_edit_update(update, tool_call_id, state)
-    else
-      case Map.get(update, "status") do
-        "completed" when is_binary(name) and name != "" ->
-          {:event,
-           %{
-             type: :tool_call_completed,
-             tool_call_id: tool_call_id,
-             name: name,
-             result: tool_output(update)
-           }, state}
+    state =
+      state
+      |> put_in([:tool_kinds, tool_call_id], kind)
+      |> track_file_operation(tool_call_id, cached_name, update)
+      |> track_file_operation(tool_call_id, reported_name, update)
 
-        "failed" when is_binary(name) and name != "" ->
-          {:event,
-           %{
-             type: :tool_call_failed,
-             tool_call_id: tool_call_id,
-             name: name,
-             reason: tool_failure_reason(update)
-           }, state}
+    cond do
+      file_operation_call?(state, tool_call_id) ->
+        case file_operation_status(update) do
+          "completed" ->
+            {:event,
+             file_operation_event(
+               :file_operation_completed,
+               tool_call_id,
+               :completed,
+               update,
+               state
+             ), state}
 
-        status when status not in ["completed", "failed"] ->
-          # A non-terminal update for a call we have not seen is its START: the
-          # Claude adapter's first report of a tool_use block is a
-          # `tool_call_update` (pending/in_progress) with no prior `tool_call`.
-          # Without this the call would only surface at completion — after the
-          # UI already parked the reply bubble above it — and the terminal
-          # update carries no toolName, so the row would fall back to "tool".
-          cond do
-            Map.has_key?(state.tool_titles, tool_call_id) ->
+          "failed" ->
+            {:event,
+             file_operation_event(
+               :file_operation_failed,
+               tool_call_id,
+               :failed,
+               update,
+               state
+             )
+             |> Map.put(:reason, tool_failure_reason(update)), state}
+
+          _non_terminal ->
+            if file_operation_started?(state, tool_call_id) do
               {:skip, state}
-
-            tool_name?(name) ->
-              state = put_in(state.tool_titles[tool_call_id], name)
+            else
+              state = mark_file_operation_started(state, tool_call_id)
 
               {:event,
-               %{
-                 type: :tool_call_started,
-                 tool_call_id: tool_call_id,
-                 name: name,
-                 arguments: tool_arguments(update)
-               }, state}
+               file_operation_event(
+                 :file_operation_started,
+                 tool_call_id,
+                 :running,
+                 update,
+                 state
+               ), state}
+            end
+        end
 
-            true ->
-              {:skip, state}
-          end
+      kind == "edit" ->
+        map_edit_update(update, tool_call_id, state)
 
-        _terminal_without_identity ->
-          {:skip, state}
-      end
+      true ->
+        case Map.get(update, "status") do
+          "completed" when is_binary(name) and name != "" ->
+            {:event,
+             %{
+               type: :tool_call_completed,
+               tool_call_id: tool_call_id,
+               name: name,
+               kind: kind,
+               result: tool_output(update)
+             }, state}
+
+          "failed" when is_binary(name) and name != "" ->
+            {:event,
+             %{
+               type: :tool_call_failed,
+               tool_call_id: tool_call_id,
+               name: name,
+               kind: kind,
+               reason: tool_failure_reason(update)
+             }, state}
+
+          status when status not in ["completed", "failed"] ->
+            # A non-terminal update for a call we have not seen is its START: the
+            # Claude adapter's first report of a tool_use block is a
+            # `tool_call_update` (pending/in_progress) with no prior `tool_call`.
+            # Without this the call would only surface at completion — after the
+            # UI already parked the reply bubble above it — and the terminal
+            # update carries no toolName, so the row would fall back to "tool".
+            cond do
+              Map.has_key?(state.tool_titles, tool_call_id) ->
+                {:skip, state}
+
+              tool_name?(name) ->
+                state = put_in(state.tool_titles[tool_call_id], name)
+
+                {:event,
+                 %{
+                   type: :tool_call_started,
+                   tool_call_id: tool_call_id,
+                   name: name,
+                   kind: kind,
+                   arguments: tool_arguments(update)
+                 }, state}
+
+              true ->
+                {:skip, state}
+            end
+
+          _terminal_without_identity ->
+            {:skip, state}
+        end
     end
   end
 
@@ -619,6 +883,9 @@ defmodule Ecrits.AcpAgent.AcpStream do
     |> Map.put_new(:saw_text?, false)
     |> Map.put_new(:tool_titles, %{})
     |> Map.put_new(:tool_kinds, %{})
+    |> Map.put_new(:file_operation_ids, MapSet.new())
+    |> Map.put_new(:file_operation_started_ids, MapSet.new())
+    |> Map.put_new(:file_operations, %{})
     |> Map.put_new(:edit_payloads, %{})
     |> Map.put_new(:edit_paths, %{})
   end
@@ -702,6 +969,93 @@ defmodule Ecrits.AcpAgent.AcpStream do
       else: state
   end
 
+  defp track_file_operation(state, file_operation_id, name, update) do
+    previous = Map.get(state.file_operations, file_operation_id, %{})
+    operation = Map.get(previous, :operation) || recognized_file_operation(name)
+
+    if is_binary(operation) do
+      arguments = tool_arguments(update)
+      kind = tool_kind(update)
+
+      metadata =
+        previous
+        |> Map.put(:operation, operation)
+        |> put_present(
+          :path,
+          Map.get(update, "path") || Map.get(update, :path) ||
+            argument_value(arguments, "path")
+        )
+        |> put_present(
+          :query,
+          Map.get(update, "query") || Map.get(update, :query) ||
+            argument_value(arguments, "query")
+        )
+
+      state
+      |> maybe_put_tool_title(file_operation_id, operation)
+      |> maybe_put_tool_kind(file_operation_id, kind)
+      |> update_in([:file_operation_ids], &MapSet.put(&1, file_operation_id))
+      |> put_in([:file_operations, file_operation_id], metadata)
+    else
+      state
+    end
+  end
+
+  defp recognized_file_operation(name) do
+    if file_operation_name?(name), do: name
+  end
+
+  defp maybe_put_tool_kind(state, _file_operation_id, nil), do: state
+
+  defp maybe_put_tool_kind(state, file_operation_id, kind) do
+    put_in(state.tool_kinds[file_operation_id], kind)
+  end
+
+  defp file_operation_call?(state, file_operation_id) do
+    MapSet.member?(state.file_operation_ids, file_operation_id)
+  end
+
+  defp file_operation_started?(state, file_operation_id) do
+    MapSet.member?(state.file_operation_started_ids, file_operation_id)
+  end
+
+  defp mark_file_operation_started(state, file_operation_id) do
+    update_in(state.file_operation_started_ids, &MapSet.put(&1, file_operation_id))
+  end
+
+  defp file_operation_event(type, file_operation_id, status, update, state) do
+    metadata = Map.get(state.file_operations, file_operation_id, %{})
+
+    %{
+      type: type,
+      file_operation_id: file_operation_id,
+      tool_call_id: file_operation_id,
+      operation: Map.get(metadata, :operation),
+      path: Map.get(metadata, :path),
+      query: Map.get(metadata, :query),
+      kind: tool_kind(update) || Map.get(state.tool_kinds, file_operation_id),
+      status: status
+    }
+  end
+
+  defp file_operation_id(update) do
+    Map.get(update, "fileOperationId") || tool_call_id(update)
+  end
+
+  defp file_operation_name(update) do
+    Map.get(update, "operation") || tool_name(update)
+  end
+
+  defp file_operation_status(%{"success" => false}), do: "failed"
+  defp file_operation_status(update), do: Map.get(update, "status")
+
+  defp argument_value(arguments, key) do
+    Map.get(arguments, key) || Map.get(arguments, String.to_existing_atom(key))
+  end
+
+  defp put_present(map, _key, value) when value in [nil, ""], do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
+
   defp tool_arguments(update) do
     case Map.get(update, "rawInput") || Map.get(update, "input") do
       args when is_map(args) -> args
@@ -714,9 +1068,29 @@ defmodule Ecrits.AcpAgent.AcpStream do
   end
 
   defp tool_failure_reason(update) do
-    extract_content_text(Map.get(update, "content")) ||
-      inspect(Map.get(update, "rawOutput") || "")
+    update
+    |> Map.get("reason")
+    |> case do
+      reason when is_binary(reason) and reason != "" ->
+        reason
+
+      _ ->
+        Map.get(update, "error") ||
+          extract_content_text(Map.get(update, "content")) ||
+          inspect(Map.get(update, "rawOutput") || "")
+    end
+    |> truncate_file_operation_reason()
   end
+
+  defp truncate_file_operation_reason(reason) when is_binary(reason) do
+    if String.length(reason) <= @file_operation_reason_max_chars do
+      reason
+    else
+      String.slice(reason, 0, @file_operation_reason_max_chars) <> "..."
+    end
+  end
+
+  defp truncate_file_operation_reason(reason), do: inspect(reason)
 
   defp extract_content_text(content) when is_list(content) do
     content
@@ -741,11 +1115,19 @@ defmodule Ecrits.AcpAgent.AcpStream do
 
   # ── adapter_opts ────────────────────────────────────────────────────
 
-  defp exmcp_adapter_opts(Codex, cwd, opts) do
+  defp exmcp_adapter_opts(adapter, cwd, opts) when adapter in [Codex, CodexAdapter] do
     [cwd: cwd]
     |> maybe_put(:model, Keyword.get(opts, :model))
     |> maybe_put(:approvalPolicy, codex_approval_policy(Keyword.get(opts, :approval_policy)))
     |> maybe_put(:sandbox, Keyword.get(opts, :sandbox))
+    # Ecrits embeds Codex inside a document workspace. It must not inherit or
+    # generate personal Codex memories, which would otherwise become hidden
+    # authoring guidance for an ACP turn.
+    |> Keyword.put(:disable_memories, true)
+    # Only Ecrits' per-agent document MCP endpoint can receive unattended
+    # write elicitation in full-workspace mode. Shell/file escalations and
+    # every other MCP server stay denied by the adapter.
+    |> Keyword.put(:auto_approve_mcp_servers, ["doc"])
     |> maybe_put(:mcp_servers, present_list(Keyword.get(opts, :mcp_servers)))
   end
 
@@ -765,6 +1147,70 @@ defmodule Ecrits.AcpAgent.AcpStream do
     Keyword.put(opts, :cwd, cwd)
   end
 
+  defp adapter_isolation(adapter, turn, opts) when adapter in [Codex, CodexAdapter] do
+    with {:ok, isolation} <-
+           CodexHome.prepare(
+             sandbox: Keyword.get(opts, :sandbox),
+             document_lane?: document_lane?(turn, opts),
+             workspace_root: turn[:workspace_root]
+           ) do
+      {:ok,
+       %{
+         adapter_opts: CodexHome.adapter_opts(isolation),
+         cleanup: fn -> CodexHome.cleanup(isolation) end
+       }}
+    end
+  end
+
+  defp adapter_isolation(_adapter, _turn, _opts),
+    do: {:ok, %{adapter_opts: [], cleanup: fn -> :ok end}}
+
+  defp file_handler_client_opts(client_opts, adapter, turn, opts, cwd)
+       when adapter in [Codex, CodexAdapter] do
+    read_only? = not acp_write_authorized?(opts)
+
+    client_opts
+    |> Keyword.put(:handler, WorkspaceFileHandler)
+    |> Keyword.put(
+      :handler_opts,
+      workspace_root: turn[:workspace_root] || cwd,
+      document_path: turn[:document_path],
+      session_pid: turn[:session_pid],
+      expected_identity: turn[:expected_identity],
+      read_only?: read_only?
+    )
+    # These describe the handler's protocol surface, not the current user's
+    # authority. WorkspaceFileHandler remains the source of truth for explicit
+    # Full-workspace authority, active-document ownership, and conditional-write
+    # decisions. Ask mode stays read-only until it has a real approval round-trip.
+    # Keeping the dynamic tool set stable lets a Codex thread survive access/doc
+    # changes.
+    |> Keyword.put(
+      :capabilities,
+      %{"fs" => %{"readTextFile" => true, "writeTextFile" => true}}
+    )
+  end
+
+  defp file_handler_client_opts(client_opts, _adapter, _turn, _opts, _cwd), do: client_opts
+
+  defp document_lane?(turn, _opts) do
+    is_binary(turn[:document_path]) and turn[:document_path] != ""
+  end
+
+  # Full-workspace authority arrives in the turn opts as BOTH approval_policy
+  # "never" and permission_mode "dontAsk" (AgentConfig.Access). Accept either,
+  # so a plumbing drift that loses one field cannot silently downgrade a
+  # Full-workspace rail to a write-refusing handler (2026-07-19 take17: turn 1
+  # was denied with zero writes while the chip read Full workspace; the
+  # follow-up turn on the same rail wrote fine — see board #459). A turn
+  # carrying neither signal stays fail-closed read-only.
+  @doc false
+  def acp_write_authorized?(opts) do
+    Keyword.get(opts, :sandbox) == "workspace-write" and
+      (Keyword.get(opts, :approval_policy) in [:never, "never"] or
+         Keyword.get(opts, :permission_mode) == "dontAsk")
+  end
+
   # Map the rail's Claude effort tier onto the thinking-token budget the Claude
   # adapter forwards to the CLI as `--max-thinking-tokens` (a flag the `claude`
   # binary still accepts). The adapter does NOT forward `--effort`, so the budget
@@ -777,8 +1223,6 @@ defmodule Ecrits.AcpAgent.AcpStream do
   defp claude_thinking_budget("xhigh"), do: 31_999
   defp claude_thinking_budget("ultracode"), do: 60_000
   defp claude_thinking_budget(_effort), do: nil
-
-  defp claude_ultracode?(opts), do: Keyword.get(opts, :reasoning_effort) == "ultracode"
 
   defp codex_approval_policy(nil), do: nil
   defp codex_approval_policy(:never), do: "never"
@@ -813,278 +1257,11 @@ defmodule Ecrits.AcpAgent.AcpStream do
     end
   end
 
-  # Prepend a concise, provider-agnostic developer instruction so the agent knows
-  # the currently-open document is read/editable ONLY through the document MCP
-  # tools — not by shelling out to hwp5proc / LibreOffice / file readers. Without
-  # this, codex (gpt-5.5) tends to ignore them and try shell tooling, or it reads
-  # but never follows through to the edit.
-  #
-  # CRITICAL — two confirmed failure modes this preamble defends against (verified
-  # live against codex gpt-5.5 via ~/.codex/logs_2.sqlite):
-  #
-  # 1. Tool naming: the MCP server registers dotted names (`doc.context`). Keep
-  #    the prompt aligned with that contract so the model uses the doc MCP tools
-  #    it is actually handed, instead of searching for stale underscore aliases.
-  #
-  # 2. Deferred MCP tools: with many MCP servers connected (the user's global
-  #    codex servers + our `doc`), codex does NOT inject every MCP tool into the
-  #    request — it defers them behind a tool-search / `list_mcp_resources`
-  #    discovery layer. The doc server connects and lists 12 tools
-  #    (`tool_count=12` in connection_manager) yet none appear in the request's
-  #    tools array. The earlier preamble FORBADE `tool_search`/`list_mcp_*`, so the
-  #    model never surfaced the deferred doc tools and declared them missing. The
-  #    fix REQUIRES the model to use discovery to load the `doc` tools first.
-  # `turn.input` arrives already normalized by `Session` (a bare string for the
-  # legacy path, OR a validated multi-modal block list — Phase 5). Map it onto the
-  # ACP prompt content shape via `Ecrits.AcpAgent.Prompt`: a string input
-  # yields `preamble <> string` (UNCHANGED — `ExMCP.ACP.Client` auto-wraps it as
-  # one text block, exactly as before); a block list yields a leading preamble
-  # text block followed by one ACP block per input block.
+  # `Content` encodes a normalized turn; `Prompt` owns every agent-visible
+  # instruction. A bare string remains the legacy `preamble <> string` shape,
+  # while block input becomes a leading preamble block plus content blocks.
   defp build_prompt(turn, opts) do
-    Ecrits.AcpAgent.Prompt.to_acp_content(turn.input, doc_preamble(opts))
-  end
-
-  # When the rail's top "ultracode" tier is selected (Claude only), append the
-  # `ultrathink` workflow keyword. The Claude CLI recognizes this literal keyword
-  # in the turn text — it injects a system message ("The user included the keyword
-  # 'ultrathink', requesting deeper reasoning on this turn") that raises the
-  # thinking budget for the turn. Verified present in claude 2.1.153's binary
-  # (`workflow_keyword_request`). This is the real, supported way to engage the
-  # most exhaustive reasoning per turn; there is NO `ultracode`/`--ultracode` flag.
-  defp ultracode_keyword(opts) do
-    if claude_ultracode?(opts) do
-      "\n\n[System] ultrathink\n"
-    else
-      ""
-    end
-  end
-
-  # Kept lean ON PURPOSE — this rides EVERY turn. Only the live-verified
-  # defenses stay (dot/underscore tool naming, deferred-MCP discovery, the
-  # no-shell rule + render-view exception, save/read-only/no-fabrication, the
-  # caveman voice). The current document handle is now an MCP contract:
-  # doc.context.current_document, not prompt-embedded path text.
-  defp doc_preamble(opts) do
-    status = Ecrits.Fuse.DocMount.status()
-    vfs_mounted? = Keyword.get(opts, :doc_vfs_mounted, status.enabled?)
-
-    cond do
-      status.enabled? and vfs_mounted? ->
-        mounted_vfs_preamble(status, opts)
-
-      status.enabled? ->
-        unmounted_vfs_preamble(status, opts)
-
-      fs_vfs_expected?(status) ->
-        blocked_vfs_preamble(status, opts)
-
-      true ->
-        legacy_doc_preamble(opts)
-    end
-  end
-
-  defp unmounted_vfs_preamble(status, opts) do
-    """
-    [System] Doc VFS backend is available, but this workspace is not mounted right now:
-    #{status.message}
-
-    Do not claim a mounted `.jsonl` exists until `doc.open_doc` returns
-    a non-null `mounted_at`. Do not use `.md`, and do not shell-read the raw
-    binary document. For this/current/open document, call `doc.open_doc`; if it
-    returns `mounted_at: null`, report the `mount_status` / `mount_error` blocker
-    instead of editing. Only after `mounted_at` is non-null should you read/edit
-    the mounted JSONL file with shell tools.
-
-    Voice: caveman. Short answer, no filler; report result/blockers only.
-    """ <> ultracode_keyword(opts)
-  end
-
-  defp fs_vfs_expected?(%{backend: :fskit, reason: reason})
-       when reason in [
-              :fskit_extension_disabled,
-              :fskit_extension_not_registered,
-              :fskit_extension_unsigned
-            ],
-       do: true
-
-  defp fs_vfs_expected?(_status), do: false
-
-  defp blocked_vfs_preamble(status, opts) do
-    settings_line =
-      if is_binary(status.settings_url) and status.settings_url != "" do
-        "Settings URL: #{status.settings_url}\n"
-      else
-        ""
-      end
-
-    """
-    [System] FSKit/VFS is configured but not mountable right now:
-    #{status.message}
-    #{settings_line}
-    Do not claim a mounted `.jsonl` exists until `doc.open_doc` returns
-    a non-null `mounted_at`. Do not use `.md`. Use the normal doc MCP tools for
-    this turn unless the user enables FSKit first; `doc.open_doc` will report the
-    same `mount_status` blocker.
-
-    """ <> legacy_doc_preamble(opts)
-  end
-
-  # Mounted VFS mode: documents are FILES. Only doc.open_doc is advertised as an MCP
-  # tool; read/find/edit happen with native shell tools over the projected IR file.
-  # This matches the MCPServer tool gate (both key on `DocMount.enabled?()`), so
-  # the agent is never told about a tool it can't call.
-  defp mounted_vfs_preamble(status, opts) do
-    """
-    [System] #{doc_vfs_backend_mode_label(status)} mode: documents are EDITABLE FILES, not opaque binaries.
-    The ONLY MCP tool to call is `doc.open_doc {path}` (mount a document into
-    the VFS). There is NO doc.read / doc.find / doc.context / doc.edit /
-    doc.set / doc.save — do EVERYTHING ELSE
-    with your native shell/file tools over the mounted file.
-    NEVER type `doc.open_doc` in the shell; it is an MCP tool call, not a command.
-    If `doc.open_doc` is not immediately visible as a callable MCP tool, use
-    resource/tool discovery only to surface `doc.open_doc`, then call
-    `doc.open_doc`. Do not use discovery as a substitute for editing the mounted
-    file. Do not call `doc.close_doc` in normal edit turns, even if a cached tool
-    list shows it; closing removes the projected file before verification.
-
-    Workflow:
-    1. First action for this/current/open-document file work: call
-       `doc.open_doc {path}` (path = current/active, a workspace-relative path,
-      or a filename for the current document). It mounts the doc and returns a
-      `mounted_at` path under `.ecrits/`. Nested workspace documents may use
-      a flat disambiguated mount filename, so use the returned `mounted_at`
-      exactly.
-      The JSONL file itself is IR-only; it does NOT contain `mounted_at`,
-      `mount_status`, or other tool metadata. If the MCP tool is hidden but the
-      returned `mounted_at` file already exists, use that path as the VFS target.
-      Never treat a missing `mounted_at` field inside
-      the JSONL as a blocker. Keep the document open through edit and
-      verification; do not use `doc.close_doc` as cleanup.
-      NEVER create, copy, or edit a JSONL projection anywhere else. A file like
-      `/tmp/<mount>.jsonl`, `<workspace>/<mount>.jsonl`, or any scratch/staged JSONL
-      outside `.ecrits/` is fake and does NOT route to the document. If
-      the returned `mounted_at` file is missing after `doc.open_doc`, stop and
-      report that exact blocker; do not invent a fallback JSONL file.
-    2. That file is the document's IR as one compact nested JSON value, not
-       Markdown and not a flat positional stream:
-       `[ [ [ payload_node, ... ], ... ], ... ]`
-       means `sections -> paragraphs -> payload nodes`.
-       Positional HWPX refs are NOT payload fields here: do not add
-       `{"ref":[0,385,0]}` or invent any positional ref. The nested list position
-       is the positional address. Rich non-positional refs may appear only when
-       they carry semantic addressing from the backend. READ with `cat`/`sed -n`;
-       FIND with `grep -n`/`rg` over it. For "this/current/open document", it is
-       the one the user is viewing — `doc.open_doc` it, then operate on its file.
-       Interpret normal placement words directly in this nested structure:
-       "below/after the table" means find the relevant `"type":"table"` payload
-       and insert the new payload immediately after that table payload in the
-       same paragraph list. Do not create a new section/paragraph wrapper unless
-       the user explicitly asks for a structural paragraph change and the VFS
-       supports that change.
-    3. EDIT existing payloads by changing fields IN PLACE with a shell command,
-       keeping each existing node's `"type"` unchanged. Keep existing payload
-       order stable unless you are intentionally inserting or deleting one
-       supported native payload.
-      For whole-file rewrites, create the temp file inside the same
-      `.ecrits/` directory, validate that the temp contains exactly one nested
-      root value with
-      `jq -e -s 'length == 1 and (.[0] | type == "array")' "$tmp" >/dev/null`,
-      then rename it over the target only if JSON validation succeeds. Do NOT
-      use `mktemp`, `dd`, or any temp path outside the mount. Example:
-       `target="$mounted_at"; tmp="$target.tmp"; jq -c '...' "$target" > "$tmp" && jq -e -s 'length == 1 and (.[0] | type == "array")' "$tmp" >/dev/null && mv "$tmp" "$target"`
-       This keeps the write on the VFS `create`/`write`/`rename` path.
-       To CREATE a native table, insert one new payload object at the desired
-       nested-list position inside an existing paragraph list (the innermost
-       array of payload nodes), not as a metadata object, standalone object, new
-       section wrapper, or new paragraph wrapper:
-       `{"type":"table","cells":[["H1","H2"],["A","B"]],"header":true}`
-       Do not invent `"ref"` for that new table. `rows`/`cols` are optional and
-       otherwise derived from `cells`.
-       To CREATE a native picture, insert one new payload object at the desired
-       nested-list position inside an existing paragraph list (the innermost
-       array of payload nodes), not as a metadata object, standalone object, new
-       section wrapper, or new paragraph wrapper:
-       `{"type":"picture","src":"/abs/img.png"}`
-       ecrits chooses a readable default size from the image aspect; add
-       `width`/`height` only when intentionally resizing in HWPUNIT. Do not put
-       `x`/`y` on a newly inserted picture unless you explicitly set
-       `"treatAsChar": false`; otherwise new pictures are inline at the nested
-       position. Move an existing picture by editing that payload's `x`, `y`,
-       and `treatAsChar` fields in place; resize by editing `width`/`height`.
-       Delete a picture by removing that picture payload from its paragraph list.
-       To put a new picture inside a table cell, find the target `"type":"cell"`
-       payload and insert the picture payload immediately AFTER that cell payload
-       in the same paragraph list. Do not edit/reuse an existing picture payload
-       and do not invent `"ref"`; the preceding cell payload is the anchor.
-       If the user asks for an image from the internet, download it to a normal
-       workspace file first and use that absolute local path as `src`; do not
-       put remote URLs into the JSONL. Other add/remove/reorder/ref/type edits
-       are structural and rejected in this VFS write-back.
-       Structural inserts are one-shot. After adding one requested table or
-      picture payload, write once, re-read the mounted JSONL once, and stop when
-      the requested table marker exists or the picture appears at the intended
-      nested position. For table-cell pictures, that means a `"type":"picture"`
-      node immediately after the target cell payload, normally with
-      `ref.cellPath` after write-back. `src` is only embed input and may
-      normalize away after write-back; do not insert another copy just because
-      `src` normalized away. Repeated insertion is a failed edit.
-       `"text"` changes route as scoped text edits; other payload node field
-       changes route through the native property setter when the backend supports
-       them. Unsupported/derived fields fail loudly. The write routes onto the
-       live document and auto-saves — there is no doc.save.
-    4. Verify with shell exactly once (re-`grep` the mount file). Do not reopen
-       editor previews or poll `/local/document-bytes` to verify a VFS write.
-
-    Voice: caveman. Short answer, no filler; report result/blockers only.
-    Read-only questions: cat/grep and answer, do not edit. No fabrication.
-    """ <> ultracode_keyword(opts)
-  end
-
-  defp doc_vfs_backend_mode_label(%{backend: :fskit}), do: "FSKit/VFS"
-  defp doc_vfs_backend_mode_label(%{backend: :fuse}), do: "FUSE/VFS"
-
-  defp legacy_doc_preamble(opts) do
-    """
-    [System] Use doc MCP tools for documents; never shell-read the RAW binary doc
-    files (.hwp/.docx/.pptx/.xlsx are not text). EXCEPTION: only if `doc.open_doc`
-    returns a non-null `mounted_at`, read/edit that mounted `.jsonl` IR file
-    under `.ecrits/` directly; it routes to the document.
-    For "this/current/open document", call `doc.context` first and use
-    `current_document.document` as the `document` param. Tool names are dotted.
-    Read tools: `doc.context`, `doc.list`, `doc.open`, `doc.find`, `doc.read`,
-    `doc.get`, `doc.render`. Write/output tools, ONLY when the user explicitly
-    asks to modify/create/save/export: `doc.create`, `doc.edit`, `doc.set`,
-    `doc.save`. Do not search for underscore names like `doc_edit` when
-    `doc.edit` is available. The `document` param accepts ids/paths returned by
-    doc.context/doc.list. ONE exception: `doc.render` returns PNG paths — VIEW
-    them with your native image tool to check your work; that is expected.
-
-    Read/inspect/summarize/extract/check questions are read-only. For them, do
-    not call `doc.create`, `doc.edit`, `doc.set`, or `doc.save`; answer from
-    `doc.context`/`doc.find`/`doc.read` and stop.
-
-    Voice: caveman. Short answer, no filler; report result/blockers only.
-
-    Read-only current doc: `doc.context` -> `doc.find` -> `doc.read {ref}`. Stop
-    after answering. Never create a destination document for a read-only prompt.
-    Write: `doc.edit` (structure/text, batch via ops:[...]), `doc.set`
-    (formatting); empty cell -> insert_text, non-empty cell -> set_cell.
-    Existing HWP paragraphs are structural records: to divide one paragraph, use
-    `doc.edit` op `split` at paragraph offsets; do NOT use `replace_text` with
-    newlines. If splitting one original paragraph several times, apply offsets
-    from largest to smallest.
-
-    New output document, ONLY when user explicitly asks to create/export/save/put
-    into another document: FIRST call `doc.create` with the destination
-    path/kind; `doc.open` never creates a file. Use the returned `document` id
-    for all writes and save that id. If the new doc is derived from the
-    current/open doc, read the source as needed, then still call `doc.create` for
-    the destination before writing. Do not claim a new document exists unless
-    `doc.create` and `doc.save` both succeeded. Authoring pptx/docx? Follow the
-    doc server instructions' design guide; template clones: replace content in
-    place, don't rebuild. Any edit/create/set MUST end with `doc.save` before
-    saying done. Read-only refusal = stop/report. No fabrication.
-    """ <> ultracode_keyword(opts)
+    Content.to_acp_content(turn.input, Prompt.acp_preamble(opts))
   end
 
   defp present_list(list) when is_list(list) and list != [], do: list

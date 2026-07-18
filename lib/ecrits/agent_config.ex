@@ -1,5 +1,5 @@
 defmodule Ecrits.AgentConfig do
-  @moduledoc "Embedded state model for the active local-agent configuration."
+  @moduledoc "Embedded state model for the active agent configuration."
 
   use Ecto.Schema
 

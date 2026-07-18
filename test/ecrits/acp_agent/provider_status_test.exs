@@ -5,9 +5,9 @@ defmodule Ecrits.AcpAgent.ProviderStatusTest do
 
   setup do
     original_path = System.get_env("PATH")
-    original_ui_config = Application.get_env(:ecrits, :local_agent_ui)
+    original_ui_config = Application.get_env(:ecrits, :agent_ui)
 
-    Application.delete_env(:ecrits, :local_agent_ui)
+    Application.delete_env(:ecrits, :agent_ui)
 
     on_exit(fn ->
       if is_nil(original_path),
@@ -15,9 +15,9 @@ defmodule Ecrits.AcpAgent.ProviderStatusTest do
         else: System.put_env("PATH", original_path)
 
       if is_nil(original_ui_config) do
-        Application.delete_env(:ecrits, :local_agent_ui)
+        Application.delete_env(:ecrits, :agent_ui)
       else
-        Application.put_env(:ecrits, :local_agent_ui, original_ui_config)
+        Application.put_env(:ecrits, :agent_ui, original_ui_config)
       end
     end)
   end
@@ -28,6 +28,13 @@ defmodule Ecrits.AcpAgent.ProviderStatusTest do
 
     assert {:ok, claude} = AcpAgent.provider_setup("claude")
     assert claude.install_command == "curl -fsSL https://claude.ai/install.sh | bash"
+  end
+
+  test "ACP sessions receive only the existing doc MCP server" do
+    agent_id = "permission-boundary-agent"
+
+    assert [%{"name" => "doc", "url" => url}] = AcpAgent.mcp_servers(agent_id)
+    assert URI.parse(url).path == "/mcp/doc-tools/#{agent_id}"
   end
 
   @tag :tmp_dir

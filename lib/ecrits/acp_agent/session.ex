@@ -8,7 +8,7 @@ defmodule Ecrits.AcpAgent.Session do
   provider (`ExMCP.ACP.Adapters.Codex` / `Claude`), translates the agent's
   streamed `session/update` notifications into the normalized chat-rail events,
   and broadcasts them on
-  `local_agent:<session_id>` (the contract the workspace LiveView consumes).
+  `agent:<session_id>` (the contract the workspace LiveView consumes).
 
   The session passes the `doc.*` MCP server to `new_session(..., mcp_servers:)`
   so the agent (codex AND claude, over ACP) discovers and calls those tools; the
@@ -26,21 +26,21 @@ defmodule Ecrits.AcpAgent.Session do
   fresh app-server process. Queued follow-ups are left queued on a normal cancel;
   only `flush_queue/2` promotes a queued turn immediately.
 
-  ## AgentLive boundary (Phase 5)
+  ## Session contract
 
-  This is the concrete **AgentLive** — see `Ecrits.Agent.AgentLive` for the
-  extraction-boundary contract (the generic transcript / queue / title / topic
-  mechanics this module implements, vs. the ACP-provider-specific turn driver in
-  `AcpStream`). A `use Ecrits.Agent.AgentLive` behaviour extraction is
-  deliberately deferred to avoid restructuring this GenServer's live `handle_*`
-  surface; this module already satisfies that contract function-for-function.
+  This is the concrete `Ecrits.Agent.SessionContract` implementation: generic
+  transcript / queue / title / topic mechanics live here, while `AcpStream`
+  owns the ACP-provider-specific turn driver. It is not a Phoenix LiveView.
   """
 
   use GenServer
 
+  @behaviour Ecrits.Agent.SessionContract
+
+  alias Ecrits.Agent
   alias Ecrits.Context
   alias Ecrits.AcpAgent.AcpStream
-  alias Ecrits.AcpAgent.Prompt
+  alias Ecrits.AcpAgent.Content
   alias ExMCP.ACP.Client
 
   @registry Ecrits.AcpAgent.SessionRegistry
@@ -51,6 +51,16 @@ defmodule Ecrits.AcpAgent.Session do
   # stream's own `safe_disconnect/1` waits up to 2s on `GenServer.stop`, so allow
   # a little more so the graceful path normally wins.
   @cancel_grace_ms 5_000
+  @edit_preview_max 5_000
+  @dangling_file_operation_reason "Turn ended before the file operation finished."
+  @persisted_adapter_opt_keys [
+    :model,
+    :reasoning_effort,
+    :sandbox,
+    :permission_mode,
+    :approval_policy,
+    :access_control
+  ]
 
   # ── public API ────────────────────────────────────────────────────
 
@@ -93,21 +103,69 @@ defmodule Ecrits.AcpAgent.Session do
   @spec tool_context(pid()) :: %{
           active_doc: String.t() | nil,
           agent_id: String.t(),
-          workspace_root: String.t() | nil
+          instance_id: String.t(),
+          workspace_root: String.t() | nil,
+          turn_id: String.t() | nil
         }
   def tool_context(pid) when is_pid(pid), do: GenServer.call(pid, :tool_context)
 
+  @doc "Fetch this live turn's durable mounted-document tool sequence."
+  @spec doc_vfs_sequence(pid(), String.t()) :: {:ok, map() | nil} | {:error, :turn_mismatch}
+  def doc_vfs_sequence(pid, turn_id) when is_pid(pid) and is_binary(turn_id),
+    do: GenServer.call(pid, {:doc_vfs_sequence, turn_id})
+
+  @doc "Replace this live turn's durable mounted-document tool sequence."
+  @spec put_doc_vfs_sequence(pid(), String.t(), map()) :: :ok | {:error, :turn_mismatch}
+  def put_doc_vfs_sequence(pid, turn_id, sequence)
+      when is_pid(pid) and is_binary(turn_id) and is_map(sequence),
+      do: GenServer.call(pid, {:put_doc_vfs_sequence, turn_id, sequence})
+
+  @impl true
   def send_turn(pid, ctx, input, opts \\ []),
     do: GenServer.call(pid, {:send_turn, ctx, input, opts})
 
   @doc """
   Re-Enter on a queued message (Phase 5 FIFO queue): cancel the in-flight turn
-  and run the queue head NOW instead of waiting for the running turn to finish.
+  and promote the queue head after that turn's workspace finalization ack.
   `{:error, :empty_queue}` when nothing is queued.
   """
-  def flush_queue(pid, ctx), do: GenServer.call(pid, {:flush_queue, ctx})
+  @impl true
+  def flush_queue(pid, ctx) do
+    with_current_turn_lock(pid, fn _turn_id -> GenServer.call(pid, {:flush_queue, ctx}) end)
+  end
 
-  def cancel(pid, ctx, turn_id \\ nil), do: GenServer.call(pid, {:cancel, ctx, turn_id})
+  @impl true
+  def cancel(pid, ctx, turn_id \\ nil) do
+    with_requested_turn_lock(pid, turn_id, fn locked_turn_id ->
+      requested_turn_id = locked_turn_id || :no_current_turn
+      GenServer.call(pid, {:cancel, ctx, requested_turn_id})
+    end)
+  end
+
+  @doc false
+  def prepare_restart(pid, workspace_root) when is_pid(pid) and is_binary(workspace_root) do
+    with_current_turn_lock(pid, fn _turn_id ->
+      GenServer.call(pid, {:prepare_restart, workspace_root})
+    end)
+  end
+
+  @doc false
+  def with_turn_commit(pid, identity, fun)
+      when is_pid(pid) and is_map(identity) and is_function(fun, 0) do
+    case Map.get(identity, :turn_id) do
+      turn_id when is_binary(turn_id) and turn_id != "" ->
+        :global.trans(turn_commit_lock(pid, turn_id), fn ->
+          if current_turn_identity?(pid, identity), do: fun.(), else: {:error, :turn_invalidated}
+        end)
+
+      _missing ->
+        {:error, :incomplete_turn_identity}
+    end
+  end
+
+  @doc false
+  def reconcile_workspace(pid, workspace_root) when is_pid(pid) and is_binary(workspace_root),
+    do: GenServer.call(pid, {:reconcile_workspace, workspace_root})
 
   @doc """
   Display-only snapshot for the workspace Session / chat-rail repaint after a
@@ -116,9 +174,15 @@ defmodule Ecrits.AcpAgent.Session do
   the derived/renamed chat title. The conversation itself stays provider-owned
   (codex `thread/resume`), so this is purely the visible history + header.
   """
+  @impl true
   def agent_snapshot(pid) when is_pid(pid), do: GenServer.call(pid, :agent_snapshot)
 
+  @doc false
+  @spec durable_snapshot(pid()) :: map()
+  def durable_snapshot(pid) when is_pid(pid), do: GenServer.call(pid, :durable_snapshot)
+
   @doc "The current chat title (nil/empty when no first-prompt title yet)."
+  @impl true
   def title(pid) when is_pid(pid), do: GenServer.call(pid, :title)
 
   @doc """
@@ -135,6 +199,7 @@ defmodule Ecrits.AcpAgent.Session do
   the first-prompt auto-title never overrides it afterwards, and broadcasts a
   `:thread_title` event so every attached LiveView updates its header.
   """
+  @impl true
   def rename(pid, title) when is_pid(pid) and is_binary(title),
     do: GenServer.call(pid, {:rename, title})
 
@@ -180,7 +245,8 @@ defmodule Ecrits.AcpAgent.Session do
     GenServer.call(pid, {:update_options, adapter_opts})
   end
 
-  def topic(id), do: "local_agent:" <> id
+  @impl true
+  def topic(id), do: "agent:" <> id
 
   # ── GenServer ─────────────────────────────────────────────────────
 
@@ -188,13 +254,27 @@ defmodule Ecrits.AcpAgent.Session do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
+    id = Keyword.fetch!(opts, :id)
+    restored = normalize_durable_restore(Keyword.get(opts, :durable_restore), id)
+    adapter_opts = merge_restored_adapter_opts(Keyword.get(opts, :adapter_opts, []), restored)
+    transcript = restored_transcript(restored)
+    title = Map.get(restored, :title)
+
     {:ok,
      %{
-       id: Keyword.fetch!(opts, :id),
+       id: id,
+       # A durable agent id survives provider restarts, but this GenServer does
+       # not. Every emitted event carries this immutable process incarnation so
+       # attached rails can reject delayed events from the process it replaced.
+       instance_id: Ecto.UUID.generate(),
+       # One process-owned cursor orders every PubSub event against snapshots.
+       # A joining rail can replay the snapshot and discard already-covered
+       # queued events without guessing from timestamps or event contents.
+       event_seq: 0,
        owner_id: owner_id(Keyword.get(opts, :ctx)),
        provider: Keyword.get(opts, :provider),
        exmcp_adapter: Keyword.fetch!(opts, :exmcp_adapter),
-       adapter_opts: Keyword.get(opts, :adapter_opts, []),
+       adapter_opts: adapter_opts,
        workspace_root: Keyword.get(opts, :workspace_root),
        # Workspace-relative path of the doc the user is viewing. This is exposed
        # through doc.context so "this document" turns get the handle from MCP
@@ -211,11 +291,28 @@ defmodule Ecrits.AcpAgent.Session do
        # The provider's session/thread id, captured on turn 1 and RESUMED on
        # turns 2+ so the conversation keeps cross-turn memory. `nil` until the
        # first turn establishes it.
-       provider_session_id: nil,
+       provider_session_id: Map.get(restored, :provider_session_id),
        acp_client: nil,
        acp_client_key: nil,
        acp_client_ref: nil,
        current: nil,
+       # Explicit cancellation is a two-stage terminal path. The cancelled
+       # turn's task must be observed dead before workspace finalization can
+       # begin, otherwise its late cleanup can race the next turn's edits. The
+       # fence retains the exact task monitor and requested post-finalization
+       # queue mode until that DOWN arrives.
+       cancellation_fence: nil,
+       # A terminal turn is not fully closed until the workspace coordinator
+       # acknowledges the exact {agent, process instance, turn} finalization.
+       # While this barrier is present every new send remains in the FIFO.
+       terminal_finalization: nil,
+       # Natural completion/failure cannot mutate `current` from this GenServer
+       # while a document commit owns the per-turn global lock: the commit may
+       # call back into `tool_context/1`, which would deadlock if this process
+       # waited for that lock. A short-lived external owner acquires the lock,
+       # asks this process to apply the terminal state, releases it, and only
+       # then permits workspace finalization / FIFO advancement.
+       terminal_transition: nil,
        # FIFO queue of messages received WHILE a turn was in flight (Phase 5). A
        # mid-turn send ENQUEUES instead of cancelling the running turn; the head
        # drains automatically when the running turn reaches a terminal state. A
@@ -228,47 +325,89 @@ defmodule Ecrits.AcpAgent.Session do
        # refresh can repaint the prior bubbles. codex `thread/resume` restores the
        # agent's memory but does NOT re-stream past messages, so without this the
        # re-attached pane is blank. Each entry: %{turn_id, user, agent, items}.
-       transcript: [],
+       transcript: Enum.reverse(transcript),
        # Codex (unlike the `pi` adapter) never emits a session/thread title over
        # ACP, so a fresh conversation would stay "New Chat" forever. We derive a
        # title from the FIRST turn's prompt and emit it once; this flag gates that.
-       title_emitted?: false,
+       title_emitted?: transcript != [] or not blank?(title),
        # The current chat title, RETAINED on the durable agent so a re-attach
        # (browser refresh) can recover it from `agent_snapshot/1` even though
        # codex never re-streams it. `nil` until the first prompt derives one (or a
        # user rename sets it). `title_user_edited?` pins a manual rename so the
        # first-prompt auto-title never clobbers it.
-       title: nil,
-       title_user_edited?: false
+       title: title,
+       title_user_edited?: Map.get(restored, :title_user_edited?, false)
      }}
   end
 
   @impl true
   def handle_call(:snapshot, _from, state) do
+    state = state |> ensure_instance_id() |> ensure_event_seq()
     {:reply, {:ok, public_snapshot(state)}, state}
   end
 
   def handle_call(:agent_snapshot, _from, state) do
+    state = state |> ensure_instance_id() |> ensure_event_seq() |> normalize_transcript()
     {:reply, agent_snapshot_payload(state), state}
   end
 
+  def handle_call(:durable_snapshot, _from, state) do
+    state = normalize_transcript(state)
+    {:reply, durable_snapshot_payload(state), state}
+  end
+
   def handle_call(:tool_context, _from, state) do
+    state = ensure_instance_id(state)
     context = current_tool_context(state)
 
     {:reply,
      %{
        active_doc: context.pool_document_id,
        agent_id: state.id,
+       instance_id: state.instance_id,
        workspace_root: state.workspace_root,
        # Map.get: tolerate pre-field state maps on hot-reloaded sessions.
        document_path: context.document_path,
+       turn_id: state.current && state.current.turn_id,
        # Access modes map to sandbox: read-only → "read-only"; ask /
        # full-workspace → "workspace-write" (see workspace_live.ex
-       # local_agent_access_control/1). So sandbox == "read-only" ⟺ the user
+       # agent_access_control/1). So sandbox == "read-only" ⟺ the user
        # put this agent in read-only mode; the doc.* MCP tools (which run
        # server-side and bypass the CLI sandbox) consult this to gate writes.
        read_only: Keyword.get(state.adapter_opts, :sandbox) == "read-only"
      }, state}
+  end
+
+  def handle_call(:turn_lock_id, _from, state) do
+    state = ensure_terminal_transition(state)
+
+    turn_id =
+      case state.current do
+        %{turn_id: turn_id} -> turn_id
+        nil -> state.terminal_transition && state.terminal_transition.turn_id
+      end
+
+    {:reply, turn_id, state}
+  end
+
+  def handle_call({:doc_vfs_sequence, turn_id}, _from, state) do
+    case state.current do
+      %{turn_id: ^turn_id} = current ->
+        {:reply, {:ok, Map.get(current, :doc_vfs_sequence)}, state}
+
+      _other ->
+        {:reply, {:error, :turn_mismatch}, state}
+    end
+  end
+
+  def handle_call({:put_doc_vfs_sequence, turn_id, sequence}, _from, state) do
+    case state.current do
+      %{turn_id: ^turn_id} = current ->
+        {:reply, :ok, %{state | current: Map.put(current, :doc_vfs_sequence, sequence)}}
+
+      _other ->
+        {:reply, {:error, :turn_mismatch}, state}
+    end
   end
 
   def handle_call(:title, _from, state) do
@@ -278,7 +417,8 @@ defmodule Ecrits.AcpAgent.Session do
   def handle_call({:rename, title}, _from, state) do
     title = String.trim(title)
     state = %{state | title: title, title_user_edited?: true, title_emitted?: true}
-    {:reply, :ok, emit(state, %{type: :thread_title, title: title})}
+    state = state |> emit(%{type: :thread_title, title: title}) |> persist_durable_state()
+    {:reply, :ok, state}
   end
 
   def handle_call({:set_generated_title, title}, _from, state) do
@@ -291,15 +431,17 @@ defmodule Ecrits.AcpAgent.Session do
         %{state | title: title, title_emitted?: true}
       end
 
-    {:reply, :ok, state}
+    {:reply, :ok, persist_durable_state(state)}
   end
 
   def handle_call(:transcript, _from, state) do
+    state = normalize_transcript(state)
     {:reply, Enum.reverse(state.transcript), state}
   end
 
   def handle_call({:append_transcript_item, item}, _from, state) when is_map(item) do
-    {:reply, :ok, append_transcript_item_to_state(state, item)}
+    state = state |> append_transcript_item_to_state(item) |> persist_durable_state_async()
+    {:reply, :ok, state}
   end
 
   def handle_call({:update_options, new_opts}, _from, state) do
@@ -311,10 +453,10 @@ defmodule Ecrits.AcpAgent.Session do
 
     merged = Keyword.merge(state.adapter_opts, adapter_opts)
 
-    {:reply, :ok, %{state | adapter_opts: merged}}
+    {:reply, :ok, persist_durable_state(%{state | adapter_opts: merged})}
   end
 
-  def handle_call({:send_turn, ctx, raw_input, opts}, _from, state) do
+  def handle_call({:send_turn, ctx, raw_input, opts}, from, state) do
     cond do
       not authorized?(ctx, state) ->
         {:reply, {:error, :forbidden}, state}
@@ -329,14 +471,36 @@ defmodule Ecrits.AcpAgent.Session do
         # Normalize the input at the boundary (Phase 5 multi-modal seam): a bare
         # string stays a bare string (the byte-for-byte-unchanged legacy path), a
         # block list is validated. A malformed multi-modal send fails fast here.
-        case Prompt.normalize(raw_input) do
-          {:ok, input} -> start_turn(input, turn_extras(state, opts), ensure_queue(state))
-          {:error, reason} -> {:reply, {:error, {:invalid_input, reason}}, state}
+        case Content.normalize(raw_input) do
+          {:ok, input} ->
+            state =
+              state
+              |> ensure_queue()
+              |> ensure_cancellation_fence()
+              |> ensure_terminal_finalization()
+              |> ensure_terminal_transition()
+
+            extras =
+              state
+              |> turn_extras(opts)
+              |> Map.put(:workspace_registration_mode, workspace_registration_mode(state, from))
+
+            start_turn(input, extras, state)
+
+          {:error, reason} ->
+            {:reply, {:error, {:invalid_input, reason}}, state}
         end
     end
   end
 
   def handle_call({:cancel, ctx, turn_id}, _from, state) do
+    state =
+      state
+      |> ensure_queue()
+      |> ensure_cancellation_fence()
+      |> ensure_terminal_finalization()
+      |> ensure_terminal_transition()
+
     cond do
       not authorized?(ctx, state) ->
         {:reply, {:error, :forbidden}, state}
@@ -356,29 +520,71 @@ defmodule Ecrits.AcpAgent.Session do
         cancelled_turn_id = state.current.turn_id
         cancelled_current = state.current
 
-        if state.current.task_pid do
-          send(state.current.task_pid, :acp_cancel_turn)
-          Process.send_after(self(), {:force_kill_turn, state.current.task_pid}, @cancel_grace_ms)
-        end
-
         state =
           state
-          |> cancel_acp_client_turn()
-          |> close_acp_client()
-          |> record_transcript_turn(cancelled_current)
-          |> emit(%{type: :turn_cancelled, turn_id: cancelled_turn_id})
-          |> Map.put(:current, nil)
+          |> cancel_current_turn(cancelled_current, :hold)
 
         {:reply, {:ok, %{id: cancelled_turn_id, session_id: state.id, status: :cancelled}}, state}
     end
   end
 
-  # Re-Enter on a queued message (Phase 5): flush the FIFO head NOW by cancelling
-  # the in-flight turn and launching the head immediately, instead of waiting for
-  # the running turn to finish. No-op when the queue is empty. When no turn is in
-  # flight the head simply launches.
-  def handle_call({:flush_queue, ctx}, _from, state) do
-    state = ensure_queue(state)
+  def handle_call({:prepare_restart, workspace_root}, _from, state) do
+    state =
+      state
+      |> Map.put(:workspace_root, workspace_root)
+      |> ensure_instance_id()
+      |> ensure_queue()
+      |> ensure_cancellation_fence()
+      |> ensure_terminal_finalization()
+      |> ensure_terminal_transition()
+
+    cond do
+      current = state.current ->
+        key = {state.id, state.instance_id, current.turn_id}
+        {:reply, {:pending, key}, cancel_current_turn(state, current, :hold)}
+
+      transition = state.terminal_transition ->
+        key = {state.id, state.instance_id, transition.turn_id}
+        transition = %{transition | mode: :hold}
+        {:reply, {:pending, key}, %{state | terminal_transition: transition}}
+
+      fence = state.cancellation_fence ->
+        key = {state.id, state.instance_id, fence.turn_id}
+        {:reply, {:pending, key}, %{state | cancellation_fence: %{fence | mode: :hold}}}
+
+      pending = state.terminal_finalization ->
+        state = %{state | terminal_finalization: %{pending | mode: :hold}}
+        {:reply, {:pending, pending.key}, renotify_terminal_finalization(state)}
+
+      true ->
+        {:reply, :ready, state}
+    end
+  end
+
+  def handle_call({:reconcile_workspace, workspace_root}, _from, state) do
+    state =
+      state
+      |> Map.put(:workspace_root, workspace_root)
+      |> ensure_instance_id()
+      |> ensure_cancellation_fence()
+      |> ensure_terminal_finalization()
+      |> ensure_terminal_transition()
+      |> renotify_active_turn_owner()
+      |> renotify_terminal_finalization()
+
+    {:reply, :ok, state}
+  end
+
+  # Re-Enter on a queued message (Phase 5): cancel the in-flight turn and mark
+  # the FIFO head to launch after the exact terminal-finalization ack. When no
+  # terminal barrier is pending the head launches immediately.
+  def handle_call({:flush_queue, ctx}, from, state) do
+    state =
+      state
+      |> ensure_queue()
+      |> ensure_cancellation_fence()
+      |> ensure_terminal_finalization()
+      |> ensure_terminal_transition()
 
     cond do
       not authorized?(ctx, state) ->
@@ -390,29 +596,24 @@ defmodule Ecrits.AcpAgent.Session do
       true ->
         # Gracefully cancel the in-flight turn (same teardown as a normal cancel)
         # so the conversation can resume, record it, drop the durable client, then
-        # drain the queue head on a fresh app-server process.
+        # drain the queue head on a fresh client only after finalization.
         state =
           case state.current do
-            %{turn_id: cancelled_turn_id} = current ->
-              if current.task_pid do
-                send(current.task_pid, :acp_cancel_turn)
-                Process.send_after(self(), {:force_kill_turn, current.task_pid}, @cancel_grace_ms)
-              end
-
+            %{turn_id: _cancelled_turn_id} = current ->
               state
-              |> cancel_acp_client_turn()
-              |> close_acp_client()
-              |> record_transcript_turn(current)
-              |> emit(%{type: :turn_cancelled, turn_id: cancelled_turn_id})
-              |> Map.put(:current, nil)
+              |> cancel_current_turn(current, :drain)
 
             nil ->
-              state
+              request_queue_drain(state, workspace_registration_mode(state, from))
           end
-          |> drain_queue()
 
-        flushed = state.current && state.current.turn_id
-        {:reply, {:ok, %{id: flushed, session_id: state.id, status: :running}}, state}
+        {flushed, status} =
+          case state.current do
+            %{turn_id: turn_id} -> {turn_id, :running}
+            nil -> {state.queue |> List.first() |> Map.fetch!(:turn_id), :queued}
+          end
+
+        {:reply, {:ok, %{id: flushed, session_id: state.id, status: status}}, state}
     end
   end
 
@@ -434,6 +635,20 @@ defmodule Ecrits.AcpAgent.Session do
       context: turn_context(state, opts)
     }
   end
+
+  # A send delegated by the Workspace Session cannot synchronously call that
+  # same GenServer back while it is waiting for this handle_call reply. Erlang
+  # signal ordering still makes the async registration durable before our reply
+  # reaches Workspace. Direct callers use the synchronous path so a caller
+  # cannot kill this Session and race a replacement attach ahead of ownership
+  # registration.
+  defp workspace_registration_mode(state, {caller, _tag}) when is_pid(caller) do
+    if Ecrits.Workspace.Session.whereis(state.workspace_root) == caller,
+      do: :async,
+      else: :sync
+  end
+
+  defp workspace_registration_mode(_state, _from), do: :sync
 
   @impl true
   # The durable ACP client is started with this Session as its event listener.
@@ -487,14 +702,7 @@ defmodule Ecrits.AcpAgent.Session do
 
   def handle_info({:finish_turn_done, turn_id}, state) do
     with %{turn_id: ^turn_id} = current <- state.current do
-      state =
-        state
-        |> record_transcript_turn(current)
-        |> emit(%{type: :turn_completed, turn_id: turn_id, text: current.text})
-        |> Map.put(:current, nil)
-        |> drain_queue()
-
-      {:noreply, state}
+      {:noreply, begin_terminal_transition(state, current, :completed)}
     else
       _ -> {:noreply, state}
     end
@@ -502,33 +710,134 @@ defmodule Ecrits.AcpAgent.Session do
 
   def handle_info({:turn_failed, turn_id, reason}, state) do
     with %{turn_id: ^turn_id} = current <- state.current do
-      state =
-        state
-        |> close_acp_client()
-        |> record_transcript_turn(current)
-        |> emit(%{type: :turn_failed, turn_id: turn_id, reason: inspect(reason)})
-        |> Map.put(:current, nil)
-        |> drain_queue()
-
-      {:noreply, state}
+      {:noreply, begin_terminal_transition(state, current, {:failed, reason, :close})}
     else
       _ -> {:noreply, state}
     end
   end
 
-  # Bounded fallback for a cancelled turn: if the per-turn task is still alive
-  # after the grace window (its `AcpStream` cleanup wedged), hard-kill it so it
-  # cannot linger. By now `current` has already been cleared, so this never
-  # affects a turn that started after the cancel.
-  def handle_info({:force_kill_turn, task_pid}, state) do
-    state =
-      if is_pid(task_pid) and Process.alive?(task_pid) do
-        Process.exit(task_pid, :kill)
-        close_acp_client(state)
-      else
-        state
-      end
+  def handle_info({:terminal_turn_lock_acquired, token, lock_pid}, state)
+      when is_reference(token) and is_pid(lock_pid) do
+    state = ensure_terminal_transition(state)
 
+    case state.terminal_transition do
+      %{token: ^token, lock_pid: ^lock_pid, phase: :waiting} = transition ->
+        case apply_terminal_transition(state, transition) do
+          {:ok, state} ->
+            transition = %{transition | phase: :applied}
+            send(lock_pid, {:terminal_turn_state_applied, token, :applied})
+            {:noreply, %{state | terminal_transition: transition}}
+
+          :stale ->
+            transition = %{transition | phase: :discarded}
+            send(lock_pid, {:terminal_turn_state_applied, token, :discarded})
+            {:noreply, %{state | terminal_transition: transition}}
+        end
+
+      _duplicate_or_stale ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:terminal_turn_lock_released, token, lock_pid, result}, state)
+      when is_reference(token) and is_pid(lock_pid) do
+    state = ensure_terminal_transition(state)
+
+    case state.terminal_transition do
+      %{token: ^token, lock_pid: ^lock_pid, phase: :applied} = transition
+      when result == :applied ->
+        {:noreply, finish_released_terminal_transition(state, transition)}
+
+      %{token: ^token, lock_pid: ^lock_pid, phase: :discarded}
+      when result == :discarded ->
+        {:noreply, %{state | terminal_transition: nil}}
+
+      %{token: ^token, lock_pid: ^lock_pid, phase: :waiting} ->
+        {:noreply, restart_terminal_transition_lock(state)}
+
+      _duplicate_or_stale ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {:guarded_turn_worker_started, turn_id, guardian_pid, worker_pid},
+        state
+      )
+      when is_binary(turn_id) and is_pid(guardian_pid) and is_pid(worker_pid) do
+    cond do
+      match?(%{turn_id: ^turn_id, task_pid: ^guardian_pid}, state.current) ->
+        worker_ref = Process.monitor(worker_pid)
+
+        current =
+          state.current
+          |> Map.put(:worker_pid, worker_pid)
+          |> Map.put(:worker_ref, worker_ref)
+
+        {:noreply, %{state | current: current}}
+
+      match?(
+        %{turn_id: ^turn_id, task_pid: ^guardian_pid},
+        Map.get(state, :cancellation_fence)
+      ) ->
+        worker_ref = Process.monitor(worker_pid)
+        send(guardian_pid, :acp_cancel_turn)
+
+        fence =
+          state.cancellation_fence
+          |> Map.put(:worker_pid, worker_pid)
+          |> Map.put(:worker_ref, worker_ref)
+          |> Map.put(:worker_down?, false)
+
+        {:noreply, %{state | cancellation_fence: fence}}
+
+      true ->
+        {:noreply, state}
+    end
+  end
+
+  # Bounded fallback for a cancelled turn: if the exact fenced task is still
+  # alive after the grace window, hard-kill only that task. In particular this
+  # handler must never close `state.acp_client`: after the fence clears that
+  # field may belong to a newer turn.
+  def handle_info({:force_kill_turn, token, task_pid}, state) do
+    state = ensure_cancellation_fence(state)
+
+    case state.cancellation_fence do
+      %{token: ^token, task_pid: ^task_pid} = fence ->
+        if is_pid(task_pid) and Process.alive?(task_pid), do: Process.exit(task_pid, :kill)
+
+        case Map.get(fence, :worker_pid) do
+          worker_pid when is_pid(worker_pid) ->
+            if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+
+          _missing ->
+            :ok
+        end
+
+        {:noreply, state}
+
+      _other ->
+        {:noreply, state}
+    end
+  end
+
+  # A live process can receive the old two-element timeout after a hot code
+  # reload. Preserve that cleanup without touching the durable client, whose
+  # ownership may already have advanced to another turn.
+  def handle_info({:force_kill_turn, task_pid}, state) do
+    if is_pid(task_pid) and Process.alive?(task_pid), do: Process.exit(task_pid, :kill)
+    {:noreply, state}
+  end
+
+  # `Task.async/1` sends its result immediately before the monitor DOWN. While a
+  # cancellation fence owns that monitor, retain it and wait for DOWN: receiving
+  # the result is not yet proof that the task is dead.
+  def handle_info(
+        {ref, _result},
+        %{cancellation_fence: %{task_ref: ref}} = state
+      )
+      when is_reference(ref) do
     {:noreply, state}
   end
 
@@ -538,18 +847,76 @@ defmodule Ecrits.AcpAgent.Session do
   end
 
   def handle_info(
-        {:DOWN, ref, :process, _pid, reason},
-        %{current: %{task_ref: ref, turn_id: turn_id} = current} = state
-      )
-      when reason not in [:normal, :killed] do
-    state =
-      state
-      |> record_transcript_turn(current)
-      |> emit(%{type: :turn_failed, turn_id: turn_id, reason: inspect(reason)})
-      |> Map.put(:current, nil)
-      |> drain_queue()
+        {:workspace_turn_finalization_ack, {agent_id, instance_id, turn_id}, _summary},
+        state
+      ) do
+    state = ensure_terminal_finalization(state)
 
-    {:noreply, state}
+    case state.terminal_finalization do
+      %{key: {^agent_id, ^instance_id, ^turn_id}, mode: mode} ->
+        state = %{state | terminal_finalization: nil}
+        {:noreply, if(mode == :drain, do: drain_queue(state), else: state)}
+
+      _other ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{current: %{task_ref: ref} = current} = state
+      )
+      when reason != :normal do
+    {:noreply, begin_terminal_transition(state, current, {:failed, reason, :cancel_and_close})}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, lock_pid, _reason},
+        %{terminal_transition: %{lock_ref: ref, lock_pid: lock_pid} = transition} = state
+      ) do
+    case transition.phase do
+      :applied ->
+        # A process monitor is delivered only after its global lock is gone, so
+        # an applied transition can safely continue even when the helper died
+        # before it sent the explicit release message.
+        {:noreply, finish_released_terminal_transition(state, transition)}
+
+      :discarded ->
+        {:noreply, %{state | terminal_transition: nil}}
+
+      :waiting ->
+        {:noreply, restart_terminal_transition_lock(state)}
+    end
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, task_pid, _reason},
+        %{cancellation_fence: %{task_ref: ref, task_pid: task_pid}} = state
+      ) do
+    fence = %{state.cancellation_fence | task_down?: true}
+    {:noreply, maybe_finish_cancelled_turn(%{state | cancellation_fence: fence})}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, worker_pid, _reason},
+        %{cancellation_fence: %{worker_ref: ref, worker_pid: worker_pid}} = state
+      ) do
+    fence = %{state.cancellation_fence | worker_down?: true}
+    {:noreply, maybe_finish_cancelled_turn(%{state | cancellation_fence: fence})}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, worker_pid, reason},
+        %{current: %{worker_ref: ref, worker_pid: worker_pid} = current} = state
+      ) do
+    if reason == :normal do
+      current = current |> Map.delete(:worker_ref) |> Map.put(:worker_down?, true)
+      {:noreply, %{state | current: current}}
+    else
+      failure = {:turn_worker_exit, reason}
+
+      {:noreply, begin_terminal_transition(state, current, {:failed, failure, :cancel_and_close})}
+    end
   end
 
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
@@ -570,12 +937,359 @@ defmodule Ecrits.AcpAgent.Session do
     :ok
   end
 
+  defp begin_terminal_transition(state, current, outcome) do
+    state = ensure_terminal_transition(state)
+
+    case state.terminal_transition do
+      nil ->
+        transition = %{
+          token: make_ref(),
+          turn_id: current.turn_id,
+          outcome: outcome,
+          mode: :drain,
+          previous_input: current.input,
+          phase: :waiting,
+          lock_pid: nil,
+          lock_ref: nil
+        }
+
+        start_terminal_transition_lock(%{state | terminal_transition: transition})
+
+      %{turn_id: turn_id} when turn_id == current.turn_id ->
+        # `turn_failed`, guardian DOWN, and worker DOWN may all describe the
+        # same terminal edge. The first mailbox-ordered edge owns it.
+        state
+
+      _other_turn ->
+        state
+    end
+  end
+
+  defp start_terminal_transition_lock(%{terminal_transition: transition} = state) do
+    session = self()
+
+    {lock_pid, lock_ref} =
+      spawn_monitor(fn ->
+        run_terminal_transition_lock(session, transition.token, transition.turn_id)
+      end)
+
+    transition = %{
+      transition
+      | lock_pid: lock_pid,
+        lock_ref: lock_ref,
+        phase: :waiting
+    }
+
+    %{state | terminal_transition: transition}
+  end
+
+  defp restart_terminal_transition_lock(%{terminal_transition: transition} = state) do
+    if is_reference(transition.lock_ref), do: Process.demonitor(transition.lock_ref, [:flush])
+    start_terminal_transition_lock(state)
+  end
+
+  defp run_terminal_transition_lock(session, token, turn_id) do
+    session_ref = Process.monitor(session)
+
+    result =
+      try do
+        :global.trans(turn_commit_lock(session, turn_id), fn ->
+          send(session, {:terminal_turn_lock_acquired, token, self()})
+
+          receive do
+            {:terminal_turn_state_applied, ^token, result}
+            when result in [:applied, :discarded] ->
+              result
+
+            {:DOWN, ^session_ref, :process, ^session, _reason} ->
+              :session_down
+          end
+        end)
+      catch
+        kind, reason -> exit({:terminal_turn_lock_failed, kind, reason})
+      end
+
+    Process.demonitor(session_ref, [:flush])
+
+    if result != :session_down do
+      send(session, {:terminal_turn_lock_released, token, self(), result})
+    end
+  end
+
+  defp apply_terminal_transition(state, %{turn_id: turn_id, outcome: outcome}) do
+    case state.current do
+      %{turn_id: ^turn_id} = current ->
+        state =
+          case outcome do
+            :completed ->
+              state
+              |> record_transcript_turn(current)
+              |> emit(%{type: :turn_completed, turn_id: turn_id, text: current.text})
+
+            {:failed, reason, :close} ->
+              state
+              |> close_acp_client()
+              |> record_transcript_turn(current)
+              |> emit(%{type: :turn_failed, turn_id: turn_id, reason: inspect(reason)})
+
+            {:failed, reason, :cancel_and_close} ->
+              state
+              |> cancel_acp_client_turn()
+              |> close_acp_client()
+              |> record_transcript_turn(current)
+              |> emit(%{type: :turn_failed, turn_id: turn_id, reason: inspect(reason)})
+          end
+
+        {:ok, Map.put(state, :current, nil)}
+
+      _stale ->
+        :stale
+    end
+  end
+
+  defp finish_released_terminal_transition(state, transition) do
+    if is_reference(transition.lock_ref), do: Process.demonitor(transition.lock_ref, [:flush])
+
+    state
+    |> Map.put(:terminal_transition, nil)
+    |> persist_durable_state()
+    |> begin_terminal_finalization(
+      transition.turn_id,
+      transition.mode,
+      transition.previous_input
+    )
+  end
+
+  defp cancel_waiting_terminal_transition(state, turn_id) do
+    state = ensure_terminal_transition(state)
+
+    case state.terminal_transition do
+      %{turn_id: ^turn_id, phase: :waiting, lock_pid: lock_pid, lock_ref: lock_ref} ->
+        if is_reference(lock_ref), do: Process.demonitor(lock_ref, [:flush])
+        if is_pid(lock_pid), do: Process.exit(lock_pid, :kill)
+        %{state | terminal_transition: nil}
+
+      _none_or_already_applied ->
+        state
+    end
+  end
+
+  defp cancel_current_turn(state, current, mode) when mode in [:drain, :hold] do
+    # This function is reached only through public APIs that own the same turn
+    # lock. If a natural terminal message recorded a waiting helper first, that
+    # helper cannot concurrently own the lock and is safe to retire here.
+    state = cancel_waiting_terminal_transition(state, current.turn_id)
+    task_pid = Map.get(current, :task_pid)
+    worker_pid = Map.get(current, :worker_pid)
+
+    if is_pid(task_pid), do: send(task_pid, :acp_cancel_turn)
+
+    state =
+      state
+      |> cancel_acp_client_turn()
+      |> close_acp_client()
+      |> record_transcript_turn(current)
+      |> emit(%{type: :turn_cancelled, turn_id: current.turn_id})
+      |> Map.put(:current, nil)
+
+    task_alive? = is_pid(task_pid) and Process.alive?(task_pid)
+    worker_alive? = is_pid(worker_pid) and Process.alive?(worker_pid)
+
+    if task_alive? or worker_alive? do
+      task_ref =
+        cond do
+          not task_alive? -> nil
+          is_reference(Map.get(current, :task_ref)) -> current.task_ref
+          true -> Process.monitor(task_pid)
+        end
+
+      worker_ref =
+        cond do
+          not worker_alive? -> nil
+          is_reference(Map.get(current, :worker_ref)) -> current.worker_ref
+          true -> Process.monitor(worker_pid)
+        end
+
+      token = make_ref()
+
+      timer_ref =
+        Process.send_after(
+          self(),
+          {:force_kill_turn, token, task_pid},
+          turn_cancel_grace_ms(state)
+        )
+
+      %{
+        state
+        | cancellation_fence: %{
+            token: token,
+            task_pid: task_pid,
+            task_ref: task_ref,
+            task_down?: not task_alive?,
+            worker_pid: worker_pid,
+            worker_ref: worker_ref,
+            worker_down?: not worker_alive?,
+            timer_ref: timer_ref,
+            turn_id: current.turn_id,
+            mode: mode,
+            previous_input: current.input
+          }
+      }
+    else
+      state
+      |> maybe_demonitor_turn_task(current)
+      |> begin_terminal_finalization(current.turn_id, mode, current.input)
+    end
+  end
+
+  defp finish_cancelled_turn(state) do
+    state = ensure_cancellation_fence(state)
+
+    case state.cancellation_fence do
+      %{turn_id: turn_id, mode: mode, previous_input: previous_input} = fence ->
+        cancel_cancellation_timer(fence)
+
+        state
+        |> Map.put(:cancellation_fence, nil)
+        |> begin_terminal_finalization(turn_id, mode, previous_input)
+
+      nil ->
+        state
+    end
+  end
+
+  defp maybe_finish_cancelled_turn(state) do
+    case state.cancellation_fence do
+      %{task_down?: true, worker_down?: true} -> finish_cancelled_turn(state)
+      _pending -> state
+    end
+  end
+
+  defp cancel_cancellation_timer(%{timer_ref: timer_ref}) when is_reference(timer_ref) do
+    _ = Process.cancel_timer(timer_ref)
+    :ok
+  end
+
+  defp cancel_cancellation_timer(_fence), do: :ok
+
+  defp turn_cancel_grace_ms(state) do
+    case Keyword.get(state.adapter_opts, :turn_cancel_grace_ms, @cancel_grace_ms) do
+      grace_ms when is_integer(grace_ms) and grace_ms >= 0 -> grace_ms
+      _invalid -> @cancel_grace_ms
+    end
+  end
+
+  defp maybe_demonitor_turn_task(state, %{task_ref: ref}) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    state
+  end
+
+  defp maybe_demonitor_turn_task(state, _current), do: state
+
+  defp begin_terminal_finalization(state, turn_id, mode, previous_input)
+       when mode in [:drain, :hold] do
+    state = ensure_terminal_finalization(state)
+
+    identity = %{
+      agent_id: state.id,
+      instance_id: state.instance_id,
+      turn_id: turn_id
+    }
+
+    key = {identity.agent_id, identity.instance_id, identity.turn_id}
+
+    case Ecrits.Workspace.Session.notify_turn_terminal(state.workspace_root, identity, self()) do
+      :pending ->
+        %{
+          state
+          | terminal_finalization: %{
+              key: key,
+              mode: mode,
+              previous_input: previous_input
+            }
+        }
+
+      :no_workspace ->
+        if mode == :drain, do: drain_queue(state), else: state
+    end
+  end
+
+  defp renotify_terminal_finalization(%{terminal_finalization: %{key: key}} = state) do
+    case key do
+      {agent_id, instance_id, turn_id}
+      when is_binary(agent_id) and is_binary(instance_id) and is_binary(turn_id) ->
+        _ =
+          Ecrits.Workspace.Session.notify_turn_terminal(
+            state.workspace_root,
+            %{agent_id: agent_id, instance_id: instance_id, turn_id: turn_id},
+            self()
+          )
+
+        state
+
+      _invalid_key ->
+        state
+    end
+  end
+
+  defp renotify_terminal_finalization(state), do: state
+
+  defp renotify_active_turn_owner(%{current: %{turn_id: turn_id, task_pid: task_pid}} = state)
+       when is_binary(turn_id) and turn_id != "" and is_pid(task_pid) do
+    _ =
+      Ecrits.Workspace.Session.notify_turn_started(
+        state.workspace_root,
+        %{agent_id: state.id, instance_id: state.instance_id, turn_id: turn_id},
+        self(),
+        task_pid,
+        :async
+      )
+
+    state
+  end
+
+  defp renotify_active_turn_owner(state), do: state
+
+  defp request_queue_drain(
+         %{cancellation_fence: pending} = state,
+         _workspace_registration_mode
+       )
+       when pending != nil do
+    %{state | cancellation_fence: Map.put(pending, :mode, :drain)}
+  end
+
+  defp request_queue_drain(
+         %{terminal_transition: pending} = state,
+         _workspace_registration_mode
+       )
+       when pending != nil do
+    %{state | terminal_transition: Map.put(pending, :mode, :drain)}
+  end
+
+  defp request_queue_drain(
+         %{terminal_finalization: nil} = state,
+         workspace_registration_mode
+       ),
+       do: drain_queue(state, workspace_registration_mode)
+
+  defp request_queue_drain(
+         %{terminal_finalization: pending} = state,
+         _workspace_registration_mode
+       ) do
+    %{state | terminal_finalization: Map.put(pending, :mode, :drain)}
+  end
+
   # Pop the FIFO queue head (if any) and launch it as the next turn. Called on
   # automatic terminal paths (done/failed/crash) and explicit flush, so a normal
   # user cancel can stop the current chat without sending queued follow-ups.
   # Callers clear `current` to nil before draining, so the head launches into an
   # idle session.
-  defp drain_queue(%{current: nil, queue: [next | rest]} = state) do
+  defp drain_queue(state, workspace_registration_mode \\ :sync)
+
+  defp drain_queue(
+         %{current: nil, queue: [next | rest]} = state,
+         workspace_registration_mode
+       ) do
     {:ok, _turn_id, state} =
       launch_turn(
         queued_provider_input(next),
@@ -583,13 +1297,14 @@ defmodule Ecrits.AcpAgent.Session do
         next.turn_id,
         Map.get(next, :display) || next.input,
         Map.get(next, :picks, []),
-        Map.get(next, :context)
+        Map.get(next, :context),
+        workspace_registration_mode
       )
 
     state
   end
 
-  defp drain_queue(state), do: state
+  defp drain_queue(state, _workspace_registration_mode), do: state
 
   # ── send-turn helpers (FIFO queue) ─────────────────────────────────
 
@@ -598,7 +1313,31 @@ defmodule Ecrits.AcpAgent.Session do
   # so the first send into an upgraded process never crashes on a missing key.
   defp ensure_queue(state), do: Map.put_new(state, :queue, [])
 
+  defp ensure_cancellation_fence(state),
+    do: Map.put_new(state, :cancellation_fence, nil)
+
+  defp ensure_terminal_finalization(state),
+    do: Map.put_new(state, :terminal_finalization, nil)
+
+  defp ensure_terminal_transition(state),
+    do: Map.put_new(state, :terminal_transition, nil)
+
   defp start_turn(input, extras, %{current: current} = state) when current != nil do
+    enqueue_turn(state, input, extras)
+  end
+
+  defp start_turn(input, extras, %{cancellation_fence: pending} = state)
+       when pending != nil do
+    enqueue_turn(state, input, extras)
+  end
+
+  defp start_turn(input, extras, %{terminal_finalization: pending} = state)
+       when pending != nil do
+    enqueue_turn(state, input, extras)
+  end
+
+  defp start_turn(input, extras, %{terminal_transition: pending} = state)
+       when pending != nil do
     enqueue_turn(state, input, extras)
   end
 
@@ -614,7 +1353,8 @@ defmodule Ecrits.AcpAgent.Session do
         Ecto.UUID.generate(),
         extras.display,
         extras.picks,
-        extras.context
+        extras.context,
+        Map.get(extras, :workspace_registration_mode, :sync)
       )
 
     {:reply, {:ok, %{id: turn_id, session_id: state.id, status: :running}}, state}
@@ -647,7 +1387,15 @@ defmodule Ecrits.AcpAgent.Session do
 
   # Spawn the per-turn streaming task and record it as the current turn. Shared by
   # a fresh send and by draining the FIFO queue on a turn terminal.
-  defp launch_turn(input, state, turn_id, display_input, picks, context) do
+  defp launch_turn(
+         input,
+         state,
+         turn_id,
+         display_input,
+         picks,
+         context,
+         workspace_registration_mode
+       ) do
     display_input = display_input || input
     parent = self()
 
@@ -659,12 +1407,38 @@ defmodule Ecrits.AcpAgent.Session do
     client_key = acp_client_key(state)
     state = maybe_drop_incompatible_acp_client(state, client_key)
 
+    launch_token = make_ref()
+
+    # The guardian stays linked to the provider worker (so an untrappable kill
+    # of either the Session or guardian cannot orphan document-writing work),
+    # while monitoring this Session explicitly so ordinary owner death also
+    # tears the worker down before Workspace finalization begins.
     task =
       Task.async(fn ->
-        run_turn(parent, turn_id, input, state, client_key)
+        run_guarded_turn(
+          parent,
+          launch_token,
+          turn_id,
+          input,
+          state,
+          client_key
+        )
       end)
 
     Process.unlink(task.pid)
+
+    identity = %{agent_id: state.id, instance_id: state.instance_id, turn_id: turn_id}
+
+    _ =
+      Ecrits.Workspace.Session.notify_turn_started(
+        state.workspace_root,
+        identity,
+        self(),
+        task.pid,
+        workspace_registration_mode
+      )
+
+    send(task.pid, {:launch_agent_turn, launch_token})
 
     state = %{
       state
@@ -675,7 +1449,11 @@ defmodule Ecrits.AcpAgent.Session do
           text: "",
           pending_text: "",
           text_segment: 0,
+          pending_reasoning: "",
+          reasoning_segment: 0,
+          edit_preview: nil,
           acp_update_state: AcpStream.update_state(),
+          doc_vfs_sequence: nil,
           items: [],
           input: display_input,
           provider_input: input,
@@ -692,16 +1470,278 @@ defmodule Ecrits.AcpAgent.Session do
     {:ok, turn_id, state}
   end
 
-  defp queue_previous_input(%{queue: queue, current: current}) do
+  defp run_guarded_turn(parent, launch_token, turn_id, input, state, client_key) do
+    Process.flag(:trap_exit, true)
+    parent_ref = Process.monitor(parent)
+    key = {state.id, state.instance_id, turn_id}
+    cancel_grace_ms = turn_cancel_grace_ms(state)
+
+    receive do
+      {:launch_agent_turn, ^launch_token} ->
+        guardian = self()
+        worker_launch_token = make_ref()
+
+        worker_pid =
+          spawn_link(fn ->
+            identity = %{agent_id: state.id, instance_id: state.instance_id, turn_id: turn_id}
+
+            _ =
+              Ecrits.Workspace.Session.notify_turn_worker_started(
+                state.workspace_root,
+                identity,
+                guardian,
+                self()
+              )
+
+            send(guardian, {:guarded_turn_worker_registered, self()})
+
+            receive do
+              {:launch_provider_worker, ^worker_launch_token} ->
+                result = run_turn(parent, turn_id, input, state, client_key)
+                send(guardian, {:guarded_turn_result, self(), result})
+
+              :acp_cancel_turn ->
+                :cancelled_before_launch
+            end
+          end)
+
+        worker_ref = Process.monitor(worker_pid)
+
+        await_guarded_worker_registration(
+          parent,
+          parent_ref,
+          key,
+          state.workspace_root,
+          worker_pid,
+          worker_ref,
+          worker_launch_token,
+          cancel_grace_ms
+        )
+
+      {:DOWN, ^parent_ref, :process, ^parent, _reason} ->
+        notify_guardian_stopped(state.workspace_root, key)
+        :ok
+
+      {:EXIT, _from, reason} ->
+        exit(reason)
+    end
+  end
+
+  defp await_guarded_worker_registration(
+         parent,
+         parent_ref,
+         key,
+         workspace_root,
+         worker_pid,
+         worker_ref,
+         worker_launch_token,
+         cancel_grace_ms
+       ) do
+    receive do
+      {:guarded_turn_worker_registered, ^worker_pid} ->
+        send(parent, {:guarded_turn_worker_started, elem(key, 2), self(), worker_pid})
+        send(worker_pid, {:launch_provider_worker, worker_launch_token})
+
+        await_guarded_turn(
+          parent,
+          parent_ref,
+          key,
+          workspace_root,
+          worker_pid,
+          worker_ref,
+          cancel_grace_ms
+        )
+
+      :acp_cancel_turn ->
+        send(worker_pid, :acp_cancel_turn)
+
+        await_guarded_worker_registration(
+          parent,
+          parent_ref,
+          key,
+          workspace_root,
+          worker_pid,
+          worker_ref,
+          worker_launch_token,
+          cancel_grace_ms
+        )
+
+      {:shutdown_agent_turn, ^key, reply_to} when is_pid(reply_to) ->
+        stop_guarded_worker(worker_pid, worker_ref, cancel_grace_ms)
+        send(reply_to, {:agent_turn_guardian_stopped, key, self()})
+        :ok
+
+      {:DOWN, ^parent_ref, :process, ^parent, _reason} ->
+        stop_guarded_worker(worker_pid, worker_ref, cancel_grace_ms)
+        notify_guardian_stopped(workspace_root, key)
+        :ok
+
+      {:DOWN, ^worker_ref, :process, ^worker_pid, reason} ->
+        Process.demonitor(parent_ref, [:flush])
+        exit({:turn_worker_exit, reason})
+
+      {:EXIT, ^worker_pid, :normal} ->
+        await_guarded_worker_registration(
+          parent,
+          parent_ref,
+          key,
+          workspace_root,
+          worker_pid,
+          worker_ref,
+          worker_launch_token,
+          cancel_grace_ms
+        )
+
+      {:EXIT, ^worker_pid, reason} ->
+        Process.demonitor(parent_ref, [:flush])
+        exit({:turn_worker_exit, reason})
+
+      {:EXIT, _from, reason} ->
+        stop_guarded_worker(worker_pid, worker_ref, cancel_grace_ms)
+        exit(reason)
+    end
+  end
+
+  defp await_guarded_turn(
+         parent,
+         parent_ref,
+         key,
+         workspace_root,
+         worker_pid,
+         worker_ref,
+         cancel_grace_ms
+       ) do
+    receive do
+      {:guarded_turn_result, ^worker_pid, result} ->
+        Process.demonitor(parent_ref, [:flush])
+        Process.demonitor(worker_ref, [:flush])
+        result
+
+      {:acp_stream_activity, _update} = activity ->
+        send(worker_pid, activity)
+
+        await_guarded_turn(
+          parent,
+          parent_ref,
+          key,
+          workspace_root,
+          worker_pid,
+          worker_ref,
+          cancel_grace_ms
+        )
+
+      :acp_cancel_turn ->
+        send(worker_pid, :acp_cancel_turn)
+
+        await_guarded_turn(
+          parent,
+          parent_ref,
+          key,
+          workspace_root,
+          worker_pid,
+          worker_ref,
+          cancel_grace_ms
+        )
+
+      {:shutdown_agent_turn, ^key, reply_to} when is_pid(reply_to) ->
+        stop_guarded_worker(worker_pid, worker_ref, cancel_grace_ms)
+        send(reply_to, {:agent_turn_guardian_stopped, key, self()})
+        :ok
+
+      {:DOWN, ^parent_ref, :process, ^parent, _reason} ->
+        stop_guarded_worker(worker_pid, worker_ref, cancel_grace_ms)
+        notify_guardian_stopped(workspace_root, key)
+        :ok
+
+      {:DOWN, ^worker_ref, :process, ^worker_pid, reason} ->
+        Process.demonitor(parent_ref, [:flush])
+        exit({:turn_worker_exit, reason})
+
+      {:EXIT, ^worker_pid, :normal} ->
+        await_guarded_turn(
+          parent,
+          parent_ref,
+          key,
+          workspace_root,
+          worker_pid,
+          worker_ref,
+          cancel_grace_ms
+        )
+
+      {:EXIT, ^worker_pid, reason} ->
+        Process.demonitor(parent_ref, [:flush])
+        exit({:turn_worker_exit, reason})
+
+      {:EXIT, _from, reason} ->
+        stop_guarded_worker(worker_pid, worker_ref, cancel_grace_ms)
+        exit(reason)
+    end
+  end
+
+  defp stop_guarded_worker(worker_pid, worker_ref, cancel_grace_ms) do
+    send(worker_pid, :acp_cancel_turn)
+
+    receive do
+      {:DOWN, ^worker_ref, :process, ^worker_pid, _reason} ->
+        :ok
+
+      {:EXIT, ^worker_pid, _reason} ->
+        await_guarded_worker_down(worker_pid, worker_ref)
+    after
+      cancel_grace_ms ->
+        Process.exit(worker_pid, :kill)
+        await_guarded_worker_down(worker_pid, worker_ref)
+    end
+  end
+
+  defp notify_guardian_stopped(workspace_root, key) do
+    case Ecrits.Workspace.Session.whereis(workspace_root) do
+      pid when is_pid(pid) -> send(pid, {:agent_turn_guardian_stopped, key, self()})
+      nil -> :ok
+    end
+  end
+
+  defp await_guarded_worker_down(worker_pid, worker_ref) do
+    receive do
+      {:DOWN, ^worker_ref, :process, ^worker_pid, _reason} -> :ok
+      {:EXIT, ^worker_pid, _reason} -> await_guarded_worker_down(worker_pid, worker_ref)
+    end
+  end
+
+  defp queue_previous_input(%{queue: queue, current: current} = state) do
     case List.last(queue) do
-      %{input: input} -> input
-      _ -> current.input
+      %{input: input} ->
+        input
+
+      _ ->
+        case current do
+          %{input: input} ->
+            input
+
+          _ ->
+            case Map.get(state, :cancellation_fence) do
+              %{previous_input: input} ->
+                input
+
+              _ ->
+                case Map.get(state, :terminal_transition) do
+                  %{previous_input: input} ->
+                    input
+
+                  _ ->
+                    case Map.get(state, :terminal_finalization) do
+                      %{previous_input: input} -> input
+                      _ -> ""
+                    end
+                end
+            end
+        end
     end
   end
 
   defp queued_provider_input(%{input: input, previous_input: previous_input}) do
-    previous = previous_input |> Prompt.display_text() |> String.trim()
-    addendum = input |> Prompt.display_text() |> String.trim()
+    previous = previous_input |> Content.display_text() |> String.trim()
+    addendum = input |> Content.display_text() |> String.trim()
 
     if previous == "" or addendum == "" do
       input
@@ -804,7 +1844,8 @@ defmodule Ecrits.AcpAgent.Session do
     {
       state.exmcp_adapter,
       normalize_keyword(state.adapter_opts),
-      state.mcp_servers
+      state.mcp_servers,
+      is_binary(Map.get(state, :document_path)) and Map.get(state, :document_path) != ""
     }
   end
 
@@ -858,6 +1899,13 @@ defmodule Ecrits.AcpAgent.Session do
         %{
           input: input,
           workspace_root: state.workspace_root,
+          document_path: state.document_path,
+          session_pid: parent,
+          expected_identity: %{
+            agent_id: state.id,
+            instance_id: state.instance_id,
+            turn_id: turn_id
+          },
           # Resume the conversation's provider session on turns 2+ (nil on turn 1)
           # so the agent keeps cross-turn memory.
           provider_session_id: state.provider_session_id
@@ -904,18 +1952,18 @@ defmodule Ecrits.AcpAgent.Session do
 
     ref = Process.monitor(client)
 
-    %{
+    persist_durable_state(%{
       state
       | acp_client: client,
         acp_client_key: client_key,
         acp_client_ref: ref,
         provider_session_id: id
-    }
+    })
   end
 
   defp handle_turn_event(state, _turn_id, %{type: :provider_session, provider_session_id: id})
        when is_binary(id) and id != "" do
-    %{state | provider_session_id: id}
+    persist_durable_state(%{state | provider_session_id: id})
   end
 
   defp handle_turn_event(
@@ -938,13 +1986,30 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp handle_turn_event(state, turn_id, %{type: :reasoning_delta, delta: delta})
        when is_binary(delta) do
-    emit(state, %{type: :reasoning_delta, turn_id: turn_id, delta: delta})
+    current =
+      state.current
+      |> flush_pending_text_item()
+      |> Map.update(:pending_reasoning, delta, &((&1 || "") <> delta))
+
+    state
+    |> Map.put(:current, current)
+    |> emit(%{
+      type: :reasoning_delta,
+      turn_id: turn_id,
+      segment: Map.get(current, :reasoning_segment, 0),
+      delta: delta
+    })
   end
 
   defp handle_turn_event(state, turn_id, %{type: :edit_delta, delta: delta} = event)
        when is_binary(delta) do
+    current =
+      state.current
+      |> flush_pending_items()
+      |> retain_edit_preview(event, delta)
+
     state
-    |> Map.update!(:current, &flush_pending_text_item/1)
+    |> Map.put(:current, current)
     |> emit(%{
       type: :edit_delta,
       turn_id: turn_id,
@@ -954,22 +2019,58 @@ defmodule Ecrits.AcpAgent.Session do
     })
   end
 
+  defp handle_turn_event(state, turn_id, %{type: :file_operation_started} = event) do
+    current =
+      state.current
+      |> flush_pending_items()
+      |> put_file_activity_item(event, :running)
+
+    state
+    |> emit(file_operation_event_payload(event, turn_id, :running))
+    |> Map.put(:current, current)
+  end
+
+  defp handle_turn_event(state, turn_id, %{type: :file_operation_completed} = event) do
+    current =
+      state.current
+      |> flush_pending_items()
+      |> put_file_activity_item(event, :completed)
+
+    state
+    |> emit(file_operation_event_payload(event, turn_id, :completed))
+    |> Map.put(:current, current)
+  end
+
+  defp handle_turn_event(state, turn_id, %{type: :file_operation_failed} = event) do
+    current =
+      state.current
+      |> flush_pending_items()
+      |> put_file_activity_item(event, :failed)
+
+    state
+    |> emit(file_operation_event_payload(event, turn_id, :failed))
+    |> Map.put(:current, current)
+  end
+
   defp handle_turn_event(state, turn_id, %{type: :tool_call_started} = event) do
     current =
       state.current
-      |> flush_pending_text_item()
+      |> flush_pending_items()
       |> put_tool_item(
         event.tool_call_id,
         event.name,
+        Map.get(event, :kind),
         :running,
         tool_payload(event.name, Map.get(event, :arguments, %{}))
       )
+      |> put_tool_arguments(event.tool_call_id, Map.get(event, :arguments, %{}))
 
     emit(state, %{
       type: :tool_call_started,
       turn_id: turn_id,
       tool_call_id: event.tool_call_id,
       name: event.name,
+      kind: Map.get(event, :kind),
       arguments: Map.get(event, :arguments, %{})
     })
     |> Map.put(:current, current)
@@ -980,10 +2081,11 @@ defmodule Ecrits.AcpAgent.Session do
     # (no started event) must still get [text-so-far, tool] item order.
     current =
       state.current
-      |> flush_pending_text_item()
+      |> flush_pending_items()
       |> put_tool_item(
         event.tool_call_id,
         event.name,
+        Map.get(event, :kind),
         :completed,
         tool_payload(event.name, Map.get(event, :result, %{}))
       )
@@ -993,6 +2095,7 @@ defmodule Ecrits.AcpAgent.Session do
       turn_id: turn_id,
       tool_call_id: event.tool_call_id,
       name: event.name,
+      kind: Map.get(event, :kind),
       result: Map.get(event, :result, %{})
     })
     |> Map.put(:current, current)
@@ -1001,10 +2104,11 @@ defmodule Ecrits.AcpAgent.Session do
   defp handle_turn_event(state, turn_id, %{type: :tool_call_failed} = event) do
     current =
       state.current
-      |> flush_pending_text_item()
+      |> flush_pending_items()
       |> put_tool_item(
         event.tool_call_id,
         event.name,
+        Map.get(event, :kind),
         :failed,
         Map.get(event, :reason, "")
       )
@@ -1014,6 +2118,7 @@ defmodule Ecrits.AcpAgent.Session do
       turn_id: turn_id,
       tool_call_id: event.tool_call_id,
       name: event.name,
+      kind: Map.get(event, :kind),
       reason: Map.get(event, :reason, "")
     })
     |> Map.put(:current, current)
@@ -1021,9 +2126,61 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp handle_turn_event(state, _turn_id, _event), do: state
 
+  defp retain_edit_preview(current, event, delta) when is_map(current) do
+    edit_id = Map.get(event, :edit_id)
+    path = Map.get(event, :path)
+    previous = Map.get(current, :edit_preview)
+
+    preview =
+      if same_edit_preview?(previous, edit_id, path) do
+        previous
+        |> Map.put(:edit_id, edit_id || Map.get(previous, :edit_id))
+        |> Map.put(:path, path || Map.get(previous, :path))
+        |> Map.put(:text, edit_preview_text_append(Map.get(previous, :text), delta))
+        |> Map.put(:delta_count, Map.get(previous, :delta_count, 0) + 1)
+      else
+        %{
+          edit_id: edit_id,
+          path: path,
+          text: edit_preview_text_append("", delta),
+          delta_count: 1
+        }
+      end
+
+    Map.put(current, :edit_preview, preview)
+  end
+
+  defp same_edit_preview?(previous, edit_id, path) when is_map(previous) do
+    previous_edit_id = Map.get(previous, :edit_id)
+    previous_path = Map.get(previous, :path)
+
+    not (different_preview_identity?(previous_edit_id, edit_id) or
+           different_preview_identity?(previous_path, path))
+  end
+
+  defp same_edit_preview?(_previous, _edit_id, _path), do: false
+
+  defp different_preview_identity?(left, right)
+       when is_binary(left) and left != "" and is_binary(right) and right != "",
+       do: left != right
+
+  defp different_preview_identity?(_left, _right), do: false
+
+  defp edit_preview_text_append(text, delta) do
+    text = (text || "") <> delta
+
+    if String.length(text) <= @edit_preview_max do
+      text
+    else
+      start = String.length(text) - @edit_preview_max
+      "..." <> String.slice(text, start, @edit_preview_max)
+    end
+  end
+
   defp append_text_delta(state, turn_id, delta) do
     current =
       state.current
+      |> flush_pending_reasoning_item()
       |> Map.update(:text, delta, &((&1 || "") <> delta))
       |> Map.update(:pending_text, delta, &((&1 || "") <> delta))
 
@@ -1040,7 +2197,7 @@ defmodule Ecrits.AcpAgent.Session do
   defp record_transcript_turn(state, current) do
     # The transcript bubble shows the typed text regardless of input modality
     # (string sugar OR a multi-modal block list), so derive the display text.
-    user = Prompt.display_text(current[:input])
+    user = Content.display_text(current[:input])
     agent = current[:text]
 
     items = transcript_items(current, user, agent)
@@ -1048,14 +2205,22 @@ defmodule Ecrits.AcpAgent.Session do
     if blank?(user) and blank?(agent) and items == [] do
       state
     else
-      entry = %{turn_id: current.turn_id, user: user, agent: agent, items: items}
+      entry =
+        Agent.new_dialog!(%{turn_id: current.turn_id, user: user, agent: agent, items: items})
+
       %{state | transcript: [entry | state.transcript]}
     end
   end
 
   defp transcript_items(current, user, agent) do
-    current = flush_pending_text_item(current)
-    items = Map.get(current, :items, [])
+    current = flush_pending_items(current)
+
+    items =
+      current
+      |> Map.get(:items, [])
+      |> normalize_file_activity_items()
+      |> Enum.map(&terminalize_running_file_activity/1)
+
     # Map.get: a session hot-reloaded mid-turn may hold a pre-picks current map.
     picks = Map.get(current, :picks, [])
 
@@ -1099,6 +2264,33 @@ defmodule Ecrits.AcpAgent.Session do
     end
   end
 
+  defp flush_pending_reasoning_item(current) when is_map(current) do
+    pending = Map.get(current, :pending_reasoning, "")
+
+    if blank?(pending) do
+      current
+    else
+      segment = Map.get(current, :reasoning_segment, 0)
+
+      current
+      |> Map.update(:items, [reasoning_item(pending, segment)], fn items ->
+        items ++ [reasoning_item(pending, segment)]
+      end)
+      |> Map.put(:pending_reasoning, "")
+      |> Map.put(:reasoning_segment, segment + 1)
+    end
+  end
+
+  defp flush_pending_items(current) when is_map(current) do
+    current
+    |> flush_pending_text_item()
+    |> flush_pending_reasoning_item()
+  end
+
+  defp reasoning_item(body, segment) do
+    %{role: :thinking, body: body, status: :sent, segment: segment}
+  end
+
   defp maybe_append_agent_item(items, text, segment) do
     if blank?(text) do
       items
@@ -1107,28 +2299,320 @@ defmodule Ecrits.AcpAgent.Session do
     end
   end
 
-  defp append_transcript_item_to_state(%{current: current} = state, item)
-       when is_map(current) do
-    current = flush_pending_text_item(current)
-    items = Map.get(current, :items, []) ++ [item]
+  defp append_transcript_item_to_state(state, item) do
+    item_turn_id = transcript_item_turn_id(item)
+    current = Map.get(state, :current)
+
+    cond do
+      is_map(current) and
+          (is_nil(item_turn_id) or Map.get(current, :turn_id) == item_turn_id) ->
+        append_transcript_item_to_current(state, item)
+
+      is_binary(item_turn_id) ->
+        append_transcript_item_to_turn(state, item, item_turn_id)
+
+      Map.get(state, :transcript, []) != [] ->
+        append_transcript_item_to_latest(state, item)
+
+      true ->
+        append_transcript_item_as_dialog(state, item, nil)
+    end
+  end
+
+  defp append_transcript_item_to_current(%{current: current} = state, item) do
+    current = flush_pending_items(current)
+
+    items =
+      Agent.upsert_dialog_item(
+        Map.get(current, :items, []),
+        item,
+        Map.get(current, :id) || Map.get(current, :turn_id)
+      )
+
     %{state | current: Map.put(current, :items, items)}
   end
 
-  defp append_transcript_item_to_state(%{transcript: [latest | rest]} = state, item) do
-    items = Map.get(latest, :items, []) ++ [item]
-    %{state | transcript: [Map.put(latest, :items, items) | rest]}
+  defp append_transcript_item_to_turn(state, item, turn_id) do
+    {transcript, found?} =
+      Enum.map_reduce(state.transcript, false, fn dialog, found? ->
+        if not found? and dialog_turn_id(dialog) == turn_id do
+          {Agent.append_dialog_item(dialog, item), true}
+        else
+          {dialog, found?}
+        end
+      end)
+
+    if found? do
+      %{state | transcript: transcript}
+    else
+      append_transcript_item_as_dialog(state, item, turn_id)
+    end
   end
 
-  defp append_transcript_item_to_state(state, item) do
+  defp append_transcript_item_to_latest(%{transcript: [latest | rest]} = state, item) do
+    latest = Agent.append_dialog_item(latest, item)
+    %{state | transcript: [latest | rest]}
+  end
+
+  defp append_transcript_item_as_dialog(state, item, turn_id) do
     turn_id =
-      item[:turn_id] || item["turn_id"] ||
+      turn_id || transcript_item_turn_id(item) ||
         "display-#{System.unique_integer([:positive, :monotonic])}"
 
-    entry = %{turn_id: turn_id, user: "", agent: "", items: [item]}
+    entry = Agent.new_dialog!(%{turn_id: turn_id, user: "", agent: "", items: [item]})
     %{state | transcript: [entry | state.transcript]}
   end
 
-  defp put_tool_item(current, tool_call_id, name, status, body) when is_map(current) do
+  defp transcript_item_turn_id(item) when is_map(item) do
+    case Map.get(item, :turn_id) || Map.get(item, "turn_id") do
+      turn_id when is_binary(turn_id) and turn_id != "" -> turn_id
+      _other -> nil
+    end
+  end
+
+  defp dialog_turn_id(dialog) when is_map(dialog),
+    do: Map.get(dialog, :turn_id) || Map.get(dialog, "turn_id")
+
+  defp normalize_transcript(state) do
+    Map.update!(state, :transcript, fn transcript ->
+      transcript
+      |> Agent.normalize_dialogs!()
+      |> Enum.map(fn dialog ->
+        items =
+          dialog.items
+          |> normalize_file_activity_items()
+          |> Enum.map(&terminalize_running_file_activity/1)
+
+        Agent.new_dialog!(%{dialog | items: items})
+      end)
+    end)
+  end
+
+  defp normalize_file_activity_item(item) when is_map(item) do
+    operation = item_field(item, :operation) || item_field(item, :name)
+
+    if file_activity_item?(item) do
+      file_operation_id = file_activity_id(item)
+      input = file_activity_input(item)
+      path = item_field(item, :path) || item_field(input, :path)
+      query = item_field(item, :query) || item_field(input, :query)
+      reason = file_activity_failure_reason(item)
+
+      item
+      |> Map.put(:role, :file_activity)
+      |> Map.put(:file_operation_id, file_operation_id)
+      |> Map.put(:tool_call_id, file_operation_id)
+      |> Map.put(:operation, operation)
+      |> Map.put(:name, operation)
+      |> put_file_activity_value(:path, path)
+      |> put_file_activity_value(:query, query)
+      |> put_file_activity_value(:reason, reason)
+      |> maybe_put_file_activity_failure_body(reason)
+    else
+      item
+    end
+  end
+
+  defp normalize_file_activity_item(item), do: item
+
+  defp normalize_file_activity_items(items) when is_list(items) do
+    Enum.reduce(items, [], fn raw_item, normalized_items ->
+      item = normalize_file_activity_item(raw_item)
+      file_operation_id = if(file_activity_item?(item), do: file_activity_id(item))
+
+      if is_nil(file_operation_id) do
+        normalized_items ++ [item]
+      else
+        case Enum.find_index(normalized_items, fn existing ->
+               file_activity_item?(existing) and file_activity_id(existing) == file_operation_id
+             end) do
+          nil ->
+            normalized_items ++ [item]
+
+          index ->
+            previous = Enum.at(normalized_items, index)
+            List.replace_at(normalized_items, index, merge_file_activity_items(previous, item))
+        end
+      end
+    end)
+  end
+
+  defp merge_file_activity_items(previous, current) do
+    merged =
+      Map.merge(previous, current, fn _key, previous_value, current_value ->
+        if present_file_activity_value?(current_value),
+          do: current_value,
+          else: previous_value
+      end)
+
+    if terminal_file_activity_status?(item_field(previous, :status)) and
+         not terminal_file_activity_status?(item_field(current, :status)) do
+      merged
+      |> Map.put(:status, item_field(previous, :status))
+      |> put_file_activity_value(:reason, item_field(previous, :reason))
+      |> put_file_activity_value(:body, item_field(previous, :body))
+      |> put_file_activity_value(:output, item_field(previous, :output))
+    else
+      merged
+    end
+  end
+
+  defp terminalize_running_file_activity(item) when is_map(item) do
+    if file_activity_item?(item) and
+         item_field(item, :status) in [:pending, "pending", :running, "running"] do
+      item
+      |> normalize_file_activity_item()
+      |> Map.put(:status, :failed)
+      |> Map.put(:reason, @dangling_file_operation_reason)
+      |> Map.put(:body, @dangling_file_operation_reason)
+    else
+      item
+    end
+  end
+
+  defp terminalize_running_file_activity(item), do: item
+
+  defp file_activity_input(item) do
+    [:arguments, :args, :input]
+    |> Enum.find_value(%{}, fn key ->
+      case decode_file_activity_map(item_field(item, key)) do
+        map when map != %{} -> map
+        _ -> nil
+      end
+    end)
+  end
+
+  defp decode_file_activity_map(value) when is_map(value), do: value
+
+  defp decode_file_activity_map(value) when is_binary(value) do
+    value = String.trim(value)
+
+    with {:error, _reason} <- Jason.decode(value),
+         [input] <-
+           Regex.run(~r/(?:^|\n)Input:\n(.*?)(?:\n\nOutput:|\z)/s, value, capture: :all_but_first),
+         {:ok, decoded} when is_map(decoded) <- Jason.decode(String.trim(input)) do
+      decoded
+    else
+      {:ok, decoded} when is_map(decoded) -> decoded
+      _ -> %{}
+    end
+  end
+
+  defp decode_file_activity_map(_value), do: %{}
+
+  defp file_activity_failure_reason(item) do
+    if item_field(item, :status) in [:failed, "failed"] do
+      item_field(item, :reason) ||
+        file_activity_text(item_field(item, :output)) ||
+        file_activity_body_output(item_field(item, :body)) ||
+        file_activity_text(item_field(item, :body))
+    end
+  end
+
+  defp file_activity_body_output(body) when is_binary(body) do
+    case Regex.run(~r/(?:^|\n)Output:\n(.*)\z/s, body, capture: :all_but_first) do
+      [output] -> file_activity_text(output)
+      _ -> nil
+    end
+  end
+
+  defp file_activity_body_output(_body), do: nil
+
+  defp file_activity_text(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp file_activity_text(value) when is_map(value) or is_list(value),
+    do: Jason.encode!(value)
+
+  defp file_activity_text(nil), do: nil
+  defp file_activity_text(value), do: inspect(value)
+
+  defp maybe_put_file_activity_failure_body(item, nil), do: item
+
+  defp maybe_put_file_activity_failure_body(item, reason) do
+    put_file_activity_value(item, :body, reason)
+  end
+
+  defp put_file_activity_value(item, _key, value) when value in [nil, ""], do: item
+  defp put_file_activity_value(item, key, value), do: Map.put(item, key, value)
+
+  defp present_file_activity_value?(value), do: value not in [nil, "", [], %{}]
+
+  defp terminal_file_activity_status?(status),
+    do: status in [:completed, "completed", :failed, "failed", :cancelled, "cancelled"]
+
+  defp file_activity_item?(item) when is_map(item) do
+    role = item_field(item, :role)
+    operation = item_field(item, :operation) || item_field(item, :name)
+
+    role in [:file_activity, "file_activity"] or
+      (role in [:tool, "tool"] and AcpStream.file_operation_name?(operation))
+  end
+
+  defp file_activity_item?(_item), do: false
+
+  defp file_activity_id(item) do
+    item_field(item, :file_operation_id) || item_field(item, :tool_call_id)
+  end
+
+  defp item_field(item, key) when is_map(item),
+    do: Map.get(item, key, Map.get(item, Atom.to_string(key)))
+
+  defp put_file_activity_item(current, event, status) when is_map(current) do
+    file_operation_id =
+      Map.get(event, :file_operation_id) || Map.get(event, :tool_call_id) ||
+        "file-operation-" <> Integer.to_string(System.unique_integer([:positive]))
+
+    previous =
+      current
+      |> Map.get(:items, [])
+      |> Enum.find(fn item ->
+        file_activity_item?(item) and file_activity_id(item) == file_operation_id
+      end)
+
+    operation = Map.get(event, :operation) || (previous && item_field(previous, :operation))
+
+    item = %{
+      role: :file_activity,
+      file_operation_id: file_operation_id,
+      tool_call_id: file_operation_id,
+      operation: operation,
+      name: operation,
+      path: Map.get(event, :path) || (previous && item_field(previous, :path)),
+      query: Map.get(event, :query) || (previous && item_field(previous, :query)),
+      kind: Map.get(event, :kind) || (previous && item_field(previous, :kind)),
+      status: status,
+      reason: if(status == :failed, do: Map.get(event, :reason, ""), else: nil),
+      body: if(status == :failed, do: Map.get(event, :reason, ""), else: nil)
+    }
+
+    items = Map.get(current, :items, [])
+
+    items =
+      if previous do
+        Enum.map(items, fn existing ->
+          if file_activity_item?(existing) and file_activity_id(existing) == file_operation_id,
+            do: item,
+            else: existing
+        end)
+      else
+        items ++ [item]
+      end
+
+    Map.put(current, :items, items)
+  end
+
+  defp file_operation_event_payload(event, turn_id, status) do
+    event
+    |> Map.put(:turn_id, turn_id)
+    |> Map.put(:status, status)
+  end
+
+  defp put_tool_item(current, tool_call_id, name, kind, status, body) when is_map(current) do
     tool_call_id =
       tool_call_id || "tool-" <> Integer.to_string(System.unique_integer([:positive]))
 
@@ -1143,6 +2627,7 @@ defmodule Ecrits.AcpAgent.Session do
       role: :tool,
       tool_call_id: tool_call_id,
       name: name || "tool",
+      kind: kind || (previous && Map.get(previous, :kind)),
       status: status,
       input: input,
       output: output,
@@ -1163,6 +2648,22 @@ defmodule Ecrits.AcpAgent.Session do
 
     Map.put(current, :items, items)
   end
+
+  # Raw arguments are needed only while a tool is in flight so a sibling rail
+  # joining mid-turn can complete the same doc.edit preview when the terminal
+  # event arrives. `put_tool_item/6` drops this field on terminal updates, and
+  # the durable transcript normalizer never persists it.
+  defp put_tool_arguments(current, tool_call_id, arguments)
+       when is_map(current) and not is_nil(tool_call_id) do
+    Map.update(current, :items, [], fn items ->
+      Enum.map(items, fn
+        %{tool_call_id: ^tool_call_id} = item -> Map.put(item, :arguments, arguments)
+        item -> item
+      end)
+    end)
+  end
+
+  defp put_tool_arguments(current, _tool_call_id, _arguments), do: current
 
   defp tool_payload(name, payload) do
     Ecrits.Doc.ToolPayloadSanitizer.encode_tool_payload(name, payload)
@@ -1243,6 +2744,52 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp current_tool_context(state), do: turn_context(state, [])
 
+  defp with_requested_turn_lock(pid, nil, fun), do: with_current_turn_lock(pid, fun)
+
+  defp with_requested_turn_lock(pid, turn_id, fun)
+       when is_pid(pid) and is_binary(turn_id) and is_function(fun, 1) do
+    :global.trans(turn_commit_lock(pid, turn_id), fn -> fun.(turn_id) end)
+  end
+
+  defp with_current_turn_lock(pid, fun) when is_pid(pid) and is_function(fun, 1) do
+    case current_turn_id(pid) do
+      turn_id when is_binary(turn_id) and turn_id != "" ->
+        result =
+          :global.trans(turn_commit_lock(pid, turn_id), fn ->
+            if current_turn_id(pid) == turn_id, do: fun.(turn_id), else: :retry_turn_lock
+          end)
+
+        if result == :retry_turn_lock, do: with_current_turn_lock(pid, fun), else: result
+
+      _no_current_turn ->
+        fun.(nil)
+    end
+  end
+
+  defp current_turn_id(pid) do
+    GenServer.call(pid, :turn_lock_id)
+  catch
+    :exit, _reason -> nil
+  end
+
+  defp current_turn_identity?(pid, identity) do
+    case tool_context(pid) do
+      context when is_map(context) ->
+        Enum.all?([:agent_id, :instance_id, :turn_id], fn key ->
+          value = Map.get(identity, key)
+          is_binary(value) and value != "" and Map.get(context, key) == value
+        end)
+
+      _context ->
+        false
+    end
+  catch
+    :exit, _reason -> false
+  end
+
+  defp turn_commit_lock(pid, turn_id),
+    do: {{__MODULE__, :turn_commit, pid, turn_id}, self()}
+
   defp blank?(nil), do: true
   defp blank?(text) when is_binary(text), do: String.trim(text) == ""
   defp blank?(_), do: false
@@ -1250,6 +2797,7 @@ defmodule Ecrits.AcpAgent.Session do
   defp public_snapshot(state) do
     %{
       id: state.id,
+      instance_id: state.instance_id,
       owner_id: state.owner_id,
       provider: state.provider,
       workspace_root: state.workspace_root,
@@ -1263,23 +2811,207 @@ defmodule Ecrits.AcpAgent.Session do
   # Display-only snapshot for chat-rail repaint after a refresh.
   defp agent_snapshot_payload(state) do
     %{
+      instance_id: state.instance_id,
+      event_seq: state.event_seq,
       transcript: Enum.reverse(state.transcript),
       status: status(state),
       title: state.title,
       title_user_edited?: Map.get(state, :title_user_edited?, false),
+      # Provider is bound when this agent process starts; model is the canonical
+      # option retained by that process. Same-tab sibling LiveViews use these
+      # values when a provider restart reuses the durable agent id.
+      provider: snapshot_provider_id(state.provider),
+      model: Keyword.get(state.adapter_opts, :model),
       # Number of mid-turn sends still queued (Phase 5), so a refresh can repaint
       # the "N 대기" pending state.
       pending: length(state.queue),
       queued: Enum.map(state.queue, &queued_turn_payload/1),
-      current_turn: state.current && %{id: state.current.turn_id, status: :running},
+      current_turn: current_turn_snapshot(state.current),
       # Stored adapter_opts so the LiveView can hydrate reasoning/access from
       # session on re-attach (instead of reading stale URL params).
       adapter_opts: state.adapter_opts
     }
   end
 
+  defp durable_snapshot_payload(state) do
+    %{
+      id: state.id,
+      instance_id: state.instance_id,
+      provider_session_id: Map.get(state, :provider_session_id),
+      title: Map.get(state, :title),
+      title_user_edited?: Map.get(state, :title_user_edited?, false),
+      transcript:
+        state.transcript
+        |> Enum.reverse()
+        |> Enum.map(&Agent.dump_dialog/1),
+      adapter_opts:
+        state.adapter_opts
+        |> Keyword.take(@persisted_adapter_opt_keys)
+        |> Map.new(fn {key, value} -> {Atom.to_string(key), durable_scalar(value)} end)
+    }
+  end
+
+  defp persist_durable_state(%{workspace_root: workspace_root, id: id} = state)
+       when is_binary(workspace_root) and workspace_root != "" and is_binary(id) and id != "" do
+    _ =
+      Ecrits.WorkspaceHandoff.put_agent_state(
+        workspace_root,
+        id,
+        durable_snapshot_payload(normalize_transcript(state))
+      )
+
+    state
+  rescue
+    _error -> state
+  catch
+    :exit, _reason -> state
+  end
+
+  defp persist_durable_state(state), do: state
+
+  defp persist_durable_state_async(%{workspace_root: workspace_root, id: id} = state)
+       when is_binary(workspace_root) and workspace_root != "" and is_binary(id) and id != "" do
+    _ =
+      Ecrits.WorkspaceHandoff.put_agent_state_async(
+        workspace_root,
+        id,
+        durable_snapshot_payload(normalize_transcript(state))
+      )
+
+    state
+  rescue
+    _error -> state
+  catch
+    :exit, _reason -> state
+  end
+
+  defp persist_durable_state_async(state), do: state
+
+  defp normalize_durable_restore(restore, expected_id) when is_map(restore) do
+    id = restore_field(restore, :id)
+
+    if is_binary(id) and id == expected_id do
+      %{
+        id: id,
+        provider_session_id: durable_string(restore_field(restore, :provider_session_id)),
+        title: durable_string(restore_field(restore, :title)),
+        title_user_edited?: restore_field(restore, :title_user_edited?) == true,
+        transcript: restore_field(restore, :transcript) || [],
+        adapter_opts: restore_field(restore, :adapter_opts) || %{}
+      }
+    else
+      %{}
+    end
+  end
+
+  defp normalize_durable_restore(_restore, _expected_id), do: %{}
+
+  defp restored_transcript(%{transcript: transcript}) when is_list(transcript) do
+    Enum.map(transcript, &Agent.load_dialog!/1)
+  rescue
+    _error -> []
+  end
+
+  defp restored_transcript(_restore), do: []
+
+  defp merge_restored_adapter_opts(runtime_opts, %{adapter_opts: restored})
+       when is_list(runtime_opts) and is_map(restored) do
+    persisted =
+      Enum.flat_map(@persisted_adapter_opt_keys, fn key ->
+        case Map.fetch(restored, Atom.to_string(key)) do
+          {:ok, value} -> [{key, value}]
+          :error -> []
+        end
+      end)
+
+    Keyword.merge(persisted, runtime_opts)
+  end
+
+  defp merge_restored_adapter_opts(runtime_opts, _restore), do: runtime_opts
+
+  defp restore_field(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
+
+  defp durable_string(value) when is_binary(value), do: value
+  defp durable_string(_value), do: nil
+
+  defp durable_scalar(value) when is_atom(value), do: Atom.to_string(value)
+
+  defp durable_scalar(value) when is_binary(value) or is_number(value) or is_boolean(value),
+    do: value
+
+  defp durable_scalar(_value), do: nil
+
+  # This is a value snapshot of the current turn, not the mutable `current`
+  # state map itself. Pending prose/reasoning remain separate from already
+  # ordered items so a joining LiveView can render the current bytes and then
+  # continue appending future deltas to the same segment ids.
+  defp current_turn_snapshot(nil), do: nil
+
+  defp current_turn_snapshot(current) when is_map(current) do
+    input = Content.display_text(Map.get(current, :input))
+    picks = Map.get(current, :picks, [])
+
+    current_items =
+      current
+      |> Map.get(:items, [])
+      |> normalize_file_activity_items()
+
+    %{
+      id: current.turn_id,
+      turn_id: current.turn_id,
+      status: :running,
+      input: input,
+      picks: picks,
+      items:
+        []
+        |> maybe_append_user_item(input, picks)
+        |> Kernel.++(Enum.map(current_items, &Map.delete(&1, :arguments))),
+      pending_text: Map.get(current, :pending_text, ""),
+      text_segment: Map.get(current, :text_segment, 0),
+      pending_reasoning: Map.get(current, :pending_reasoning, ""),
+      reasoning_segment: Map.get(current, :reasoning_segment, 0),
+      edit_preview: current_edit_preview_snapshot(current),
+      active_tools: current_active_tools(current_items)
+    }
+  end
+
+  defp current_edit_preview_snapshot(current) do
+    case Map.get(current, :edit_preview) do
+      preview when is_map(preview) ->
+        %{
+          edit_id: Map.get(preview, :edit_id),
+          path: Map.get(preview, :path),
+          text: Map.get(preview, :text, ""),
+          delta_count: Map.get(preview, :delta_count, 0)
+        }
+
+      _missing ->
+        nil
+    end
+  end
+
+  defp current_active_tools(items) do
+    items
+    |> Enum.filter(&(Map.get(&1, :role) == :tool and Map.get(&1, :status) == :running))
+    |> Map.new(fn item ->
+      tool_call_id = Map.get(item, :tool_call_id)
+
+      {tool_call_id,
+       %{
+         name: Map.get(item, :name),
+         kind: Map.get(item, :kind),
+         input: Map.get(item, :input),
+         args: Map.get(item, :arguments, %{})
+       }}
+    end)
+  end
+
   defp status(%{current: nil}), do: :idle
   defp status(_state), do: :running
+
+  defp snapshot_provider_id(%{id: id}) when is_binary(id), do: id
+  defp snapshot_provider_id(provider) when is_binary(provider), do: provider
+  defp snapshot_provider_id(_provider), do: nil
 
   defp queued_turn_payload(queued) do
     %{
@@ -1291,32 +3023,64 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp queued_display_input(%{display: display}) when is_binary(display), do: display
 
-  defp queued_display_input(%{input: input}), do: Prompt.display_text(input)
+  defp queued_display_input(%{input: input}), do: Content.display_text(input)
 
   defp emit(state, event) do
+    state = state |> ensure_instance_id() |> ensure_event_seq()
+    event_seq = state.event_seq + 1
+    state = Map.put(state, :event_seq, event_seq)
+
     event =
       event
       |> Map.put(:session_id, state.id)
+      |> Map.put(:instance_id, state.instance_id)
+      |> Map.put(:event_seq, event_seq)
       |> Map.put(
         :at,
         DateTime.utc_now() |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601()
       )
 
-    Phoenix.PubSub.broadcast(@pubsub, topic(state.id), {:local_agent_event, event})
-    state
+    Phoenix.PubSub.broadcast(@pubsub, topic(state.id), {:agent_event, event})
+    maybe_persist_durable_event(state, event)
+  end
+
+  defp maybe_persist_durable_event(state, %{type: type})
+       when type in [:thread_title, :turn_cancelled],
+       do: persist_durable_state(state)
+
+  defp maybe_persist_durable_event(state, %{type: type})
+       when type in [:turn_completed, :turn_failed],
+       do: persist_durable_state_async(state)
+
+  defp maybe_persist_durable_event(state, _event), do: state
+
+  # Tolerate a process that was started before this field was hot-loaded. The
+  # first snapshot or event pins one token for the rest of that process life.
+  defp ensure_instance_id(state) do
+    case Map.get(state, :instance_id) do
+      instance_id when is_binary(instance_id) and instance_id != "" -> state
+      _missing -> Map.put(state, :instance_id, Ecto.UUID.generate())
+    end
+  end
+
+  defp ensure_event_seq(state) do
+    case Map.get(state, :event_seq) do
+      event_seq when is_integer(event_seq) and event_seq >= 0 -> state
+      _missing -> Map.put(state, :event_seq, 0)
+    end
   end
 
   # Auto-title a fresh conversation from its first user message. Codex does not
   # emit a session/thread title over ACP (only the `pi` adapter does via
   # session_info_update), so without this a `New Chat` stays untitled. We emit a
   # `:thread_title` event ONCE, on the first turn; the LiveView applies it unless
-  # the user has manually renamed the thread (local_agent_title_user_edited?).
+  # the user has manually renamed the thread (agent_title_user_edited?).
   defp maybe_emit_thread_title(%{title_emitted?: true} = state, _input), do: state
 
   defp maybe_emit_thread_title(state, input) do
     # Derive from the display text so a multi-modal turn titles from its typed
     # text; a bare-string input passes through `display_text/1` unchanged.
-    case derive_title(Prompt.display_text(input)) do
+    case derive_title(Content.display_text(input)) do
       title when is_binary(title) and title != "" ->
         # RETAIN the title on the durable agent (so a re-attach recovers it) AND
         # emit it once so attached LiveViews update their header.

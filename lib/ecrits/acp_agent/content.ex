@@ -1,6 +1,6 @@
-defmodule Ecrits.AcpAgent.Prompt do
+defmodule Ecrits.AcpAgent.Content do
   @moduledoc """
-  The multi-modal input seam for a chat turn (Phase 5).
+  The multi-modal ACP content seam for a chat turn (Phase 5).
 
   A turn's `input` is generalized from a bare string to a list of **content
   blocks** — `%{type: :text | :image | :audio | :file | :doc_ref, …}` — with a
@@ -14,8 +14,8 @@ defmodule Ecrits.AcpAgent.Prompt do
       string path is provably untouched.
     * `display_text/1` — the human-visible text of an input (for the chat
       transcript bubble + the auto-title derivation), regardless of modality.
-    * `to_acp_content/2` — maps a normalized input + the doc preamble onto the
-      ACP `prompt` content shape (`String.t() | [content_block_map]`). A string
+    * `to_acp_content/2` — maps normalized input plus supplied instruction text
+      onto the ACP `prompt` content shape (`String.t() | [content_block_map]`). A string
       input maps to `preamble <> string` (UNCHANGED). A block list maps to a
       leading preamble **text block** followed by one ACP block per input block
       (`text` / `image` / `audio` / `resource_link`), so a future image / doc-ref

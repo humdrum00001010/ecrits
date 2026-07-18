@@ -55,7 +55,7 @@ defmodule Ecrits.AcpAgent.SessionMemoryTest do
     assert is_binary(provider_id_1) and provider_id_1 != ""
     assert_receive {:fake_acp_prompt, ^provider_id_1, _prompt1}, 2_000
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn1}}, 2_000
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn1}}, 2_000
 
     # ── Turn 2: same launch options → no session/new or session/load at all ──
     {:ok, %{id: turn2}} = Session.send_turn(pid, nil, "what is my favorite color?")
@@ -63,7 +63,7 @@ defmodule Ecrits.AcpAgent.SessionMemoryTest do
     assert_receive {:fake_acp_prompt, ^provider_id_1, _prompt2}, 2_000
     refute_received {:fake_acp_session, _method, _provider_id}
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn2}}, 2_000
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn2}}, 2_000
   end
 
   test "launch option changes reopen ACP but resume the remembered provider session", %{id: id} do
@@ -73,7 +73,7 @@ defmodule Ecrits.AcpAgent.SessionMemoryTest do
     {:ok, %{id: turn1}} = Session.send_turn(pid, nil, "favorite color is teal")
     assert_receive {:fake_acp_session, :new, provider_id_1}, 2_000
     assert_receive {:fake_acp_prompt, ^provider_id_1, _prompt1}, 2_000
-    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn1}}, 2_000
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn1}}, 2_000
 
     :ok = Session.update_options(pid, model: "changed-model")
 
@@ -82,7 +82,7 @@ defmodule Ecrits.AcpAgent.SessionMemoryTest do
     assert_receive {:fake_acp_session, :load, provider_id_2}, 2_000
     assert provider_id_2 == provider_id_1
     assert_receive {:fake_acp_prompt, ^provider_id_1, _prompt2}, 2_000
-    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn2}}, 2_000
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn2}}, 2_000
 
     refute_received {:fake_acp_session, :new, _}
   end

@@ -11,7 +11,7 @@ defmodule EcritsWeb.FakeAcpAdapter do
       is `{:text_delta, str}` / `{:reasoning_delta, str}` or a map like
       `%{type: :tool_call_completed, id: ..., name: ..., result: ...}`.
     * `:wait_for` / `:test_pid` — block the turn until `:test_pid` sends the
-      `:wait_for` message (after announcing `{:local_agent_adapter_waiting, self}`),
+      `:wait_for` message (after announcing `{:agent_adapter_waiting, self}`),
       so cancellation/concurrency can be tested.
     * `:echo_opts` — when true, the final text echoes the prompt input.
   """
@@ -111,7 +111,7 @@ defmodule EcritsWeb.FakeAcpAdapter do
         :ok
 
       {message, test_pid} when is_pid(test_pid) ->
-        send(test_pid, {:local_agent_adapter_waiting, self()})
+        send(test_pid, {:agent_adapter_waiting, self()})
 
         receive do
           ^message -> :ok
@@ -163,6 +163,43 @@ defmodule EcritsWeb.FakeAcpAdapter do
   defp to_session_update(%{type: :text_delta, delta: text}, session_id),
     do: to_session_update({:text_delta, text}, session_id)
 
+  defp to_session_update(%{type: :file_operation_started} = event, session_id) do
+    session_update(session_id, %{
+      "sessionUpdate" => "file_operation",
+      "fileOperationId" => event[:file_operation_id] || event[:id],
+      "operation" => event[:operation] || event[:name],
+      "kind" => event[:kind],
+      "path" => event[:path],
+      "query" => event[:query],
+      "status" => "in_progress"
+    })
+  end
+
+  defp to_session_update(%{type: :file_operation_completed} = event, session_id) do
+    session_update(session_id, %{
+      "sessionUpdate" => "file_operation_update",
+      "fileOperationId" => event[:file_operation_id] || event[:id],
+      "operation" => event[:operation] || event[:name],
+      "kind" => event[:kind],
+      "path" => event[:path],
+      "query" => event[:query],
+      "status" => "completed"
+    })
+  end
+
+  defp to_session_update(%{type: :file_operation_failed} = event, session_id) do
+    session_update(session_id, %{
+      "sessionUpdate" => "file_operation_update",
+      "fileOperationId" => event[:file_operation_id] || event[:id],
+      "operation" => event[:operation] || event[:name],
+      "kind" => event[:kind],
+      "path" => event[:path],
+      "query" => event[:query],
+      "status" => "failed",
+      "reason" => event[:reason]
+    })
+  end
+
   defp to_session_update(%{type: :edit_delta} = event, session_id) do
     session_update(session_id, %{
       "sessionUpdate" => "tool_call",
@@ -188,6 +225,7 @@ defmodule EcritsWeb.FakeAcpAdapter do
       "status" => "completed",
       "toolCallId" => event[:id],
       "toolName" => event[:name],
+      "kind" => event[:kind],
       "rawOutput" => event[:result]
     })
   end
@@ -198,6 +236,7 @@ defmodule EcritsWeb.FakeAcpAdapter do
       "status" => "failed",
       "toolCallId" => event[:id],
       "toolName" => event[:name],
+      "kind" => event[:kind],
       "content" => [
         %{"type" => "content", "content" => %{"type" => "text", "text" => event[:reason] || ""}}
       ]
@@ -209,6 +248,7 @@ defmodule EcritsWeb.FakeAcpAdapter do
       "sessionUpdate" => "tool_call",
       "toolCallId" => event[:id],
       "toolName" => event[:name],
+      "kind" => event[:kind],
       "rawInput" => event[:arguments] || %{}
     })
   end
@@ -223,6 +263,7 @@ defmodule EcritsWeb.FakeAcpAdapter do
       "status" => "in_progress",
       "toolCallId" => event[:id],
       "toolName" => event[:name],
+      "kind" => event[:kind],
       "input" => event[:arguments] || %{}
     })
   end
