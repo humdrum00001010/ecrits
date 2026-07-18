@@ -14,7 +14,7 @@ defmodule Ecrits.AcpAgent do
   """
 
   alias ExMCP.ACP.Adapters.Claude, as: ExMCPClaude
-  alias ExMCP.ACP.Adapters.Codex, as: ExMCPCodex
+  alias Ecrits.AcpAgent.CodexAdapter
   alias Ecrits.AcpAgent.Session
   alias Ecrits.AcpAgent.SessionSupervisor
 
@@ -22,9 +22,9 @@ defmodule Ecrits.AcpAgent do
     %{
       id: "codex",
       label: "Codex",
-      icon: "local-agent-provider-codex",
+      icon: "agent-provider-codex",
       favicon_src: "/images/icons/openai-blossom.svg",
-      exmcp_adapter: ExMCPCodex,
+      exmcp_adapter: CodexAdapter,
       executables: ["codex"],
       login_command: "codex login",
       install_command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
@@ -33,7 +33,7 @@ defmodule Ecrits.AcpAgent do
     %{
       id: "claude",
       label: "Claude",
-      icon: "local-agent-provider-claude",
+      icon: "agent-provider-claude",
       favicon_src: "/images/icons/claude-favicon.ico",
       exmcp_adapter: ExMCPClaude,
       executables: ["claude"],
@@ -56,7 +56,7 @@ defmodule Ecrits.AcpAgent do
   def default_provider_id do
     configured =
       :ecrits
-      |> Application.get_env(:local_agent, [])
+      |> Application.get_env(:agent, [])
       |> Keyword.get(:provider, "codex")
       |> normalize_provider_id()
 
@@ -128,7 +128,7 @@ defmodule Ecrits.AcpAgent do
   end
 
   defp configured_integration_options do
-    case Application.get_env(:ecrits, :local_agent_ui, []) do
+    case Application.get_env(:ecrits, :agent_ui, []) do
       config when is_list(config) -> Keyword.get(config, :integration_options)
       _ -> nil
     end
@@ -243,6 +243,7 @@ defmodule Ecrits.AcpAgent do
         workspace_root: Keyword.get(opts, :workspace_root),
         document_path: Keyword.get(opts, :document_path),
         pool_document_id: Keyword.get(opts, :pool_document_id),
+        durable_restore: Keyword.get(opts, :durable_restore),
         # Per-agent MCP url (design invariant 3): the agent's own id keys its
         # `/mcp/doc-tools/<id>` endpoint, so a tool call resolves back to THIS
         # agent and runs in its own doc context — never a shared global pool.
@@ -267,6 +268,22 @@ defmodule Ecrits.AcpAgent do
   def cancel(ctx, session_id, turn_id \\ nil) do
     with {:ok, pid} <- fetch_session(session_id) do
       Session.cancel(pid, ctx, turn_id)
+    end
+  end
+
+  @doc false
+  def prepare_restart(session_id, workspace_root)
+      when is_binary(session_id) and is_binary(workspace_root) do
+    with {:ok, pid} <- fetch_session(session_id) do
+      Session.prepare_restart(pid, workspace_root)
+    end
+  end
+
+  @doc false
+  def reconcile_workspace(session_id, workspace_root)
+      when is_binary(session_id) and is_binary(workspace_root) do
+    with {:ok, pid} <- fetch_session(session_id) do
+      Session.reconcile_workspace(pid, workspace_root)
     end
   end
 
@@ -320,6 +337,13 @@ defmodule Ecrits.AcpAgent do
     case safe_whereis(session_id) do
       pid when is_pid(pid) -> Session.agent_snapshot(pid)
       nil -> %{transcript: [], status: :offline, title: nil}
+    end
+  end
+
+  @doc false
+  def durable_snapshot(session_id) when is_binary(session_id) do
+    with {:ok, pid} <- fetch_session(session_id) do
+      Session.durable_snapshot(pid)
     end
   end
 
