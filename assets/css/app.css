@@ -396,7 +396,7 @@
    The heroicons installation itself is managed by your mix.exs */
 @plugin "./plugins/heroicons";
 
-@plugin "daisyui" {
+@plugin "../vendor/daisyui" {
   themes: false;
 }
 
@@ -405,7 +405,7 @@
    base is near-black-blue, text is a dim off-white (not pure white), and a
    single luminous blue carries the voice. Tuned for long contract-reading
    sessions at night; see SPEC.md §10 for the design rationale. */
-@plugin "daisyui/theme" {
+@plugin "../vendor/daisyui-theme" {
   name: "studio";
   default: true;
   prefersdark: true;

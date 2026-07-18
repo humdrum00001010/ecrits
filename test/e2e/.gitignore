@@ -1,8 +1,0 @@
-node_modules/
-playwright-report/
-test-results/
-blob-report/
-playwright/.cache/
-# We pin via pnpm — keep the pnpm-lock, ignore other package managers'.
-package-lock.json
-yarn.lock
