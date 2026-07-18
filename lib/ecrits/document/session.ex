@@ -222,7 +222,7 @@ defmodule Ecrits.Document.Session do
 
   defp publish(document, %{"saved" => true} = snapshot) do
     Phoenix.PubSub.broadcast(Ecrits.PubSub, Document.topic(document.id), {
-      :local_document_saved,
+      :document_saved,
       document,
       snapshot
     })
@@ -230,7 +230,7 @@ defmodule Ecrits.Document.Session do
 
   defp publish(document, snapshot) do
     Phoenix.PubSub.broadcast(Ecrits.PubSub, Document.topic(document.id), {
-      :local_document_checkpointed,
+      :document_checkpointed,
       document,
       snapshot
     })

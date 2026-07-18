@@ -56,11 +56,16 @@ defmodule Ecrits.Doc.Projection do
   `fingerprint/1`).
   """
 
+  require Logger
+
   alias Ecrits.Doc.BrowserBridge
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
-  alias Ecrits.Document.ByteSpool
-  alias Ecrits.Fuse.DocMount
+  alias Ecrits.AcpAgent.Session, as: AgentSession
+  alias Ecrits.Document
+  alias Ecrits.Document.{ByteSpool, PreviewSnapshot}
+  alias Ecrits.FS
+  alias Ecrits.Fuse.{DocMount, OpenDocs}
   alias Ecrits.Workspace.Session
   alias Libreofficex.LokBackend.Ir, as: OfficeIr
 
@@ -78,6 +83,11 @@ defmodule Ecrits.Doc.Projection do
         }
 
   @supported_exts ~w(.hwp .hwpx .docx .pptx .xlsx)
+  @browser_transaction_supervisor Ecrits.Doc.BrowserTransactionSupervisor
+  @agent_picture_insert_error {
+    :agent_picture_insertion_requires_doc_edit,
+    "insert_picture changes from agent JSONL edits are not allowed; use doc.edit for image insertion"
+  }
 
   @doc "The file extensions this projection can render (downcased, with the dot)."
   @spec supported_exts() :: [String.t()]
@@ -307,19 +317,38 @@ defmodule Ecrits.Doc.Projection do
   # bytes.
   @spec render_elements([map()], Ecrits.Doc.kind()) :: projection()
   defp render_elements(nodes, kind) do
-    line =
+    bytes =
       nodes
       |> nested_for(kind)
-      |> encode_ir_node()
-      |> Kernel.<>("\n")
-
-    bytes = IO.iodata_to_binary(line)
+      |> encode_projection_bytes()
 
     %{
       bytes: bytes,
       line_index: [{{0, byte_size(bytes)}, nil}],
       fingerprint: :erlang.phash2(bytes)
     }
+  end
+
+  # One paragraph group per line while the whole file stays ONE valid JSON
+  # value (newlines are inter-token whitespace, so every existing whole-value
+  # decoder keeps working). This is what makes the surface navigable by the
+  # ACP agent's line-oriented tools: measured on the 411s take18 turn, ~95% of
+  # dialog time was the agent scanning a ~3MB single-line value by byte
+  # offsets (board #460). A raw 0x0A can only be OUR separator — Jason escapes
+  # newlines inside strings — so document content can never fake a boundary,
+  # and a raw newline injected INSIDE a record breaks JSON and fails closed.
+  defp encode_projection_bytes([]), do: "[]\n"
+
+  defp encode_projection_bytes(sections) when is_list(sections) do
+    chunks = Enum.map(sections, &encode_section_chunk/1)
+    IO.iodata_to_binary(["[\n", Enum.intersperse(chunks, ",\n"), "\n]\n"])
+  end
+
+  defp encode_section_chunk([]), do: "[]"
+
+  defp encode_section_chunk(groups) when is_list(groups) do
+    lines = groups |> Enum.map(&encode_ir_node/1) |> Enum.intersperse(",\n")
+    ["[\n", lines, "\n]"]
   end
 
   # Office (libre) projects through its own engine IR policy in the dep — ref-
@@ -366,6 +395,9 @@ defmodule Ecrits.Doc.Projection do
   Returns `{:ok, %{applied: n, doc: name}}`, or `{:error, reason}` —
   `:structural_change` when the payload count/order/identity changed outside the
   supported new-table payload shape,
+  `{:agent_picture_insertion_requires_doc_edit, message}` when an agent-owned
+  JSONL edit tries to add a picture (native image insertion belongs to
+  `doc.edit`),
   `:unroutable` when a changed node has no backend ref, or an engine error. Never
   raises. On success, broadcasts `{:vfs_doc_edited, info}` on `doc_vfs:<root>` so
   the chat rail can show where the file edit landed.
@@ -381,9 +413,16 @@ defmodule Ecrits.Doc.Projection do
            {:ok, old_nodes, document_id} <- ir_nodes(abs_path, kind),
            {:ok, new_nodes} <- parse_ir_jsonl(new_bytes) do
         case ir_changes(kind, old_nodes, new_nodes) do
-          {:error, reason} -> {:error, reason}
-          [] -> {:ok, %{applied: 0, doc: Path.basename(abs_path)}}
-          changes -> apply_changes(abs_path, kind, document_id, changes, opts)
+          {:error, reason} ->
+            {:error, reason}
+
+          [] ->
+            {:ok, %{applied: 0, doc: Path.basename(abs_path)}}
+
+          changes ->
+            with :ok <- validate_agent_picture_changes(changes, opts) do
+              apply_changes(abs_path, kind, document_id, changes, opts)
+            end
         end
       end
 
@@ -434,21 +473,23 @@ defmodule Ecrits.Doc.Projection do
           {:ok, %{previewed: 0, tokens: 0, doc: Path.basename(abs_path)}}
 
         changes ->
-          groups = browser_preview_groups(changes)
-          applied = List.duplicate(%{}, length(changes))
+          with :ok <- validate_agent_picture_changes(changes, opts) do
+            groups = browser_preview_groups(changes)
+            applied = List.duplicate(%{}, length(changes))
 
-          preview_opts =
-            opts
-            |> Keyword.put(:progress_index, 0)
-            |> Keyword.put(:progress_total, length(groups))
-            |> Keyword.put(:applied_total, 0)
-            |> Keyword.put(:preview_steps, browser_preview_steps(groups, changes, applied))
-            |> Keyword.put(:preview_only, true)
+            preview_opts =
+              opts
+              |> Keyword.put(:progress_index, 0)
+              |> Keyword.put(:progress_total, length(groups))
+              |> Keyword.put(:applied_total, 0)
+              |> Keyword.put(:preview_steps, browser_preview_steps(groups, changes, applied))
+              |> Keyword.put(:preview_only, true)
 
-          broadcast_edit(abs_path, changes, applied, preview_opts)
+            broadcast_edit(abs_path, changes, applied, preview_opts)
 
-          {:ok,
-           %{previewed: length(changes), tokens: length(groups), doc: Path.basename(abs_path)}}
+            {:ok,
+             %{previewed: length(changes), tokens: length(groups), doc: Path.basename(abs_path)}}
+          end
       end
     end
   rescue
@@ -479,6 +520,7 @@ defmodule Ecrits.Doc.Projection do
   defp parse_ir_jsonl_lines(bytes) do
     bytes
     |> String.split("\n")
+    |> Enum.map(&String.trim_trailing(&1, "\r"))
     |> Enum.reject(&(&1 == ""))
     |> decode_jsonl_values()
     |> case do
@@ -1344,6 +1386,21 @@ defmodule Ecrits.Doc.Projection do
 
     @doc false
     def __browser_preview_groups_for_test__(changes), do: browser_preview_groups(changes)
+
+    @doc false
+    def __browser_sets_for_test__(changes), do: browser_sets(changes)
+
+    @doc false
+    def __apply_browser_changes_for_test__(lv, abs_path, kind, changes, opts),
+      do: apply_browser_changes(lv, abs_path, kind, changes, opts)
+
+    @doc false
+    def __apply_server_changes_for_test__(editor, abs_path, kind, changes, opts),
+      do: apply_change_groups(editor, abs_path, kind, logical_change_groups(changes), opts)
+
+    @doc false
+    def __broadcast_edit_for_test__(abs_path, changes, applied, opts),
+      do: broadcast_edit(abs_path, changes, applied, opts)
   end
 
   defp normalize_ir_value(%{} = map) do
@@ -1369,7 +1426,13 @@ defmodule Ecrits.Doc.Projection do
   defp apply_changes(abs_path, kind, document_id, changes, opts) do
     case writeback_route(opts[:root], document_id) do
       {:browser, lv} ->
-        apply_browser_changes(lv, abs_path, kind, changes, opts)
+        apply_browser_changes(
+          lv,
+          abs_path,
+          kind,
+          changes,
+          Keyword.put(opts, :expected_document_id, document_id)
+        )
 
       {:server, editor} ->
         with {:ok, _applied} <-
@@ -1394,6 +1457,24 @@ defmodule Ecrits.Doc.Projection do
   defp writeback_route(_root, document_id), do: Pool.route(Pool, document_id)
 
   defp apply_browser_changes(lv, abs_path, kind, changes, opts) do
+    run_browser_transaction(fn ->
+      do_apply_browser_changes(lv, abs_path, kind, changes, opts)
+    end)
+  end
+
+  # WorkspaceLive keeps a browser VFS lease under the BrowserBridge caller pid.
+  # Keep that pid stable for the whole write transaction, and do not link it to
+  # the ACP HandlerRunner that is awaiting the result: if the request owner dies
+  # after the durable source replace, this coordinator still owns the lease and
+  # finishes vfs_commit (or restores + rolls back) under the same turn fence.
+  defp run_browser_transaction(fun) when is_function(fun, 0) do
+    task = Task.Supervisor.async_nolink(@browser_transaction_supervisor, fun)
+    Task.await(task, :infinity)
+  catch
+    :exit, reason -> {:error, {:browser_transaction_coordinator_failed, reason}}
+  end
+
+  defp do_apply_browser_changes(lv, abs_path, kind, changes, opts) do
     edit_id =
       Keyword.get_lazy(opts, :edit_id, fn ->
         "vfs-edit-#{System.unique_integer([:positive, :monotonic])}"
@@ -1402,48 +1483,386 @@ defmodule Ecrits.Doc.Projection do
     groups = browser_preview_groups(changes)
     ops = browser_ops(changes)
     sets = browser_sets(changes)
+    commit_timeout = Keyword.get(opts, :browser_commit_timeout, 8_000)
 
-    payload = %{edit_id: edit_id, ops: ops, sets: sets}
+    payload =
+      %{edit_id: edit_id, ops: ops, sets: sets}
+      |> put_browser_transaction_metadata(opts)
 
-    with {:ok, result} <- BrowserBridge.call(lv, :vfs_write, payload, timeout: 30_000),
-         {:ok, bytes} <- ByteSpool.decode(result),
-         :ok <- File.write(abs_path, bytes),
-         {:ok, _committed} <-
-           BrowserBridge.call(lv, :vfs_commit, %{edit_id: edit_id}, timeout: 8_000) do
-      # The browser export is now the durable source of truth. Drop the cold
-      # server twin so the next projection/diff reopens those exact bytes rather
-      # than comparing against the pre-write Editor model.
-      _ = Pool.close_by_path(abs_path)
-      applied = browser_applied_results(changes, result)
+    case FS.raw_read(abs_path) do
+      {:ok, source_preimage} ->
+        with {:ok, result} <-
+               BrowserBridge.call(lv, :vfs_write, payload,
+                 timeout: BrowserBridge.vfs_write_timeout()
+               ),
+             {:ok, bytes} <- ByteSpool.decode(result) do
+          case commit_browser_export(
+                 lv,
+                 abs_path,
+                 source_preimage,
+                 bytes,
+                 edit_id,
+                 commit_timeout,
+                 kind,
+                 opts
+               ) do
+            {:ok, _committed} ->
+              # The browser export is now the durable source of truth. Refresh the
+              # server twin from those exact bytes asynchronously instead of
+              # dropping it: reload_from_bytes is a call on the twin's own
+              # Editor, so any later reader (next diff's ir_nodes, doc.find,
+              # the canonical stage) queues behind it in the editor mailbox — a
+              # natural fence — while this write's ACK no longer pays the
+              # close-then-reopen parse that dominated write latency.
+              sync_browser_twin_async(abs_path, bytes)
+              applied = browser_applied_results(changes, result)
 
-      preview_opts =
-        opts
-        |> Keyword.put(:edit_id, edit_id)
-        |> Keyword.put(:progress_index, length(groups))
-        |> Keyword.put(:progress_total, length(groups))
-        |> Keyword.put(:applied_total, length(changes))
-        |> Keyword.put(:preview_steps, browser_preview_steps(groups, changes, applied))
-        |> Keyword.put(:preview_base_url, value(result, "preview_base_url"))
-        |> Keyword.put(:browser_authority, true)
+              preview_opts =
+                opts
+                |> Keyword.put(:edit_id, edit_id)
+                |> Keyword.put(:progress_index, length(groups))
+                |> Keyword.put(:progress_total, length(groups))
+                |> Keyword.put(:applied_total, length(changes))
+                |> Keyword.put(
+                  :preview_steps,
+                  browser_preview_steps(groups, changes, applied)
+                )
+                |> Keyword.put(:preview_base_url, value(result, "preview_base_url"))
+                |> Keyword.put(:browser_authority, true)
+                |> Keyword.put(:preview_snapshot_bytes_result, {:ok, bytes})
 
-      broadcast_edit(abs_path, changes, applied, preview_opts)
-      {:ok, %{applied: length(changes), doc: Path.basename(abs_path)}}
-    else
+              broadcast_edit(abs_path, changes, applied, preview_opts)
+              {:ok, %{applied: length(changes), doc: Path.basename(abs_path)}}
+
+            {:error, _reason} = error ->
+              error
+          end
+        else
+          failure ->
+            _ = rollback_browser_write(lv, edit_id, opts)
+            browser_writeback_error(kind, failure)
+        end
+
       {:error, _reason} = error ->
-        _ = BrowserBridge.call(lv, :vfs_rollback, %{edit_id: edit_id}, timeout: 8_000)
         error
-
-      other ->
-        _ = BrowserBridge.call(lv, :vfs_rollback, %{edit_id: edit_id}, timeout: 8_000)
-        {:error, {:browser_writeback_failed, kind, other}}
     end
   end
+
+  # Mirror the committed browser bytes into the live server twin off the ACK
+  # path. The reload call enqueues on the twin's Editor within microseconds,
+  # well before any next agent write (>100ms away), so every later editor call
+  # observes the refreshed model. A failed reload must not leave a stale twin
+  # to poison the next diff: fall back to dropping the twin so the next reader
+  # reopens the committed file (the pre-optimization behavior).
+  defp sync_browser_twin_async(abs_path, bytes) do
+    Task.Supervisor.start_child(@browser_transaction_supervisor, fn ->
+      case Pool.refresh_by_path(abs_path, bytes) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "[Projection] browser twin refresh failed for #{abs_path}: #{inspect(reason)}; dropping twin"
+          )
+
+          Pool.close_by_path(abs_path)
+      end
+    end)
+  end
+
+  defp commit_browser_export(
+         lv,
+         abs_path,
+         source_preimage,
+         bytes,
+         edit_id,
+         commit_timeout,
+         kind,
+         opts
+       ) do
+    result =
+      with_agent_turn_commit(opts, fn ->
+        {:commit_result,
+         do_commit_browser_export(
+           lv,
+           abs_path,
+           source_preimage,
+           bytes,
+           edit_id,
+           commit_timeout,
+           kind,
+           opts
+         )}
+      end)
+
+    case result do
+      {:commit_result, commit_result} ->
+        commit_result
+
+      other ->
+        _ = rollback_browser_write(lv, edit_id, opts)
+        browser_writeback_error(kind, other)
+    end
+  end
+
+  defp do_commit_browser_export(
+         lv,
+         abs_path,
+         source_preimage,
+         bytes,
+         edit_id,
+         commit_timeout,
+         kind,
+         opts
+       ) do
+    case validate_agent_turn(opts) do
+      :ok ->
+        case FS.raw_atomic_write(abs_path, bytes) do
+          :ok ->
+            finish_browser_export_after_source_write(
+              lv,
+              abs_path,
+              source_preimage,
+              edit_id,
+              commit_timeout,
+              kind,
+              opts
+            )
+
+          failure ->
+            _ = rollback_browser_write(lv, edit_id, opts)
+            browser_writeback_error(kind, failure)
+        end
+
+      failure ->
+        _ = rollback_browser_write(lv, edit_id, opts)
+        browser_writeback_error(kind, failure)
+    end
+  end
+
+  defp finish_written_browser_export(
+         lv,
+         abs_path,
+         source_preimage,
+         edit_id,
+         commit_timeout,
+         kind,
+         opts
+       ) do
+    result =
+      with :ok <- validate_agent_turn(opts),
+           commit_payload <- put_browser_transaction_metadata(%{edit_id: edit_id}, opts),
+           {:ok, _committed} = committed <-
+             BrowserBridge.call(lv, :vfs_commit, commit_payload, timeout: commit_timeout) do
+        committed
+      end
+
+    case result do
+      {:ok, _committed} = ok ->
+        ok
+
+      failure ->
+        restore_browser_source_and_rollback(
+          lv,
+          abs_path,
+          source_preimage,
+          edit_id,
+          kind,
+          failure,
+          opts
+        )
+    end
+  end
+
+  defp with_agent_turn_commit(opts, fun) do
+    case Keyword.get(opts, :turn_commit_fun) do
+      turn_commit when is_function(turn_commit, 2) ->
+        turn_commit.(agent_turn_identity(opts), fun)
+
+      _default ->
+        case Keyword.get(opts, :agent_session) do
+          pid when is_pid(pid) ->
+            AgentSession.with_turn_commit(pid, agent_turn_identity(opts), fun)
+
+          _legacy_or_server ->
+            fun.()
+        end
+    end
+  end
+
+  if Mix.env() == :test do
+    defp finish_browser_export_after_source_write(
+           lv,
+           abs_path,
+           source_preimage,
+           edit_id,
+           commit_timeout,
+           kind,
+           opts
+         ) do
+      case browser_transaction_checkpoint(opts, :source_written) do
+        :ok ->
+          finish_written_browser_export(
+            lv,
+            abs_path,
+            source_preimage,
+            edit_id,
+            commit_timeout,
+            kind,
+            opts
+          )
+
+        failure ->
+          restore_browser_source_and_rollback(
+            lv,
+            abs_path,
+            source_preimage,
+            edit_id,
+            kind,
+            failure,
+            opts
+          )
+      end
+    end
+
+    defp browser_transaction_checkpoint(opts, checkpoint) do
+      case Keyword.get(opts, :browser_transaction_checkpoint_fun) do
+        checkpoint_fun when is_function(checkpoint_fun, 1) ->
+          try do
+            checkpoint_fun.(checkpoint)
+          rescue
+            error -> {:error, {:checkpoint_raised, Exception.message(error)}}
+          catch
+            kind, reason -> {:error, {:checkpoint_failed, kind, reason}}
+          end
+
+        _no_checkpoint ->
+          :ok
+      end
+    end
+  else
+    defp finish_browser_export_after_source_write(
+           lv,
+           abs_path,
+           source_preimage,
+           edit_id,
+           commit_timeout,
+           kind,
+           opts
+         ) do
+      finish_written_browser_export(
+        lv,
+        abs_path,
+        source_preimage,
+        edit_id,
+        commit_timeout,
+        kind,
+        opts
+      )
+    end
+  end
+
+  defp validate_agent_turn(opts) do
+    case Keyword.get(opts, :agent_session) do
+      pid when is_pid(pid) ->
+        identity = agent_turn_identity(opts)
+
+        case AgentSession.tool_context(pid) do
+          context when is_map(context) ->
+            if Enum.all?([:agent_id, :instance_id, :turn_id], fn key ->
+                 value = Map.get(identity, key)
+                 is_binary(value) and value != "" and Map.get(context, key) == value
+               end) do
+              :ok
+            else
+              {:error, :turn_invalidated}
+            end
+
+          _context ->
+            {:error, :turn_invalidated}
+        end
+
+      _legacy_or_server ->
+        :ok
+    end
+  catch
+    :exit, _reason -> {:error, :turn_invalidated}
+  end
+
+  defp agent_turn_identity(opts) do
+    Map.new([:agent_id, :instance_id, :turn_id], &{&1, Keyword.get(opts, &1)})
+  end
+
+  defp validate_agent_picture_changes(changes, opts) do
+    if full_agent_turn_identity?(opts) and
+         Enum.any?(changes, &match?({:insert_picture, _op, _marker, _props}, &1)) do
+      {:error, @agent_picture_insert_error}
+    else
+      :ok
+    end
+  end
+
+  defp full_agent_turn_identity?(opts) do
+    Enum.all?([:agent_id, :instance_id, :turn_id], fn key ->
+      case Keyword.get(opts, key) do
+        value when is_binary(value) -> String.trim(value) != ""
+        _other -> false
+      end
+    end)
+  end
+
+  defp restore_browser_source_and_rollback(
+         lv,
+         abs_path,
+         source_preimage,
+         edit_id,
+         kind,
+         commit_failure,
+         opts
+       ) do
+    restore_result = FS.raw_atomic_write(abs_path, source_preimage)
+    _ = rollback_browser_write(lv, edit_id, opts)
+
+    case restore_result do
+      :ok ->
+        browser_writeback_error(kind, commit_failure)
+
+      {:error, _reason} = restore_error ->
+        {:error, {:browser_source_restore_failed, commit_failure, restore_error}}
+    end
+  end
+
+  defp rollback_browser_write(lv, edit_id, opts) do
+    payload =
+      %{edit_id: edit_id}
+      |> put_browser_transaction_metadata(opts)
+
+    BrowserBridge.call(lv, :vfs_rollback, payload, timeout: 8_000)
+  end
+
+  defp put_browser_transaction_metadata(payload, opts) do
+    Enum.reduce([:expected_document_id, :agent_id, :instance_id, :turn_id], payload, fn key,
+                                                                                        payload ->
+      case Keyword.get(opts, key) do
+        value when is_binary(value) and value != "" -> Map.put(payload, key, value)
+        _missing -> payload
+      end
+    end)
+  end
+
+  defp browser_writeback_error(_kind, {:error, reason}) when is_binary(reason),
+    do: {:error, {:browser_writeback_rejected, reason}}
+
+  defp browser_writeback_error(_kind, {:error, _reason} = error), do: error
+
+  defp browser_writeback_error(kind, other),
+    do: {:error, {:browser_writeback_failed, kind, other}}
 
   defp browser_ops(changes) do
     Enum.flat_map(changes, fn
       {:text, op, _marker} -> [browser_edit_op(op)]
       {:insert_table, op, _marker} -> [browser_edit_op(op)]
-      {:insert_picture, op, _marker, _props} -> [browser_edit_op(op)]
+      {:insert_picture, op, _marker, props} -> [browser_picture_edit_op(op, props)]
       {:delete_node, op, _marker} -> [browser_edit_op(op)]
       {:set, _ref, _type, _props} -> []
     end)
@@ -1453,7 +1872,9 @@ defmodule Ecrits.Doc.Projection do
     Enum.flat_map(changes, fn
       {:set, ref, type, props} ->
         props =
-          if is_binary(type) and type != "", do: Map.put_new(props, "kind", type), else: props
+          if is_binary(type) and type != "",
+            do: Map.put_new(props, "kind", browser_set_kind(type)),
+            else: props
 
         [%{"ref" => ref, "props" => props}]
 
@@ -1461,6 +1882,9 @@ defmodule Ecrits.Doc.Projection do
         []
     end)
   end
+
+  defp browser_set_kind("paragraph"), do: "para"
+  defp browser_set_kind(type), do: type
 
   defp browser_preview_steps(groups, changes, applied) do
     applied_by_change = Enum.zip(changes, applied)
@@ -1533,50 +1957,115 @@ defmodule Ecrits.Doc.Projection do
         "vfs-edit-#{System.unique_integer([:positive, :monotonic])}"
       end)
 
+    case editor_write_owner(opts) do
+      :incomplete ->
+        {:error, :incomplete_turn_identity}
+
+      owner ->
+        commands = groups |> List.flatten() |> Enum.map(&editor_batch_command/1)
+
+        after_save = fn applied ->
+          preview_opts =
+            Keyword.put(opts, :preview_snapshot_bytes_result, FS.raw_read(abs_path))
+
+          broadcast_committed_groups(abs_path, groups, applied, edit_id, preview_opts)
+        end
+
+        batch_opts =
+          [
+            owner: owner,
+            format: save_format(kind),
+            path: abs_path,
+            after_save: after_save
+          ]
+          |> maybe_put_editor_commit_opt(:agent_session, Keyword.get(opts, :agent_session))
+          |> maybe_put_editor_commit_opt(:turn_commit_fun, Keyword.get(opts, :turn_commit_fun))
+
+        case Editor.apply_batch_and_save(
+               editor,
+               commands,
+               batch_opts
+             ) do
+          {:ok, applied} ->
+            {:ok, applied}
+
+          {:error, reason} ->
+            reason = normalize_batch_write_error(reason)
+            {:error, reason}
+        end
+    end
+  end
+
+  defp maybe_put_editor_commit_opt(opts, :agent_session, value) when is_pid(value),
+    do: Keyword.put(opts, :agent_session, value)
+
+  defp maybe_put_editor_commit_opt(opts, :turn_commit_fun, value) when is_function(value, 2),
+    do: Keyword.put(opts, :turn_commit_fun, value)
+
+  defp maybe_put_editor_commit_opt(opts, _key, _value), do: opts
+
+  defp editor_batch_command({:text, op, _marker}), do: {:apply, op}
+  defp editor_batch_command({:insert_table, op, _marker}), do: {:apply, op}
+  defp editor_batch_command({:delete_node, op, _marker}), do: {:apply, op}
+
+  defp editor_batch_command({:insert_picture, op, _marker, props}) when props == %{},
+    do: {:apply, op}
+
+  defp editor_batch_command({:insert_picture, op, _marker, props}) do
+    props = Map.put_new(props, "kind", "picture")
+    {:apply_then_set, op, props, &inserted_control_ref(op, &1)}
+  end
+
+  defp editor_batch_command({:set, ref, type, props}) do
+    props =
+      if is_binary(type) and type != "",
+        do: Map.put_new(props, "kind", type),
+        else: props
+
+    {:set, ref, props}
+  end
+
+  defp broadcast_committed_groups(abs_path, groups, applied, edit_id, opts) do
     total = length(groups)
 
     groups
     |> Enum.with_index(1)
-    |> Enum.reduce_while({:ok, [], 0}, fn {group, index}, {:ok, acc, applied_total} ->
-      with {:ok, group_applied} <- apply_changes_directly(editor, group),
-           :ok <- maybe_save_final_group(editor, abs_path, kind, index, total) do
-        applied_total = applied_total + length(group)
+    |> Enum.reduce({applied, 0}, fn {group, index}, {remaining, applied_total} ->
+      {group_applied, remaining} = Enum.split(remaining, length(group))
+      applied_total = applied_total + length(group)
 
-        step_opts =
-          opts
-          |> Keyword.put(:edit_id, edit_id)
-          |> Keyword.put(:progress_index, index)
-          |> Keyword.put(:progress_total, total)
-          |> Keyword.put(:applied_total, applied_total)
+      step_opts =
+        opts
+        |> Keyword.put(:edit_id, edit_id)
+        |> Keyword.put(:progress_index, index)
+        |> Keyword.put(:progress_total, total)
+        |> Keyword.put(:applied_total, applied_total)
 
-        broadcast_edit(abs_path, group, group_applied, step_opts)
-
-        {:cont, {:ok, Enum.reverse(group_applied, acc), applied_total}}
-      else
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
+      broadcast_edit(abs_path, group, group_applied, step_opts)
+      {remaining, applied_total}
     end)
-    |> case do
-      {:ok, applied, _applied_total} -> {:ok, Enum.reverse(applied)}
-      {:error, reason} -> {:error, reason}
-    end
+
+    :ok
   end
 
-  defp maybe_save_final_group(editor, abs_path, kind, index, total) when index == total,
-    do: save_editor(editor, abs_path, kind)
+  defp normalize_batch_write_error(:mixed_unsaved_writers),
+    do: :projection_mixed_unsaved_writers
 
-  defp maybe_save_final_group(_editor, _abs_path, _kind, _index, _total), do: :ok
+  defp normalize_batch_write_error(:owner_changed),
+    do: :projection_write_owner_changed
+
+  defp normalize_batch_write_error(reason), do: reason
 
   # A text replacement is represented by a delete_range + insert_text pair.
-  # Keep the delete and first inserted grapheme atomic so the rail never flashes
-  # an empty document, then stream every remaining Unicode grapheme as one native
-  # edit token. Independent structural nodes remain one preview update apiece.
+  # Keep that pair atomic so the rail never flashes an empty document. Every
+  # remaining change is already one semantic edit range; expanding inserted text
+  # into grapheme-sized groups makes one field look like hundreds of edits and
+  # briefly highlights only one character at a time.
   defp logical_change_groups(changes) do
     changes
     |> logical_change_groups([])
     |> Enum.chunk_by(&logical_group_marker/1)
     |> Enum.map(&List.flatten/1)
-    |> Enum.flat_map(&stream_text_group_by_grapheme/1)
   end
 
   # Ehwp.Ir deliberately orders authoritative positional writes from the end of
@@ -1630,50 +2119,6 @@ defmodule Ecrits.Doc.Projection do
   defp preview_change_ref({:set, ref, _type, _props}), do: ref
   defp preview_change_ref(_change), do: nil
 
-  defp stream_text_group_by_grapheme(group) do
-    inserts =
-      Enum.filter(group, fn
-        {:text, %{"op" => "insert_text", "text" => text}, _marker} when is_binary(text) ->
-          true
-
-        _other ->
-          false
-      end)
-
-    texts = Enum.map(inserts, fn {:text, op, _marker} -> op["text"] end) |> Enum.uniq()
-
-    case texts do
-      [text] when text != "" ->
-        graphemes = String.graphemes(text)
-        deletes_and_other = group -- inserts
-
-        graphemes
-        |> Enum.with_index()
-        |> Enum.map(fn {grapheme, index} ->
-          prefix = graphemes |> Enum.take(index + 1) |> Enum.join()
-
-          token_inserts =
-            Enum.map(inserts, fn {:text, op, _marker} ->
-              {:text, token_insert_op(op, grapheme, index), prefix}
-            end)
-
-          if index == 0, do: deletes_and_other ++ token_inserts, else: token_inserts
-        end)
-
-      _other ->
-        [group]
-    end
-  end
-
-  defp token_insert_op(op, grapheme, index) do
-    ref = Map.get(op, "ref", %{})
-    offset = ref_offset(ref) + index
-
-    op
-    |> Map.put("text", grapheme)
-    |> Map.put("ref", Map.put(ref, "offset", offset))
-  end
-
   defp logical_change_groups([first, second | rest], acc) do
     if text_replacement_pair?(first, second) do
       logical_change_groups(rest, [[first, second] | acc])
@@ -1702,67 +2147,19 @@ defmodule Ecrits.Doc.Projection do
     end) || make_ref()
   end
 
-  defp apply_changes_directly(editor, changes) do
-    Enum.reduce_while(changes, {:ok, []}, fn change, {:ok, acc} ->
-      case apply_change_directly(editor, change) do
-        :ok -> {:cont, {:ok, [%{} | acc]}}
-        {:ok, applied} -> {:cont, {:ok, [applied | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:ok, applied} -> {:ok, Enum.reverse(applied)}
-      error -> error
-    end
-  end
+  defp editor_write_owner(opts) do
+    keys = [:agent_id, :instance_id, :turn_id]
 
-  defp apply_change_directly(editor, {:text, op, _marker}) do
-    Editor.apply(editor, op)
-  end
+    owner = %{
+      agent_id: Keyword.get(opts, :agent_id),
+      instance_id: Keyword.get(opts, :instance_id),
+      turn_id: Keyword.get(opts, :turn_id)
+    }
 
-  defp apply_change_directly(editor, {:insert_table, op, _marker}) do
-    Editor.apply(editor, op)
-  end
-
-  defp apply_change_directly(editor, {:insert_picture, op, _marker, props}) do
-    with {:ok, applied} <- Editor.apply(editor, op),
-         :ok <- maybe_set_inserted_picture_props(editor, inserted_control_ref(op, applied), props) do
-      {:ok, applied}
-    end
-  end
-
-  defp apply_change_directly(editor, {:delete_node, op, _marker}) do
-    Editor.apply(editor, op)
-  end
-
-  defp apply_change_directly(editor, {:set, ref, type, props}) do
-    props =
-      if is_binary(type) and type != "" do
-        Map.put_new(props, "kind", type)
-      else
-        props
-      end
-
-    Editor.set(editor, ref, props)
-  end
-
-  defp maybe_set_inserted_picture_props(_editor, _ref_result, props) when props == %{}, do: :ok
-
-  defp maybe_set_inserted_picture_props(editor, {:ok, ref}, props) do
-    case Editor.set(editor, ref, Map.put_new(props, "kind", "picture")) do
-      {:ok, _applied} -> :ok
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp maybe_set_inserted_picture_props(_editor, {:error, reason}, _props), do: {:error, reason}
-
-  defp save_editor(editor, abs_path, kind) do
-    case Editor.save(editor, format: save_format(kind), path: abs_path) do
-      :ok -> :ok
-      {:ok, _} -> :ok
-      {:error, reason} -> {:error, reason}
+    cond do
+      Enum.all?(Map.values(owner), &(is_binary(&1) and &1 != "")) -> owner
+      Enum.any?(keys, &Keyword.has_key?(opts, &1)) -> :incomplete
+      true -> nil
     end
   end
 
@@ -1865,13 +2262,11 @@ defmodule Ecrits.Doc.Projection do
         |> maybe_put_info(:browser_authority, opts[:browser_authority])
         |> maybe_put_info(:preview_only, opts[:preview_only])
         |> maybe_put_info(:preview_continuation, opts[:preview_continuation])
-        |> maybe_put_vfs_agent_id(vfs_agent_id(root, abs_path, opts))
+        |> maybe_put_vfs_agent_id(Keyword.get(opts, :agent_id))
+        |> maybe_put_vfs_instance_id(Keyword.get(opts, :instance_id))
+        |> maybe_put_vfs_turn_id(Keyword.get(opts, :turn_id))
 
-      Phoenix.PubSub.broadcast(
-        Ecrits.PubSub,
-        "doc_vfs:" <> DocMount.canonical_root(root),
-        {:vfs_doc_edited, info}
-      )
+      publish_or_defer_edit(abs_path, root, info, opts)
     end
 
     :ok
@@ -1881,40 +2276,167 @@ defmodule Ecrits.Doc.Projection do
     _, _ -> :ok
   end
 
+  defp publish_or_defer_edit(abs_path, root, info, opts) do
+    token = OpenDocs.begin_preview_publication(root, abs_path, info.edit_id)
+
+    case {final_committed_preview?(opts), token} do
+      {true, {:registry_unavailable, _ref}} ->
+        publish_edit(
+          root,
+          Map.put(info, :preview_snapshot_error, "preview_registry_unavailable")
+        )
+
+      {true, token} ->
+        task = fn -> publish_durable_preview(abs_path, root, info, opts, token) end
+
+        case Task.Supervisor.start_child(Ecrits.Doc.PreviewTaskSupervisor, task) do
+          {:ok, _pid} ->
+            :ok
+
+          {:error, reason} ->
+            publish_current_preview_error(abs_path, root, info, token, reason)
+        end
+
+      {false, _token} ->
+        publish_edit(root, info)
+    end
+  end
+
+  defp publish_durable_preview(abs_path, root, info, opts, token) do
+    {preview_snapshot, preview_snapshot_error} =
+      try do
+        durable_preview_snapshot(abs_path, root, opts)
+      rescue
+        error -> {nil, preview_snapshot_error({:exception, Exception.message(error)})}
+      catch
+        kind, reason -> {nil, preview_snapshot_error({kind, reason})}
+      end
+
+    info =
+      info
+      |> maybe_put_info(:preview_snapshot, preview_snapshot)
+      |> maybe_put_info(:preview_snapshot_error, preview_snapshot_error)
+
+    _ = OpenDocs.publish_preview_if_current(root, abs_path, token, info)
+    :ok
+  end
+
+  defp publish_current_preview_error(abs_path, root, info, token, reason) do
+    info = Map.put(info, :preview_snapshot_error, preview_snapshot_error(reason))
+    _ = OpenDocs.publish_preview_if_current(root, abs_path, token, info)
+    :ok
+  end
+
+  defp publish_edit(root, info) do
+    Phoenix.PubSub.broadcast(
+      Ecrits.PubSub,
+      "doc_vfs:" <> DocMount.canonical_root(root),
+      {:vfs_doc_edited, info}
+    )
+  end
+
+  defp durable_preview_snapshot(abs_path, root, opts) do
+    if final_committed_preview?(opts) do
+      canonical_root = DocMount.canonical_root(root)
+      relative_path = Path.relative_to(abs_path, canonical_root)
+      document_id = Document.id_for(canonical_root, relative_path)
+      put_snapshot = Keyword.get(opts, :preview_snapshot_fun, &PreviewSnapshot.put/2)
+
+      with {:ok, bytes} <- preview_snapshot_bytes(abs_path, opts),
+           {:ok, snapshot} <- put_snapshot.(document_id, bytes) do
+        {snapshot, nil}
+      else
+        {:error, reason} -> {nil, preview_snapshot_error(reason)}
+        other -> {nil, preview_snapshot_error(other)}
+      end
+    else
+      {nil, nil}
+    end
+  end
+
+  defp preview_snapshot_bytes(abs_path, opts) do
+    case Keyword.fetch(opts, :preview_snapshot_bytes_result) do
+      {:ok, {:ok, bytes}} when is_binary(bytes) -> {:ok, bytes}
+      {:ok, {:error, _reason} = error} -> error
+      {:ok, other} -> {:error, {:invalid_snapshot_bytes_result, other}}
+      :error -> File.read(abs_path)
+    end
+  end
+
+  defp preview_snapshot_error(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp preview_snapshot_error(reason), do: inspect(reason, limit: 8, printable_limit: 160)
+
+  defp final_committed_preview?(opts) do
+    if opts[:preview_only] == true do
+      false
+    else
+      case {opts[:progress_index], opts[:progress_total]} do
+        {index, total} when is_integer(index) and is_integer(total) and total >= 1 ->
+          index >= total
+
+        _other ->
+          true
+      end
+    end
+  end
+
   defp highlights_for_changes(changes, applied) do
     changes
     |> Enum.zip(applied)
-    |> Enum.flat_map(fn
-      {{:text, op, marker}, _applied} ->
-        [text_highlight(op, marker)]
-
-      {{:insert_table, op, _marker}, applied} ->
-        table_insert_highlights(op, applied)
-
-      {{:insert_picture, op, marker, _props}, applied} ->
-        picture_insert_highlights(op, marker, applied)
-
-      {{:delete_node, op, marker}, _applied} ->
-        [
-          %{
-            "kind" => "delete",
-            "op" => op["op"],
-            "ref" => op["ref"],
-            "text" => marker
-          }
-        ]
-
-      {{:set, ref, type, props}, _applied} ->
-        [
-          %{
-            "kind" => "set",
-            "ref" => ref,
-            "type" => type,
-            "props" => props
-          }
-        ]
-    end)
+    |> highlights_for_change_entries()
     |> remap_persisted_highlights(changes)
+  end
+
+  # The authoritative write must retain both engine operations for a text
+  # replacement, but the committed document only has one visible changed range:
+  # the inserted replacement. Dropping the delete highlight here prevents the
+  # mirror from painting the same semantic location twice.
+  defp highlights_for_change_entries([
+         {{:text, _delete, _old_marker} = delete_change, _delete_applied} = delete_entry,
+         {{:text, insert, marker} = insert_change, _insert_applied} = insert_entry | rest
+       ]) do
+    if text_replacement_pair?(delete_change, insert_change) do
+      [text_highlight(insert, marker) | highlights_for_change_entries(rest)]
+    else
+      highlights_for_change_entry(delete_entry) ++
+        highlights_for_change_entries([insert_entry | rest])
+    end
+  end
+
+  defp highlights_for_change_entries([entry | rest]),
+    do: highlights_for_change_entry(entry) ++ highlights_for_change_entries(rest)
+
+  defp highlights_for_change_entries([]), do: []
+
+  defp highlights_for_change_entry({{:text, op, marker}, _applied}),
+    do: [text_highlight(op, marker)]
+
+  defp highlights_for_change_entry({{:insert_table, op, _marker}, applied}),
+    do: table_insert_highlights(op, applied)
+
+  defp highlights_for_change_entry({{:insert_picture, op, marker, _props}, applied}),
+    do: picture_insert_highlights(op, marker, applied)
+
+  defp highlights_for_change_entry({{:delete_node, op, marker}, _applied}) do
+    [
+      %{
+        "kind" => "delete",
+        "op" => op["op"],
+        "ref" => op["ref"],
+        "text" => marker
+      }
+    ]
+  end
+
+  defp highlights_for_change_entry({{:set, ref, type, props}, _applied}) do
+    [
+      %{
+        "kind" => "set",
+        "ref" => ref,
+        "type" => type,
+        "props" => props
+      }
+    ]
   end
 
   defp maybe_put_info(info, _key, nil), do: info
@@ -1922,23 +2444,21 @@ defmodule Ecrits.Doc.Projection do
   defp maybe_put_info(info, _key, ""), do: info
   defp maybe_put_info(info, key, value), do: Map.put(info, key, value)
 
-  defp vfs_agent_id(root, abs_path, opts) do
-    case Keyword.get(opts, :agent_id) do
-      agent_id when is_binary(agent_id) and agent_id != "" ->
-        agent_id
-
-      _ ->
-        if is_binary(root) do
-          Ecrits.Fuse.OpenDocs.owner_agent_id_for_source(root, abs_path) ||
-            Ecrits.Fuse.OpenDocs.owner_agent_id(root, Path.basename(abs_path))
-        end
-    end
-  end
-
   defp maybe_put_vfs_agent_id(info, agent_id) when is_binary(agent_id) and agent_id != "",
     do: Map.put(info, :agent_id, agent_id)
 
   defp maybe_put_vfs_agent_id(info, _agent_id), do: info
+
+  defp maybe_put_vfs_instance_id(info, instance_id)
+       when is_binary(instance_id) and instance_id != "",
+       do: Map.put(info, :instance_id, instance_id)
+
+  defp maybe_put_vfs_instance_id(info, _instance_id), do: info
+
+  defp maybe_put_vfs_turn_id(info, turn_id) when is_binary(turn_id) and turn_id != "",
+    do: Map.put(info, :turn_id, turn_id)
+
+  defp maybe_put_vfs_turn_id(info, _turn_id), do: info
 
   defp text_highlight(op, marker) do
     %{
@@ -2276,6 +2796,19 @@ defmodule Ecrits.Doc.Projection do
   end
 
   defp browser_edit_op(op), do: op
+
+  # A picture's placement properties require the control ref allocated by the
+  # insertion itself. Keep them coupled to the browser insert op so the browser
+  # arm can apply both mutations atomically after it discovers that ref.
+  defp browser_picture_edit_op(op, props) do
+    op = browser_edit_op(op)
+
+    if is_map(props) and map_size(props) > 0 do
+      Map.put(op, "post_insert_props", Map.put_new(props, "kind", "picture"))
+    else
+      op
+    end
+  end
 
   defp table_insert_section(op) do
     case normalize_ir_value(Map.get(op, "ref")) do

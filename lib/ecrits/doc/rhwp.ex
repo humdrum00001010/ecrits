@@ -844,7 +844,7 @@ defmodule Ecrits.Doc.Rhwp do
     at = Ehwp.Op.Ref.new(flatten_ref(op[:ref]))
 
     case Image.resolve_src(op, at) do
-      {:ok, %Ehwp.Op.InsertPicture{} = pic, bins} ->
+      {:ok, pic, bins} when is_struct(pic, Ehwp.Op.InsertPicture) ->
         apply_struct(handle, "insert_picture", pic, bins)
 
       {:ok, op} ->

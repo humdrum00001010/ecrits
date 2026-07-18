@@ -23,7 +23,14 @@ defmodule Ecrits.Test.FakeEhwpRuntime do
 
   def open(path_or_binary, opts) when is_binary(path_or_binary) do
     text = Keyword.get(opts, :__text__, default_text(path_or_binary))
-    handle = %{__fake_ehwp__: true, agent: start_agent(text), owner: Keyword.get(opts, :owner)}
+
+    handle = %{
+      __fake_ehwp__: true,
+      agent: start_agent(text),
+      owner: Keyword.get(opts, :owner),
+      elements: Keyword.get(opts, :__elements__)
+    }
+
     metadata = %{page_count: 1, source_bytes: byte_size(path_or_binary)}
     {:ok, handle, metadata}
   end
@@ -90,7 +97,14 @@ defmodule Ecrits.Test.FakeEhwpRuntime do
     case Map.get(query, :q) || Map.get(query, "q") do
       "elements" ->
         if is_pid(Map.get(handle, :owner)), do: send(handle.owner, {:fake_ehwp_query, "elements"})
-        {:ok, Jason.encode!(fake_elements(text(agent)))}
+
+        elements =
+          case Map.get(handle, :elements) do
+            elements when is_list(elements) -> elements
+            _ -> fake_elements(text(agent))
+          end
+
+        {:ok, Jason.encode!(elements)}
 
       _ ->
         {:error,

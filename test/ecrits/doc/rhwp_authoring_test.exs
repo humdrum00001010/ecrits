@@ -15,7 +15,7 @@ defmodule Ecrits.Doc.RhwpAuthoringTest do
   """
   use ExUnit.Case, async: false
 
-  alias Ecrits.Doc.{Pool, Tools}
+  alias Ecrits.Doc.{MCPToolPolicy, Pool, Tools}
   alias Ehwp.Pool, as: EPool
 
   setup do
@@ -139,6 +139,81 @@ defmodule Ecrits.Doc.RhwpAuthoringTest do
     EPool.close(h)
     types = els |> Jason.decode!() |> Enum.map(& &1["type"]) |> Enum.frequencies()
     assert types["picture"] == 1
+  end
+
+  test "marker-derived signature overlay keeps the marker and native geometry", %{
+    native: true,
+    ctx: ctx,
+    path: path
+  } do
+    image_path = path <> ".signature.png"
+    File.write!(image_path, png(1_337, 323))
+    on_exit(fn -> File.rm(image_path) end)
+
+    target = "수급사업자 대표자 김에크리츠 (인)"
+    marker = "(인)"
+
+    {:ok, %{"document" => doc}} = Tools.call(ctx, "doc.create", %{"path" => path})
+
+    assert {:ok, %{"ok" => true}} =
+             Tools.call(ctx, "doc.edit", %{
+               "document" => doc,
+               "op" => %{
+                 "op" => "insert_table",
+                 "ref" => "end",
+                 "rows" => 1,
+                 "cols" => 1,
+                 "cells" => [[target]]
+               }
+             })
+
+    assert {:ok, %{"matches" => [match]}} =
+             Tools.call(ctx, "doc.find", %{
+               "document" => doc,
+               "pattern" => target,
+               "type" => "paragraph",
+               "marker" => marker,
+               "case_sensitive" => true,
+               "limit" => 1
+             })
+
+    prepared =
+      MCPToolPolicy.prepare_vfs_call(
+        "doc.edit",
+        %{
+          "document" => doc,
+          "op" => %{
+            "op" => "insert_picture",
+            "ref" => match["before_marker_ref"],
+            "src" => image_path
+          },
+          "fallback" => %{"reason" => "unrepresentable"}
+        },
+        %{native_marker: marker}
+      )
+
+    assert {:ok, %{"ok" => true, "native" => [native]}} =
+             Tools.call(ctx, "doc.edit", prepared)
+
+    assert native["placement"] == "markerOverlay"
+    assert native["logicalOffset"] == match["marker_offset"]
+
+    assert {:ok, %{"ok" => true}} = Tools.call(ctx, "doc.save", %{"document" => doc})
+
+    {:ok, handle, _meta} = EPool.open(File.read!(path))
+    {:ok, elements_json} = EPool.query(handle, %{q: "elements"})
+    EPool.close(handle)
+    elements = Jason.decode!(elements_json)
+
+    assert [picture] = Enum.filter(elements, &(&1["type"] == "picture"))
+
+    assert Map.take(picture, ~w(width height treatAsChar)) == %{
+             "width" => 5_000,
+             "height" => 1_208,
+             "treatAsChar" => false
+           }
+
+    assert Enum.any?(elements, &(&1["type"] == "paragraph" and &1["text"] == target))
   end
 
   test "insert_table with inline cells fills the grid, leaves body clean", %{
@@ -281,5 +356,20 @@ defmodule Ecrits.Doc.RhwpAuthoringTest do
 
   test "skips when NIF unavailable", context do
     if context[:native], do: assert(true), else: assert(context[:native] == false)
+  end
+
+  defp png(width, height) do
+    scanline = <<0, :binary.copy(<<0, 0, 0, 0>>, width)::binary>>
+    pixels = :binary.copy(scanline, height)
+
+    <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A>> <>
+      png_chunk("IHDR", <<width::32, height::32, 8, 6, 0, 0, 0>>) <>
+      png_chunk("IDAT", :zlib.compress(pixels)) <>
+      png_chunk("IEND", <<>>)
+  end
+
+  defp png_chunk(type, data) do
+    payload = type <> data
+    <<byte_size(data)::32, payload::binary, :erlang.crc32(payload)::32>>
   end
 end

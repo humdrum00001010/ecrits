@@ -1,8 +1,9 @@
 defmodule Ecrits.Doc.PoolTest do
   use ExUnit.Case, async: false
 
-  alias Ecrits.Doc.Pool
+  alias Ecrits.Doc.{Editor, Pool}
   alias Ecrits.Test.FakeEhwpRuntime
+  alias Ecrits.Test.FailingRollbackEhwpRuntime
 
   setup do
     prev = Application.get_env(:ehwp, :runtime)
@@ -74,6 +75,73 @@ defmodule Ecrits.Doc.PoolTest do
     test "unknown document is not routable", %{pool: pool} do
       assert {:error, :not_found} = Pool.route(pool, "ghost")
     end
+
+    @tag :edit_failure
+    test "rollback fail-stop leaves no orphan and reopens one clean editor", %{pool: pool} do
+      dir =
+        Path.join(
+          System.tmp_dir!(),
+          "ecrits-pool-rollback-failure-#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(dir, "contract.hwp")
+      initial = "POOL_SOURCE_PREIMAGE"
+      File.mkdir_p!(dir)
+      File.write!(path, initial)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      :ok = FailingRollbackEhwpRuntime.reset()
+      Application.put_env(:ehwp, :runtime, FailingRollbackEhwpRuntime)
+
+      assert {:ok, document_id} = Pool.open(pool, path, kind: :hwp)
+      assert {:server, original_editor} = Pool.route(pool, document_id)
+
+      pool_state = :sys.get_state(pool)
+      supervisor = pool_state.sup
+      assert dynamic_child_pids(supervisor) == [original_editor]
+
+      ref = Process.monitor(original_editor)
+      owner = %{agent_id: "agent-a", instance_id: "instance-a", turn_id: "turn-a"}
+
+      assert {:error,
+              {:atomic_rollback_failed, :forced_save_export_failure,
+               {:atomic_model_restore_failed, :forced_rollback_open_failure}}} =
+               Editor.apply_batch_and_save(
+                 original_editor,
+                 [
+                   {:apply,
+                    %{
+                      "op" => "insert_text",
+                      "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+                      "text" => "REJECTED_POOL_EDIT"
+                    }}
+                 ],
+                 owner: owner,
+                 path: path,
+                 format: :hwp
+               )
+
+      assert_receive {:DOWN, ^ref, :process, ^original_editor, _reason}, 5_000
+      :ok = await_pool_drop(pool, document_id, 10)
+
+      assert File.read!(path) == initial
+      assert FailingRollbackEhwpRuntime.open_count() == 2
+      assert {:error, :not_found} = Pool.route(pool, document_id)
+      assert {:error, :not_found} = Pool.info_by_path(pool, path)
+      assert Pool.list(pool) == []
+      assert dynamic_child_pids(supervisor) == []
+      assert :sys.get_state(pool).by_path == %{}
+
+      :ok = FailingRollbackEhwpRuntime.allow_reopen()
+      assert {:ok, ^document_id} = Pool.open(pool, path, kind: :hwp)
+      assert {:server, reopened_editor} = Pool.route(pool, document_id)
+      refute reopened_editor == original_editor
+      assert dynamic_child_pids(supervisor) == [reopened_editor]
+      assert FailingRollbackEhwpRuntime.open_count() == 3
+      assert {:ok, %{text: ^initial}} = Editor.read(reopened_editor)
+      assert Editor.dirty_snapshot(reopened_editor) == %{dirty?: false, revision: 0, owner: nil}
+      assert Editor.history(reopened_editor) == []
+    end
   end
 
   describe "close/2" do
@@ -116,4 +184,21 @@ defmodule Ecrits.Doc.PoolTest do
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)
+
+  defp dynamic_child_pids(supervisor) do
+    supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.map(fn {_id, pid, _type, _modules} -> pid end)
+    |> Enum.sort()
+  end
+
+  defp await_pool_drop(_pool, _document_id, 0), do: {:error, :pool_drop_timeout}
+
+  defp await_pool_drop(pool, document_id, attempts) do
+    state = :sys.get_state(pool)
+
+    if Map.has_key?(state.docs, document_id),
+      do: await_pool_drop(pool, document_id, attempts - 1),
+      else: :ok
+  end
 end

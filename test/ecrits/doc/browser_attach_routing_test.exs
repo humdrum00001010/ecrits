@@ -25,7 +25,6 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
 
   alias Ecrits.Doc.Pool
   alias Ecrits.Doc.Tools
-  alias Ecrits.Document.ByteSpool
   alias Ecrits.Test.FakeEhwpRuntime
   alias Ecrits.Workspace.Session
 
@@ -46,7 +45,15 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
   end
 
   # An agent ctx that routes via the workspace Session (the production path).
-  defp ctx(pool, path), do: %{pool: pool, agent_id: "fg", session_path: path}
+  defp ctx(pool, path) do
+    %{
+      pool: pool,
+      agent_id: "fg",
+      instance_id: "fg-instance",
+      turn_id: "fg-turn",
+      session_path: path
+    }
+  end
 
   defp idle_lv do
     spawn(fn ->
@@ -62,6 +69,7 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
         {:doc_browser_request, from, ref, verb, payload} ->
           send(parent, {:browser_request, verb, payload})
           send(from, {:doc_browser_reply, ref, {:ok, result}})
+          acknowledge_browser_completion(from, ref)
 
           receive do
             :stop -> :ok
@@ -86,10 +94,18 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       {:doc_browser_request, from, ref, verb, payload} ->
         send(parent, {:browser_request, verb, payload})
         send(from, {:doc_browser_reply, ref, {:error, "forced browser snapshot"}})
+        acknowledge_browser_completion(from, ref)
         render_viewer_loop(parent, dirty?)
 
       :stop ->
         :ok
+    end
+  end
+
+  defp acknowledge_browser_completion(from, ref) do
+    receive do
+      {:doc_browser_request_completed, ^from, ^ref, ack_ref} ->
+        send(from, {:doc_browser_request_completion_ack, ack_ref, :ok})
     end
   end
 
@@ -155,6 +171,109 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       assert {:browser, ^lv_b} = Session.route(path, doc2)
     end
 
+    test "same-document viewers promote the next live pid on detach and DOWN", %{
+      pool: pool,
+      path: path
+    } do
+      {:ok, doc} =
+        Pool.open(pool, "/abs/concurrent.hwp", kind: :hwp, open_opts: [__text__: "SHARED"])
+
+      lv_a = idle_lv()
+      lv_b = idle_lv()
+
+      :ok = Session.attach_viewer(path, doc, lv_a)
+      :ok = Session.attach_viewer(path, doc, lv_b)
+
+      assert Session.viewer(path, doc) == lv_b
+      assert {:browser, ^lv_b} = Session.route(path, doc)
+
+      :ok = Session.detach_viewer(path, doc, lv_b)
+      assert Session.viewer(path, doc) == lv_a
+      assert {:browser, ^lv_a} = Session.route(path, doc)
+
+      :ok = Session.attach_viewer(path, doc, lv_b)
+      assert Session.viewer(path, doc) == lv_b
+
+      ref = Process.monitor(lv_b)
+      send(lv_b, :stop)
+      assert_receive {:DOWN, ^ref, :process, ^lv_b, :normal}
+
+      assert Session.viewer(path, doc) == lv_a
+      assert {:browser, ^lv_a} = Session.route(path, doc)
+
+      :ok = Session.detach_viewer(path, doc, lv_a)
+      assert Session.viewer(path, doc) == nil
+      assert {:server, editor} = Pool.route(pool, doc)
+      assert is_pid(editor)
+
+      send(lv_a, :stop)
+    end
+
+    test "moving a fallback viewer preserves the other document viewer", %{
+      pool: pool,
+      path: path
+    } do
+      {:ok, doc1} =
+        Pool.open(pool, "/abs/shared-then-moved.hwp",
+          kind: :hwp,
+          open_opts: [__text__: "ONE"]
+        )
+
+      {:ok, doc2} =
+        Pool.open(pool, "/abs/fallback-destination.hwp",
+          kind: :hwp,
+          open_opts: [__text__: "TWO"]
+        )
+
+      lv_a = idle_lv()
+      lv_b = idle_lv()
+
+      :ok = Session.attach_viewer(path, doc1, lv_a)
+      :ok = Session.attach_viewer(path, doc1, lv_b)
+      assert Session.viewer(path, doc1) == lv_b
+
+      :ok = Session.attach_viewer(path, doc2, lv_a)
+
+      assert Session.viewer(path, doc1) == lv_b
+      assert Session.viewer(path, doc2) == lv_a
+      assert {:browser, ^lv_b} = Session.route(path, doc1)
+      assert {:browser, ^lv_a} = Session.route(path, doc2)
+
+      send(lv_a, :stop)
+      send(lv_b, :stop)
+    end
+
+    test "legacy hot state with one viewer pid normalizes before promotion", %{
+      pool: pool,
+      path: path
+    } do
+      {:ok, doc} =
+        Pool.open(pool, "/abs/legacy-viewer.hwp", kind: :hwp, open_opts: [__text__: "OLD"])
+
+      legacy_lv = idle_lv()
+      newest_lv = idle_lv()
+
+      :ok = Session.attach_viewer(path, doc, legacy_lv)
+      session_pid = Session.whereis(path)
+
+      :sys.replace_state(session_pid, fn state ->
+        %{state | viewers: %{doc => legacy_lv}}
+      end)
+
+      assert Session.viewer(path, doc) == legacy_lv
+      assert %{^doc => [^legacy_lv]} = :sys.get_state(session_pid).viewers
+
+      :ok = Session.attach_viewer(path, doc, newest_lv)
+      assert Session.viewer(path, doc) == newest_lv
+      assert %{^doc => [^newest_lv, ^legacy_lv]} = :sys.get_state(session_pid).viewers
+
+      :ok = Session.detach_viewer(path, doc, newest_lv)
+      assert Session.viewer(path, doc) == legacy_lv
+
+      send(legacy_lv, :stop)
+      send(newest_lv, :stop)
+    end
+
     test "detach_viewer/3 relinquishes a viewer's browser claim", %{pool: pool, path: path} do
       {:ok, doc} = Pool.open(pool, "/abs/d.hwp", kind: :hwp, open_opts: [__text__: "X"])
       lv = idle_lv()
@@ -169,7 +288,47 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
   end
 
   describe "doc.* operate on the NAMED doc while a viewer is attached (server arm)" do
-    test "browser-routed batch edit keeps revision metadata out of per-op payloads", %{
+    test "VFS doc.find reads the freshly committed server file instead of a stale viewer", %{
+      pool: pool,
+      path: path
+    } do
+      document_path = Path.join(path, "committed-find.hwp")
+      File.mkdir_p!(path)
+      File.write!(document_path, "committed bytes")
+
+      {:ok, doc} = Pool.open(pool, document_path, kind: :hwp)
+
+      stale_viewer =
+        browser_reply_lv(self(), %{
+          "pattern" => "제2조",
+          "type" => "paragraph",
+          "matches" => []
+        })
+
+      :ok = Session.attach_viewer(path, doc, stale_viewer)
+
+      committed_ctx =
+        ctx(pool, path)
+        |> Map.put(:active_doc, doc)
+        |> Map.put(:document_path, "committed-find.hwp")
+        |> Map.put(:doc_find_authority, :committed_server)
+
+      assert {:ok, %{"matches" => matches}} =
+               Tools.call(committed_ctx, "doc.find", %{
+                 "document" => doc,
+                 "type" => "paragraph",
+                 "pattern" => "제2조"
+               })
+
+      assert [%{"text" => text, "ref" => ref}] = matches
+      assert %{"paragraph" => 1} = Jason.decode!(ref)
+      assert text =~ "제2조"
+      refute_receive {:browser_request, :find, _payload}
+
+      send(stale_viewer, :stop)
+    end
+
+    test "browser-routed batch edit rejects retired metadata before it reaches the browser", %{
       pool: pool,
       path: path
     } do
@@ -189,10 +348,9 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       lv = browser_reply_lv(self(), live_result)
       :ok = Session.attach_viewer(path, doc, lv)
 
-      assert {:ok, %{"applied" => 2, "failed" => 0}} =
+      assert {:error, %{"error" => "invalid_op", "message" => message}} =
                Tools.call(ctx(pool, path), "doc.edit", %{
                  "document" => doc,
-                 "base_revision" => 7,
                  "ops" => [
                    %{
                      "op" => "replace_text",
@@ -209,10 +367,8 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
                  ]
                })
 
-      assert_receive {:browser_request, :edit, %{ops: [op_a, op_b]} = payload}
-      refute Map.has_key?(payload, :base_revision)
-      refute Map.has_key?(op_a, "base_revision")
-      refute Map.has_key?(op_b, "current_version")
+      assert message =~ "base_revision"
+      refute_receive {:browser_request, :edit, _payload}, 50
 
       send(lv, :stop)
     end
@@ -261,13 +417,9 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
       bytes = "PPTX-BROWSER-BYTES"
       File.mkdir_p!(path)
 
-      assert {:ok, token, token_path} = ByteSpool.reserve()
-      File.write!(token_path, bytes)
-
       lv =
         browser_reply_lv(self(), %{
-          "bytes_token" => token,
-          "bytes" => byte_size(bytes),
+          "bytes" => bytes,
           "format" => "pptx"
         })
 
@@ -288,7 +440,6 @@ defmodule Ecrits.Doc.BrowserAttachRoutingTest do
 
       assert_receive {:browser_request, :save, %{}}
       assert File.read!(doc_path) == bytes
-      refute File.exists?(token_path)
 
       send(lv, :stop)
     end

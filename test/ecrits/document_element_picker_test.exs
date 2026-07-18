@@ -32,6 +32,10 @@ defmodule Ecrits.DocumentElementPickerTest do
     assert pick.text == "selected text"
     assert pick.rects == [%{pageIndex: 0, x: 1.5}]
 
+    picker = DocumentElementPicker.put_enabled(picker, false)
+    refute picker.enabled?
+    assert [^pick] = picker.picks
+
     assert DocumentElementPicker.toggle_pick(picker, %{document: pick.document, ref: pick.ref}).picks ==
              []
   end

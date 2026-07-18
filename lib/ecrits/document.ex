@@ -94,7 +94,7 @@ defmodule Ecrits.Document do
 
   @doc "PubSub topic for a local document session."
   @spec topic(String.t()) :: String.t()
-  def topic(document_id) when is_binary(document_id), do: "local_document:#{document_id}"
+  def topic(document_id) when is_binary(document_id), do: "document:#{document_id}"
 
   @doc false
   @spec open_args(String.t(), String.t(), keyword()) :: {:ok, keyword()} | {:error, term()}

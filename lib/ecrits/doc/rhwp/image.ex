@@ -41,17 +41,19 @@ defmodule Ecrits.Doc.Rhwp.Image do
 
           {width, height} = placed_size(op, nw, nh)
 
-          pic = %Ehwp.Op.InsertPicture{
-            at: at,
-            bin_index: op[:bin_index] || 0,
-            extension: present_string(op[:extension]) || ext_hint || "",
-            width: width,
-            height: height,
-            natural_width_px: nw,
-            natural_height_px: nh,
-            description: op[:description] || "",
-            inline_in_cell: op[:inline_in_cell] == true
-          }
+          pic =
+            %Ehwp.Op.InsertPicture{
+              at: at,
+              bin_index: op[:bin_index] || 0,
+              extension: present_string(op[:extension]) || ext_hint || "",
+              width: width,
+              height: height,
+              natural_width_px: nw,
+              natural_height_px: nh,
+              description: op[:description] || "",
+              inline_in_cell: op[:inline_in_cell] == true
+            }
+            |> Map.put(:overlay_marker_length, op[:overlay_marker_length] || 0)
 
           {:ok, pic, [bytes]}
         end
@@ -105,6 +107,7 @@ defmodule Ecrits.Doc.Rhwp.Image do
 
         op =
           op
+          |> default_inline_in_cell()
           |> Map.delete(:src)
           |> Map.put(:image_base64, Base.encode64(bytes))
           |> Map.put(:extension, present_string(op[:extension]) || ext)
@@ -122,7 +125,32 @@ defmodule Ecrits.Doc.Rhwp.Image do
   # ── internals ──────────────────────────────────────────────────────────────
 
   @default_max_unit 22_000
+  @marker_overlay_default_max_unit 5_000
   @inline_cell_default_max_unit 4_500
+
+  defp default_inline_in_cell(%{inline_in_cell: inline} = op) when is_boolean(inline), do: op
+
+  defp default_inline_in_cell(%{ref: ref} = op) do
+    if cell_ref?(ref), do: Map.put(op, :inline_in_cell, true), else: op
+  end
+
+  defp default_inline_in_cell(op), do: op
+
+  defp cell_ref?(%{cell: %{} = _cell}), do: true
+  defp cell_ref?(%{"cell" => %{} = _cell}), do: true
+
+  defp cell_ref?(ref) when is_binary(ref) do
+    case Jason.decode(ref) do
+      {:ok, %{} = decoded} ->
+        cell_path = Map.get(decoded, "cellPath") || Map.get(decoded, "cell_path")
+        is_list(cell_path) and cell_path != []
+
+      _ ->
+        false
+    end
+  end
+
+  defp cell_ref?(_ref), do: false
 
   defp extension(src) do
     src
@@ -233,6 +261,10 @@ defmodule Ecrits.Doc.Rhwp.Image do
         fit_size(natural_width, natural_height, max_unit)
     end
   end
+
+  defp default_max_unit(%{overlay_marker_length: length})
+       when is_integer(length) and length > 0,
+       do: @marker_overlay_default_max_unit
 
   defp default_max_unit(%{inline_in_cell: true}), do: @inline_cell_default_max_unit
   defp default_max_unit(_op), do: @default_max_unit

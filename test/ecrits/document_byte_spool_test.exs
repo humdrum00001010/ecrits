@@ -3,21 +3,18 @@ defmodule Ecrits.Document.ByteSpoolTest do
 
   alias Ecrits.Document.ByteSpool
 
-  test "reserve writes a consumable token file" do
-    assert {:ok, token, path} = ByteSpool.reserve()
-    bytes = "draft bytes"
-    File.write!(path, bytes)
-
-    assert {:ok, ^bytes} = ByteSpool.decode(%{"bytes_token" => token})
-    refute File.exists?(path)
-  end
-
-  test "rejects paths outside the spool directory" do
-    assert {:error, :invalid_bytes_path} =
-             ByteSpool.decode(%{"bytes_path" => "/tmp/not-owned.bin"})
+  test "decodes claimed octet binaries passed through as bytes" do
+    assert {:ok, "raw binary"} = ByteSpool.decode(%{"bytes" => "raw binary"})
+    assert {:ok, "raw binary"} = ByteSpool.decode(%{bytes: "raw binary"})
   end
 
   test "keeps legacy base64 decode compatibility" do
     assert {:ok, "abc"} = ByteSpool.decode(%{"bytes_base64" => Base.encode64("abc")})
+    assert {:error, :invalid_base64} = ByteSpool.decode(%{"bytes_base64" => "%%%"})
+  end
+
+  test "reports missing byte payloads" do
+    assert {:error, :missing_bytes} = ByteSpool.decode(%{"bytes_token" => "retired-lane"})
+    assert {:error, :missing_bytes} = ByteSpool.decode(%{})
   end
 end

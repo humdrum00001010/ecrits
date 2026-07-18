@@ -20,6 +20,7 @@ defmodule Ecrits.Doc.Editor do
 
   use GenServer
 
+  alias Ecrits.AcpAgent.Session, as: AgentSession
   alias Ecrits.Doc.Op
 
   @type t :: pid()
@@ -60,12 +61,47 @@ defmodule Ecrits.Doc.Editor do
   def get(editor, ref, props \\ nil), do: GenServer.call(editor, {:get, ref, props})
 
   @doc "Property edit (write)."
-  @spec set(t(), term(), map()) :: {:ok, map()} | {:error, term()}
-  def set(editor, ref, props), do: GenServer.call(editor, {:set, ref, props})
+  @spec set(t(), term(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def set(editor, ref, props, opts \\ []),
+    do: GenServer.call(editor, {:set, ref, props, opts})
 
   @doc "Structural edit (write)."
-  @spec apply(t(), map()) :: {:ok, map()} | {:error, term()}
-  def apply(editor, op), do: GenServer.call(editor, {:apply, op})
+  @spec apply(t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def apply(editor, op, opts \\ []), do: GenServer.call(editor, {:apply, op, opts})
+
+  @typedoc """
+  One command in an all-or-nothing Editor mailbox transaction.
+
+  `:apply_then_set` covers native inserts whose returned control ref is needed
+  by the immediately-following property write.
+  """
+  @type batch_command ::
+          {:apply, map()}
+          | {:set, term(), map()}
+          | {:apply_then_set, map(), map(), (map() -> {:ok, term()} | {:error, term()})}
+
+  @doc """
+  Apply a command batch and persist it as one mailbox-level transaction.
+
+  No other Editor writer can interleave between snapshot, apply, save, and a
+  possible rollback. Subscriber events are emitted only after persistence
+  succeeds; a failure restores the model, history, dirty revision/owner, and
+  save target before the next mailbox request runs. When `:agent_session` and
+  the full `:owner` turn identity are supplied, the Editor process itself owns
+  that turn's commit fence for the whole transaction. The fence therefore
+  survives death of the process waiting on this `GenServer.call/3`.
+
+  An optional `:after_save` callback receives the applied results after the
+  source has been persisted but before the commit fence is released. It must
+  return `:ok`. Because persistence is already irreversible at that point, a
+  callback error is fail-stop: the Editor terminates and does not pretend that
+  the saved source was rolled back.
+  """
+  @spec apply_batch_and_save(t(), [batch_command()], keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def apply_batch_and_save(editor, commands, opts \\ [])
+      when is_list(commands) and is_list(opts),
+      do: GenServer.call(editor, {:apply_batch_and_save, commands, opts}, :infinity)
 
   @doc "Persist (export) the document."
   @spec save(t(), keyword()) :: :ok | {:error, term()}
@@ -113,6 +149,31 @@ defmodule Ecrits.Doc.Editor do
   """
   @spec dirty?(t()) :: boolean()
   def dirty?(editor), do: GenServer.call(editor, :dirty?)
+
+  @doc "Atomically inspect unsaved state and the writer identity that last mutated it."
+  @spec dirty_snapshot(t()) :: %{
+          dirty?: boolean(),
+          revision: non_neg_integer(),
+          owner: term()
+        }
+  def dirty_snapshot(editor), do: GenServer.call(editor, :dirty_snapshot)
+
+  @doc "Classify whether a dirty snapshot belongs exclusively or partly to one writer."
+  @spec owner_status(map(), map()) :: :clean | :exclusive | :mixed | :other
+  def owner_status(%{dirty?: false}, _owner), do: :clean
+  def owner_status(%{owner: owner}, owner), do: :exclusive
+
+  def owner_status(%{owner: {:mixed, %MapSet{} = owners}}, owner) do
+    if MapSet.member?(owners, owner_token(owner)), do: :mixed, else: :other
+  end
+
+  def owner_status(_snapshot, _owner), do: :other
+
+  @doc "Persist only when the current dirty revision still belongs to `snapshot`."
+  @spec save_if_owner(t(), map(), keyword()) ::
+          :ok | {:ok, term()} | {:error, term()} | {:skipped, :owner_changed | :clean}
+  def save_if_owner(editor, snapshot, opts \\ []) when is_map(snapshot),
+    do: GenServer.call(editor, {:save_if_owner, snapshot, opts}, :infinity)
 
   @doc """
   Save target for an autonomous (turn-end) persist: `{:ok, path}` when the
@@ -175,6 +236,8 @@ defmodule Ecrits.Doc.Editor do
            handle: handle,
            path: path,
            dirty?: false,
+           dirty_revision: 0,
+           dirty_owner: nil,
            history: [],
            subscribers: MapSet.new()
          }}
@@ -185,18 +248,38 @@ defmodule Ecrits.Doc.Editor do
   end
 
   @impl true
-  def terminate(_reason, %{backend: backend, handle: handle}) do
+  def terminate(_reason, %{backend: backend, handle: handle} = st) do
     # Best-effort: a backend whose governor is a separate process (office's
     # singleton Instance) may already be down/restarting when we terminate, so a
-    # close call can `exit`. Swallow it — terminate must not itself crash (that
-    # turned a recoverable office error into a LiveView-channel cascade).
-    try do
-      backend.close(handle)
-    catch
-      _kind, _reason -> :ok
-    end
+    # close call can `exit`. A failed atomic rollback can also retain a newly
+    # reopened handle whose first close failed before disposal. Retry every
+    # retained handle, swallowing the final failure so terminate itself cannot
+    # turn a recoverable office error into a LiveView-channel cascade.
+    [handle | Map.get(st, :rollback_cleanup_handles, [])]
+    |> Enum.uniq()
+    |> Enum.each(&terminate_close_handle(backend, &1, 2))
 
     :ok
+  end
+
+  defp terminate_close_handle(_backend, _handle, 0), do: :ok
+
+  defp terminate_close_handle(backend, handle, attempts_left) do
+    # Do not rescue around the fence runner: it executes the transaction in this
+    # process, and an unexpected post-mutation failure must retain the Editor's
+    # existing fail-stop/restart semantics rather than reply from the old state.
+    result =
+      try do
+        backend.close(handle)
+      rescue
+        _error -> :retry
+      catch
+        _kind, _reason -> :retry
+      end
+
+    if result == :ok,
+      do: :ok,
+      else: terminate_close_handle(backend, handle, attempts_left - 1)
   end
 
   @impl true
@@ -214,6 +297,15 @@ defmodule Ecrits.Doc.Editor do
   end
 
   def handle_call(:dirty?, _from, st), do: {:reply, dirty_state?(st), st}
+
+  def handle_call(:dirty_snapshot, _from, st) do
+    {:reply,
+     %{
+       dirty?: dirty_state?(st),
+       revision: Map.get(st, :dirty_revision, 0),
+       owner: Map.get(st, :dirty_owner)
+     }, st}
+  end
 
   def handle_call(:save_target, _from, st), do: {:reply, save_target_of(st), st}
 
@@ -270,16 +362,25 @@ defmodule Ecrits.Doc.Editor do
   end
 
   def handle_call({:save, opts}, _from, st) do
-    case save_via(st, opts) do
-      :ok ->
-        {:reply, :ok, mark_clean(st)}
+    save_reply(st, opts)
+  end
 
-      {:ok, _} = ok ->
-        {:reply, ok, mark_clean(st)}
+  def handle_call({:save_if_owner, snapshot, opts}, _from, st) do
+    current = %{
+      dirty?: dirty_state?(st),
+      revision: Map.get(st, :dirty_revision, 0),
+      owner: Map.get(st, :dirty_owner)
+    }
 
-      {:error, _} = error ->
-        {:reply, error, st}
+    cond do
+      not current.dirty? -> {:reply, {:skipped, :clean}, st}
+      current != snapshot -> {:reply, {:skipped, :owner_changed}, st}
+      true -> save_reply(st, opts)
     end
+  end
+
+  def handle_call({:apply_batch_and_save, commands, opts}, _from, st) do
+    batch_and_save_reply(st, commands, opts)
   end
 
   def handle_call({:export_bytes, format}, _from, st) do
@@ -316,16 +417,20 @@ defmodule Ecrits.Doc.Editor do
     end
   end
 
-  def handle_call({:set, ref, props}, _from, st) do
-    write(st, %{kind: :set, ref: ref, props: props}, fn ->
+  def handle_call({:set, ref, props, opts}, _from, st) do
+    write(st, %{kind: :set, ref: ref, props: props, owner: write_owner(opts)}, fn ->
       st.backend.set(st.handle, ref, props)
     end)
   end
 
-  def handle_call({:apply, op}, _from, st) do
+  # Preserve old-shape calls already queued in a hot-reloaded Editor mailbox.
+  def handle_call({:set, ref, props}, from, st),
+    do: handle_call({:set, ref, props, []}, from, st)
+
+  def handle_call({:apply, op, opts}, _from, st) do
     case Op.normalize(op) do
       {:ok, op} ->
-        write(st, %{kind: :edit, op: op}, fn applied_op ->
+        write(st, %{kind: :edit, op: op, owner: write_owner(opts)}, fn applied_op ->
           st.backend.edit(st.handle, Map.get(applied_op, :op, op))
         end)
 
@@ -333,6 +438,9 @@ defmodule Ecrits.Doc.Editor do
         {:reply, {:error, reason}, st}
     end
   end
+
+  def handle_call({:apply, op}, from, st),
+    do: handle_call({:apply, op, []}, from, st)
 
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, _reason}, st) do
@@ -346,6 +454,20 @@ defmodule Ecrits.Doc.Editor do
   end
 
   defp do_write(st, descriptor, run) do
+    case execute_write(st, descriptor, run) do
+      {:ok, info, next_st, true} ->
+        broadcast(next_st, %{op: descriptor_op(descriptor)})
+        {:reply, {:ok, info}, next_st}
+
+      {:ok, info, next_st, false} ->
+        {:reply, {:ok, info}, next_st}
+
+      {:error, reason, next_st} ->
+        {:reply, {:error, reason}, next_st}
+    end
+  end
+
+  defp execute_write(st, descriptor, run) do
     result =
       case descriptor do
         %{kind: :edit, op: op} -> run.(%{op: op})
@@ -354,21 +476,605 @@ defmodule Ecrits.Doc.Editor do
 
     case result do
       {:ok, applied} ->
-        entry =
-          descriptor
-          |> Map.put(:applied, applied)
-
-        st =
-          st |> Map.put(:dirty?, true) |> Map.put(:history, [entry | Map.get(st, :history, [])])
-
         info = Map.put_new(applied, :invalidated, Map.get(applied, :invalidated, []))
 
-        broadcast(st, %{op: descriptor_op(descriptor)})
-        {:reply, {:ok, info}, st}
+        if applied_mutated?(applied) do
+          entry = Map.put(descriptor, :applied, applied)
 
-      {:error, _reason} = error ->
-        {:reply, error, st}
+          next_st =
+            st
+            |> Map.put(:dirty_owner, next_dirty_owner(st, Map.get(descriptor, :owner)))
+            |> Map.put(:dirty?, true)
+            |> Map.put(:dirty_revision, Map.get(st, :dirty_revision, 0) + 1)
+            |> Map.put(:history, [entry | Map.get(st, :history, [])])
+
+          {:ok, info, next_st, true}
+        else
+          {:ok, info, st, false}
+        end
+
+      {:error, reason} ->
+        {:error, reason, st}
     end
+  end
+
+  defp batch_and_save_reply(st, commands, opts) do
+    with {:ok, owner} <- batch_write_owner(opts),
+         :ok <- validate_after_save(opts) do
+      run_batch_commit_fence(st, commands, opts, owner)
+    else
+      {:error, reason} -> {:reply, {:error, reason}, st}
+    end
+  end
+
+  defp run_batch_commit_fence(st, commands, opts, owner) do
+    transaction = fn ->
+      {:editor_batch_transaction, do_batch_and_save_reply(st, commands, opts, owner)}
+    end
+
+    result =
+      case Keyword.get(opts, :turn_commit_fun) do
+        turn_commit when is_function(turn_commit, 2) and is_map(owner) ->
+          turn_commit.(owner, transaction)
+
+        turn_commit when is_function(turn_commit, 2) ->
+          {:error, :incomplete_turn_identity}
+
+        _default ->
+          case Keyword.get(opts, :agent_session) do
+            pid when is_pid(pid) and is_map(owner) ->
+              AgentSession.with_turn_commit(pid, owner, transaction)
+
+            pid when is_pid(pid) ->
+              {:error, :incomplete_turn_identity}
+
+            nil ->
+              transaction.()
+
+            _invalid_agent_session ->
+              {:error, :invalid_agent_session}
+          end
+      end
+
+    case result do
+      {:editor_batch_transaction, reply} ->
+        reply
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, st}
+
+      other ->
+        {:reply, {:error, {:turn_commit_failed, other}}, st}
+    end
+  end
+
+  defp do_batch_and_save_reply(st, commands, opts, owner) do
+    with :ok <- validate_batch_owner(st, owner),
+         {:ok, snapshot} <- capture_batch_snapshot(st, opts) do
+      case execute_batch(st, commands, owner) do
+        {:ok, applied, next_st, broadcasts} ->
+          case validate_batch_commit_owner(next_st, owner) do
+            :ok ->
+              case save_batch_atomically(next_st, opts) do
+                :ok ->
+                  finish_batch_save(next_st, applied, broadcasts, opts)
+
+                {:ok, _saved} ->
+                  finish_batch_save(next_st, applied, broadcasts, opts)
+
+                {:error, reason} ->
+                  rollback_batch(next_st, snapshot, reason, true)
+              end
+
+            {:error, reason} ->
+              rollback_batch(next_st, snapshot, reason, false)
+          end
+
+        {:error, reason, failed_st} ->
+          rollback_batch(failed_st, snapshot, reason, false)
+      end
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, st}
+    end
+  end
+
+  defp finish_batch_save(st, applied, broadcasts, opts) do
+    st = mark_clean(st)
+    run_after_save!(opts, applied)
+
+    Enum.each(broadcasts, fn descriptor ->
+      broadcast(st, %{op: descriptor_op(descriptor)})
+    end)
+
+    {:reply, {:ok, applied}, st}
+  end
+
+  defp validate_after_save(opts) do
+    case Keyword.get(opts, :after_save) do
+      nil -> :ok
+      callback when is_function(callback, 1) -> :ok
+      _invalid -> {:error, :invalid_after_save}
+    end
+  end
+
+  defp run_after_save!(opts, applied) do
+    case Keyword.get(opts, :after_save) do
+      nil ->
+        :ok
+
+      callback ->
+        case callback.(applied) do
+          :ok -> :ok
+          {:error, reason} -> exit({:after_save_failed, reason})
+          other -> exit({:after_save_invalid_return, other})
+        end
+    end
+  end
+
+  defp batch_write_owner(opts) do
+    case Keyword.fetch(opts, :owner) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, owner} when is_map(owner) ->
+        if Enum.all?([:agent_id, :instance_id, :turn_id], fn key ->
+             value = Map.get(owner, key)
+             is_binary(value) and value != ""
+           end) do
+          {:ok, Map.take(owner, [:agent_id, :instance_id, :turn_id])}
+        else
+          {:error, :incomplete_turn_identity}
+        end
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, _owner} ->
+        {:error, :incomplete_turn_identity}
+    end
+  end
+
+  defp validate_batch_owner(_st, nil), do: :ok
+
+  defp validate_batch_owner(st, owner) when is_map(owner) do
+    snapshot = %{
+      dirty?: dirty_state?(st),
+      revision: Map.get(st, :dirty_revision, 0),
+      owner: Map.get(st, :dirty_owner)
+    }
+
+    case owner_status(snapshot, owner) do
+      status when status in [:clean, :exclusive] -> :ok
+      :mixed -> {:error, :mixed_unsaved_writers}
+      :other -> {:error, :owner_changed}
+    end
+  end
+
+  defp validate_batch_commit_owner(_st, nil), do: :ok
+
+  defp validate_batch_commit_owner(st, owner) when is_map(owner) do
+    snapshot = %{
+      dirty?: dirty_state?(st),
+      revision: Map.get(st, :dirty_revision, 0),
+      owner: Map.get(st, :dirty_owner)
+    }
+
+    case owner_status(snapshot, owner) do
+      :exclusive -> :ok
+      :mixed -> {:error, :mixed_unsaved_writers}
+      status when status in [:clean, :other] -> {:error, :owner_changed}
+    end
+  end
+
+  defp capture_batch_snapshot(st, opts) do
+    path = Keyword.get(opts, :path, st.path)
+
+    with {:ok, source} <- capture_source_preimage_safely(path),
+         {:ok, model} <- capture_model_preimage(st, source, opts) do
+      {:ok, %{state: st, path: path, source: source, model: model}}
+    end
+  end
+
+  defp capture_source_preimage_safely(path) do
+    case atomic_boundary(:source_snapshot, fn -> capture_source_preimage(path) end) do
+      {:ok, {:ok, _source} = ok} ->
+        ok
+
+      {:ok, {:error, _reason} = error} ->
+        error
+
+      {:ok, other} ->
+        {:error, {:atomic_source_snapshot_failed, {:unexpected_return, other}}}
+
+      {:error, reason} ->
+        {:error, {:atomic_source_snapshot_failed, reason}}
+    end
+  end
+
+  defp capture_source_preimage(path) when is_binary(path) and path != "" do
+    case File.read(path) do
+      {:ok, bytes} -> {:ok, {:present, bytes}}
+      {:error, :enoent} -> {:ok, :missing}
+      {:error, reason} -> {:error, {:atomic_source_snapshot_failed, reason}}
+    end
+  end
+
+  defp capture_source_preimage(_path), do: {:ok, :none}
+
+  defp capture_model_preimage(st, source, opts) do
+    cond do
+      not dirty_state?(st) and match?({:present, _bytes}, source) and
+          same_path?(st.path, Keyword.get(opts, :path, st.path)) ->
+        {:present, bytes} = source
+        {:ok, {:source, bytes}}
+
+      function_exported?(st.backend, :export_bytes, 2) ->
+        case atomic_boundary(:model_snapshot_export, fn ->
+               st.backend.export_bytes(
+                 st.handle,
+                 Keyword.get(opts, :format, format_of(st))
+               )
+             end) do
+          {:ok, {:ok, bytes}} when is_binary(bytes) ->
+            {:ok, {:bytes, bytes}}
+
+          {:ok, {:error, reason}} ->
+            {:error, {:atomic_model_snapshot_failed, reason}}
+
+          {:ok, other} ->
+            {:error, {:atomic_model_snapshot_failed, {:unexpected_return, other}}}
+
+          {:error, reason} ->
+            {:error, {:atomic_model_snapshot_failed, reason}}
+        end
+
+      true ->
+        {:error, :atomic_model_snapshot_unavailable}
+    end
+  end
+
+  defp same_path?(left, right)
+       when is_binary(left) and left != "" and is_binary(right) and right != "",
+       do: Path.expand(left) == Path.expand(right)
+
+  defp same_path?(_left, _right), do: false
+
+  defp execute_batch(st, commands, owner) do
+    commands
+    |> Enum.reduce_while({:ok, st, [], []}, fn command, {:ok, current_st, applied, broadcasts} ->
+      case execute_batch_command_safely(current_st, command, owner) do
+        {:ok, result, next_st, command_broadcasts} ->
+          {:cont,
+           {:ok, next_st, [result | applied], Enum.reverse(command_broadcasts, broadcasts)}}
+
+        {:error, reason, failed_st} ->
+          {:halt, {:error, reason, failed_st}}
+      end
+    end)
+    |> case do
+      {:ok, next_st, applied, broadcasts} ->
+        {:ok, Enum.reverse(applied), next_st, Enum.reverse(broadcasts)}
+
+      {:error, reason, failed_st} ->
+        {:error, reason, failed_st}
+    end
+  end
+
+  # A native backend may mutate its handle and only then raise/exit (or return a
+  # shape outside the callback contract). Convert every such outcome into the
+  # batch error channel while the Editor still owns the mailbox. The caller can
+  # then restore the captured model before the next queued writer runs.
+  defp execute_batch_command_safely(st, command, owner) do
+    stage = batch_command_stage(command)
+
+    case atomic_boundary(stage, fn -> execute_batch_command(st, command, owner) end) do
+      {:ok, {:ok, _result, _next_st, _broadcasts} = ok} ->
+        ok
+
+      {:ok, {:error, _reason, _failed_st} = error} ->
+        error
+
+      {:ok, other} ->
+        {:error, {:atomic_unexpected_result, stage, other}, st}
+
+      {:error, reason} ->
+        {:error, reason, st}
+    end
+  end
+
+  defp batch_command_stage({:apply, _op}), do: :batch_apply
+  defp batch_command_stage({:set, _ref, _props}), do: :batch_set
+  defp batch_command_stage({:apply_then_set, _op, _props, _resolver}), do: :batch_apply_then_set
+  defp batch_command_stage(_command), do: :batch_command
+
+  defp execute_batch_command(st, {:apply, op}, owner) do
+    execute_batch_apply(st, op, owner)
+  end
+
+  defp execute_batch_command(st, {:set, ref, props}, owner) do
+    execute_batch_set(st, ref, props, owner)
+  end
+
+  defp execute_batch_command(st, {:apply_then_set, op, props, resolve_ref}, owner)
+       when is_function(resolve_ref, 1) do
+    case execute_batch_apply(st, op, owner) do
+      {:ok, applied, applied_st, apply_broadcasts} ->
+        case resolve_batch_ref(resolve_ref, applied) do
+          {:ok, ref} ->
+            case execute_batch_set(applied_st, ref, props, owner) do
+              {:ok, _set_result, set_st, set_broadcasts} ->
+                {:ok, applied, set_st, apply_broadcasts ++ set_broadcasts}
+
+              {:error, reason, failed_st} ->
+                {:error, reason, failed_st}
+            end
+
+          {:error, reason} ->
+            {:error, reason, applied_st}
+        end
+
+      {:error, reason, failed_st} ->
+        {:error, reason, failed_st}
+    end
+  end
+
+  defp execute_batch_command(st, _command, _owner),
+    do: {:error, :invalid_batch_command, st}
+
+  defp execute_batch_apply(st, op, owner) do
+    case Op.normalize(op) do
+      {:ok, normalized_op} ->
+        descriptor = %{kind: :edit, op: normalized_op, owner: owner}
+
+        case execute_write(st, descriptor, fn applied_op ->
+               st.backend.edit(st.handle, Map.get(applied_op, :op, normalized_op))
+             end) do
+          {:ok, info, next_st, mutated?} ->
+            broadcasts = if mutated?, do: [descriptor], else: []
+            {:ok, info, next_st, broadcasts}
+
+          {:error, reason, failed_st} ->
+            {:error, reason, failed_st}
+        end
+
+      {:error, reason} ->
+        {:error, reason, st}
+    end
+  end
+
+  defp execute_batch_set(st, ref, props, owner) when is_map(props) do
+    descriptor = %{kind: :set, ref: ref, props: props, owner: owner}
+
+    case execute_write(st, descriptor, fn -> st.backend.set(st.handle, ref, props) end) do
+      {:ok, info, next_st, mutated?} ->
+        broadcasts = if mutated?, do: [descriptor], else: []
+        {:ok, info, next_st, broadcasts}
+
+      {:error, reason, failed_st} ->
+        {:error, reason, failed_st}
+    end
+  end
+
+  defp execute_batch_set(st, _ref, _props, _owner),
+    do: {:error, :invalid_batch_command, st}
+
+  defp resolve_batch_ref(resolve_ref, applied) do
+    case resolve_ref.(applied) do
+      {:ok, _ref} = ok -> ok
+      {:error, _reason} = error -> error
+      other -> {:error, {:invalid_batch_ref, other}}
+    end
+  rescue
+    error -> {:error, {:batch_ref_resolver_failed, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:batch_ref_resolver_failed, {kind, reason}}}
+  end
+
+  defp rollback_batch(st, snapshot, reason, restore_source?) do
+    source_result = if restore_source?, do: restore_source_preimage_safely(snapshot), else: :ok
+    model_result = restore_model_preimage_safely(st, snapshot, source_result)
+
+    case {source_result, model_result} do
+      {:ok, {:ok, restored_st}} ->
+        {:reply, {:error, reason}, restored_st}
+
+      {source_error, {:ok, restored_st}} ->
+        stop_after_rollback_failure(
+          restored_st,
+          {:atomic_rollback_failed, reason, source_error}
+        )
+
+      {:ok, {:error, model_error, failed_st}} ->
+        stop_after_rollback_failure(failed_st, {:atomic_rollback_failed, reason, model_error})
+
+      {source_error, {:error, model_error, failed_st}} ->
+        stop_after_rollback_failure(
+          failed_st,
+          {:atomic_rollback_failed, reason, source_error, model_error}
+        )
+    end
+  end
+
+  defp stop_after_rollback_failure(st, reason),
+    do: {:stop, reason, {:error, reason}, st}
+
+  defp restore_source_preimage_safely(snapshot) do
+    case atomic_boundary(:source_restore, fn -> restore_source_preimage(snapshot) end) do
+      {:ok, :ok} ->
+        :ok
+
+      {:ok, {:error, reason}} ->
+        {:error, {:atomic_source_restore_failed, reason}}
+
+      {:ok, other} ->
+        {:error, {:atomic_source_restore_failed, {:unexpected_return, other}}}
+
+      {:error, reason} ->
+        {:error, {:atomic_source_restore_failed, reason}}
+    end
+  end
+
+  defp restore_source_preimage(%{source: :none}), do: :ok
+
+  defp restore_source_preimage(%{path: path, source: {:present, bytes}}) do
+    case File.read(path) do
+      {:ok, ^bytes} -> :ok
+      _other -> Ecrits.FS.atomic_write(path, bytes)
+    end
+  end
+
+  defp restore_source_preimage(%{path: path, source: :missing}) do
+    case File.stat(path) do
+      {:error, :enoent} -> :ok
+      {:ok, _stat} -> File.rm(path)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp restore_model_preimage(st, snapshot, source_result) do
+    reopen = reopen_model_preimage(st, snapshot, source_result)
+
+    case reopen do
+      {:ok, handle} ->
+        restored_st = %{snapshot.state | handle: handle}
+
+        # A close may raise before it actually disposes the rejected engine
+        # handle. Retry once while the old handle is still reachable. If both
+        # attempts fail, try to dispose the newly-opened rollback handle too.
+        # If that close also fails, retain the new handle in fail-stop state so
+        # terminate/2 can retry both handles instead of orphaning either one.
+        case close_rejected_handle(st) do
+          :ok ->
+            {:ok, restored_st}
+
+          {:error, close_reason} ->
+            restored_close = close_handle_once(st.backend, handle, :restored_handle_close)
+
+            failed_st =
+              case restored_close do
+                :ok -> st
+                {:error, _reason} -> retain_rollback_cleanup_handle(st, handle)
+              end
+
+            {:error,
+             {:atomic_rejected_handle_close_failed, close_reason,
+              restored_handle_close_result(restored_close)}, failed_st}
+        end
+
+      {:error, reason} ->
+        {:error, {:atomic_model_restore_failed, reason}, st}
+    end
+  end
+
+  defp restore_model_preimage_safely(st, snapshot, source_result) do
+    case atomic_boundary(:model_restore, fn ->
+           restore_model_preimage(st, snapshot, source_result)
+         end) do
+      {:ok, {:ok, _restored_st} = ok} ->
+        ok
+
+      {:ok, {:error, _reason, _failed_st} = error} ->
+        error
+
+      {:ok, other} ->
+        {:error, {:atomic_model_restore_failed, {:unexpected_return, other}}, st}
+
+      {:error, reason} ->
+        {:error, {:atomic_model_restore_failed, reason}, st}
+    end
+  end
+
+  defp retain_rollback_cleanup_handle(st, handle) do
+    Map.update(st, :rollback_cleanup_handles, [handle], fn handles ->
+      [handle | handles] |> Enum.uniq()
+    end)
+  end
+
+  defp reopen_model_preimage(_st, %{model: {:source, _bytes}}, source_result)
+       when source_result != :ok,
+       do: {:error, :source_restore_failed}
+
+  defp reopen_model_preimage(st, %{model: {:source, bytes}, path: path}, :ok) do
+    call =
+      if function_exported?(st.backend, :reopen, 2) do
+        fn -> st.backend.reopen(st.handle, bytes) end
+      else
+        fn -> st.backend.open(path, []) end
+      end
+
+    normalize_model_reopen(atomic_boundary(:model_reopen, call))
+  end
+
+  defp reopen_model_preimage(st, %{model: {:bytes, bytes}}, _source_result) do
+    normalize_model_reopen(atomic_boundary(:model_reopen, fn -> st.backend.open(bytes, []) end))
+  end
+
+  defp normalize_model_reopen({:ok, {:ok, _handle} = ok}), do: ok
+  defp normalize_model_reopen({:ok, {:error, _reason} = error}), do: error
+
+  defp normalize_model_reopen({:ok, other}),
+    do: {:error, {:unexpected_return, other}}
+
+  defp normalize_model_reopen({:error, reason}), do: {:error, reason}
+
+  defp close_rejected_handle(st) do
+    first = close_handle_once(st.backend, st.handle, :rejected_handle_close)
+
+    case first do
+      :ok ->
+        :ok
+
+      {:error, first_reason} ->
+        case close_handle_once(st.backend, st.handle, :rejected_handle_close_retry) do
+          :ok -> :ok
+          {:error, retry_reason} -> {:error, {:close_retry_failed, first_reason, retry_reason}}
+        end
+    end
+  end
+
+  defp close_handle_once(backend, handle, stage) do
+    case atomic_boundary(stage, fn -> backend.close(handle) end) do
+      {:ok, :ok} -> :ok
+      {:ok, other} -> {:error, {:unexpected_return, other}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp restored_handle_close_result(:ok), do: :closed
+  defp restored_handle_close_result({:error, reason}), do: {:close_failed, reason}
+
+  defp save_batch_atomically(st, opts) do
+    case atomic_boundary(:batch_save, fn -> save_via(st, opts) end) do
+      {:ok, :ok} ->
+        :ok
+
+      {:ok, {:ok, _saved} = ok} ->
+        ok
+
+      {:ok, {:error, _reason} = error} ->
+        error
+
+      {:ok, other} ->
+        {:error, {:atomic_unexpected_result, :batch_save, other}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp atomic_boundary(stage, fun) when is_function(fun, 0) do
+    {:ok, fun.()}
+  rescue
+    error ->
+      {:error,
+       {:atomic_boundary_failed, stage, {:raise, error.__struct__, Exception.message(error)}}}
+  catch
+    :exit, reason ->
+      {:error, {:atomic_boundary_failed, stage, {:exit, reason}}}
+
+    kind, reason ->
+      {:error, {:atomic_boundary_failed, stage, {kind, reason}}}
   end
 
   defp descriptor_op(%{kind: :edit, op: op}), do: op
@@ -380,7 +1086,81 @@ defmodule Ecrits.Doc.Editor do
 
   defp dirty_state?(st), do: Map.get(st, :dirty?, false)
 
-  defp mark_clean(st), do: Map.put(st, :dirty?, false)
+  defp next_dirty_owner(st, owner) do
+    cond do
+      not dirty_state?(st) ->
+        owner
+
+      match?({:mixed, %MapSet{}}, Map.get(st, :dirty_owner)) ->
+        {:mixed,
+         st
+         |> Map.get(:dirty_owner)
+         |> elem(1)
+         |> MapSet.put(owner_token(owner))}
+
+      Map.get(st, :dirty_owner) == owner ->
+        owner
+
+      true ->
+        {:mixed,
+         MapSet.new([
+           owner_token(Map.get(st, :dirty_owner)),
+           owner_token(owner)
+         ])}
+    end
+  end
+
+  defp owner_token(nil), do: :unowned
+  defp owner_token(owner), do: owner
+
+  defp applied_mutated?(%{changed?: false}), do: false
+  defp applied_mutated?(%{"changed" => false}), do: false
+  defp applied_mutated?(%{op: "noop"}), do: false
+  defp applied_mutated?(%{"op" => "noop"}), do: false
+  defp applied_mutated?(%{native: native}) when is_list(native), do: native_mutated?(native)
+  defp applied_mutated?(%{"native" => native}) when is_list(native), do: native_mutated?(native)
+  defp applied_mutated?(%{replaced: 0}), do: false
+  defp applied_mutated?(%{"replaced" => 0}), do: false
+  defp applied_mutated?(_applied), do: true
+
+  defp native_mutated?(results), do: Enum.any?(results, &native_result_mutated?/1)
+
+  defp native_result_mutated?(%{} = result) do
+    ok = Map.get(result, :ok, Map.get(result, "ok"))
+    replaced = Map.get(result, :replaced, Map.get(result, "replaced"))
+    ok != false and replaced != 0
+  end
+
+  defp native_result_mutated?(_result), do: true
+
+  defp mark_clean(st), do: st |> Map.put(:dirty?, false) |> Map.put(:dirty_owner, nil)
+
+  defp write_owner(opts) when is_list(opts) do
+    owner = Keyword.get(opts, :owner)
+
+    if is_map(owner) and
+         Enum.all?([:agent_id, :instance_id, :turn_id], fn key ->
+           value = Map.get(owner, key)
+           is_binary(value) and value != ""
+         end) do
+      Map.take(owner, [:agent_id, :instance_id, :turn_id])
+    end
+  end
+
+  defp write_owner(_opts), do: nil
+
+  defp save_reply(st, opts) do
+    case save_via(st, opts) do
+      :ok ->
+        {:reply, :ok, mark_clean(st)}
+
+      {:ok, _} = ok ->
+        {:reply, ok, mark_clean(st)}
+
+      {:error, _} = error ->
+        {:reply, error, st}
+    end
+  end
 
   # The document's own export format, derived from its save-target extension
   # (.hwpx -> :hwpx, everything else .hwp). Office backends don't reach this

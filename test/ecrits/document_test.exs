@@ -5,12 +5,12 @@ defmodule Ecrits.DocumentTest do
   alias Ecrits.Document.RhwpAdapter
 
   setup do
-    ensure_local_runtime_started()
+    ensure_runtime_started()
 
     root =
       Path.join(
         System.tmp_dir!(),
-        "ecrits-local-document-#{System.unique_integer([:positive])}"
+        "ecrits-document-#{System.unique_integer([:positive])}"
       )
 
     File.mkdir_p!(root)
@@ -172,12 +172,12 @@ defmodule Ecrits.DocumentTest do
     assert response.snapshot["saved"]
     assert File.read!(path) == saved
 
-    assert_receive {:local_document_saved, %Document{id: ^document_id}, %{"saved" => true}}
+    assert_receive {:document_saved, %Document{id: ^document_id}, %{"saved" => true}}
 
     assert :ok = Document.close(document_id)
   end
 
-  test "rhwp adapter saves snapshot payload from uploaded byte token", %{root: root} do
+  test "rhwp adapter saves snapshot payload from claimed octet bytes", %{root: root} do
     path = Path.join(root, "contract.hwpx")
     original = hwpx_fixture()
     saved = hwpx_fixture()
@@ -186,19 +186,15 @@ defmodule Ecrits.DocumentTest do
     assert {:ok, %{document_id: document_id, bytes: ^original, format: "hwpx"}} =
              RhwpAdapter.open(root, "contract.hwpx")
 
-    assert {:ok, token, token_path} = Ecrits.Document.ByteSpool.reserve()
-    File.write!(token_path, saved)
-
     assert {:ok, response} =
              RhwpAdapter.save(document_id, %{
-               "bytes_token" => token,
+               "bytes" => saved,
                "format" => "hwpx",
-               "request_id" => "save-token-1"
+               "request_id" => "save-octet-1"
              })
 
     assert response.ok
     assert File.read!(path) == saved
-    refute File.exists?(token_path)
 
     assert :ok = Document.close(document_id)
   end
@@ -235,7 +231,7 @@ defmodule Ecrits.DocumentTest do
     assert :ok = Document.close(document)
   end
 
-  defp ensure_local_runtime_started do
+  defp ensure_runtime_started do
     if is_nil(Process.whereis(Ecrits.PubSub)) do
       start_supervised!({Phoenix.PubSub, name: Ecrits.PubSub})
     end

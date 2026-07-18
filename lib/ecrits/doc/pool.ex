@@ -23,7 +23,7 @@ defmodule Ecrits.Doc.Pool do
       editor when no viewer is attached);
     * **per-agent doc ownership** (`owners`, invariant 2) → `Ecrits.Workspace.Session`;
     * the **global active document** — DELETED; each agent's active doc is its
-      own AgentLive state (`pool_document_id`).
+      own agent-session state (`pool_document_id`).
 
   `backing` in `list/1`/`info/2` is therefore always `:server` here (the Pool
   never holds the browser arm); the Session overlays the browser view on top.
@@ -72,7 +72,10 @@ defmodule Ecrits.Doc.Pool do
   @spec open(GenServer.server(), String.t(), keyword()) ::
           {:ok, document_id()} | {:error, term()}
   def open(pool, path, opts) when is_binary(path) and is_list(opts) do
-    GenServer.call(pool, {:open, path, opts})
+    # Opens serialize behind every other pool call; under turn load (browser
+    # saves + canonical projections) the 5s default starved the canonical
+    # stage and wedged in-flight commits behind :projection_temp_exists.
+    GenServer.call(pool, {:open, path, opts}, 30_000)
   end
 
   @doc """
@@ -268,8 +271,11 @@ defmodule Ecrits.Doc.Pool do
   def handle_call({:route, document_id}, _from, st) do
     reply =
       case Map.get(st.docs, document_id) do
-        %{editor: editor} when is_pid(editor) -> {:server, editor}
-        _ -> {:error, :not_found}
+        %{editor: editor} when is_pid(editor) ->
+          if Process.alive?(editor), do: {:server, editor}, else: {:error, :not_found}
+
+        _ ->
+          {:error, :not_found}
       end
 
     {:reply, reply, st}
@@ -316,13 +322,24 @@ defmodule Ecrits.Doc.Pool do
 
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, _reason}, st) do
-    # an editor went down — drop its doc from the registry
-    docs =
+    # A pooled Editor is temporary: after an unrecoverable rollback it must not
+    # auto-restart behind this Pool's back. Remove both indexes for exactly the
+    # dead pid. If the path was already reopened before this DOWN arrived, the
+    # replacement pid remains registered and its by_path entry is preserved.
+    {removed, retained} =
       st.docs
-      |> Enum.reject(fn {_id, doc} -> doc.editor == pid end)
-      |> Map.new()
+      |> Enum.split_with(fn {_id, doc} -> doc.editor == pid end)
 
-    {:noreply, %{st | docs: docs}}
+    docs = Map.new(retained)
+
+    by_path =
+      Enum.reduce(removed, st.by_path, fn {document_id, doc}, by_path ->
+        if Map.get(by_path, doc.path) == document_id,
+          do: Map.delete(by_path, doc.path),
+          else: by_path
+      end)
+
+    {:noreply, %{st | docs: docs, by_path: by_path}}
   end
 
   # --- helpers -------------------------------------------------------------
@@ -346,7 +363,13 @@ defmodule Ecrits.Doc.Pool do
       open_opts: Keyword.get(opts, :open_opts, [])
     ]
 
-    case DynamicSupervisor.start_child(st.sup, {Editor, editor_opts}) do
+    # The Pool owns registration/reopen semantics. A permanent Editor child can
+    # restart with a new pid after rollback fail-stop while the Pool still
+    # monitors only the dead pid, creating an unregistered orphan. Temporary
+    # children make the Pool the sole authority that can reopen a document.
+    child_spec = Supervisor.child_spec({Editor, editor_opts}, restart: :temporary)
+
+    case DynamicSupervisor.start_child(st.sup, child_spec) do
       {:ok, editor} ->
         Process.monitor(editor)
 
@@ -385,8 +408,11 @@ defmodule Ecrits.Doc.Pool do
 
   defp fetch_editor(st, document_id) do
     case Map.get(st.docs, document_id) do
-      %{editor: editor} when is_pid(editor) -> {:ok, editor}
-      _ -> {:error, :not_found}
+      %{editor: editor} when is_pid(editor) ->
+        if Process.alive?(editor), do: {:ok, editor}, else: {:error, :not_found}
+
+      _ ->
+        {:error, :not_found}
     end
   end
 

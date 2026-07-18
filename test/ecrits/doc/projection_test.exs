@@ -10,8 +10,14 @@ defmodule Ecrits.Doc.ProjectionTest do
   """
   use ExUnit.Case, async: false
 
+  alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
   alias Ecrits.Doc.Projection
+  alias Ecrits.Document
+  alias Ecrits.Document.PreviewSnapshot
+  alias Ecrits.Fuse.{DocFs, OpenDocs}
+  alias Ecrits.Test.ExceptionalEditorBackend
+  alias Ecrits.Workspace.TurnFinalizer
 
   @hwpx_fixture Path.expand("../../fixtures/hwpx/real_contract.hwpx", __DIR__)
   @png_1x1 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII="
@@ -101,8 +107,7 @@ defmodule Ecrits.Doc.ProjectionTest do
       assert Enum.map(groups, fn [{:text, op, _marker}] ->
                {op["ref"]["paragraph"], op["ref"]["offset"], op["text"]}
              end) == [
-               {11, 2, "앞"},
-               {11, 3, "쪽"},
+               {11, 2, "앞쪽"},
                {20, 4, "뒤"}
              ]
     end
@@ -141,6 +146,74 @@ defmodule Ecrits.Doc.ProjectionTest do
                  "cellParaIndex" => 0
                }
              ]
+    end
+
+    test "replacement preview keeps both raw ops and one final ranged highlight" do
+      ref = %{"section" => 0, "paragraph" => 11, "offset" => 0}
+      replacement = " ◇ 계약명  : 프리뷰 중복 추적"
+
+      delete =
+        {:text, %{"op" => "delete_range", "ref" => ref, "count" => 34}, replacement}
+
+      insert =
+        {:text, %{"op" => "insert_text", "ref" => ref, "text" => replacement}, replacement}
+
+      changes = [delete, insert]
+      assert [^changes] = Projection.__browser_preview_groups_for_test__(changes)
+
+      assert [%{"ops" => ops, "highlights" => [highlight]}] =
+               Projection.__browser_preview_steps_for_test__(
+                 [changes],
+                 changes,
+                 [%{}, %{}]
+               )
+
+      assert Enum.map(ops, & &1["op"]) == ["delete_range", "insert_text"]
+
+      assert highlight == %{
+               "kind" => "text",
+               "op" => "insert_text",
+               "ref" => ref,
+               "offset" => 0,
+               "length" => String.length(replacement),
+               "text" => replacement
+             }
+    end
+
+    test "browser picture preview keeps placement coupled to its insertion" do
+      change =
+        {:insert_picture,
+         %{
+           "op" => "insert_picture",
+           "ref" => %{"section" => 0, "paragraph" => 8, "offset" => 0},
+           "src" => "/tmp/signature.png"
+         }, "signature.png", %{"treatAsChar" => false, "horzOffset" => 120, "vertOffset" => 80}}
+
+      assert [%{"ops" => [op], "sets" => []}] =
+               Projection.__browser_preview_steps_for_test__(
+                 [[change]],
+                 [change],
+                 [%{"paraIdx" => 8, "controlIdx" => 2}]
+               )
+
+      assert op["post_insert_props"] == %{
+               "kind" => "picture",
+               "treatAsChar" => false,
+               "horzOffset" => 120,
+               "vertOffset" => 80
+             }
+    end
+
+    test "browser property sets translate IR paragraph kind to the editor vocabulary" do
+      ref = %{"section" => 0, "paragraph" => 73}
+      change = {:set, ref, "paragraph", %{"alignment" => "justify"}}
+
+      assert [
+               %{
+                 "ref" => ^ref,
+                 "props" => %{"kind" => "para", "alignment" => "justify"}
+               }
+             ] = Projection.__browser_sets_for_test__([change])
     end
 
     test "replace_text highlights only the changed replacement span" do
@@ -248,6 +321,744 @@ defmodule Ecrits.Doc.ProjectionTest do
     end
   end
 
+  describe "browser-authority write transaction" do
+    @tag :edit_failure
+    test "commit timeout restores the exact source and rolls the browser back without publishing" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_browser_rollback_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      source_preimage = <<0, 1, 2, 3, 255, 254, 253, 10, 0>>
+      browser_export = <<9, 8, 7, 6, 5, 4, 3, 2, 1>>
+      mounted_name = Path.basename(path)
+      edit_id = "browser-commit-timeout"
+
+      File.mkdir_p!(root)
+      File.write!(path, source_preimage)
+
+      on_exit(fn ->
+        OpenDocs.unstage(root, mounted_name)
+        OpenDocs.uncache_committed(root, mounted_name)
+        File.rm_rf(root)
+      end)
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+      )
+
+      owner = self()
+
+      viewer =
+        start_supervised!(
+          {Task,
+           fn ->
+             browser_transaction_loop(
+               owner,
+               path,
+               browser_export,
+               :timeout
+             )
+           end}
+        )
+
+      changes = [
+        {:text,
+         %{
+           "op" => "insert_text",
+           "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+           "text" => "edited"
+         }, "edited"}
+      ]
+
+      assert {:error, {:browser_timeout, "viewer did not reply in time"}} =
+               Projection.__apply_browser_changes_for_test__(
+                 viewer,
+                 path,
+                 :hwp,
+                 changes,
+                 root: root,
+                 edit_id: edit_id,
+                 browser_commit_timeout: 20
+               )
+
+      assert_receive {:browser_transaction, :vfs_write, ^edit_id, ^source_preimage}
+      assert_receive {:browser_transaction, :vfs_commit, ^edit_id, ^browser_export}
+      assert_receive {:browser_transaction, :vfs_rollback, ^edit_id, ^source_preimage}
+
+      assert File.read!(path) == source_preimage
+      assert :error = OpenDocs.staged(root, mounted_name)
+      assert :error = OpenDocs.committed(root, mounted_name)
+      refute_receive {:vfs_doc_edited, _info}
+    end
+
+    test "coordinator survives request-owner death after source replace and completes browser commit" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_browser_owner_death_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      source_preimage = <<0, 1, 2, 3>>
+      browser_export = <<9, 8, 7, 6>>
+      edit_id = "browser-owner-death-gap"
+      File.mkdir_p!(root)
+      File.write!(path, source_preimage)
+
+      on_exit(fn -> File.rm_rf(root) end)
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+      )
+
+      owner = self()
+
+      viewer =
+        start_test_task(fn ->
+          browser_transaction_loop(
+            owner,
+            path,
+            browser_export,
+            {:ok, %{"committed" => true}}
+          )
+        end)
+
+      checkpoint = fn
+        :source_written ->
+          send(owner, {:browser_source_written, self()})
+
+          receive do
+            :continue_browser_commit -> :ok
+          end
+      end
+
+      request_owner =
+        start_test_task(fn ->
+          result =
+            Projection.__apply_browser_changes_for_test__(
+              viewer,
+              path,
+              :hwp,
+              browser_text_change("survives"),
+              root: root,
+              edit_id: edit_id,
+              browser_transaction_checkpoint_fun: checkpoint
+            )
+
+          send(owner, {:request_owner_result, result})
+        end)
+
+      assert_receive {:browser_transaction, :vfs_write, ^edit_id, ^source_preimage}
+      assert_receive {:browser_transaction_owner, :vfs_write, ^edit_id, write_owner}
+      assert_receive {:browser_source_written, coordinator}
+      assert coordinator != request_owner
+      assert coordinator == write_owner
+      assert {:ok, ^browser_export} = Ecrits.FS.raw_read(path)
+
+      request_owner_ref = Process.monitor(request_owner)
+      Process.exit(request_owner, :kill)
+
+      assert_receive {:DOWN, ^request_owner_ref, :process, ^request_owner, :killed}
+      refute_receive {:browser_transaction, :vfs_commit, ^edit_id, _bytes}
+      refute_receive {:browser_transaction, :vfs_rollback, ^edit_id, _bytes}
+
+      coordinator_ref = Process.monitor(coordinator)
+      send(coordinator, :continue_browser_commit)
+
+      assert_receive {:browser_transaction, :vfs_commit, ^edit_id, ^browser_export}
+      assert_receive {:browser_transaction_owner, :vfs_commit, ^edit_id, ^coordinator}
+      assert_receive {:vfs_doc_edited, %{edit_id: ^edit_id, browser_authority: true}}, 1_000
+      assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+
+      assert {:ok, ^browser_export} = Ecrits.FS.raw_read(path)
+      refute_receive {:browser_transaction, :vfs_rollback, ^edit_id, _bytes}
+      refute_receive {:request_owner_result, _result}
+    end
+
+    @tag :edit_failure
+    test "invalidated and aborted commit fences roll browser playback back before source commit" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_browser_cancel_fence_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      source_preimage = <<0, 1, 2, 3>>
+      browser_export = <<9, 8, 7, 6>>
+      edit_id = "browser-cancel-fence"
+      File.mkdir_p!(root)
+      File.write!(path, source_preimage)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      owner = self()
+
+      viewer =
+        start_test_task(fn ->
+          browser_transaction_loop(owner, path, browser_export, {:ok, %{"committed" => true}})
+        end)
+
+      dead_session = spawn(fn -> :ok end)
+      dead_ref = Process.monitor(dead_session)
+      assert_receive {:DOWN, ^dead_ref, :process, ^dead_session, :normal}
+
+      assert {:error, :turn_invalidated} =
+               Projection.__apply_browser_changes_for_test__(
+                 viewer,
+                 path,
+                 :hwp,
+                 browser_text_change("cancelled"),
+                 root: root,
+                 edit_id: edit_id,
+                 agent_session: dead_session,
+                 agent_id: "agent-a",
+                 instance_id: "instance-a",
+                 turn_id: "turn-a"
+               )
+
+      assert_receive {:browser_transaction, :vfs_write, ^edit_id, ^source_preimage}
+      assert_receive {:browser_transaction, :vfs_rollback, ^edit_id, ^source_preimage}
+      refute_receive {:browser_transaction, :vfs_commit, ^edit_id, _bytes}
+      assert File.read!(path) == source_preimage
+      refute_receive {:vfs_doc_edited, %{edit_id: ^edit_id}}
+
+      aborted_edit_id = "browser-aborted-fence"
+
+      assert {:error, {:browser_writeback_failed, :hwp, :aborted}} =
+               Projection.__apply_browser_changes_for_test__(
+                 viewer,
+                 path,
+                 :hwp,
+                 browser_text_change("aborted"),
+                 root: root,
+                 edit_id: aborted_edit_id,
+                 turn_commit_fun: fn _identity, _commit -> :aborted end
+               )
+
+      assert_receive {:browser_transaction, :vfs_write, ^aborted_edit_id, ^source_preimage}
+      assert_receive {:browser_transaction, :vfs_rollback, ^aborted_edit_id, ^source_preimage}
+      refute_receive {:browser_transaction, :vfs_commit, ^aborted_edit_id, _bytes}
+      assert File.read!(path) == source_preimage
+    end
+
+    test "OpenDocs agent session metadata reaches Projection commit options" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_browser_owner_propagation_#{System.unique_integer([:positive])}"
+        )
+
+      name = "contract.hwp"
+      path = Path.join(root, name)
+      File.mkdir_p!(root)
+      File.write!(path, <<0, 1, 2, 3>>)
+
+      OpenDocs.open(root, name,
+        source_path: path,
+        agent_session: self(),
+        agent_id: "agent-a",
+        instance_id: "instance-a",
+        turn_id: "turn-a"
+      )
+
+      on_exit(fn ->
+        OpenDocs.close(root, name)
+        File.rm_rf(root)
+      end)
+
+      opts = DocFs.__owner_identity_opts_for_test__(root, name, path)
+      assert opts[:agent_session] == self()
+      owner = self()
+      viewer = start_test_task(fn -> browser_commit_loop(<<9, 8, 7, 6>>) end)
+
+      turn_commit = fn identity, _commit ->
+        send(owner, {:projection_commit_identity, identity})
+        :aborted
+      end
+
+      assert {:error, {:browser_writeback_failed, :hwp, :aborted}} =
+               Projection.__apply_browser_changes_for_test__(
+                 viewer,
+                 path,
+                 :hwp,
+                 browser_text_change("propagated"),
+                 opts ++
+                   [
+                     root: root,
+                     edit_id: "owner-propagation-edit",
+                     turn_commit_fun: turn_commit
+                   ]
+               )
+
+      assert_receive {:projection_commit_identity,
+                      %{agent_id: "agent-a", instance_id: "instance-a", turn_id: "turn-a"}}
+    end
+
+    test "routed document identity is preserved across write, commit, and rollback payloads" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_browser_document_fence_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      File.mkdir_p!(root)
+      File.write!(path, <<0, 1, 2, 3>>)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      owner = self()
+      expected_document_id = "routed-document-id"
+
+      viewer =
+        start_test_task(fn ->
+          browser_payload_loop(owner, <<9, 8, 7, 6>>, {:error, "document switched"})
+        end)
+
+      turn_commit = fn _identity, commit ->
+        result = commit.()
+        send(owner, {:commit_lock_returned, Ecrits.FS.raw_read(path)})
+        result
+      end
+
+      assert {:error, {:browser_writeback_rejected, "document switched"}} =
+               Projection.__apply_browser_changes_for_test__(
+                 viewer,
+                 path,
+                 :hwp,
+                 browser_text_change("fenced"),
+                 root: root,
+                 edit_id: "document-fence-edit",
+                 expected_document_id: expected_document_id,
+                 agent_id: "agent-a",
+                 instance_id: "instance-a",
+                 turn_id: "turn-a",
+                 turn_commit_fun: turn_commit
+               )
+
+      for verb <- [:vfs_write, :vfs_commit, :vfs_rollback] do
+        assert_receive {:browser_payload, ^verb,
+                        %{
+                          edit_id: "document-fence-edit",
+                          expected_document_id: ^expected_document_id,
+                          agent_id: "agent-a",
+                          instance_id: "instance-a",
+                          turn_id: "turn-a"
+                        }}
+      end
+
+      assert_receive {:commit_lock_returned, {:ok, <<0, 1, 2, 3>>}}
+    end
+
+    test "postcommit returns while file_server is suspended and publishes the carried export later" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_browser_postcommit_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      source_preimage = <<0, 1, 2, 3>>
+      browser_export = <<9, 8, 7, 6, 5, 4, 3, 2, 1>>
+      edit_id = "browser-postcommit-with-file-server-suspended"
+
+      File.mkdir_p!(root)
+      File.write!(path, source_preimage)
+
+      on_exit(fn -> File.rm_rf(root) end)
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+      )
+
+      viewer = start_test_task(fn -> browser_commit_loop(browser_export) end)
+      owner = self()
+      file_server = Process.whereis(:file_server_2)
+      :ok = :sys.suspend(file_server)
+      on_exit(fn -> :sys.resume(file_server) end)
+
+      _worker =
+        start_test_task(fn ->
+          result =
+            Projection.__apply_browser_changes_for_test__(
+              viewer,
+              path,
+              :hwp,
+              browser_text_change("edited"),
+              root: root,
+              edit_id: edit_id
+            )
+
+          send(owner, {:postcommit_result, result})
+        end)
+
+      assert_receive {:postcommit_result, {:ok, %{applied: 1}}}, 1_000
+      refute_receive {:vfs_doc_edited, %{edit_id: ^edit_id}}, 20
+
+      :ok = :sys.resume(file_server)
+
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        edit_id: ^edit_id,
+                        preview_snapshot: %{sha256: snapshot_sha256}
+                      }},
+                     1_000
+
+      assert snapshot_sha256 == Document.sha256(browser_export)
+      assert File.read!(path) == browser_export
+    end
+
+    test "a blocked older snapshot cannot publish after a newer edit" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_browser_preview_order_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      File.mkdir_p!(root)
+      File.write!(path, <<0>>)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+      )
+
+      owner = self()
+      old_bytes = <<1, 1, 1>>
+      new_bytes = <<2, 2, 2>>
+      old_viewer = start_test_task(fn -> browser_commit_loop(old_bytes) end)
+      new_viewer = start_test_task(fn -> browser_commit_loop(new_bytes) end)
+
+      blocking_snapshot = fn document_id, bytes ->
+        send(owner, {:old_snapshot_started, self(), document_id, bytes})
+
+        receive do
+          :release_old_snapshot ->
+            id = Document.sha256(bytes)
+            {:ok, %{id: id, document_id: document_id, byte_size: byte_size(bytes), sha256: id}}
+        end
+      end
+
+      assert {:ok, %{applied: 1}} =
+               Projection.__apply_browser_changes_for_test__(
+                 old_viewer,
+                 path,
+                 :hwp,
+                 browser_text_change("old"),
+                 root: root,
+                 edit_id: "older-edit",
+                 preview_snapshot_fun: blocking_snapshot
+               )
+
+      assert_receive {:old_snapshot_started, old_task, _document_id, ^old_bytes}
+
+      :ok =
+        Projection.__broadcast_edit_for_test__(
+          path,
+          browser_text_change("new"),
+          [%{}],
+          root: root,
+          edit_id: "newer-edit",
+          preview_only: true,
+          progress_index: 0,
+          progress_total: 1
+        )
+
+      assert_receive {:vfs_doc_edited, %{edit_id: "newer-edit", preview_only: true}}
+      send(old_task, :release_old_snapshot)
+      refute_receive {:vfs_doc_edited, %{edit_id: "older-edit"}}, 100
+
+      immediate_snapshot = fn document_id, bytes ->
+        id = Document.sha256(bytes)
+        {:ok, %{id: id, document_id: document_id, byte_size: byte_size(bytes), sha256: id}}
+      end
+
+      assert {:ok, %{applied: 1}} =
+               Projection.__apply_browser_changes_for_test__(
+                 new_viewer,
+                 path,
+                 :hwp,
+                 browser_text_change("new"),
+                 root: root,
+                 edit_id: "newer-edit",
+                 preview_snapshot_fun: immediate_snapshot
+               )
+
+      assert_receive {:vfs_doc_edited,
+                      %{edit_id: "newer-edit", preview_snapshot: %{sha256: new_sha}}},
+                     1_000
+
+      assert new_sha == Document.sha256(new_bytes)
+    end
+
+    test "snapshot persistence failure still publishes the terminal edit event" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_browser_preview_error_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      File.mkdir_p!(root)
+      File.write!(path, <<0>>)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+      )
+
+      viewer = start_supervised!({Task, fn -> browser_commit_loop(<<3, 3, 3>>) end})
+
+      assert {:ok, %{applied: 1}} =
+               Projection.__apply_browser_changes_for_test__(
+                 viewer,
+                 path,
+                 :hwp,
+                 browser_text_change("error"),
+                 root: root,
+                 edit_id: "snapshot-error-edit",
+                 preview_snapshot_fun: fn _document_id, _bytes -> {:error, :disk_full} end
+               )
+
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        edit_id: "snapshot-error-edit",
+                        preview_snapshot_error: "disk_full"
+                      }},
+                     1_000
+    end
+
+    test "deferred server preview snapshots use captured post-save bytes, not a later reread" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_server_snapshot_capture_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      captured_bytes = <<1, 2, 3, 4>>
+      later_bytes = <<9, 9, 9, 9>>
+      File.mkdir_p!(root)
+      File.write!(path, captured_bytes)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+      )
+
+      owner = self()
+
+      blocking_snapshot = fn document_id, bytes ->
+        send(owner, {:server_snapshot_started, self(), document_id, bytes})
+
+        receive do
+          :release_server_snapshot ->
+            id = Document.sha256(bytes)
+            {:ok, %{id: id, document_id: document_id, byte_size: byte_size(bytes), sha256: id}}
+        end
+      end
+
+      :ok =
+        Projection.__broadcast_edit_for_test__(
+          path,
+          browser_text_change("server"),
+          [%{}],
+          root: root,
+          edit_id: "server-captured-snapshot",
+          preview_snapshot_bytes_result: {:ok, captured_bytes},
+          preview_snapshot_fun: blocking_snapshot
+        )
+
+      assert_receive {:server_snapshot_started, snapshot_task, _document_id, ^captured_bytes}
+      File.write!(path, later_bytes)
+      send(snapshot_task, :release_server_snapshot)
+
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        edit_id: "server-captured-snapshot",
+                        preview_snapshot: %{sha256: snapshot_sha}
+                      }},
+                     1_000
+
+      assert snapshot_sha == Document.sha256(captured_bytes)
+      assert File.read!(path) == later_bytes
+    end
+
+    test "a final preview publication token is consumed exactly once" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_preview_once_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      token = OpenDocs.begin_preview_publication(root, path, "once-edit")
+      info = %{path: path, edit_id: "once-edit"}
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+      )
+
+      assert :ok = OpenDocs.publish_preview_if_current(root, path, token, info)
+      assert :stale = OpenDocs.publish_preview_if_current(root, path, token, info)
+      assert_receive {:vfs_doc_edited, ^info}
+      refute_receive {:vfs_doc_edited, ^info}, 50
+    end
+  end
+
+  describe "server-authority turn commit fence" do
+    test "Projection passes the full identity and the Editor process owns the fence" do
+      dir =
+        Path.join(
+          System.tmp_dir!(),
+          "projection-server-turn-fence-#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(dir, "contract.hwp")
+      initial = "SOURCE_PREIMAGE"
+      File.mkdir_p!(dir)
+      File.write!(path, initial)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      editor =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Editor,
+             document_id: "server_fence_#{System.unique_integer([:positive])}",
+             kind: :hwp,
+             backend: ExceptionalEditorBackend,
+             path: path,
+             open_opts: []},
+            id: make_ref()
+          )
+        )
+
+      owner = %{agent_id: "agent-a", instance_id: "instance-a", turn_id: "turn-a"}
+      test_pid = self()
+
+      turn_commit = fn identity, _commit ->
+        send(test_pid, {:server_projection_fence, self(), identity})
+        :aborted
+      end
+
+      assert {:error, {:turn_commit_failed, :aborted}} =
+               Projection.__apply_server_changes_for_test__(
+                 editor,
+                 path,
+                 :hwp,
+                 browser_text_change("MUST_NOT_COMMIT"),
+                 agent_id: owner.agent_id,
+                 instance_id: owner.instance_id,
+                 turn_id: owner.turn_id,
+                 turn_commit_fun: turn_commit
+               )
+
+      assert_receive {:server_projection_fence, ^editor, ^owner}
+      assert File.read!(path) == initial
+      assert {:ok, %{text: ^initial}} = Editor.read(editor, [])
+      assert Editor.dirty_snapshot(editor) == %{dirty?: false, revision: 0, owner: nil}
+      assert Editor.history(editor) == []
+    end
+
+    test "the committed preview survives death of the Projection request owner" do
+      dir =
+        Path.join(
+          System.tmp_dir!(),
+          "projection-server-preview-owner-death-#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(dir, "contract.hwp")
+      initial = "SOURCE_PREIMAGE"
+      marker = "COMMITTED_PREVIEW_AFTER_CALLER_DEATH"
+      edit_id = "server-preview-owner-death"
+      File.mkdir_p!(dir)
+      File.write!(path, initial)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      editor =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Editor,
+             document_id: "server_preview_#{System.unique_integer([:positive])}",
+             kind: :hwp,
+             backend: ExceptionalEditorBackend,
+             path: path,
+             open_opts: []},
+            id: make_ref()
+          )
+        )
+
+      owner = %{agent_id: "agent-a", instance_id: "instance-a", turn_id: "turn-a"}
+      test_pid = self()
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(dir)
+      )
+
+      turn_commit = fn identity, commit ->
+        send(test_pid, {:server_preview_fence_acquired, self(), identity})
+
+        receive do
+          :release_server_preview_commit -> commit.()
+        end
+      end
+
+      caller =
+        start_test_task(fn ->
+          result =
+            Projection.__apply_server_changes_for_test__(
+              editor,
+              path,
+              :hwp,
+              browser_text_change(marker),
+              root: dir,
+              edit_id: edit_id,
+              agent_id: owner.agent_id,
+              instance_id: owner.instance_id,
+              turn_id: owner.turn_id,
+              turn_commit_fun: turn_commit
+            )
+
+          send(test_pid, {:unexpected_server_preview_caller_result, result})
+        end)
+
+      assert_receive {:server_preview_fence_acquired, ^editor, ^owner}, 2_000
+
+      caller_ref = Process.monitor(caller)
+      Process.exit(caller, :kill)
+      assert_receive {:DOWN, ^caller_ref, :process, ^caller, :killed}, 2_000
+
+      send(editor, :release_server_preview_commit)
+      _ = :sys.get_state(editor)
+
+      expected = initial <> marker
+      assert File.read!(path) == expected
+
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        edit_id: ^edit_id,
+                        marker: ^marker,
+                        preview_snapshot: %{sha256: snapshot_sha256}
+                      }},
+                     2_000
+
+      assert snapshot_sha256 == Document.sha256(expected)
+      refute_receive {:vfs_doc_edited, %{edit_id: ^edit_id}}, 100
+      refute_receive {:unexpected_server_preview_caller_result, _result}
+    end
+  end
+
   describe "write_back/3 over HWPX JSONL IR" do
     setup do
       {:ok, ehwp: ehwp_available?(@hwpx_fixture)}
@@ -278,7 +1089,7 @@ defmodule Ecrits.Doc.ProjectionTest do
       end
     end
 
-    test "streams multi-node write-back as ordered grapheme edit tokens", %{ehwp: ehwp} do
+    test "streams multi-node write-back as ordered semantic edit ranges", %{ehwp: ehwp} do
       if not ehwp do
         IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection streaming write_back e2e")
       else
@@ -314,9 +1125,7 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         assert_receive {:vfs_doc_edited, first}
 
-        expected_total =
-          length(String.graphemes("STREAMED_WRITEBACK_TOKEN_ONE")) +
-            length(String.graphemes("STREAMED_WRITEBACK_TOKEN_TWO"))
+        expected_total = 2
 
         assert first.progress_total == expected_total
 
@@ -330,13 +1139,253 @@ defmodule Ecrits.Doc.ProjectionTest do
         assert events |> Enum.map(& &1.edit_id) |> Enum.uniq() == [first.edit_id]
         assert Enum.map(events, & &1.progress_index) == Enum.to_list(1..expected_total)
         assert Enum.all?(events, &(&1.progress_total == expected_total))
-        assert List.last(events).applied >= applied_total
+        assert List.last(events).applied == applied_total
+
+        assert Enum.all?(Enum.drop(events, -1), &is_nil(Map.get(&1, :preview_snapshot)))
+
+        assert %{
+                 id: snapshot_id,
+                 document_id: snapshot_document_id,
+                 sha256: snapshot_sha256
+               } = List.last(events).preview_snapshot
+
+        expected_document_id = Document.id_for(root, Path.basename(path))
+        assert snapshot_document_id == expected_document_id
+        assert snapshot_id == snapshot_sha256
+        assert snapshot_sha256 == Document.sha256(File.read!(path))
+        assert {:ok, snapshot_bytes} = PreviewSnapshot.fetch(expected_document_id, snapshot_id)
+        assert snapshot_bytes == File.read!(path)
+
+        on_exit(fn ->
+          snapshot_path = PreviewSnapshot.path(expected_document_id, snapshot_id)
+          File.rm_rf(Path.dirname(snapshot_path))
+        end)
 
         markers = MapSet.new(events, & &1.marker)
         assert MapSet.member?(markers, "STREAMED_WRITEBACK_TOKEN_ONE")
         assert MapSet.member?(markers, "STREAMED_WRITEBACK_TOKEN_TWO")
 
         refute_receive {:vfs_doc_edited, _info}
+      end
+    end
+
+    test "rejects an already-streamed multi-group preview when final save fails", %{
+      ehwp: ehwp
+    } do
+      if not ehwp do
+        IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection save rejection e2e")
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_writeback_save_rejection", ".hwpx")
+        root = Path.dirname(path)
+        owner = %{agent_id: "agent-a", instance_id: "instance-a", turn_id: "turn-a"}
+
+        on_exit(fn ->
+          _ = File.chmod(root, 0o700)
+          _ = File.chmod(path, 0o600)
+          cleanup_tmp(path)
+        end)
+
+        Phoenix.PubSub.subscribe(
+          Ecrits.PubSub,
+          "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+        )
+
+        source_preimage = File.read!(path)
+        {:ok, bytes} = Projection.project_file(path)
+        {_lines, doc} = decode_projection(bytes)
+        {first_path, first_node} = first_text_paragraph(doc)
+        {_section, first_paragraph, _payload} = first_path
+        {second_path, second_node} = text_paragraph_after(doc, first_paragraph + 1)
+
+        new_bytes =
+          doc
+          |> replace_payload_node(
+            first_path,
+            Map.put(first_node, "text", "SAVE_REJECTION_TOKEN_ONE")
+          )
+          |> replace_payload_node(
+            second_path,
+            Map.put(second_node, "text", "SAVE_REJECTION_TOKEN_TWO")
+          )
+          |> encode_projection()
+
+        {:ok, %{id: document_id}} = Pool.info_by_path(path)
+        assert {:server, editor} = Pool.route(document_id)
+        editor_preimage = Editor.dirty_snapshot(editor)
+        history_preimage = Editor.history(editor)
+        edit_id = "save-rejection-#{System.unique_integer([:positive])}"
+
+        identity_opts = [
+          root: root,
+          edit_id: edit_id,
+          agent_id: owner.agent_id,
+          instance_id: owner.instance_id,
+          turn_id: owner.turn_id
+        ]
+
+        assert {:ok, %{previewed: previewed}} =
+                 Projection.preview_write_back(path, new_bytes, identity_opts)
+
+        assert previewed > 0
+
+        assert_receive {:vfs_doc_edited,
+                        %{
+                          progress_index: 0,
+                          edit_id: ^edit_id,
+                          preview_only: true
+                        } = preview}
+
+        assert Map.take(preview, [:agent_id, :instance_id, :turn_id]) == owner
+
+        File.chmod!(path, 0o400)
+        File.chmod!(root, 0o500)
+
+        assert {:error, _reason} =
+                 Projection.write_back(
+                   path,
+                   new_bytes,
+                   identity_opts ++ [preview_continuation: true]
+                 )
+
+        refute_receive {:vfs_doc_edit_rejected, _rejected}
+        refute_receive {:vfs_doc_edited, %{progress_index: 1}}
+        refute_receive {:vfs_doc_edited, %{progress_index: 2}}
+
+        assert File.read!(path) == source_preimage
+        assert {:ok, ^bytes} = Projection.project_file(path)
+        assert Editor.dirty_snapshot(editor) == editor_preimage
+        assert Editor.history(editor) == history_preimage
+
+        File.chmod!(root, 0o700)
+        File.chmod!(path, 0o600)
+
+        finalizer =
+          TurnFinalizer.run(root,
+            agent_id: owner.agent_id,
+            instance_id: owner.instance_id,
+            turn_id: owner.turn_id
+          )
+
+        assert finalizer.saved == []
+        assert finalizer.failed == []
+        assert File.read!(path) == source_preimage
+        assert {:ok, ^bytes} = Projection.project_file(path)
+        assert Editor.dirty_snapshot(editor) == editor_preimage
+        assert Editor.history(editor) == history_preimage
+      end
+    end
+
+    test "rolls back an earlier group when the next group fails to apply", %{ehwp: ehwp} do
+      if not ehwp do
+        IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection apply rollback e2e")
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_writeback_apply_rollback", ".hwpx")
+        root = Path.dirname(path)
+        owner = %{agent_id: "agent-a", instance_id: "instance-a", turn_id: "turn-a"}
+
+        on_exit(fn ->
+          cleanup_tmp(path)
+        end)
+
+        Phoenix.PubSub.subscribe(
+          Ecrits.PubSub,
+          "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+        )
+
+        source_preimage = File.read!(path)
+        {:ok, projection_preimage} = Projection.project_file(path)
+        {_lines, doc} = decode_projection(projection_preimage)
+        {first_path, first_node} = first_text_paragraph(doc)
+        {_section, first_paragraph, _payload} = first_path
+        {second_path, second_node} = text_paragraph_after(doc, first_paragraph + 1)
+
+        new_bytes =
+          doc
+          |> replace_payload_node(
+            first_path,
+            Map.put(first_node, "text", "APPLY_ROLLBACK_TOKEN_ONE")
+          )
+          |> replace_payload_node(
+            second_path,
+            Map.put(second_node, "text", "APPLY_ROLLBACK_TOKEN_TWO")
+          )
+          |> encode_projection()
+
+        {:ok, %{id: document_id}} = Pool.info_by_path(path)
+        assert {:server, editor} = Pool.route(document_id)
+        editor_preimage = Editor.dirty_snapshot(editor)
+        history_preimage = Editor.history(editor)
+        edit_id = "apply-rollback-#{System.unique_integer([:positive])}"
+
+        identity_opts = [
+          root: root,
+          edit_id: edit_id,
+          agent_id: owner.agent_id,
+          instance_id: owner.instance_id,
+          turn_id: owner.turn_id
+        ]
+
+        assert {:ok, %{previewed: previewed}} =
+                 Projection.preview_write_back(path, new_bytes, identity_opts)
+
+        assert previewed > 0
+
+        assert_receive {:vfs_doc_edited,
+                        %{
+                          edit_id: ^edit_id,
+                          preview_only: true,
+                          preview_steps: [first_step, _second_step]
+                        }}
+
+        first_group_command_count =
+          length(Map.fetch!(first_step, "ops")) + length(Map.fetch!(first_step, "sets"))
+
+        assert first_group_command_count > 0
+        assert %{handle: %{ehwp: %Ehwp.Handle{id: ehwp_handle_id}}} = :sys.get_state(editor)
+        assert [{ehwp_session, _value}] = Registry.lookup(Ehwp.Registry, ehwp_handle_id)
+
+        :ok =
+          Ecrits.Test.FailingAfterEditEhwpRuntime.reset(first_group_command_count + 1)
+
+        :sys.replace_state(ehwp_session, fn state ->
+          %{state | runtime: Ecrits.Test.FailingAfterEditEhwpRuntime}
+        end)
+
+        on_exit(fn ->
+          if Process.alive?(ehwp_session) do
+            :sys.replace_state(ehwp_session, &%{&1 | runtime: Ehwp.Runtime})
+          end
+        end)
+
+        assert {:error, _reason} =
+                 Projection.write_back(
+                   path,
+                   new_bytes,
+                   identity_opts ++ [preview_continuation: true]
+                 )
+
+        refute_receive {:vfs_doc_edit_rejected, _rejected}
+        refute_receive {:vfs_doc_edited, %{progress_index: 1}}
+        refute_receive {:vfs_doc_edited, %{progress_index: 2}}
+
+        assert File.read!(path) == source_preimage
+        assert {:ok, ^projection_preimage} = Projection.project_file(path)
+        assert Editor.dirty_snapshot(editor) == editor_preimage
+        assert Editor.history(editor) == history_preimage
+
+        finalizer =
+          TurnFinalizer.run(root,
+            agent_id: owner.agent_id,
+            instance_id: owner.instance_id,
+            turn_id: owner.turn_id
+          )
+
+        assert finalizer.saved == []
+        assert finalizer.failed == []
+        assert File.read!(path) == source_preimage
+        assert {:ok, ^projection_preimage} = Projection.project_file(path)
+        assert Editor.dirty_snapshot(editor) == editor_preimage
+        assert Editor.history(editor) == history_preimage
       end
     end
 
@@ -458,6 +1507,7 @@ defmodule Ecrits.Doc.ProjectionTest do
           doc
           |> insert_payload_node(insert_after(anchor_path), table)
           |> encode_projection()
+          |> String.replace(":0.0", ":0")
 
         assert {:ok, %{applied: 1}} = Projection.write_back(path, new_bytes)
         assert {:ok, after_bytes} = Projection.project_file(path)
@@ -477,6 +1527,128 @@ defmodule Ecrits.Doc.ProjectionTest do
           |> Enum.map(& &1["text"])
 
         assert inserted_cells == List.flatten(table["cells"])
+
+        # The accepted compact transport is no longer a valid semantic diff
+        # against the engine-expanded table. Replaying it directly must fail
+        # without duplicating anything; DocFs handles this exact-byte replay as
+        # a transport no-op before it reaches Projection again.
+        assert {:error, :structural_change} = Projection.write_back(path, new_bytes)
+        assert {:ok, ^after_bytes} = Projection.project_file(path)
+      end
+    end
+
+    test "agent JSONL picture insertion is rejected before preview or mutation", %{ehwp: ehwp} do
+      if not ehwp do
+        IO.puts("\n[skip] ehwp NIF unavailable; skipping agent JSONL picture boundary e2e")
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_agent_picture_boundary", ".hwpx")
+        root = Path.dirname(path)
+        edit_id = "agent-picture-boundary-#{System.unique_integer([:positive])}"
+
+        on_exit(fn -> cleanup_tmp(path) end)
+
+        Phoenix.PubSub.subscribe(
+          Ecrits.PubSub,
+          "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+        )
+
+        source_preimage = File.read!(path)
+        {:ok, projection_preimage} = Projection.project_file(path)
+        {_lines, doc} = decode_projection(projection_preimage)
+        {anchor_path, _node} = first_text_paragraph(doc)
+
+        picture = %{
+          "type" => "picture",
+          "src" => image_fixture(),
+          "description" => "AGENT_JSONL_PICTURE_MUST_NOT_APPEAR"
+        }
+
+        edited_bytes =
+          doc
+          |> insert_payload_node(insert_after(anchor_path), picture)
+          |> encode_projection()
+
+        opts = [
+          root: root,
+          edit_id: edit_id,
+          agent_id: "agent-a",
+          instance_id: "instance-a",
+          turn_id: "turn-a"
+        ]
+
+        {:ok, %{id: document_id}} = Pool.info_by_path(path)
+        assert {:server, editor} = Pool.route(document_id)
+        editor_preimage = Editor.dirty_snapshot(editor)
+        history_preimage = Editor.history(editor)
+
+        expected_error =
+          {:error,
+           {:agent_picture_insertion_requires_doc_edit,
+            "insert_picture changes from agent JSONL edits are not allowed; use doc.edit for image insertion"}}
+
+        assert ^expected_error = Projection.preview_write_back(path, edited_bytes, opts)
+        refute_receive {:vfs_doc_edited, %{edit_id: ^edit_id}}
+
+        assert ^expected_error = Projection.write_back(path, edited_bytes, opts)
+        refute_receive {:vfs_doc_edited, %{edit_id: ^edit_id}}
+
+        assert File.read!(path) == source_preimage
+        assert {:ok, ^projection_preimage} = Projection.project_file(path)
+        assert Editor.dirty_snapshot(editor) == editor_preimage
+        assert Editor.history(editor) == history_preimage
+      end
+    end
+
+    test "agent JSONL text and table changes remain allowed", %{ehwp: ehwp} do
+      if not ehwp do
+        IO.puts("\n[skip] ehwp NIF unavailable; skipping agent JSONL text and table e2e")
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_agent_text_table", ".hwpx")
+        root = Path.dirname(path)
+        edit_id = "agent-text-table-#{System.unique_integer([:positive])}"
+
+        on_exit(fn -> cleanup_tmp(path) end)
+
+        {:ok, bytes} = Projection.project_file(path)
+        {_lines, doc} = decode_projection(bytes)
+        {anchor_path, anchor} = first_text_paragraph(doc)
+        text_marker = "AGENT_JSONL_TEXT_ALLOWED"
+
+        table = %{
+          "type" => "table",
+          "cells" => [
+            ["AGENT_JSONL_TABLE_H1", "AGENT_JSONL_TABLE_H2"],
+            ["AGENT_JSONL_TABLE_A", "AGENT_JSONL_TABLE_B"]
+          ]
+        }
+
+        edited_bytes =
+          doc
+          |> replace_payload_node(anchor_path, Map.put(anchor, "text", text_marker))
+          |> insert_payload_node(insert_after(anchor_path), table)
+          |> encode_projection()
+
+        opts = [
+          root: root,
+          edit_id: edit_id,
+          agent_id: "agent-a",
+          instance_id: "instance-a",
+          turn_id: "turn-a"
+        ]
+
+        assert {:ok, %{previewed: previewed}} =
+                 Projection.preview_write_back(path, edited_bytes, opts)
+
+        assert previewed > 0
+        assert {:ok, %{applied: applied}} = Projection.write_back(path, edited_bytes, opts)
+        assert applied > 0
+
+        assert {:ok, after_bytes} = Projection.project_file(path)
+        assert after_bytes =~ text_marker
+
+        for marker <- List.flatten(table["cells"]) do
+          assert after_bytes =~ marker
+        end
       end
     end
 
@@ -985,9 +2157,11 @@ defmodule Ecrits.Doc.ProjectionTest do
     File.rm_rf(Path.dirname(path))
   end
 
+  # One JSON value, one paragraph group per line (#460): decode the whole
+  # binary; `lines` stays available for layout assertions.
   defp decode_projection(bytes) do
     lines = bytes |> String.split("\n") |> Enum.reject(&(&1 == ""))
-    {lines, Jason.decode!(List.first(lines))}
+    {lines, Jason.decode!(bytes)}
   end
 
   defp encode_projection(doc) do
@@ -1193,6 +2367,132 @@ defmodule Ecrits.Doc.ProjectionTest do
 
       props
     end)
+  end
+
+  defp browser_transaction_loop(owner, path, exported_bytes, commit_reply) do
+    receive do
+      {:doc_browser_request, from, ref, verb, %{edit_id: edit_id}} ->
+        handle_browser_transaction_request(
+          owner,
+          path,
+          exported_bytes,
+          commit_reply,
+          from,
+          ref,
+          verb,
+          edit_id
+        )
+
+      {:doc_browser_request, from, ref, verb, %{edit_id: edit_id}, _expected_document_id} ->
+        handle_browser_transaction_request(
+          owner,
+          path,
+          exported_bytes,
+          commit_reply,
+          from,
+          ref,
+          verb,
+          edit_id
+        )
+    end
+  end
+
+  defp handle_browser_transaction_request(
+         owner,
+         path,
+         exported_bytes,
+         commit_reply,
+         from,
+         ref,
+         verb,
+         edit_id
+       ) do
+    send(owner, {:browser_transaction, verb, edit_id, File.read!(path)})
+    send(owner, {:browser_transaction_owner, verb, edit_id, from})
+
+    reply =
+      case verb do
+        :vfs_write -> {:ok, %{"bytes" => exported_bytes}}
+        :vfs_commit when commit_reply == :timeout -> :no_reply
+        :vfs_commit -> commit_reply
+        :vfs_rollback -> {:ok, %{"rolled_back" => true}}
+      end
+
+    reply_and_ack_browser_request(from, ref, reply)
+    browser_transaction_loop(owner, path, exported_bytes, commit_reply)
+  end
+
+  defp browser_commit_loop(exported_bytes) do
+    receive do
+      {:doc_browser_request, from, ref, verb, _payload} ->
+        handle_browser_commit_request(exported_bytes, from, ref, verb)
+
+      {:doc_browser_request, from, ref, verb, _payload, _expected_document_id} ->
+        handle_browser_commit_request(exported_bytes, from, ref, verb)
+    end
+  end
+
+  defp handle_browser_commit_request(exported_bytes, from, ref, verb) do
+    reply =
+      case verb do
+        :vfs_write -> {:ok, %{"bytes" => exported_bytes}}
+        :vfs_commit -> {:ok, %{"committed" => true}}
+        :vfs_rollback -> {:ok, %{"rolled_back" => true}}
+      end
+
+    reply_and_ack_browser_request(from, ref, reply)
+    browser_commit_loop(exported_bytes)
+  end
+
+  defp browser_payload_loop(owner, exported_bytes, commit_reply) do
+    receive do
+      {:doc_browser_request, from, ref, verb, payload} ->
+        handle_browser_payload(owner, exported_bytes, commit_reply, from, ref, verb, payload)
+
+      {:doc_browser_request, from, ref, verb, payload, _expected_document_id} ->
+        handle_browser_payload(owner, exported_bytes, commit_reply, from, ref, verb, payload)
+    end
+  end
+
+  defp handle_browser_payload(owner, exported_bytes, commit_reply, from, ref, verb, payload) do
+    send(owner, {:browser_payload, verb, payload})
+
+    reply =
+      case verb do
+        :vfs_write -> {:ok, %{"bytes" => exported_bytes}}
+        :vfs_commit -> commit_reply
+        :vfs_rollback -> {:ok, %{"rolled_back" => true}}
+      end
+
+    reply_and_ack_browser_request(from, ref, reply)
+    browser_payload_loop(owner, exported_bytes, commit_reply)
+  end
+
+  defp reply_and_ack_browser_request(_from, _ref, :no_reply), do: :ok
+
+  defp reply_and_ack_browser_request(from, ref, reply) do
+    send(from, {:doc_browser_reply, ref, reply})
+
+    receive do
+      {:doc_browser_request_completed, ^from, ^ref, ack_ref} ->
+        send(from, {:doc_browser_request_completion_ack, ack_ref, :ok})
+    end
+  end
+
+  defp browser_text_change(marker) do
+    [
+      {:text,
+       %{
+         "op" => "insert_text",
+         "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+         "text" => marker
+       }, marker}
+    ]
+  end
+
+  defp start_test_task(fun) when is_function(fun, 0) do
+    child_spec = Supervisor.child_spec({Task, fun}, id: make_ref())
+    start_supervised!(child_spec)
   end
 
   # The ehwp NIF is present iff Ehwp.open succeeds on the fixture. Mirrors the

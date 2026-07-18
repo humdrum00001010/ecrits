@@ -42,7 +42,7 @@ defmodule Ecrits.DocumentSessionTest do
     root =
       Path.join(
         System.tmp_dir!(),
-        "ecrits-local-document-session-#{System.unique_integer([:positive])}"
+        "ecrits-document-session-#{System.unique_integer([:positive])}"
       )
 
     on_exit(fn -> File.rm_rf!(root) end)
