@@ -15,6 +15,13 @@ defmodule EcritsWeb.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]
 
+  # General binary ingress for browser document engines (EcritsWeb.OctetChannel).
+  # An upload is ONE binary frame, so the transport frame limit is the upload
+  # limit (channel cap + the frame's id prefix).
+  socket "/octet", EcritsWeb.OctetSocket,
+    websocket: [max_frame_size: 256 * 1024 * 1024 + 512],
+    longpoll: false
+
   # Cross-origin isolation for the office WASM editor (COOP/COEP). Must run
   # before Plug.Static so the `/assets/office/*` artifacts are served with the
   # isolation headers too. Scoped to the workspace page + office assets only.
@@ -36,6 +43,14 @@ defmodule EcritsWeb.Endpoint do
     plug Tidewave
   end
 
+  # The `doc.*` MCP server (consumed by ACP agents over streamable HTTP) must run
+  # before Plug.Parsers so it can read the raw JSON-RPC body itself — and before
+  # the dev code reloader: a recompile triggered elsewhere must never surface to
+  # an agent as a raw HTTP 500 CompileError (it killed a live contract turn on
+  # 2026-07-19). Agent tool calls tolerate a briefly stale module over a dead
+  # transport; the next browser request still recompiles.
+  plug EcritsWeb.Plugs.DocToolsMCPPlug
+
   # Code reloading can be explicitly enabled under the
   # :code_reloader configuration of your endpoint.
   if code_reloading? do
@@ -50,10 +65,6 @@ defmodule EcritsWeb.Endpoint do
 
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
-
-  # The `doc.*` MCP server (consumed by ACP agents over streamable HTTP) must run
-  # before Plug.Parsers so it can read the raw JSON-RPC body itself.
-  plug EcritsWeb.Plugs.DocToolsMCPPlug
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
