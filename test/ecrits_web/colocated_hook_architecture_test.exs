@@ -34,10 +34,10 @@ defmodule EcritsWeb.ColocatedHookArchitectureTest do
     assert source =~ "data-canvas-state={DocumentCanvasState.encode(@state)}"
 
     refute source =~ ~r/import\s+.*wasm_hwp/
-    refute source =~ "[data-role='local-hwp-editor'][data-editor-mirror='false']"
+    refute source =~ "[data-role='hwp-editor'][data-editor-mirror='false']"
 
     refute source =~
-             ~r/data-(?:document-id|document-path|scroll-top|scroll-left|local-document-id|local-document-format|bytes-url|editor-mirror|preview-turn-id|preview-text|preview-delta-count|preview-highlights)=/
+             ~r/data-(?:document-id|document-path|scroll-top|scroll-left|document-id|document-format|bytes-url|editor-mirror|preview-turn-id|preview-text|preview-delta-count|preview-highlights)=/
 
     refute File.exists?("assets/js/wasm_hwp_editor.ts")
     refute File.exists?("assets/js/wasm_hwp_keys.ts")
@@ -55,7 +55,7 @@ defmodule EcritsWeb.ColocatedHookArchitectureTest do
     refute source =~ ~r/import\s+.*wasm_office/
 
     refute source =~
-             ~r/data-(?:document-id|document-path|scroll-top|scroll-left|local-document-id|local-document-format|bytes-url|editor-mirror|preview-turn-id|preview-text|preview-delta-count|preview-highlights)=/
+             ~r/data-(?:document-id|document-path|scroll-top|scroll-left|document-id|document-format|bytes-url|editor-mirror|preview-turn-id|preview-text|preview-delta-count|preview-highlights)=/
 
     refute File.exists?("assets/js/wasm_office_editor.js")
     refute File.exists?("assets/js/wasm_office_ops.ts")
@@ -67,8 +67,22 @@ defmodule EcritsWeb.ColocatedHookArchitectureTest do
 
     assert source =~ ~s(import {hooks as colocatedHooks} from "phoenix-colocated/ecrits")
     assert source =~ "hooks: colocatedHooks"
+    assert source =~ "params: {_csrf_token: csrfToken}"
     refute source =~ "installEcritsClientBehavior"
+    refute source =~ "chat_rail_tab_id"
+    refute source =~ "sessionStorage"
     refute source =~ ~r/^\s*import\s+.*(?:from\s+)?["']\.\//m
+  end
+
+  test "workspace owns browser-tab identity in a colocated hook" do
+    source = File.read!("lib/ecrits_web/live/workspace/workspace_live.ex")
+
+    assert source =~ ~s(phx-hook=".ChatRailTabIdentity")
+    assert source =~ ~s(name=".ChatRailTabIdentity")
+    assert source =~ "sessionStorage"
+    assert source =~ ~s(pushEvent("workspace.chat_rail.tab_ready")
+    assert source =~ ~r/mounted\(\).*announceChatRailTab\(this\)/s
+    assert source =~ ~r/reconnected\(\).*announceChatRailTab\(this\)/s
   end
 
   test "app.js is the only source file under assets/js" do
@@ -94,14 +108,38 @@ defmodule EcritsWeb.ColocatedHookArchitectureTest do
     assert path_violations == []
   end
 
+  # Everything in this app is local, so the prefix carries no information.
+  # Swept 2026-07-18 (assigns, functions, DOM ids/roles, URL segments, form
+  # names, spec keys); this keeps it from creeping back. "local-first" and
+  # "local-only" are prose, not identifiers.
+  test "runtime names do not use local prefixes" do
+    violations =
+      ["lib/**/*.{ex,heex}", "test/**/*.exs", "assets/js/**/*.{js,ts}", "assets/test/**/*.ts"]
+      |> Enum.flat_map(&Path.wildcard/1)
+      |> Enum.flat_map(fn path ->
+        path
+        |> File.read!()
+        |> String.split("\n")
+        |> Enum.with_index(1)
+        |> Enum.filter(fn {line, _n} ->
+          line
+          |> String.replace(~w(local-first local-only), "")
+          |> String.match?(~r/local[_-][a-z]/)
+        end)
+        |> Enum.map(fn {_line, n} -> "#{path}:#{n}" end)
+      end)
+
+    assert violations == []
+  end
+
   test "retired external UI hook controllers stay deleted" do
     refute Enum.any?(
              ~w(
                ecrits_app.js
                editor_zoom.js
-               local_chat_rail_resizer.js
-               local_editor_shortcuts.ts
-               local_editor_toolbar.js
+               chat_rail_resizer.js
+               editor_shortcuts.ts
+               editor_toolbar.js
                markdown_editor.js
                observex_preview.js
              ),
@@ -127,7 +165,7 @@ defmodule EcritsWeb.ColocatedHookArchitectureTest do
 
   test "document canvases transmit their embedded state once" do
     legacy_parallel_attrs =
-      ~r/data-(?:document-id|document-path|scroll-top|scroll-left|document-name|contract-type-key|local-document-id|local-document-format|bytes-url|editor-mirror|preview-turn-id|preview-text|preview-delta-count|preview-highlights)=/
+      ~r/data-(?:document-id|document-path|scroll-top|scroll-left|document-name|contract-type-key|document-id|document-format|bytes-url|editor-mirror|preview-turn-id|preview-text|preview-delta-count|preview-highlights)=/
 
     for path <- [
           "lib/ecrits_web/live/studio/components/canvas/hwp_pages.ex",

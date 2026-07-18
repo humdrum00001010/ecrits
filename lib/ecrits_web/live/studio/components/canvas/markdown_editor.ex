@@ -32,7 +32,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.MarkdownEditor do
     <div
       id={@id}
       class="flex h-full min-h-0 flex-col overflow-hidden bg-base-100"
-      data-component="canvas-local-markdown-editor"
+      data-component="canvas-markdown-editor"
       data-renderer="markdown"
       data-role="markdown-editor"
       data-canvas-state={DocumentCanvasState.encode(@state)}

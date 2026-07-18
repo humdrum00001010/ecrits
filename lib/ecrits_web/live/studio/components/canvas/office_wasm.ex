@@ -9,7 +9,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
   build's `paintTile`/`getDocumentSize`/`getParts` exports. The
   colocated `WasmOfficeEditor` browser-engine adapter owns the DOM under
   `[data-role='office-wasm-pages']` and fetches the raw bytes from
-  `bytes_url` (the same `/local/document-bytes` controller the HWP hook uses).
+  `bytes_url` (the same `/document-bytes` controller the HWP hook uses).
 
   All office documents (docx/pptx/xlsx) route here; there is no server-side
   LibreOfficeKit render/edit path.
@@ -31,7 +31,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
         @state.mirror? && "overflow-hidden pointer-events-none",
         !@state.mirror? && "overflow-auto"
       ]}
-      data-component="canvas-local-office-wasm"
+      data-component="canvas-office-wasm"
       data-renderer="libreoffice-wasm"
       data-role="office-wasm-viewer"
       data-canvas-state={DocumentCanvasState.encode(@state)}
@@ -75,6 +75,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
       >
       </div>
       <script :type={Phoenix.LiveView.ColocatedHook} name=".WasmOfficeEditor">
+        import { octet } from "phoenix-colocated/ecrits"
+
         function resolveSetText(ctx, ref) {
           if (ref == null) return null;
           const elements = ctx.officeElements();
@@ -906,8 +908,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
 
           mounted() {
             this.officeHookAlive = true
-            // Debug/E2E handle (twin of el.__wasmHwpEditor) — Playwright drives the
-            // office editor through this since the Tidewave iframe is not
+            octet.upload.warmup().catch((error) => console.warn("[octet] warmup failed", error))
+            // Debug handle (twin of el.__wasmHwpEditor) — external tooling drives
+            // the office editor through this since the Tidewave iframe is not
             // cross-origin-isolated and can't run the office wasm at all.
             this.el.__wasmOfficeEditor = this
             this.api = null
@@ -6498,7 +6501,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             if (bytes && typeof bytes.then === "function") bytes = await bytes
             if (!bytes || !bytes.length) throw new Error("saveToBytes returned no bytes")
             const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
-            return { format: this.format || "docx", ...(await this.uploadLocalDocumentBytes(u8)) }
+            return { format: this.format || "docx", ...(await octet.upload(this, u8)) }
           },
 
           async officeSaveAsync(format) {
@@ -6540,38 +6543,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             }
           },
 
-          async uploadLocalDocumentBytes(bytes) {
-            const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
-            const headers = { "content-type": "application/octet-stream" }
-            const csrf = this.localCsrfToken()
-            if (csrf) headers["x-csrf-token"] = csrf
-
-            const response = await fetch("/local/document-bytes", {
-              method: "POST",
-              credentials: "same-origin",
-              headers,
-              body: u8
-            })
-            if (!response.ok) throw new Error(await this.uploadErrorFromResponse(response))
-
-            const body = await response.json()
-            if (!body || !body.bytes_token) throw new Error("document bytes upload returned no token")
-            return { bytes_token: body.bytes_token, bytes: body.bytes || u8.length }
-          },
-
-          localCsrfToken() {
-            return document.querySelector("meta[name='csrf-token']")?.getAttribute("content") || ""
-          },
-
-          async uploadErrorFromResponse(response) {
-            try {
-              const body = await response.json()
-              return body?.error || `document bytes upload failed: HTTP ${response.status}`
-            } catch (_) {
-              return `document bytes upload failed: HTTP ${response.status}`
-            }
-          },
-
           pushViewerSave(payload) {
             this.pushEvent("document.viewer.save_requested", payload, (reply) => {
               if (reply && reply.ok) {
@@ -6585,7 +6556,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
 
           async saveLocalDocument(payload = {}) {
             if (this.mirror) return
-            const requestId = payload.request_id || `local-save:${Date.now()}`
+            const requestId = payload.request_id || `save:${Date.now()}`
             const documentId = payload.document_id || this.documentId
             try {
               if (this._loadInFlight) await this._loadInFlight
@@ -6641,15 +6612,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
               try { return JSON.parse(s) } catch (_) { return { raw: s } }
             }
             return null
-          },
-
-          bytesToBase64(bytes) {
-            let binary = ""
-            const chunk = 0x8000
-            for (let i = 0; i < bytes.length; i += chunk) {
-              binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk))
-            }
-            return btoa(binary)
           }
         }
         const syncCanvasState = hook => {

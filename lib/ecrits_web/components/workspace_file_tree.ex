@@ -181,7 +181,7 @@ defmodule EcritsWeb.Components.WorkspaceFileTree do
   defp file_icon("md"), do: "hero-document-text"
   defp file_icon(_extension), do: "hero-document"
 
-  defp node_dom_id(node), do: "local-file-node-#{dom_token(node_path(node))}"
+  defp node_dom_id(node), do: "file-node-#{dom_token(node_path(node))}"
 
   defp dom_token(path) do
     path = path |> to_string() |> String.normalize(:nfc)

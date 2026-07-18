@@ -11,10 +11,10 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
 
   test "document tab close sends an explicit LiveView event" do
     html =
-      render_local_document(
-        shell_id: "local-rhwp-shell",
-        toolbar_id: "local-rhwp-toolbar",
-        frame_id: "local-rhwp-editor-frame",
+      render_document(
+        shell_id: "rhwp-shell",
+        toolbar_id: "rhwp-toolbar",
+        frame_id: "rhwp-editor-frame",
         document: nil,
         document_path: nil,
         document_loading?: false,
@@ -66,18 +66,26 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
       |> List.first()
 
     assert document_controls |> LazyHTML.attribute("role") == ["group"]
+
+    tabs_classes = document_controls |> LazyHTML.attribute("class") |> List.first()
+    wrapper_classes = wrapper |> LazyHTML.attribute("class") |> List.first()
+
+    assert tabs_classes =~ "overflow-x-auto"
+    assert tabs_classes =~ "overflow-y-hidden"
+    assert wrapper_classes =~ "shrink-0"
+    refute wrapper_classes =~ " shrink "
   end
 
   test "quick toolbar exposes bold/italic/underline commands with shortcut hints for hwp" do
     html =
-      render_local_document(
-        shell_id: "local-rhwp-shell",
-        toolbar_id: "local-rhwp-toolbar",
-        frame_id: "local-rhwp-editor-frame",
+      render_document(
+        shell_id: "rhwp-shell",
+        toolbar_id: "rhwp-toolbar",
+        frame_id: "rhwp-editor-frame",
         document: %{id: "07-hwp", format: "hwp", relative_path: "07_공문.hwp"},
         document_path: "07_공문.hwp",
-        document_spec: %{key: "local_hwp", name: "07_공문.hwp", template_hwp_path: "07_공문.hwp"},
-        canvas_id: "local-rhwp-07-hwp",
+        document_spec: %{key: "hwp", name: "07_공문.hwp", template_hwp_path: "07_공문.hwp"},
+        canvas_id: "rhwp-07-hwp",
         open_documents: [%{id: "07-hwp", name: "07_공문.hwp", path: "07_공문.hwp"}],
         active_document_id: "07-hwp",
         dirty_document_ids: MapSet.new(),
@@ -87,9 +95,22 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
 
     fragment = LazyHTML.from_fragment(html)
 
+    toolbar =
+      fragment
+      |> LazyHTML.query("#document-quick-toolbar")
+      |> Enum.to_list()
+      |> List.first()
+
+    assert toolbar
+
+    toolbar_classes = toolbar |> LazyHTML.attribute("class") |> List.first()
+
+    assert toolbar_classes =~ "flex-wrap"
+    refute toolbar_classes =~ "overflow-x-auto"
+
     commands =
       fragment
-      |> LazyHTML.query(~s(#local-document-quick-toolbar [data-command]))
+      |> LazyHTML.query(~s(#document-quick-toolbar [data-command]))
       |> Enum.to_list()
       |> Enum.map(&(&1 |> LazyHTML.attribute("data-command") |> List.first()))
 
@@ -123,7 +144,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     for role <- ~w(font-size-input text-color-input highlight-color-input) do
       input =
         fragment
-        |> LazyHTML.query(~s(#local-document-quick-toolbar [data-role="#{role}"]))
+        |> LazyHTML.query(~s(#document-quick-toolbar [data-role="#{role}"]))
         |> Enum.to_list()
         |> List.first()
 
@@ -201,7 +222,20 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
         ] do
       menu = fragment |> LazyHTML.query("##{id}") |> Enum.at(0)
       assert menu
-      assert menu |> LazyHTML.query(~s([aria-label="#{label}"])) |> Enum.to_list() != []
+
+      trigger = menu |> LazyHTML.query(~s(button[popovertarget="#{id}-popup"])) |> Enum.at(0)
+      assert trigger
+      assert trigger |> LazyHTML.attribute("aria-label") == [label]
+
+      popup = menu |> LazyHTML.query("##{id}-popup[popover]") |> Enum.at(0)
+      assert popup
+      assert popup |> LazyHTML.attribute("role") == ["menu"]
+      assert popup |> LazyHTML.attribute("aria-label") == [label]
+
+      for item <- popup |> LazyHTML.query("[role='menuitem']") |> Enum.to_list() do
+        assert item |> LazyHTML.attribute("popovertarget") == ["#{id}-popup"]
+        assert item |> LazyHTML.attribute("popovertargetaction") == ["hide"]
+      end
     end
 
     for id <- ~w(editor-toolbar-indent-decrease editor-toolbar-indent-increase) do
@@ -215,7 +249,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
   test "HWP page scroll host is keyboard focusable outside mirror previews" do
     html =
       render_component(&HwpPages.render/1,
-        id: "local-hwp-pages",
+        id: "hwp-pages",
         pages: [],
         state:
           DocumentCanvasState.new(%{
@@ -223,7 +257,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
             document_path: "sample.hwp",
             document_format: "hwp",
             spec: %{
-              key: "local_hwp",
+              key: "hwp",
               name: "sample.hwp",
               template_hwp_path: "sample.hwp"
             }
@@ -233,7 +267,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
     editor =
       html
       |> LazyHTML.from_fragment()
-      |> LazyHTML.query(~s([data-role="local-hwp-editor"]))
+      |> LazyHTML.query(~s([data-role="hwp-editor"]))
       |> Enum.to_list()
       |> List.first()
 
@@ -244,14 +278,14 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
 
   test "HEEx owns the backend-neutral document search controls" do
     html =
-      render_local_document(
-        shell_id: "local-rhwp-shell",
-        toolbar_id: "local-rhwp-toolbar",
-        frame_id: "local-rhwp-editor-frame",
+      render_document(
+        shell_id: "rhwp-shell",
+        toolbar_id: "rhwp-toolbar",
+        frame_id: "rhwp-editor-frame",
         document: %{id: "07-hwp", format: "hwp", relative_path: "07_공문.hwp"},
         document_path: "07_공문.hwp",
-        document_spec: %{key: "local_hwp", name: "07_공문.hwp", template_hwp_path: "07_공문.hwp"},
-        canvas_id: "local-rhwp-07-hwp",
+        document_spec: %{key: "hwp", name: "07_공문.hwp", template_hwp_path: "07_공문.hwp"},
+        canvas_id: "rhwp-07-hwp",
         open_documents: [],
         active_document_id: "07-hwp",
         dirty_document_ids: MapSet.new(),
@@ -288,7 +322,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
       assert button |> LazyHTML.attribute("phx-click") == [event]
     end
 
-    bridge = fragment |> LazyHTML.query("#local-rhwp-shell") |> Enum.at(0)
+    bridge = fragment |> LazyHTML.query("#rhwp-shell") |> Enum.at(0)
 
     assert bridge |> LazyHTML.attribute("phx-hook") == [
              "EcritsWeb.Live.Studio.Components.EditorSurface.DocumentSearchBridge"
@@ -303,13 +337,13 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
 
   test "quick toolbar hides underline and image for markdown documents" do
     html =
-      render_local_document(
-        shell_id: "local-rhwp-shell",
-        toolbar_id: "local-rhwp-toolbar",
-        frame_id: "local-rhwp-editor-frame",
+      render_document(
+        shell_id: "rhwp-shell",
+        toolbar_id: "rhwp-toolbar",
+        frame_id: "rhwp-editor-frame",
         document: %{id: "notes-md", format: "md", relative_path: "notes.md"},
         document_path: "notes.md",
-        canvas_id: "local-rhwp-notes-md",
+        canvas_id: "rhwp-notes-md",
         open_documents: [%{id: "notes-md", name: "notes.md", path: "notes.md"}],
         active_document_id: "notes-md",
         dirty_document_ids: MapSet.new(),
@@ -321,7 +355,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
 
     commands =
       fragment
-      |> LazyHTML.query(~s(#local-document-quick-toolbar [data-command]))
+      |> LazyHTML.query(~s(#document-quick-toolbar [data-command]))
       |> Enum.to_list()
       |> Enum.map(&(&1 |> LazyHTML.attribute("data-command") |> List.first()))
 
@@ -359,7 +393,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
               document_id: "doc-1",
               document_path: "calc.xlsx",
               document_format: "xlsx",
-              bytes_url: "/local/document-bytes?document=doc-1",
+              bytes_url: "/document-bytes?document=doc-1",
               mirror?: true,
               preview_text: "Draft text",
               preview_delta_count: 2
@@ -388,15 +422,15 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurfaceTest do
            |> Enum.any?()
 
     assert fragment
-           |> LazyHTML.query(~s([data-component="canvas-local-office-wasm"]))
+           |> LazyHTML.query(~s([data-component="canvas-office-wasm"]))
            |> Enum.any?()
 
     assert fragment |> LazyHTML.query(~s([data-role="editor-preview-open"])) |> Enum.to_list() !=
              []
   end
 
-  defp render_local_document(attrs) do
-    render_component(&EditorSurface.local_document/1,
+  defp render_document(attrs) do
+    render_component(&EditorSurface.document/1,
       shell_id: Keyword.fetch!(attrs, :shell_id),
       toolbar_id: Keyword.fetch!(attrs, :toolbar_id),
       frame_id: Keyword.fetch!(attrs, :frame_id),

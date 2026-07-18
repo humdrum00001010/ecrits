@@ -4,7 +4,7 @@ defmodule EcritsWeb.Router do
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
-    plug :put_local_live_session_id
+    plug :put_live_session_id
     plug :fetch_live_flash
     plug :put_root_layout, html: {EcritsWeb.Layouts, :root}
     plug :protect_from_forgery
@@ -45,21 +45,20 @@ defmodule EcritsWeb.Router do
     # Read-only raw bytes of a local workspace HWP/HWPX document, gated to the
     # workspace path. The browser rhwp_core WASM engine fetches these to render
     # + hit-test locally (the server keeps the bytes as source of truth).
-    get "/local/document-bytes", WorkspaceDocumentBytesController, :show
-    post "/local/document-bytes", WorkspaceDocumentBytesController, :create
+    get "/document-bytes", WorkspaceDocumentBytesController, :show
 
     # Inline previews for doc.render outputs (PNG files in the render scratch
     # dir) — the chat rail swaps the render tool-call chip body for the image.
-    get "/local/render-preview", WorkspaceRenderPreviewController, :show
+    get "/render-preview", WorkspaceRenderPreviewController, :show
   end
 
-  defp put_local_live_session_id(conn, _opts) do
-    case get_session(conn, :local_live_session_id) do
+  defp put_live_session_id(conn, _opts) do
+    case get_session(conn, :live_session_id) do
       id when is_binary(id) and id != "" ->
         conn
 
       _ ->
-        put_session(conn, :local_live_session_id, Ecto.UUID.generate())
+        put_session(conn, :live_session_id, Ecto.UUID.generate())
     end
   end
 end

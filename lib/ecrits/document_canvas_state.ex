@@ -25,7 +25,10 @@ defmodule Ecrits.DocumentCanvasState do
     field :preview_delta_count, :integer, default: 0
     field :preview_highlights, :string, default: "[]"
     field :preview_steps, :string, default: "[]"
-    field :markdown_preview_html, :string, default: ""
+    # The editor surface carries sanitized `Phoenix.HTML.safe()` preview
+    # content. This field is render-only and is deliberately omitted from the
+    # JSON client payload, so preserve the safe value rather than coercing it.
+    field :markdown_preview_html, :any, virtual: true, default: ""
     embeds_one :spec, DocumentSpec, on_replace: :delete
     embeds_one :markdown_editor, MarkdownEditorState, on_replace: :delete
   end

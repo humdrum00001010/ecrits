@@ -42,7 +42,11 @@ defmodule Ecrits.EditorSurfaceState do
     field :active_document_id, :string
     field :dirty_document_ids, {:array, :string}, default: []
     field :hwp_page_count, :integer, default: 0
-    field :markdown_preview_html, :string, default: ""
+    # Markdown preview rendering is already sanitized and wrapped as
+    # `Phoenix.HTML.safe()`. Keep that value intact across the embedded UI
+    # state boundary instead of rejecting the safe tuple as a string and
+    # silently falling back to an empty EditorSurfaceState.
+    field :markdown_preview_html, :any, virtual: true, default: ""
 
     embeds_one :document_element_picker, Ecrits.DocumentElementPicker, on_replace: :delete
 

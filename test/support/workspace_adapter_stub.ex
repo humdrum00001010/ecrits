@@ -1,7 +1,7 @@
 defmodule EcritsWeb.WorkspaceAdapterStub do
   @behaviour EcritsWeb.Workspace.Adapter
 
-  @valid_path "/tmp/ecrits-local-ui"
+  @valid_path "/tmp/ecrits-ui"
 
   def valid_path,
     do: Application.get_env(:ecrits, :workspace_adapter_stub_path, @valid_path)

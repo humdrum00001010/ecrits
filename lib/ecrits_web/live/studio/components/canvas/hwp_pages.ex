@@ -31,12 +31,12 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
       ]}
       data-component="canvas-hwp-pages"
       data-renderer="rhwp-wasm"
-      data-role="local-hwp-editor"
+      data-role="hwp-editor"
       data-canvas-state={DocumentCanvasState.encode(@state)}
     >
       <textarea
         id={"#{@id}-ime-proxy"}
-        data-role="local-hwp-ime-proxy"
+        data-role="hwp-ime-proxy"
         autocomplete="off"
         autocorrect="off"
         autocapitalize="off"
@@ -50,9 +50,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
       ></textarea>
       <div
         id={"#{@id}-pages"}
-        data-role="local-hwp-pages"
+        data-role="hwp-pages"
         data-editor-zoomable
-        class="ehwp-document-stack ehwp-document-stack--local flex min-h-full flex-col items-center overflow-auto bg-[#f4f4f5]"
+        class="ehwp-document-stack flex min-h-full flex-col items-center overflow-auto bg-[#f4f4f5]"
         phx-update="ignore"
       >
       </div>
@@ -61,25 +61,27 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
         name=".WasmHwpEditor"
         phx-no-curly-interpolation
       >
+        import { octet } from "phoenix-colocated/ecrits";
+
         // assets/js/selectors.ts
         var SEL = {
           // ── Workspace layout + chat rail colocated hook ─────────────────────────
           chatForm: '[data-role="chat-form"]',
-          chatRail: '[data-local-chat-rail="true"]',
+          chatRail: '[data-chat-rail="true"]',
           chatRailResizer: '[data-role="chat-rail-resizer"]',
-          fileTreePanel: '[data-local-file-tree-panel="true"]',
+          fileTreePanel: '[data-file-tree-panel="true"]',
           fileTreeResizer: '[data-role="file-tree-resizer"]',
           fileTreeContent: '[data-role="file-tree-content"]',
           fileTreeRestore: '[data-role="file-tree-restore"]',
           fileTreeHide: '[data-role="file-tree-hide"]',
           fileTreeShow: '[data-role="file-tree-show"]',
-          editorShell: '[data-local-editor-shell="true"]',
+          editorShell: '[data-editor-shell="true"]',
           repoBrowserHeader: '[data-role="repo-browser-header"]',
           repoBrowserFileRow: '[data-role="repo-browser-row"][data-node-kind="file"][data-openable="true"]',
           providerOptionMenus: '[data-role="provider-options"] details',
           providerOptionMenusOpen: '[data-role="provider-options"] details[open]',
           agentOptionControls: '[data-role="agent-model-option"], [data-role="provider-reasoning-option"], [data-role="agent-access-option"], [data-role="agent-provider-config-open"]',
-          agentTitleLabel: "#local-agent-title-label",
+          agentTitleLabel: "#agent-title-label",
           // Streaming agent turn output (append targets; compose with
           // `[data-message-id="${id}"]`).
           agentLoading: '[data-role="agent-loading"]',
@@ -89,12 +91,12 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           agentReasoningDetailsText: '[data-role="agent-reasoning-details-text"]',
           // ── Document element picker (chat composer chips) ───────────────────────
           pickerToggle: "[data-role='document-element-picker-toggle']",
-          composerPicks: "#local-agent-picks",
+          composerPicks: "#agent-picks",
           composerPickRemove: '[data-role="composer-pick-remove"]',
           // ── Quick toolbar colocated hook ────────────────────────────────────────
           studioSurface: "[data-component='studio-document-surface']",
-          localDocumentIdHolder: "[data-local-document-id]",
-          toolbarImageInput: "[data-role='local-editor-toolbar-image-input']",
+          localDocumentIdHolder: "[data-document-id]",
+          toolbarImageInput: "[data-role='editor-toolbar-image-input']",
           commandButton: "[data-command]",
           alignCommandButtons: "[data-command^='align-']",
           alignIcons: "[data-align-icon]",
@@ -107,10 +109,10 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           highlightColorInput: "[data-role='highlight-color-input']",
           highlightColorBar: "[data-role='highlight-color-bar']",
           // ── HWP editor surface (wasm_hwp_editor) ────────────────────────────────
-          hwpEditor: "[data-role='local-hwp-editor']",
-          hwpImeProxy: "[data-role='local-hwp-ime-proxy']",
-          hwpPages: "[data-role='local-hwp-pages']",
-          hwpPage: "[data-role='local-hwp-page']",
+          hwpEditor: "[data-role='hwp-editor']",
+          hwpImeProxy: "[data-role='hwp-ime-proxy']",
+          hwpPages: "[data-role='hwp-pages']",
+          hwpPage: "[data-role='hwp-page']",
           ehwpCanvas: "[data-role='ehwp-canvas']",
           ehwpCaretOverlay: "[data-role='ehwp-caret-overlay']",
           // ── Office editor surface (wasm_office_editor) ──────────────────────────
@@ -885,6 +887,10 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           const dimError = validateDeclaredImageDims(op, bytes);
           if (dimError) return { error: dimError };
           const inlineInCell = op.inline_in_cell === true || op.inlineInCell === true;
+          const overlayMarkerLength = Number.isInteger(op.overlay_marker_length) ? op.overlay_marker_length : Number.isInteger(op.overlayMarkerLength) ? op.overlayMarkerLength : 0;
+          if (overlayMarkerLength < 0) {
+            return { error: "insert_picture 'overlay_marker_length' must be a non-negative integer" };
+          }
           const cellPath = ref.cell && ref.cell.cellPath ? ref.cell.cellPath : ref.cell ? [{
             controlIndex: ref.cell.controlIndex ?? 0,
             cellIndex: ref.cell.cellIndex ?? 0,
@@ -915,6 +921,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               extension,
               description,
               inlineInCell,
+              overlayMarkerLength,
               paperOffsetXHu: paperOffsetX,
               paperOffsetYHu: paperOffsetY
             };
@@ -923,6 +930,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             } else if (typeof ctx.doc.insertPictureEx === "function") {
               ctx.doc.insertPictureEx(JSON.stringify(options), bytes);
             } else {
+              if (overlayMarkerLength > 0) {
+                return { error: "insert_picture marker overlay requires insertPictureEx support" };
+              }
               ctx.doc.insertPicture(
                 ref.section,
                 ref.paragraph,
@@ -952,16 +962,27 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             }) || null;
           } catch (_) {
           }
-          ctx.recordOp("AgentInsertPicture", { section: ref.section, para: ref.paragraph, offset, width, height, extension, inlineInCell });
-          const insertedRef = inserted && inserted.ref || {};
+          ctx.recordOp("AgentInsertPicture", { section: ref.section, para: ref.paragraph, offset, width, height, extension, inlineInCell, overlayMarkerLength });
+          const insertedRef = inserted && inserted.ref || null;
+          const postInsertProps = op.post_insert_props || op.postInsertProps;
+          if (postInsertProps && typeof postInsertProps === "object" && Object.keys(postInsertProps).length > 0) {
+            if (!insertedRef) {
+              return { error: "insert_picture could not resolve the inserted picture ref for its placement properties" };
+            }
+            const setResult = ctx.applySetOne(insertedRef, { kind: "picture", ...postInsertProps });
+            if (!setResult || setResult.error) {
+              return { error: `insert_picture placement failed: ${setResult && setResult.error || "unknown_error"}` };
+            }
+          }
           return {
             ok: true,
             extra: {
               width,
               height,
               extension,
-              paraIdx: Number.isInteger(insertedRef.paragraph) ? insertedRef.paragraph : ref.paragraph,
-              controlIdx: Number.isInteger(insertedRef.control) ? insertedRef.control : insertedRef.controlIndex
+              paraIdx: insertedRef && Number.isInteger(insertedRef.paragraph) ? insertedRef.paragraph : ref.paragraph,
+              controlIdx: Number.isInteger(insertedRef && insertedRef.control) ? insertedRef.control : insertedRef && insertedRef.controlIndex,
+              ref: insertedRef
             }
           };
         };
@@ -1024,6 +1045,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           },
           handleDocumentKeyDown(event) {
             if (event.defaultPrevented || !this.documentShortcutTarget(event)) return;
+            if (this.blockLocalMutationDuringVfs(event)) return;
             if (this.saveShortcut(event)) {
               event.preventDefault();
               event.stopPropagation();
@@ -1047,10 +1069,18 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             if (!target || target === this.imeProxy || !target.closest) return false;
             return !!target.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']");
           },
+          blockLocalMutationDuringVfs(event) {
+            if (!(Number(this.vfsStageDepth) > 0)) return false;
+            if (event && typeof event.preventDefault === "function") event.preventDefault();
+            if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+            if (this.imeProxy) this.imeProxy.value = "";
+            return true;
+          },
           // beforeinput lets us swallow the proxy's own echo (we never want the textarea
           // to accumulate text — the document IS the model). We still let composition
           // events flow through input/composition* handlers.
-          handleBeforeInput(_event) {
+          handleBeforeInput(event) {
+            this.blockLocalMutationDuringVfs(event);
           },
           hwpNativeImeAvailable() {
             return !!(this.doc && typeof this.doc.beginImeComposition === "function" && typeof this.doc.updateImeComposition === "function" && typeof this.doc.commitImeComposition === "function" && typeof this.doc.cancelImeComposition === "function");
@@ -1160,6 +1190,20 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               console.error("[wasm-hwp] cancelImeComposition failed", error);
             }
           },
+          settleHwpImeForVfs() {
+            if (!this.hwpNativeImeAvailable() || !this.hwpNativeImeActive()) return;
+            const text = this.hwpCompositionText();
+            if (!text) {
+              this.hwpClearNativeIme();
+              return;
+            }
+            try {
+              this.hwpCommitNativeIme(text);
+            } catch (error) {
+              console.error("[wasm-hwp] commit IME before VFS write failed", error);
+              this.hwpClearNativeIme();
+            }
+          },
           hwpCommitNativeIme(text) {
             const before = this.hwpNativeImeInfo();
             const raw = this.doc.commitImeComposition(text);
@@ -1190,6 +1234,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           // routed to the native IME carrier through composition events and must be
           // skipped here so the browser textarea never becomes the document model.
           handleInput(event) {
+            if (this.blockLocalMutationDuringVfs(event)) return;
             if (!this.doc || !this.caret) return;
             const type = event.inputType || "";
             const compositionInput = type === "insertCompositionText" || type === "insertReplacementText";
@@ -1225,7 +1270,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           // Korean IME — composition events are routed to rhwp_core. JS owns neither
           // the live composition text nor its document position; it only forwards the
           // event text and follows the native edit cursor.
-          handleCompositionStart(_event) {
+          handleCompositionStart(event) {
+            if (this.blockLocalMutationDuringVfs(event)) return;
             if (!this.doc || !this.caret) return;
             if (!this.hwpNativeImeAvailable()) return;
             this.hwpClearNativeIme();
@@ -1241,6 +1287,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             }
           },
           handleCompositionUpdate(event) {
+            if (this.blockLocalMutationDuringVfs(event)) return;
             if (!this.doc || !this.caret || !this.hwpNativeImeAvailable()) return;
             const str = this.hwpCompositionText(event);
             try {
@@ -1252,6 +1299,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             }
           },
           handleCompositionEnd(event) {
+            if (this.blockLocalMutationDuringVfs(event)) return;
             if (!this.doc || !this.caret) return;
             const str = this.hwpCompositionText(event);
             if (this.hwpNativeImeAvailable()) {
@@ -1346,6 +1394,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           },
           // ─── Editing keys (keydown, non-composing) ───────────────────────────────
           handleKeyDown(event) {
+            if (this.blockLocalMutationDuringVfs(event)) return;
             if (this.saveShortcut(event)) {
               event.preventDefault();
               event.stopPropagation();
@@ -1470,6 +1519,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             if (this.imeProxy) this.imeProxy.value = "";
           },
           handlePaste(event) {
+            if (this.blockLocalMutationDuringVfs(event)) return;
             if (!this.doc || !this.caret) return;
             const html = event.clipboardData && event.clipboardData.getData("text/html");
             const text = event.clipboardData && event.clipboardData.getData("text/plain");
@@ -1840,7 +1890,11 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           "textCursorCanvas",
           "agentOpQueue",
           "agentOpProcessing",
+          "vfsStageDepth",
+          "vfsDeferredSnapshot",
           "pendingVfsWrites",
+          "cancelledVfsWrites",
+          "terminalVfsWrites",
           "vfsPreviewObjectUrls",
           "previewPlaybackGeneration",
           "previewPlaybackFrame",
@@ -1952,6 +2006,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           },
           mounted() {
             installHwpViewState(this);
+            octet.upload.warmup().catch((error) => console.warn("[octet] warmup failed", error));
             this.canvasState = this.readCanvasState();
             this.doc = null;
             this._loadingUrl = null;
@@ -1980,7 +2035,11 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             this.pickerHoverRaf = null;
             this.agentOpQueue = [];
             this.agentOpProcessing = false;
+            this.vfsStageDepth = 0;
+            this.vfsDeferredSnapshot = false;
             this.pendingVfsWrites = new Map();
+            this.cancelledVfsWrites = new Map();
+            this.terminalVfsWrites = new Map();
             this.vfsPreviewObjectUrls = new Map();
             this.previewPlaybackGeneration = 0;
             this.previewPlaybackFrame = null;
@@ -2018,7 +2077,30 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             this.el.addEventListener("scroll", this.onScroll, { passive: true });
             ensureWasm().catch((error) => console.error("[wasm-hwp] init failed", error));
             this.handleEvent("document.hwp.load_command", (payload) => {
-              if (this.eventMatchesDocument(payload)) this.loadDocument(payload);
+              if (!this.eventMatchesDocument(payload)) return;
+              const recoveryId = payload && payload.vfs_recovery_id;
+              const recoveryAttempt = payload && payload.vfs_recovery_attempt;
+              const load = this.loadDocument(payload);
+              if (payload && payload.vfs_recovery === true && recoveryId) {
+                Promise.resolve(load).then((loaded) => {
+                  const reply = {
+                    recovery_id: recoveryId,
+                    document_id: this.documentId,
+                    attempt: recoveryAttempt
+                  };
+                  if (loaded === false) {
+                    this.pushEvent("document.vfs.recovery.replied", {
+                      ...reply,
+                      error: "canonical document reload failed"
+                    });
+                  } else {
+                    this.pushEvent("document.vfs.recovery.replied", {
+                      ...reply,
+                      result: { reloaded: true }
+                    });
+                  }
+                });
+              }
             });
             this.handleEvent("document.engine.operation.command", (payload) => {
               if (!this.mirror && this.eventMatchesDocument(payload)) this.handleAgentOp(payload);
@@ -2144,6 +2226,18 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               }
             }
             this.vfsPreviewObjectUrls.clear();
+            if (this.cancelledVfsWrites instanceof Map) {
+              for (const timer of this.cancelledVfsWrites.values()) {
+                if (timer != null) clearTimeout(timer);
+              }
+              this.cancelledVfsWrites.clear();
+            }
+            if (this.terminalVfsWrites instanceof Map) {
+              for (const terminal of this.terminalVfsWrites.values()) {
+                if (terminal && terminal.timer != null) clearTimeout(terminal.timer);
+              }
+              this.terminalVfsWrites.clear();
+            }
             window.removeEventListener("resize", this.onResize);
             if (this.onResize && this.onResize.observer) this.onResize.observer.disconnect();
             if (this.onResize && this.onResize.frame != null && this.onResize.cancel) {
@@ -2669,12 +2763,14 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             if (!this.mirror || !this.doc || !Array.isArray(steps) || steps.length === 0) return;
             const signature = `${this.canvasState.previewTurnId || ""}:${steps.length}:${JSON.stringify(steps[steps.length - 1] || {}).length}`;
             if (this.previewPlaybackSignature === signature) return;
+            const finalHighlights = this.parsePreviewHighlights();
             this.previewPlaybackSignature = signature;
             this.previewPlaybackGeneration += 1;
             const generation = this.previewPlaybackGeneration;
             let index = 0;
             this.el.dataset.previewPlaybackState = "running";
             this.el.dataset.previewPlaybackTotal = String(steps.length);
+            this.el.dataset.previewPlaybackError = "";
             const schedule = (callback) => {
               if (typeof window.requestAnimationFrame === "function" && document.visibilityState !== "hidden") {
                 this.previewPlaybackFrame = window.requestAnimationFrame(callback);
@@ -2694,7 +2790,10 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               index += 1;
               if (index >= steps.length) {
                 this.previewPlaybackFrame = null;
+                this.canvasState.previewHighlights = JSON.stringify(finalHighlights);
                 this.el.dataset.previewPlaybackState = "complete";
+                this.renderSavedEditHighlights();
+                this.refreshSavedEditHighlightsOnNextFrame(index);
                 return;
               }
               schedule(advance);
@@ -3322,15 +3421,15 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             }
           },
           async loadDocument({ url, force = false, authority_preview = false, authorityPreview = false }) {
-            if (!url) return;
-            if (this.doc && this.loadedUrl === url && !force) return;
+            if (!url) return false;
+            if (this.doc && this.loadedUrl === url && !force) return true;
             if (this._loadInFlight) {
               if (this._loadingUrl === url && !force) return this._loadInFlight;
               try {
                 await this._loadInFlight;
               } catch (_) {
               }
-              if (this.doc && this.loadedUrl === url && !force) return;
+              if (this.doc && this.loadedUrl === url && !force) return true;
             }
             if (this.loadedUrl && this.loadedUrl !== url) this.rememberScrollPosition(this.loadedUrl);
             this._loadingUrl = url;
@@ -3341,6 +3440,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               if (!response.ok) throw new Error(`document bytes HTTP ${response.status}`);
               const bytes = new Uint8Array(await response.arrayBuffer());
               if (this.doc) {
+                this.resetAgentVfsTransactionsForReload();
                 if (this.snapshotTimer) {
                   clearTimeout(this.snapshotTimer);
                   this.snapshotTimer = null;
@@ -3398,9 +3498,11 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               }
               this.notifyViewerState(true);
               this.scheduleToolbarStateSync();
+              return true;
               } catch (error) {
                 console.error("[wasm-hwp] load failed", error);
                 this.notifyViewerState(false);
+                return false;
               }
             })();
             this._loadInFlight = load;
@@ -3445,7 +3547,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               const { w, h } = this.pageInfo(i);
               const section = document.createElement("section");
               section.className = "ehwp-svg-page relative border border-black/10 bg-white shadow-[0_2px_8px_rgba(15,23,42,0.08)]";
-              section.dataset.role = "local-hwp-page";
+              section.dataset.role = "hwp-page";
               section.dataset.pageIndex = String(i);
               section.dataset.pageNumber = String(i + 1);
               section.style.cssText = `width:${w}px;max-width:100%;aspect-ratio:${w} / ${h};position:relative`;
@@ -3653,6 +3755,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           // devicePixelRatio supersampling); dividing by `scale` (== dpr) yields page
           // units, which is the coordinate space renderPageToCanvas/hitTest use.
           onCanvasMouseDown(event) {
+            if (this.blockLocalMutationDuringVfs(event)) return;
             if (event.button !== 0 || !this.doc) return;
             const hitInfo = this.hitTestEvent(event);
             if (!hitInfo) return;
@@ -4148,6 +4251,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             return point ? JSON.parse(JSON.stringify(point)) : null;
           },
           handleToolbarCommand(detail) {
+            if (this.blockLocalMutationDuringVfs()) return;
             if (!this.activeToolbarTarget() || !this.doc || !this.toolbarCommandMatchesDocument(detail)) return;
             switch (detail.command) {
               case "bold":
@@ -5378,6 +5482,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             this.imageDrag = null;
             if (!drag) return;
             this.clearImageDragGhost(drag.pageIndex);
+            if (this.blockLocalMutationDuringVfs()) return;
             if (drag.mode === "resize") {
               if (!drag.moved) {
                 this.paintPickedHighlights();
@@ -6090,6 +6195,21 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           // result. `verb` is read | find | edit. The reply is always sent (even on
           // error) so the blocked MCP caller never hangs to its timeout.
           handleAgentOp(request) {
+            // Cancellation is observed immediately, even while a queued
+            // vfs_write is awaiting its async export and cannot dequeue the
+            // rollback command yet. applyAgentVfsWrite consumes this tombstone
+            // before publishing a pending transaction.
+            if (request && request.verb === "vfs_rollback") {
+              this.markAgentVfsWriteCancelled(request.payload);
+              request = {
+                ...request,
+                payload: { ...(request.payload || {}), _vfs_cancel_marked: true }
+              };
+              const id = String(request.payload.edit_id || request.payload.editId || "");
+              if (id && this.pendingVfsWrites instanceof Map && this.pendingVfsWrites.has(id)) {
+                this.rollbackAgentVfsWrite(request.payload);
+              }
+            }
             this.agentOpQueue.push(request);
             this.processAgentOpQueue();
           },
@@ -6126,6 +6246,10 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               reply({ error: "document_not_loaded" });
               return;
             }
+            if (Number(this.vfsStageDepth) > 0 && !["read", "find", "vfs_commit", "vfs_finalize", "vfs_rollback"].includes(verb)) {
+              reply({ error: "document_write_in_progress" });
+              return;
+            }
             try {
               switch (verb) {
                 case "edit":
@@ -6160,6 +6284,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                   break;
                 case "vfs_commit":
                   reply({ result: this.commitAgentVfsWrite(payload) });
+                  break;
+                case "vfs_finalize":
+                  reply({ result: this.finalizeAgentVfsWrite(payload) });
                   break;
                 case "vfs_rollback":
                   reply({ result: this.rollbackAgentVfsWrite(payload) }, true);
@@ -6550,7 +6677,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           // still valid. Cell-targeted ops (ref carries `.cell`) and pure in-place ops
           // address a fixed cell/offset and never move another op's target, so they are
           // order-independent and run first (in their given order).
-          applyAgentEditBatch({ ops }) {
+          applyAgentEditBatch({ ops }, options = {}) {
             const list = Array.isArray(ops) ? ops : [];
             if (list.length === 0) return { error: "edit batch requires a non-empty 'ops' array" };
             this.pushHwpUndoCheckpoint("agent-edit-batch");
@@ -6582,7 +6709,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 results[idx] = { ref: refStr, error: r && r.error || "unknown_error" };
               }
             }
-            this.finishAgentEdit({});
+            this.finishAgentEdit({}, options);
             return {
               ok: true,
               result: { ok: true, applied, failed, results }
@@ -6591,28 +6718,43 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           async applyAgentVfsWrite({ edit_id, editId, ops = [], sets = [] } = {}) {
             const id = String(edit_id || editId || "");
             if (!id) throw new Error("vfs_write requires edit_id");
+            if (this.consumeAgentVfsWriteCancellation(id)) throw new Error(`vfs_write cancelled: ${id}`);
+            if (this.agentVfsTerminalState(id)) throw new Error(`vfs_write edit_id already used: ${id}`);
             if (this.pendingVfsWrites.has(id)) throw new Error(`vfs_write already pending: ${id}`);
-            const snapshot = this.saveHwpHistorySnapshot(`vfs-write:${id}`);
-            if (!snapshot) throw new Error("vfs_write could not create rollback snapshot");
+            if (Number(this.vfsStageDepth) > 0 || this.pendingVfsWrites.size > 0) {
+              throw new Error("document_write_in_progress");
+            }
+            this.beginAgentVfsStage();
+            let snapshot = null;
             const undoLength = Array.isArray(this.undoStack) ? this.undoStack.length : 0;
             const redoLength = Array.isArray(this.redoStack) ? this.redoStack.length : 0;
-            const previewBaseUrl = this.createVfsPreviewObjectUrl(id);
+            let previewBaseUrl = null;
+            let transaction = null;
             try {
-              const editReply = Array.isArray(ops) && ops.length > 0 ? this.applyAgentEditBatch({ ops }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
+              snapshot = this.saveHwpHistorySnapshot(`vfs-write:${id}`);
+              if (!snapshot) throw new Error("vfs_write could not create rollback snapshot");
+              previewBaseUrl = this.createVfsPreviewObjectUrl(id);
+              transaction = {
+                snapshot,
+                undoLength,
+                redoLength,
+                previewBaseUrl,
+                phase: "exporting"
+              };
+              this.pendingVfsWrites.set(id, transaction);
+              const editReply = Array.isArray(ops) && ops.length > 0 ? this.applyAgentEditBatch({ ops }, { scheduleSnapshot: false }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
               if (!editReply || !editReply.ok || !editReply.result || Number(editReply.result.failed || 0) > 0) {
                 throw new Error(this.vfsBatchError("edit", editReply));
               }
-              const setReply = Array.isArray(sets) && sets.length > 0 ? this.applyAgentSetBatch({ sets }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
+              const setReply = Array.isArray(sets) && sets.length > 0 ? this.applyAgentSetBatch({ sets }, { scheduleSnapshot: false }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
               if (!setReply || !setReply.ok || !setReply.result || Number(setReply.result.failed || 0) > 0) {
                 throw new Error(this.vfsBatchError("set", setReply));
               }
               const saved = await this.exportForSave();
-              this.pendingVfsWrites.set(id, {
-                snapshot,
-                undoLength,
-                redoLength,
-                previewBaseUrl
-              });
+              if (this.consumeAgentVfsWriteCancellation(id) || this.pendingVfsWrites.get(id) !== transaction) {
+                throw new Error(`vfs_write cancelled: ${id}`);
+              }
+              transaction.phase = "provisional";
               return {
                 ...saved,
                 edit_id: id,
@@ -6621,27 +6763,202 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 set: setReply.result
               };
             } catch (error) {
-              this.restoreAgentVfsSnapshot({ snapshot, undoLength, redoLength });
-              this.releaseVfsPreviewObjectUrl(id);
+              this.consumeAgentVfsWriteCancellation(id);
+              if (this.pendingVfsWrites.get(id) === transaction) {
+                this.pendingVfsWrites.delete(id);
+                this.restoreAgentVfsSnapshot({ snapshot, undoLength, redoLength });
+                this.releaseVfsPreviewObjectUrl(id);
+                this.markAgentVfsTerminalState(id, "rolled_back");
+                this.finishAgentVfsStage();
+              }
               throw error;
             }
           },
           commitAgentVfsWrite({ edit_id, editId } = {}) {
             const id = String(edit_id || editId || "");
+            if (this.consumeAgentVfsWriteCancellation(id)) {
+              return this.rollbackAgentVfsWrite({ edit_id: id, _vfs_cancel_marked: true });
+            }
             const pending = this.pendingVfsWrites.get(id);
-            if (!pending) return { ok: true, edit_id: id, already_finalized: true };
+            if (!pending) {
+              const terminal = this.agentVfsTerminalState(id);
+              if (terminal === "finalized") return { ok: true, edit_id: id, already_finalized: true };
+              if (terminal === "rolled_back") throw new Error(`vfs_commit after rollback: ${id}`);
+              throw new Error(`vfs_commit requires pending transaction: ${id}`);
+            }
+            if (pending.phase === "commit_ack_pending") {
+              return { ok: true, edit_id: id, awaiting_finalize: true, already_committed: true };
+            }
+            pending.phase = "commit_ack_pending";
+            return { ok: true, edit_id: id, awaiting_finalize: true };
+          },
+          // The browser's vfs_commit reply is not the irreversible boundary: it
+          // can race the bridge timeout. Keep the rollback snapshot and local
+          // edit lock until WorkspaceLive observes the bridge completion ACK and
+          // sends this idempotent finalize command.
+          finalizeAgentVfsWrite({ edit_id, editId } = {}) {
+            const id = String(edit_id || editId || "");
+            if (this.consumeAgentVfsWriteCancellation(id)) {
+              return this.rollbackAgentVfsWrite({ edit_id: id, _vfs_cancel_marked: true });
+            }
+            const pending = this.pendingVfsWrites.get(id);
+            if (!pending) {
+              const terminal = this.agentVfsTerminalState(id);
+              if (terminal === "finalized") return { ok: true, edit_id: id, already_finalized: true };
+              if (terminal === "rolled_back") throw new Error(`vfs_finalize after rollback: ${id}`);
+              throw new Error(`vfs_finalize requires committed transaction: ${id}`);
+            }
+            if (pending.phase !== "commit_ack_pending") {
+              throw new Error(`vfs_finalize before commit: ${id}`);
+            }
             this.pendingVfsWrites.delete(id);
             this.discardHwpHistorySnapshot(pending.snapshot);
-            return { ok: true, edit_id: id };
+            this.markAgentVfsTerminalState(id, "finalized");
+            this.finishAgentVfsStage();
+            return { ok: true, edit_id: id, finalized: true };
           },
-          rollbackAgentVfsWrite({ edit_id, editId } = {}) {
+          rollbackAgentVfsWrite({ edit_id, editId, _vfs_cancel_marked: cancelMarked = false } = {}) {
             const id = String(edit_id || editId || "");
             const pending = this.pendingVfsWrites.get(id);
-            if (!pending) return { ok: true, edit_id: id, already_finalized: true };
+            if (!pending) {
+              const terminal = this.agentVfsTerminalState(id);
+              if (terminal === "finalized") return { ok: true, edit_id: id, already_finalized: true };
+              if (terminal === "rolled_back") return { ok: true, edit_id: id, already_rolled_back: true };
+              if (cancelMarked) {
+                this.markAgentVfsTerminalState(id, "rolled_back");
+                return { ok: true, edit_id: id, rolled_back: true };
+              }
+              this.markAgentVfsWriteCancelled({ edit_id: id });
+              return { ok: true, edit_id: id, cancellation_pending: true };
+            }
+            this.consumeAgentVfsWriteCancellation(id);
             this.pendingVfsWrites.delete(id);
             this.restoreAgentVfsSnapshot(pending);
             this.releaseVfsPreviewObjectUrl(id);
+            this.markAgentVfsTerminalState(id, "rolled_back");
+            this.finishAgentVfsStage();
             return { ok: true, edit_id: id, rolled_back: true };
+          },
+          markAgentVfsWriteCancelled({ edit_id, editId } = {}) {
+            const id = String(edit_id || editId || "");
+            if (!id) return false;
+            if (!(this.cancelledVfsWrites instanceof Map)) this.cancelledVfsWrites = new Map();
+            const existing = this.cancelledVfsWrites.get(id);
+            if (existing != null) clearTimeout(existing);
+            // A rollback for a write that is already in our FIFO is not an
+            // unmatched future-write tombstone. Keep it until that exact write
+            // dequeues (or the document reload clears the queue state), however
+            // long an unrelated async operation blocks the FIFO.
+            if (this.agentVfsWriteQueued(id)) {
+              this.cancelledVfsWrites.set(id, null);
+              return true;
+            }
+            const timer = setTimeout(() => {
+              this.expireAgentVfsWriteCancellation(id, timer);
+            }, 70_000);
+            this.cancelledVfsWrites.set(id, timer);
+            return true;
+          },
+          agentVfsWriteQueued(editId) {
+            const id = String(editId || "");
+            return Array.isArray(this.agentOpQueue) && this.agentOpQueue.some((request) => {
+              if (!request || request.verb !== "vfs_write") return false;
+              const payload = request.payload || {};
+              return String(payload.edit_id || payload.editId || "") === id;
+            });
+          },
+          expireAgentVfsWriteCancellation(editId, timer) {
+            const id = String(editId || "");
+            if (!(this.cancelledVfsWrites instanceof Map)) return false;
+            if (this.cancelledVfsWrites.get(id) !== timer) return false;
+            if (this.agentVfsWriteQueued(id)) {
+              this.cancelledVfsWrites.set(id, null);
+              return false;
+            }
+            this.cancelledVfsWrites.delete(id);
+            return true;
+          },
+          consumeAgentVfsWriteCancellation(editId) {
+            if (!(this.cancelledVfsWrites instanceof Map)) return false;
+            const id = String(editId || "");
+            if (!this.cancelledVfsWrites.has(id)) return false;
+            const timer = this.cancelledVfsWrites.get(id);
+            this.cancelledVfsWrites.delete(id);
+            if (timer != null) clearTimeout(timer);
+            return true;
+          },
+          agentVfsTerminalState(editId) {
+            if (!(this.terminalVfsWrites instanceof Map)) return null;
+            const terminal = this.terminalVfsWrites.get(String(editId || ""));
+            return terminal && terminal.state || null;
+          },
+          markAgentVfsTerminalState(editId, state) {
+            const id = String(editId || "");
+            if (!id) return;
+            if (!(this.terminalVfsWrites instanceof Map)) this.terminalVfsWrites = new Map();
+            const previous = this.terminalVfsWrites.get(id);
+            if (previous && previous.timer != null) clearTimeout(previous.timer);
+            const timer = setTimeout(() => {
+              const current = this.terminalVfsWrites.get(id);
+              if (current && current.timer === timer) this.terminalVfsWrites.delete(id);
+            }, 120_000);
+            this.terminalVfsWrites.set(id, { state, timer });
+          },
+          resetAgentVfsTransactionsForReload() {
+            if (this.pendingVfsWrites instanceof Map) {
+              for (const [editId, pending] of this.pendingVfsWrites.entries()) {
+                if (pending && pending.snapshot) this.discardHwpHistorySnapshot(pending.snapshot);
+                // A commit-ACK recovery is still a successful commit. Keep its
+                // short-lived preview URL alive for the chat mirror just as the
+                // normal finalize path does; only abandoned provisional writes
+                // lose their preview artifact.
+                if (!pending || pending.phase !== "commit_ack_pending") {
+                  this.releaseVfsPreviewObjectUrl(editId);
+                }
+                this.markAgentVfsTerminalState(
+                  editId,
+                  pending && pending.phase === "commit_ack_pending" ? "finalized" : "rolled_back"
+                );
+              }
+              this.pendingVfsWrites.clear();
+            }
+            if (this.cancelledVfsWrites instanceof Map) {
+              for (const timer of this.cancelledVfsWrites.values()) {
+                if (timer != null) clearTimeout(timer);
+              }
+              this.cancelledVfsWrites.clear();
+            }
+            this.vfsStageDepth = 0;
+            this.vfsDeferredSnapshot = false;
+            if (this.el && this.el.dataset) delete this.el.dataset.vfsWritePending;
+          },
+          beginAgentVfsStage() {
+            if (!(Number(this.vfsStageDepth) > 0)) {
+              if (this.settleHwpImeForVfs) this.settleHwpImeForVfs();
+              if (this.imageDrag) {
+                this.clearImageDragGhost(this.imageDrag.pageIndex);
+                this.imageDrag = null;
+              }
+              this.dragSelect = null;
+              if (this.imeProxy) this.imeProxy.value = "";
+              if (this.el && this.el.dataset) this.el.dataset.vfsWritePending = "true";
+            }
+            if (this.snapshotTimer) {
+              this.vfsDeferredSnapshot = true;
+              clearTimeout(this.snapshotTimer);
+              this.snapshotTimer = null;
+            }
+            this.vfsStageDepth = Math.max(0, Number(this.vfsStageDepth) || 0) + 1;
+          },
+          finishAgentVfsStage() {
+            this.vfsStageDepth = Math.max(0, this.vfsStageDepth - 1);
+            if (this.vfsStageDepth === 0) {
+              if (this.el && this.el.dataset) delete this.el.dataset.vfsWritePending;
+              if (this.vfsDeferredSnapshot) {
+                this.vfsDeferredSnapshot = false;
+                this.scheduleSnapshot();
+              }
+            }
           },
           restoreAgentVfsSnapshot({ snapshot, undoLength = 0, redoLength = 0 }) {
             if (snapshot) {
@@ -6829,14 +7146,42 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               this.recordOp("AgentSetPara", { section: parsed.section, para: parsed.paragraph, cell: cl, props: rest });
               return { ok: true };
             }
-            return { error: `set: unsupported kind '${kind}' in the browser editor (supported: cell, char, para, picture)` };
+            if (kind === "field") {
+              const value = rest.value;
+              if (typeof value !== "string") return { error: "set kind:field needs a string 'value'" };
+              let fields;
+              try {
+                fields = JSON.parse(this.doc.getFieldList());
+              } catch (error) {
+                return { error: `getFieldList failed: ${String(error && error.message || error)}` };
+              }
+              const candidates = fields
+                .filter((f) => f.location && f.location.sectionIndex === parsed.section &&
+                  f.location.paraIndex === parsed.paragraph && !f.location.path)
+                .sort((a, b) => (a.startCharIdx ?? 0) - (b.startCharIdx ?? 0));
+              const control = this.rawControlIndex(ref);
+              let target = null;
+              if (candidates.length === 1) target = candidates[0];
+              else if (Number.isInteger(control) && control >= 0 && control < candidates.length) target = candidates[control];
+              if (!target) {
+                return { error: `set kind:field could not resolve a unique field at section ${parsed.section} paragraph ${parsed.paragraph} (${candidates.length} candidates)` };
+              }
+              try {
+                this.doc.setFieldValue(target.fieldId, value);
+              } catch (error) {
+                return { error: `setFieldValue failed: ${String(error && error.message || error)}` };
+              }
+              this.recordOp("AgentSetField", { section: parsed.section, para: parsed.paragraph, fieldId: target.fieldId, value });
+              return { ok: true };
+            }
+            return { error: `set: unsupported kind '${kind}' in the browser editor (supported: cell, char, para, picture, field)` };
           },
           // Batch property set (doc.set {sets:[{ref,props}, ...]}). Apply every set to
           // the WASM model with ONE re-render/snapshot at the end. Best-effort: a
           // bad ref does NOT abort the rest; the result carries a per-set `results`
           // array. Sets address fixed cells/runs and never move another set's target, so
           // order is irrelevant (applied in the given order).
-          applyAgentSetBatch({ sets }) {
+          applyAgentSetBatch({ sets }, options = {}) {
             const list = Array.isArray(sets) ? sets : [];
             if (list.length === 0) return { error: "set batch requires a non-empty 'sets' array" };
             this.pushHwpUndoCheckpoint("agent-set-batch");
@@ -6860,7 +7205,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 results.push({ ref: refStr, error: r && r.error || "unknown_error" });
               }
             }
-            this.finishAgentEdit({});
+            this.finishAgentEdit({}, options);
             return {
               ok: true,
               result: { ok: true, applied, failed, results }
@@ -6937,14 +7282,14 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           },
           // Shared post-edit step: re-render the visible window (an edit can reflow any
           // page), redraw the caret, and persist the edited bytes so it survives reload.
-          finishAgentEdit(extra) {
+          finishAgentEdit(extra, { scheduleSnapshot = true } = {}) {
             this._elementsCache = null;
             this.hwpFind = null;
             this.rendered.clear();
             this.renderVisiblePages();
             if (this.caret) this.drawCaret(this.caret);
             if (!this.mirror) {
-              this.scheduleSnapshot();
+              if (scheduleSnapshot) this.scheduleSnapshot();
               if (this.previewAuthorityLastPayload) {
                 window.setTimeout(() => this.publishAuthoritativePreview({
                   ...this.previewAuthorityLastPayload,
@@ -7659,6 +8004,10 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           // exposes exportHwp/exportHwpx, so this is a real save (not just an op-log).
           scheduleSnapshot() {
             if (this.mirror) return;
+            if (this.vfsStageDepth > 0) {
+              this.vfsDeferredSnapshot = true;
+              return;
+            }
             this.hwpFind = null;
             if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
             this.snapshotTimer = setTimeout(() => {
@@ -7674,12 +8023,20 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           },
           async exportForSave() {
             const bytes = this.exportDocumentBytes();
-            return { format: this.format, ...await this.uploadLocalDocumentBytes(bytes) };
+            return { format: this.format, ...await octet.upload(this, bytes) };
           },
           async saveLocalDocument(payload = {}) {
             if (this.mirror) return;
-            const requestId = payload.request_id || `local-save:${++this.snapshotSeq}`;
+            const requestId = payload.request_id || `save:${++this.snapshotSeq}`;
             const documentId = payload.document_id || this.documentId;
+            if (Number(this.vfsStageDepth) > 0) {
+              this.pushEvent("document.viewer.save_requested", {
+                request_id: requestId,
+                document_id: documentId,
+                error: "document_write_in_progress"
+              });
+              return;
+            }
             if (!this.doc || !documentId) {
               this.pushEvent("document.viewer.save_requested", {
                 request_id: requestId,
@@ -7706,6 +8063,10 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           },
           async pushSnapshot() {
             if (this.mirror) return;
+            if (Number(this.vfsStageDepth) > 0) {
+              this.vfsDeferredSnapshot = true;
+              return;
+            }
             if (!this.doc || !this.documentId) return;
             let bytes;
             try {
@@ -7716,7 +8077,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             }
             const requestId = `${this.documentId}:snap:${++this.snapshotSeq}`;
             try {
-              const uploaded = await this.uploadLocalDocumentBytes(bytes);
+              const uploaded = await octet.upload(this, bytes);
               this.pushEvent("document.snapshot.checkpoint", {
                 document_id: this.documentId,
                 request_id: requestId,
@@ -7731,41 +8092,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 error: String(error && error.message || error)
               });
             }
-          },
-          async uploadLocalDocumentBytes(bytes) {
-            const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-            const headers = { "content-type": "application/octet-stream" };
-            const csrf = this.localCsrfToken();
-            if (csrf) headers["x-csrf-token"] = csrf;
-            const response = await fetch("/local/document-bytes", {
-              method: "POST",
-              credentials: "same-origin",
-              headers,
-              body: u8
-            });
-            if (!response.ok) throw new Error(await this.uploadErrorFromResponse(response));
-            const body = await response.json();
-            if (!body || !body.bytes_token) throw new Error("document bytes upload returned no token");
-            return { bytes_token: body.bytes_token, bytes: body.bytes || u8.length };
-          },
-          localCsrfToken() {
-            return document.querySelector("meta[name='csrf-token']")?.getAttribute("content") || "";
-          },
-          async uploadErrorFromResponse(response) {
-            try {
-              const body = await response.json();
-              return body?.error || `document bytes upload failed: HTTP ${response.status}`;
-            } catch (_) {
-              return `document bytes upload failed: HTTP ${response.status}`;
-            }
-          },
-          bytesToBase64(bytes) {
-            let binary = "";
-            const chunk = 32768;
-            for (let i = 0; i < bytes.length; i += chunk) {
-              binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-            }
-            return btoa(binary);
           }
         };
         WasmHwpEditor.define = (verb, handler) => OPS.define(verb, handler);

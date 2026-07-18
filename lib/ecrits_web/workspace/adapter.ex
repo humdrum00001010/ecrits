@@ -17,7 +17,7 @@ defmodule EcritsWeb.Workspace.Adapter do
   defp impl do
     Application.get_env(
       :ecrits,
-      :local_workspace_adapter,
+      :workspace_adapter,
       EcritsWeb.Workspace.Adapter.Substrate
     )
   end

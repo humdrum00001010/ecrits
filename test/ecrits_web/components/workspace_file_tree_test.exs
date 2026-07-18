@@ -9,7 +9,7 @@ defmodule EcritsWeb.Components.WorkspaceFileTreeTest do
   test "renders openable file rows as LiveView event controls" do
     html =
       render_component(&WorkspaceFileTree.tree/1,
-        id: "local-file-tree",
+        id: "file-tree",
         state:
           FileTree.new(%{
             nodes: [%{type: :file, name: "template.hwp", path: "template.hwp"}]
@@ -32,7 +32,7 @@ defmodule EcritsWeb.Components.WorkspaceFileTreeTest do
   test "renders unique Korean document rows with document icons" do
     html =
       render_component(&WorkspaceFileTree.tree/1,
-        id: "local-file-tree",
+        id: "file-tree",
         state:
           FileTree.new(%{
             nodes: [
@@ -48,7 +48,7 @@ defmodule EcritsWeb.Components.WorkspaceFileTreeTest do
     rows = fragment |> LazyHTML.query(~s([data-role="repo-browser-row"])) |> Enum.to_list()
 
     assert Enum.count(rows) == 3
-    assert fragment |> LazyHTML.query("#local-file-node-template-hwp") |> Enum.any?()
+    assert fragment |> LazyHTML.query("#file-node-template-hwp") |> Enum.any?()
 
     korean_rows =
       rows
@@ -66,7 +66,7 @@ defmodule EcritsWeb.Components.WorkspaceFileTreeTest do
 
     assert Enum.count(korean_rows) == 2
     assert Enum.uniq(ids) == ids
-    assert Enum.all?(ids, &String.starts_with?(&1, "local-file-node-hwp-"))
+    assert Enum.all?(ids, &String.starts_with?(&1, "file-node-hwp-"))
 
     for row <- korean_rows do
       assert row |> LazyHTML.query(".hero-document-check") |> Enum.any?()

@@ -110,8 +110,7 @@ defmodule EcritsWeb.Layouts do
           for="mobile-nav-drawer"
           aria-label={dgettext("layouts", "Close menu")}
           class="drawer-overlay"
-        >
-        </label>
+        ></label>
         <.mobile_nav current_scope={@current_scope} />
       </div>
     </div>
@@ -193,8 +192,7 @@ defmodule EcritsWeb.Layouts do
               @fuse_mode != true && "bg-[color-mix(in_oklab,var(--cs-ink)_24%,transparent)]"
             ]}
             aria-hidden="true"
-          >
-          </span>
+          ></span>
         </button>
       </div>
     </header>

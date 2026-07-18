@@ -11,7 +11,10 @@ defmodule Ecrits.DocumentElementPicker.Transition do
   def toggle(%DocumentElementPicker{} = picker), do: put_enabled(picker, not picker.enabled?)
 
   def put_enabled(%DocumentElementPicker{} = picker, enabled?) do
-    transition(picker, %{enabled?: enabled? == true, picks: picker.picks})
+    transition(picker, %{
+      enabled?: enabled? == true,
+      picks: Enum.map(picker.picks, &Map.from_struct/1)
+    })
   end
 
   def toggle_pick(%DocumentElementPicker{} = picker, attrs) when is_map(attrs) do

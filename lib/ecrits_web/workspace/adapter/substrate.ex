@@ -31,16 +31,16 @@ defmodule EcritsWeb.Workspace.Adapter.Substrate do
   end
 
   def list_tree(_workspace, _expanded_paths) do
-    {:error, {:local_substrate_unavailable, missing_api_message()}}
+    {:error, {:substrate_unavailable, missing_api_message()}}
   end
 
   defp ensure_exported(module, function, arity) do
     cond do
       not Code.ensure_loaded?(module) ->
-        {:error, {:local_substrate_unavailable, missing_api_message()}}
+        {:error, {:substrate_unavailable, missing_api_message()}}
 
       not function_exported?(module, function, arity) ->
-        {:error, {:local_substrate_unavailable, missing_api_message()}}
+        {:error, {:substrate_unavailable, missing_api_message()}}
 
       true ->
         :ok

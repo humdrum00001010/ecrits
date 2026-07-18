@@ -69,18 +69,21 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
   alias Ecrits.AcpAgent
   alias Ecrits.AcpAgent.Session, as: AgentSession
+  alias Ecrits.Agent.Dialog
+  alias Ecrits.Doc.BrowserBridge
   alias Ecrits.Document
+  alias Ecrits.Document.PreviewSnapshot
   alias Ecrits.WorkspaceHandoff
   alias EcritsWeb.WorkspaceDirectoryPickerStub
   alias EcritsWeb.WorkspaceAdapterStub
 
   setup %{conn: conn} do
-    previous = Application.get_env(:ecrits, :local_workspace_adapter)
-    previous_directory_picker = Application.get_env(:ecrits, :local_directory_picker)
-    previous_directory_picker_stub = Application.get_env(:ecrits, :local_directory_picker_stub)
-    previous_agent = Application.get_env(:ecrits, :local_agent)
-    previous_agent_ui = Application.get_env(:ecrits, :local_agent_ui)
-    previous_local_ehwp_opts = Application.get_env(:ecrits, :local_ehwp_opts)
+    previous = Application.get_env(:ecrits, :workspace_adapter)
+    previous_directory_picker = Application.get_env(:ecrits, :directory_picker)
+    previous_directory_picker_stub = Application.get_env(:ecrits, :directory_picker_stub)
+    previous_agent = Application.get_env(:ecrits, :agent)
+    previous_agent_ui = Application.get_env(:ecrits, :agent_ui)
+    previous_ehwp_opts = Application.get_env(:ecrits, :ehwp_opts)
 
     previous_workspace_adapter_stub_path =
       Application.get_env(:ecrits, :workspace_adapter_stub_path)
@@ -88,21 +91,21 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     workspace_path =
       Path.join(
         System.tmp_dir!(),
-        "ecrits-local-ui-#{System.unique_integer([:positive, :monotonic])}"
+        "ecrits-ui-#{System.unique_integer([:positive, :monotonic])}"
       )
 
     Application.put_env(:ecrits, :workspace_adapter_stub_path, workspace_path)
-    Application.put_env(:ecrits, :local_workspace_adapter, WorkspaceAdapterStub)
-    Application.put_env(:ecrits, :local_directory_picker, WorkspaceDirectoryPickerStub)
-    Application.put_env(:ecrits, :local_ehwp_opts, runtime: EcritsWeb.WorkspaceEhwpRuntimeStub)
+    Application.put_env(:ecrits, :workspace_adapter, WorkspaceAdapterStub)
+    Application.put_env(:ecrits, :directory_picker, WorkspaceDirectoryPickerStub)
+    Application.put_env(:ecrits, :ehwp_opts, runtime: EcritsWeb.WorkspaceEhwpRuntimeStub)
 
     Application.put_env(
       :ecrits,
-      :local_directory_picker_stub,
+      :directory_picker_stub,
       {:ok, WorkspaceDirectoryPickerStub.valid_path()}
     )
 
-    prepare_local_workspace_fixture()
+    prepare_workspace_fixture()
 
     # The foreground agent is now owned by the path-keyed `Ecrits.Workspace.Session`
     # (durable, shared across tests at the same `valid_path()`). Clear any Session
@@ -115,50 +118,50 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     :ok =
       WorkspaceHandoff.put_workspace_path(live_session_id, WorkspaceAdapterStub.valid_path())
 
-    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: live_session_id})
+    conn = Phoenix.ConnTest.init_test_session(conn, %{live_session_id: live_session_id})
 
     on_exit(fn ->
       stop_workspace_session(WorkspaceAdapterStub.valid_path())
-      cleanup_local_workspace_fixture()
+      cleanup_workspace_fixture()
 
       if previous do
-        Application.put_env(:ecrits, :local_workspace_adapter, previous)
+        Application.put_env(:ecrits, :workspace_adapter, previous)
       else
-        Application.delete_env(:ecrits, :local_workspace_adapter)
+        Application.delete_env(:ecrits, :workspace_adapter)
       end
 
       if previous_directory_picker do
-        Application.put_env(:ecrits, :local_directory_picker, previous_directory_picker)
+        Application.put_env(:ecrits, :directory_picker, previous_directory_picker)
       else
-        Application.delete_env(:ecrits, :local_directory_picker)
+        Application.delete_env(:ecrits, :directory_picker)
       end
 
       if previous_directory_picker_stub do
         Application.put_env(
           :ecrits,
-          :local_directory_picker_stub,
+          :directory_picker_stub,
           previous_directory_picker_stub
         )
       else
-        Application.delete_env(:ecrits, :local_directory_picker_stub)
+        Application.delete_env(:ecrits, :directory_picker_stub)
       end
 
       if previous_agent_ui do
-        Application.put_env(:ecrits, :local_agent_ui, previous_agent_ui)
+        Application.put_env(:ecrits, :agent_ui, previous_agent_ui)
       else
-        Application.delete_env(:ecrits, :local_agent_ui)
+        Application.delete_env(:ecrits, :agent_ui)
       end
 
       if previous_agent do
-        Application.put_env(:ecrits, :local_agent, previous_agent)
+        Application.put_env(:ecrits, :agent, previous_agent)
       else
-        Application.delete_env(:ecrits, :local_agent)
+        Application.delete_env(:ecrits, :agent)
       end
 
-      if previous_local_ehwp_opts do
-        Application.put_env(:ecrits, :local_ehwp_opts, previous_local_ehwp_opts)
+      if previous_ehwp_opts do
+        Application.put_env(:ecrits, :ehwp_opts, previous_ehwp_opts)
       else
-        Application.delete_env(:ecrits, :local_ehwp_opts)
+        Application.delete_env(:ecrits, :ehwp_opts)
       end
 
       if previous_workspace_adapter_stub_path do
@@ -172,42 +175,42 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       end
     end)
 
-    {:ok, conn: conn, local_live_session_id: live_session_id}
+    {:ok, conn: conn, live_session_id: live_session_id}
   end
 
   test "root renders unauthenticated mount screen", %{conn: conn} do
     {:ok, lv, html} = live(conn, ~p"/")
 
-    assert has_element?(lv, "#local-mount-root")
+    assert has_element?(lv, "#mount-root")
     assert has_element?(lv, "a[aria-label='Ecrits'][href='/']")
-    assert has_element?(lv, "#local-native-directory-picker[data-role='native-directory-picker']")
-    assert has_element?(lv, "#local-mount-picker-surface[data-role='mount-picker-surface']")
-    assert has_element?(lv, "#local-mount-control-row[data-role='mount-control-row']")
-    assert has_element?(lv, "#local-mount-control-row #local-mount-choose", "Open folder")
+    assert has_element?(lv, "#native-directory-picker[data-role='native-directory-picker']")
+    assert has_element?(lv, "#mount-picker-surface[data-role='mount-picker-surface']")
+    assert has_element?(lv, "#mount-control-row[data-role='mount-control-row']")
+    assert has_element?(lv, "#mount-control-row #mount-choose", "Open folder")
 
     assert has_element?(
              lv,
-             "#local-mount-control-row #local-path-form[phx-submit='workspace.path.open']"
+             "#mount-control-row #path-form[phx-submit='workspace.path.open']"
            )
 
     assert has_element?(
              lv,
-             "#local-mount-control-row #local-path-input[name='local_path[path]']"
+             "#mount-control-row #path-input[name='mount_path[path]']"
            )
 
     assert has_element?(
              lv,
-             "#local-mount-control-row #local-path-submit[type='submit'][aria-label='Open path'][title='Open this path']"
+             "#mount-control-row #path-submit[type='submit'][aria-label='Open path'][title='Open this path']"
            )
 
-    assert has_element?(lv, "#local-path-submit", "Open")
-    refute has_element?(lv, "#local-manual-path-picker")
-    refute has_element?(lv, "#local-provider-picker")
-    refute has_element?(lv, "#local-agent-provider-picker")
-    refute has_element?(lv, "#local-directory-picker[data-role='directory-picker']")
-    refute has_element?(lv, "#local-mount-submit")
-    refute has_element?(lv, "#local-mount-form")
-    refute has_element?(lv, "#local-mount-path")
+    assert has_element?(lv, "#path-submit", "Open")
+    refute has_element?(lv, "#manual-path-picker")
+    refute has_element?(lv, "#provider-picker")
+    refute has_element?(lv, "#agent-provider-picker")
+    refute has_element?(lv, "#directory-picker[data-role='directory-picker']")
+    refute has_element?(lv, "#mount-submit")
+    refute has_element?(lv, "#mount-form")
+    refute has_element?(lv, "#mount-path")
     refute html =~ "data-picker-path"
     refute html =~ "You must log in"
   end
@@ -242,36 +245,36 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "#local-agent-provider-setup[data-provider='claude'][data-status='login_required']"
+             "#agent-provider-setup[data-provider='claude'][data-status='login_required']"
            )
 
-    assert has_element?(lv, "#local-agent-provider-current-status", "Login required")
+    assert has_element?(lv, "#agent-provider-current-status", "Login required")
 
     assert has_element?(
              lv,
-             "#local-agent-provider-install-command",
+             "#agent-provider-install-command",
              "curl -fsSL https://claude.ai/install.sh | bash"
            )
 
-    assert has_element?(lv, "#local-agent-provider-login-command", "claude auth login")
-    assert has_element?(lv, "#local-agent-provider-check-command", "claude auth status")
+    assert has_element?(lv, "#agent-provider-login-command", "claude auth login")
+    assert has_element?(lv, "#agent-provider-check-command", "claude auth status")
 
-    assert has_element?(lv, "a#local-agent-provider-return[href]", "Workspace")
+    assert has_element?(lv, "a#agent-provider-return[href]", "Workspace")
   end
 
   test "invalid mount path renders inline error", %{conn: conn} do
-    Application.put_env(:ecrits, :local_directory_picker_stub, {:ok, "/not-here"})
+    Application.put_env(:ecrits, :directory_picker_stub, {:ok, "/not-here"})
 
     {:ok, lv, _html} = live(conn, ~p"/")
 
     lv
-    |> element("#local-mount-choose")
+    |> element("#mount-choose")
     |> render_click()
 
     render_async(lv)
 
-    assert has_element?(lv, "#local-mount-error", "Workspace path does not exist.")
-    assert has_element?(lv, "#local-mount-picker-surface")
+    assert has_element?(lv, "#mount-error", "Workspace path does not exist.")
+    assert has_element?(lv, "#mount-picker-surface")
   end
 
   test "workspace path query is ignored in favor of the session handoff", %{conn: conn} do
@@ -280,12 +283,12 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     {:ok, lv, _html} = live(conn, ~p"/workspace?#{[path: file_path]}")
 
-    assert has_element?(lv, "#local-workspace-grid")
-    refute has_element?(lv, "#local-mount-error")
+    assert has_element?(lv, "#workspace-grid")
+    refute has_element?(lv, "#mount-error")
   end
 
   test "native picker unavailable renders inline error", %{conn: conn} do
-    Application.put_env(:ecrits, :local_directory_picker_stub, {
+    Application.put_env(:ecrits, :directory_picker_stub, {
       :error,
       {:native_picker_unavailable, "Native folder picker is unavailable on this OS."}
     })
@@ -293,20 +296,20 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = live(conn, ~p"/")
 
     lv
-    |> element("#local-mount-choose")
+    |> element("#mount-choose")
     |> render_click()
 
     render_async(lv)
 
     assert has_element?(
              lv,
-             "#local-mount-error",
+             "#mount-error",
              "Native folder picker is unavailable on this OS."
            )
   end
 
   test "native picker runs asynchronously while the mount screen stays responsive", %{conn: conn} do
-    Application.put_env(:ecrits, :local_directory_picker_stub, {
+    Application.put_env(:ecrits, :directory_picker_stub, {
       :await,
       self(),
       {:error, :cancelled}
@@ -315,17 +318,17 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = live(conn, ~p"/")
 
     lv
-    |> element("#local-mount-choose")
+    |> element("#mount-choose")
     |> render_click()
 
     assert_receive {:directory_picker_started, picker_pid}
-    assert has_element?(lv, "#local-mount-choose[disabled][data-busy='true']", "Opening picker")
+    assert has_element?(lv, "#mount-choose[disabled][data-busy='true']", "Opening picker")
 
     send(picker_pid, :release_directory_picker)
     render_async(lv)
 
-    assert has_element?(lv, "#local-mount-error", "Folder selection canceled.")
-    assert has_element?(lv, "#local-mount-choose[data-busy='false']", "Open folder")
+    assert has_element?(lv, "#mount-error", "Folder selection canceled.")
+    assert has_element?(lv, "#mount-choose[data-busy='false']", "Open folder")
   end
 
   test "manual path form submits through LiveView without URL state", %{conn: conn} do
@@ -333,14 +336,14 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "#local-path-form[phx-submit='workspace.path.open'] #local-path-input[name='local_path[path]']"
+             "#path-form[phx-submit='workspace.path.open'] #path-input[name='mount_path[path]']"
            )
   end
 
   test "valid mount path navigates to workspace shell", %{conn: conn} do
     put_provider_integrations!(ready_provider_integrations())
 
-    Application.put_env(:ecrits, :local_directory_picker_stub, {
+    Application.put_env(:ecrits, :directory_picker_stub, {
       :await,
       self(),
       {:ok, WorkspaceDirectoryPickerStub.valid_path()}
@@ -349,296 +352,298 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = live(conn, ~p"/")
 
     lv
-    |> element("#local-mount-choose")
+    |> element("#mount-choose")
     |> render_click()
 
     assert_receive {:directory_picker_started, picker_pid}
-    assert has_element?(lv, "#local-mount-choose[disabled][data-busy='true']", "Opening picker")
+    assert has_element?(lv, "#mount-choose[disabled][data-busy='true']", "Opening picker")
     send(picker_pid, :release_directory_picker)
 
     assert_redirect(lv, ~p"/workspace")
 
     {:ok, workspace_lv, _html} = live(conn, ~p"/workspace")
+    render_hook(workspace_lv, "workspace.chat_rail.tab_ready", %{"id" => "mount-shell-tab"})
+    sync_liveview(workspace_lv)
 
-    assert has_element?(workspace_lv, "#local-workspace-root")
-    assert has_element?(workspace_lv, "div#local-workspace-root")
-    refute has_element?(workspace_lv, "main#local-workspace-root")
+    assert has_element?(workspace_lv, "#workspace-root")
+    assert has_element?(workspace_lv, "div#workspace-root")
+    refute has_element?(workspace_lv, "main#workspace-root")
     assert has_element?(workspace_lv, "a[aria-label='Ecrits'][href='/workspace']")
-    assert has_element?(workspace_lv, "#local-workspace-root[class*='overflow-hidden']")
+    assert has_element?(workspace_lv, "#workspace-root[class*='overflow-hidden']")
 
-    refute has_element?(workspace_lv, "#local-workspace-grid[phx-hook]")
+    refute has_element?(workspace_lv, "#workspace-grid[phx-hook]")
 
     assert has_element?(
              workspace_lv,
-             "#local-file-tree-resizer[phx-hook='EcritsWeb.Workspace.WorkspaceLive.WorkspacePanelResize'][data-panel='file_tree']"
+             "#file-tree-resizer[phx-hook='EcritsWeb.Workspace.WorkspaceLive.WorkspacePanelResize'][data-panel='file_tree']"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-rail-resizer[phx-hook='EcritsWeb.Workspace.WorkspaceLive.WorkspacePanelResize'][data-panel='chat_rail']"
+             "#agent-rail-resizer[phx-hook='EcritsWeb.Workspace.WorkspaceLive.WorkspacePanelResize'][data-panel='chat_rail']"
            )
 
-    assert has_element?(workspace_lv, "#local-workspace-grid[data-office-asset-version]")
-    assert has_element?(workspace_lv, "#local-workspace-grid[class*='h-full']")
-    assert has_element?(workspace_lv, "#local-workspace-grid[class*='isolate']")
-    assert has_element?(workspace_lv, "#local-workspace-grid[style*='--workspace-editor-z']")
+    assert has_element?(workspace_lv, "#workspace-grid[data-office-asset-version]")
+    assert has_element?(workspace_lv, "#workspace-grid[class*='h-full']")
+    assert has_element?(workspace_lv, "#workspace-grid[class*='isolate']")
+    assert has_element?(workspace_lv, "#workspace-grid[style*='--workspace-editor-z']")
 
     assert has_element?(
              workspace_lv,
-             "#local-workspace-grid[style*='--workspace-agent-rail-z']"
+             "#workspace-grid[style*='--workspace-agent-rail-z']"
            )
 
-    assert has_element?(workspace_lv, "#local-workspace-grid[class*='overflow-hidden']")
-    refute has_element?(workspace_lv, "#local-workspace-grid[class*='max-lg:']")
+    assert has_element?(workspace_lv, "#workspace-grid[class*='overflow-hidden']")
+    refute has_element?(workspace_lv, "#workspace-grid[class*='max-lg:']")
 
     assert has_element?(
              workspace_lv,
-             "#local-workspace-grid[class*='--workspace-chat-rail-width']"
-           )
-
-    assert has_element?(
-             workspace_lv,
-             "#local-workspace-grid[class*='--workspace-chat-rail-live-width']"
+             "#workspace-grid[class*='--workspace-chat-rail-width']"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-workspace-grid[class*='--workspace-file-tree-width']"
+             "#workspace-grid[class*='--workspace-chat-rail-live-width']"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-file-tree-panel[data-component='repo-browser'][data-local-file-tree-panel='true'][data-collapsed='false'][class*='overflow-hidden']"
+             "#workspace-grid[class*='--workspace-file-tree-width']"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-editor-shell[data-local-editor-shell='true'][class*='z-[var(--workspace-editor-z)]']"
-           )
-
-    assert has_element?(workspace_lv, "#local-file-tree-panel [data-role='repo-browser-header']")
-    assert has_element?(workspace_lv, ~s(#local-file-tree-panel[aria-label="Workspace files"]))
-
-    assert has_element?(
-             workspace_lv,
-             "#local-file-tree-panel > #local-file-tree-content:first-child > div:first-child[data-role='repo-browser-header'][data-action='collapse-file-tree']"
-           )
-
-    assert has_element?(workspace_lv, "#local-file-tree-content[data-role='file-tree-content']")
-
-    assert has_element?(
-             workspace_lv,
-             ~s(button#local-file-node-template-hwpx[data-role="repo-browser-row"][phx-click="workspace.document.open"][phx-value-path="template.hwpx"])
-           )
-
-    refute has_element?(workspace_lv, ~s(button#local-file-node-template-hwpx[data-phx-link]))
-    refute has_element?(workspace_lv, ~s(button#local-file-node-template-hwpx[href]))
-
-    assert has_element?(
-             workspace_lv,
-             ~s(#local-file-tree-resizer[data-role="file-tree-resizer"][aria-label="Resize file tree"][class*="block"])
+             "#file-tree-panel[data-component='repo-browser'][data-file-tree-panel='true'][data-collapsed='false'][class*='overflow-hidden']"
            )
 
     assert has_element?(
              workspace_lv,
-             ~s(#local-file-tree-hide[data-role="file-tree-hide"][aria-label="Hide file tree"][aria-controls="local-file-tree-content"][aria-expanded="true"])
+             "#editor-shell[data-editor-shell='true'][class*='z-[var(--workspace-editor-z)]']"
+           )
+
+    assert has_element?(workspace_lv, "#file-tree-panel [data-role='repo-browser-header']")
+    assert has_element?(workspace_lv, ~s(#file-tree-panel[aria-label="Workspace files"]))
+
+    assert has_element?(
+             workspace_lv,
+             "#file-tree-panel > #file-tree-content:first-child > div:first-child[data-role='repo-browser-header'][data-action='collapse-file-tree']"
+           )
+
+    assert has_element?(workspace_lv, "#file-tree-content[data-role='file-tree-content']")
+
+    assert has_element?(
+             workspace_lv,
+             ~s(button#file-node-template-hwpx[data-role="repo-browser-row"][phx-click="workspace.document.open"][phx-value-path="template.hwpx"])
+           )
+
+    refute has_element?(workspace_lv, ~s(button#file-node-template-hwpx[data-phx-link]))
+    refute has_element?(workspace_lv, ~s(button#file-node-template-hwpx[href]))
+
+    assert has_element?(
+             workspace_lv,
+             ~s(#file-tree-resizer[data-role="file-tree-resizer"][aria-label="Resize file tree"][class*="block"])
            )
 
     assert has_element?(
              workspace_lv,
-             ~s(#local-file-tree-restore[data-role="file-tree-restore"][class*="hidden"])
+             ~s(#file-tree-hide[data-role="file-tree-hide"][aria-label="Hide file tree"][aria-controls="file-tree-content"][aria-expanded="true"])
            )
 
     assert has_element?(
              workspace_lv,
-             ~s(#local-file-tree-show[data-role="file-tree-show"][aria-label="Show file tree"][aria-controls="local-file-tree-content"][aria-expanded="true"])
-           )
-
-    refute has_element?(workspace_lv, "#local-file-tree-breadcrumb")
-    assert has_element?(workspace_lv, "#local-agent-sidebar[data-default-visible='true']")
-    assert has_element?(workspace_lv, "#local-agent-sidebar[class*='relative']")
-
-    assert has_element?(
-             workspace_lv,
-             "#local-agent-sidebar[class*='z-[var(--workspace-agent-rail-z)]']"
-           )
-
-    assert has_element?(workspace_lv, "#local-agent-sidebar[class*='overflow-visible']")
-
-    assert has_element?(
-             workspace_lv,
-             "#local-agent-rail-resizer[data-role='chat-rail-resizer'][aria-label='Resize chat rail'][class*='block']"
-           )
-
-    assert has_element?(workspace_lv, "#local-agent-sidebar[data-agent-status='idle']")
-
-    assert has_element?(
-             workspace_lv,
-             "#local-agent-sidebar [data-role='chat-rail-body'][class*='overflow-visible']"
-           )
-
-    assert has_element?(workspace_lv, "#local-agent-thread[class*='overflow-y-auto']")
-
-    assert has_element?(
-             workspace_lv,
-             "form#local-agent-provider-options[data-role='provider-options']"
+             ~s(#file-tree-restore[data-role="file-tree-restore"][class*="hidden"])
            )
 
     assert has_element?(
              workspace_lv,
-             "form#local-agent-provider-options[data-selected-provider='codex'][data-selected-model='gpt-5.5'][data-selected-reasoning='medium'][data-selected-access='read-only'] details#local-agent-model-select[data-role='agent-model-select'][data-selected-provider='codex'][data-selected-model='gpt-5.5']",
+             ~s(#file-tree-show[data-role="file-tree-show"][aria-label="Show file tree"][aria-controls="file-tree-content"][aria-expanded="true"])
+           )
+
+    refute has_element?(workspace_lv, "#file-tree-breadcrumb")
+    assert has_element?(workspace_lv, "#agent-sidebar[data-default-visible='true']")
+    assert has_element?(workspace_lv, "#agent-sidebar[class*='relative']")
+
+    assert has_element?(
+             workspace_lv,
+             "#agent-sidebar[class*='z-[var(--workspace-agent-rail-z)]']"
+           )
+
+    assert has_element?(workspace_lv, "#agent-sidebar[class*='overflow-visible']")
+
+    assert has_element?(
+             workspace_lv,
+             "#agent-rail-resizer[data-role='chat-rail-resizer'][aria-label='Resize chat rail'][class*='block']"
+           )
+
+    assert has_element?(workspace_lv, "#agent-sidebar[data-agent-status='idle']")
+
+    assert has_element?(
+             workspace_lv,
+             "#agent-sidebar [data-role='chat-rail-body'][class*='overflow-visible']"
+           )
+
+    assert has_element?(workspace_lv, "#agent-thread[class*='overflow-y-auto']")
+
+    assert has_element?(
+             workspace_lv,
+             "form#agent-provider-options[data-role='provider-options']"
+           )
+
+    assert has_element?(
+             workspace_lv,
+             "form#agent-provider-options[data-selected-provider='codex'][data-selected-model='gpt-5.5'][data-selected-reasoning='medium'][data-selected-access='read-only'] details#agent-model-select[data-role='agent-model-select'][data-selected-provider='codex'][data-selected-model='gpt-5.5']",
              "GPT-5.5"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-model-select[class*='max-w-32'] > summary[class*='max-w-32']"
+             "#agent-model-select[class*='max-w-32'] > summary[class*='max-w-32']"
            )
 
-    refute has_element?(workspace_lv, "#local-agent-model-select > summary[class*='w-full']")
+    refute has_element?(workspace_lv, "#agent-model-select > summary[class*='w-full']")
 
-    refute has_element?(workspace_lv, "#local-agent-model-select option")
-    refute has_element?(workspace_lv, "#local-agent-provider-options option[value='fake']")
-    refute has_element?(workspace_lv, "#local-agent-provider-options option[value='external']")
+    refute has_element?(workspace_lv, "#agent-model-select option")
+    refute has_element?(workspace_lv, "#agent-provider-options option[value='fake']")
+    refute has_element?(workspace_lv, "#agent-provider-options option[value='external']")
 
     assert has_element?(
              workspace_lv,
-             "form#local-agent-provider-options details#local-agent-reasoning-select[data-role='provider-reasoning-select'][data-selected-reasoning='medium'] button#local-agent-inline-reasoning-medium[data-selected='true']",
+             "form#agent-provider-options details#agent-reasoning-select[data-role='provider-reasoning-select'][data-selected-reasoning='medium'] button#agent-inline-reasoning-medium[data-selected='true']",
              "Medium - balanced reasoning/tokens"
            )
 
     assert has_element?(
              workspace_lv,
-             "form#local-agent-provider-options details#local-agent-reasoning-select [class*='right-0']"
+             "form#agent-provider-options details#agent-reasoning-select [class*='right-0']"
            )
 
     assert has_element?(
              workspace_lv,
-             "form#local-agent-provider-options details#local-agent-access-select[data-role='agent-access-control'][data-selected-access='read-only'] button#local-agent-inline-access-read-only[data-selected='true']",
+             "form#agent-provider-options details#agent-access-select[data-role='agent-access-control'][data-selected-access='read-only'] button#agent-inline-access-read-only[data-selected='true']",
              "Read only"
            )
 
-    refute has_element?(workspace_lv, "select#local-agent-reasoning-select")
-    refute has_element?(workspace_lv, "select#local-agent-access-select")
+    refute has_element?(workspace_lv, "select#agent-reasoning-select")
+    refute has_element?(workspace_lv, "select#agent-access-select")
 
-    refute has_element?(workspace_lv, "#local-agent-provider-picker")
-    refute has_element?(workspace_lv, "#local-agent-provider-integrations")
-    refute has_element?(workspace_lv, "#local-agent-modal-reasoning-select")
-    refute has_element?(workspace_lv, "#local-agent-modal-access-control")
+    refute has_element?(workspace_lv, "#agent-provider-picker")
+    refute has_element?(workspace_lv, "#agent-provider-integrations")
+    refute has_element?(workspace_lv, "#agent-modal-reasoning-select")
+    refute has_element?(workspace_lv, "#agent-modal-access-control")
 
-    refute has_element?(workspace_lv, "#local-agent-model-modal")
+    refute has_element?(workspace_lv, "#agent-model-modal")
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-model-select button#local-agent-inline-model-gpt-5\\.5[data-role='agent-model-option'][data-provider='codex'][data-selected='true']",
+             "#agent-model-select button#agent-inline-model-gpt-5\\.5[data-role='agent-model-option'][data-provider='codex'][data-selected='true']",
              "GPT-5.5"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-model-select [data-role='agent-model-menu'][class*='left-0'][class*='overflow-y-auto']"
+             "#agent-model-select [data-role='agent-model-menu'][class*='left-0'][class*='overflow-y-auto']"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-model-select [data-role='agent-model-option-label'][class*='whitespace-normal']",
+             "#agent-model-select [data-role='agent-model-option-label'][class*='whitespace-normal']",
              "GPT-5.3 Codex Spark"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-model-select button#local-agent-inline-model-gpt-5\\.3-codex-spark[data-role='agent-model-option'][data-provider='codex']",
+             "#agent-model-select button#agent-inline-model-gpt-5\\.3-codex-spark[data-role='agent-model-option'][data-provider='codex']",
              "GPT-5.3 Codex Spark"
            )
 
     refute has_element?(
              workspace_lv,
-             "#local-agent-model-select button#local-agent-inline-model-claude-opus-4-7"
+             "#agent-model-select button#agent-inline-model-claude-opus-4-7"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-model-select button#local-agent-go-to-provider[phx-click='agent.model_dialog.open'][data-role='agent-provider-config-open']",
+             "#agent-model-select button#agent-go-to-provider[phx-click='agent.model_dialog.open'][data-role='agent-provider-config-open']",
              "Go to provider"
            )
 
     workspace_lv
-    |> element("#local-agent-go-to-provider")
+    |> element("#agent-go-to-provider")
     |> render_click()
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-model-modal[role='dialog'][aria-modal='true'] #local-agent-model-detail-codex[data-provider='codex'][data-selected='true']",
+             "#agent-model-modal[role='dialog'][aria-modal='true'] #agent-model-detail-codex[data-provider='codex'][data-selected='true']",
              "Codex"
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-model-modal #local-agent-model-detail-claude[data-provider='claude']",
+             "#agent-model-modal #agent-model-detail-claude[data-provider='claude']",
              "Claude"
            )
 
     assert has_element?(
              workspace_lv,
-             ~s(#local-agent-model-modal #local-agent-model-detail-claude img[src="/images/icons/claude-favicon.ico"])
+             ~s(#agent-model-modal #agent-model-detail-claude img[src="/images/icons/claude-favicon.ico"])
            )
 
     assert has_element?(
              workspace_lv,
-             "#local-agent-model-modal button#local-agent-model-detail-claude[phx-click='agent.provider.select'][phx-value-provider='claude']"
+             "#agent-model-modal button#agent-model-detail-claude[phx-click='agent.provider.select'][phx-value-provider='claude']"
            )
 
-    refute has_element?(workspace_lv, "#local-agent-model-modal [data-provider='fake']")
-    refute has_element?(workspace_lv, "#local-agent-model-modal #local-agent-modal-options-form")
-    refute has_element?(workspace_lv, "#local-agent-model-modal #local-agent-modal-model-select")
+    refute has_element?(workspace_lv, "#agent-model-modal [data-provider='fake']")
+    refute has_element?(workspace_lv, "#agent-model-modal #agent-modal-options-form")
+    refute has_element?(workspace_lv, "#agent-model-modal #agent-modal-model-select")
 
     refute has_element?(
              workspace_lv,
-             "#local-agent-model-modal #local-agent-modal-reasoning-select"
-           )
-
-    refute has_element?(
-             workspace_lv,
-             "#local-agent-model-modal #local-agent-modal-access-control"
+             "#agent-model-modal #agent-modal-reasoning-select"
            )
 
     refute has_element?(
              workspace_lv,
-             "#local-agent-model-modal button[data-role='provider-reasoning-option']"
+             "#agent-model-modal #agent-modal-access-control"
            )
 
     refute has_element?(
              workspace_lv,
-             "#local-agent-model-modal button[data-role='agent-access-option']"
+             "#agent-model-modal button[data-role='provider-reasoning-option']"
            )
 
-    refute has_element?(workspace_lv, "#local-agent-model-modal button[data-provider='fake']")
-    refute has_element?(workspace_lv, "#local-agent-model-modal button[data-provider='external']")
+    refute has_element?(
+             workspace_lv,
+             "#agent-model-modal button[data-role='agent-access-option']"
+           )
+
+    refute has_element?(workspace_lv, "#agent-model-modal button[data-provider='fake']")
+    refute has_element?(workspace_lv, "#agent-model-modal button[data-provider='external']")
 
     workspace_lv
-    |> element("#local-agent-model-modal-close")
+    |> element("#agent-model-modal-close")
     |> render_click()
 
-    refute has_element?(workspace_lv, "#local-agent-model-modal")
+    refute has_element?(workspace_lv, "#agent-model-modal")
 
-    assert has_element?(workspace_lv, "form#local-agent-form[data-role='chat-form']")
-
-    assert has_element?(
-             workspace_lv,
-             "form#local-agent-form #local-agent-input[name='agent[message]']"
-           )
-
-    refute has_element?(workspace_lv, "form#local-agent-form #local-agent-model-select")
-    refute has_element?(workspace_lv, "form#local-agent-form #local-agent-reasoning-select")
-    refute has_element?(workspace_lv, "form#local-agent-form #local-agent-access-select")
-    assert has_element?(workspace_lv, "#local-agent-upload[data-role='chat-upload']")
+    assert has_element?(workspace_lv, "form#agent-form[data-role='chat-form']")
 
     assert has_element?(
              workspace_lv,
-             ~s(#local-agent-provider-options input[type="file"][name="local_document_import"][data-role="local-document-upload-file-input"])
+             "form#agent-form #agent-input[name='agent[message]']"
            )
 
-    assert has_element?(workspace_lv, "#local-agent-submit", "Send")
+    refute has_element?(workspace_lv, "form#agent-form #agent-model-select")
+    refute has_element?(workspace_lv, "form#agent-form #agent-reasoning-select")
+    refute has_element?(workspace_lv, "form#agent-form #agent-access-select")
+    assert has_element?(workspace_lv, "#agent-upload[data-role='chat-upload']")
+
+    assert has_element?(
+             workspace_lv,
+             ~s(#agent-provider-options input[type="file"][name="document_import"][data-role="document-import-file-input"])
+           )
+
+    assert has_element?(workspace_lv, "#agent-submit", "Send")
   end
 
   test "panel resize persists only the final browser measurement", %{conn: conn} do
@@ -654,10 +659,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "#local-workspace-grid[style*='--workspace-chat-rail-width: 440px']"
+             "#workspace-grid[style*='--workspace-chat-rail-width: 440px']"
            )
 
-    assert has_element?(lv, "#local-agent-rail-resizer[data-dragging='false']")
+    assert has_element?(lv, "#agent-rail-resizer[data-dragging='false']")
   end
 
   test "workspace chat rail reasoning option is selectable", %{conn: conn} do
@@ -665,30 +670,30 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "#local-agent-provider-options #local-agent-reasoning-select button#local-agent-inline-reasoning-minimal",
+             "#agent-provider-options #agent-reasoning-select button#agent-inline-reasoning-minimal",
              "Minimal - fastest, least tokens"
            )
 
     assert has_element?(
              lv,
-             "#local-agent-provider-options #local-agent-reasoning-select button#local-agent-inline-reasoning-low",
+             "#agent-provider-options #agent-reasoning-select button#agent-inline-reasoning-low",
              "Low - light reasoning, lower tokens"
            )
 
     assert has_element?(
              lv,
-             "#local-agent-provider-options #local-agent-reasoning-select button#local-agent-inline-reasoning-medium[data-selected='true']",
+             "#agent-provider-options #agent-reasoning-select button#agent-inline-reasoning-medium[data-selected='true']",
              "Medium - balanced reasoning/tokens"
            )
 
     assert has_element?(
              lv,
-             "#local-agent-provider-options #local-agent-reasoning-select button#local-agent-inline-reasoning-xhigh",
+             "#agent-provider-options #agent-reasoning-select button#agent-inline-reasoning-xhigh",
              "XHigh - maximum reasoning/tokens"
            )
 
     lv
-    |> element("#local-agent-inline-reasoning-high")
+    |> element("#agent-inline-reasoning-high")
     |> render_click()
 
     # #42: reasoning persists in the durable session, NOT the URL — the click
@@ -696,7 +701,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     # reflected in the re-rendered control below).
     assert has_element?(
              lv,
-             "#local-agent-provider-options #local-agent-reasoning-select[data-selected-reasoning='high'] button#local-agent-inline-reasoning-high[data-selected='true']",
+             "#agent-provider-options #agent-reasoning-select[data-selected-reasoning='high'] button#agent-inline-reasoning-high[data-selected='true']",
              "High - deeper reasoning, more tokens"
            )
   end
@@ -707,37 +712,37 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = open_workspace(conn)
 
     lv
-    |> element("#local-agent-go-to-provider")
+    |> element("#agent-go-to-provider")
     |> render_click()
 
     lv
-    |> element("#local-agent-model-detail-claude")
+    |> element("#agent-model-detail-claude")
     |> render_click()
 
-    refute has_element?(lv, "#local-agent-model-modal")
+    refute has_element?(lv, "#agent-model-modal")
 
     assert has_element?(
              lv,
-             "#local-agent-provider-options[data-selected-provider='claude'][data-selected-model='default'] #local-agent-model-select[data-selected-provider='claude'][data-selected-model='default']",
+             "#agent-provider-options[data-selected-provider='claude'][data-selected-model='default'] #agent-model-select[data-selected-provider='claude'][data-selected-model='default']",
              "Default"
            )
 
     refute has_element?(
              lv,
-             "#local-agent-model-select button[data-role='agent-model-option'][data-provider='codex']"
+             "#agent-model-select button[data-role='agent-model-option'][data-provider='codex']"
            )
 
-    refute has_element?(lv, "#local-agent-model-select option")
+    refute has_element?(lv, "#agent-model-select option")
 
     lv
-    |> element("#local-agent-go-to-provider")
+    |> element("#agent-go-to-provider")
     |> render_click()
 
     lv
-    |> element("#local-agent-model-detail-claude")
+    |> element("#agent-model-detail-claude")
     |> render_click()
 
-    refute has_element?(lv, "#local-agent-model-modal")
+    refute has_element?(lv, "#agent-model-modal")
   end
 
   test "workspace provider detail opens setup tab when provider is not configured", %{conn: conn} do
@@ -759,23 +764,23 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = open_workspace(conn)
 
     lv
-    |> element("#local-agent-go-to-provider")
+    |> element("#agent-go-to-provider")
     |> render_click()
 
     assert has_element?(
              lv,
-             "#local-agent-model-modal button#local-agent-model-detail-codex[data-role='agent-provider-select'][data-status='ready'][phx-click='agent.provider.select']"
+             "#agent-model-modal button#agent-model-detail-codex[data-role='agent-provider-select'][data-status='ready'][phx-click='agent.provider.select']"
            )
 
     assert has_element?(
              lv,
-             ~s(#local-agent-model-modal a#local-agent-model-detail-claude[data-role="agent-provider-setup"][data-status="missing"][target="_blank"][href*="/local/agent-providers/claude/setup"]),
+             ~s(#agent-model-modal a#agent-model-detail-claude[data-role="agent-provider-setup"][data-status="missing"][target="_blank"][href*="/local/agent-providers/claude/setup"]),
              "install"
            )
 
     refute has_element?(
              lv,
-             "#local-agent-model-modal button#local-agent-model-detail-claude[phx-click='agent.provider.select']"
+             "#agent-model-modal button#agent-model-detail-claude[phx-click='agent.provider.select']"
            )
   end
 
@@ -786,51 +791,51 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "form#local-agent-provider-options details#local-agent-model-select[data-role='agent-model-select']"
+             "form#agent-provider-options details#agent-model-select[data-role='agent-model-select']"
            )
 
     assert has_element?(
              lv,
-             "form#local-agent-provider-options details#local-agent-reasoning-select[data-role='provider-reasoning-select']"
+             "form#agent-provider-options details#agent-reasoning-select[data-role='provider-reasoning-select']"
            )
 
     assert has_element?(
              lv,
-             "form#local-agent-provider-options details#local-agent-access-select[data-role='agent-access-control']"
+             "form#agent-provider-options details#agent-access-select[data-role='agent-access-control']"
            )
 
-    refute has_element?(lv, "select#local-agent-reasoning-select")
-    refute has_element?(lv, "select#local-agent-access-select")
+    refute has_element?(lv, "select#agent-reasoning-select")
+    refute has_element?(lv, "select#agent-access-select")
 
-    refute has_element?(lv, "form#local-agent-provider-options option[value='fake']")
-    refute has_element?(lv, "form#local-agent-provider-options option[value='external']")
+    refute has_element?(lv, "form#agent-provider-options option[value='fake']")
+    refute has_element?(lv, "form#agent-provider-options option[value='external']")
 
     lv
-    |> element(~s([id="local-agent-inline-model-gpt-5.3-codex-spark"]))
+    |> element(~s([id="agent-inline-model-gpt-5.3-codex-spark"]))
     |> render_click()
 
     assert has_element?(
              lv,
-             "#local-agent-provider-options[data-selected-provider='codex'][data-selected-model='gpt-5.3-codex-spark']"
+             "#agent-provider-options[data-selected-provider='codex'][data-selected-model='gpt-5.3-codex-spark']"
            )
 
     # reasoning + access select into the durable SESSION (no URL patch); the
     # submit below proves they were forwarded to the adapter (echoed back).
     lv
-    |> element("#local-agent-inline-reasoning-xhigh")
+    |> element("#agent-inline-reasoning-xhigh")
     |> render_click()
 
     lv
-    |> element("#local-agent-inline-access-full-workspace")
+    |> element("#agent-inline-access-full-workspace")
     |> render_click()
 
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "selected rail opts"})
+    |> form("#agent-form", agent: %{message: "selected rail opts"})
     |> render_submit()
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :turn_completed,
                       session_id: ^session_id,
@@ -850,7 +855,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"]),
+             ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="sent"]),
              "model=gpt-5.3-codex-spark"
            )
   end
@@ -860,51 +865,51 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     {:ok, lv, _html} = live(conn, ~p"/workspace?#{[path: root, provider: "fake"]}")
 
-    assert has_element?(lv, "#local-agent-provider-options[data-selected-provider='codex']")
-    assert has_element?(lv, "#local-workspace-grid")
+    assert has_element?(lv, "#agent-provider-options[data-selected-provider='codex']")
+    assert has_element?(lv, "#workspace-grid")
   end
 
   test "file tree supports expansion, row-open, and format affordances", %{conn: conn} do
     {:ok, lv, _html} = open_workspace(conn)
 
-    assert has_element?(lv, "#local-file-tree")
-    assert has_element?(lv, ~s(#local-file-tree ul[role="tree"]))
-    refute has_element?(lv, "#local-file-node-ecrits")
-    assert has_element?(lv, "#local-file-node-Assignment-2[aria-expanded='false']")
-    assert has_element?(lv, "#local-file-node-drafts[aria-expanded='false']")
+    assert has_element?(lv, "#file-tree")
+    assert has_element?(lv, ~s(#file-tree ul[role="tree"]))
+    refute has_element?(lv, "#file-node-ecrits")
+    assert has_element?(lv, "#file-node-Assignment-2[aria-expanded='false']")
+    assert has_element?(lv, "#file-node-drafts[aria-expanded='false']")
 
     assert has_element?(
              lv,
-             ~s(button#local-file-node-template-hwpx[data-role="repo-browser-row"][phx-click="workspace.document.open"][phx-value-path="template.hwpx"])
+             ~s(button#file-node-template-hwpx[data-role="repo-browser-row"][phx-click="workspace.document.open"][phx-value-path="template.hwpx"])
            )
 
-    refute has_element?(lv, "#local-file-node-template-hwpx[data-bytes-url]")
-    refute has_element?(lv, "#local-file-node-template-hwpx[data-node-path]")
+    refute has_element?(lv, "#file-node-template-hwpx[data-bytes-url]")
+    refute has_element?(lv, "#file-node-template-hwpx[data-node-path]")
 
-    refute has_element?(lv, "#local-file-node-template-hwpx[href]")
-    refute has_element?(lv, ~s(#local-file-node-template-hwpx[data-phx-link]))
+    refute has_element?(lv, "#file-node-template-hwpx[href]")
+    refute has_element?(lv, ~s(#file-node-template-hwpx[data-phx-link]))
     refute has_element?(lv, ~s([id^="open-file-"]))
-    refute has_element?(lv, "#local-file-tree [data-role='file-extension']")
+    refute has_element?(lv, "#file-tree [data-role='file-extension']")
     refute has_element?(lv, "#disabled-file-Antigravity-dmg")
-    refute has_element?(lv, "#local-file-node-Antigravity-dmg")
-    refute has_element?(lv, "#local-file-node-drafts-service-hwpx")
+    refute has_element?(lv, "#file-node-Antigravity-dmg")
+    refute has_element?(lv, "#file-node-drafts-service-hwpx")
 
     lv
     |> element("#toggle-dir-Assignment-2")
     |> render_click()
 
-    assert has_element?(lv, "#local-file-node-Assignment-2[aria-expanded='true']")
-    refute has_element?(lv, "#local-file-node-Assignment-2 + ul[role='group']")
+    assert has_element?(lv, "#file-node-Assignment-2[aria-expanded='true']")
+    refute has_element?(lv, "#file-node-Assignment-2 + ul[role='group']")
 
     lv
     |> element("#toggle-dir-drafts")
     |> render_click()
 
-    assert has_element?(lv, "#local-file-node-drafts[aria-expanded='true']")
+    assert has_element?(lv, "#file-node-drafts[aria-expanded='true']")
 
     assert has_element?(
              lv,
-             ~s(button#local-file-node-drafts-service-hwpx[phx-click="workspace.document.open"][phx-value-path="drafts/service.hwpx"])
+             ~s(button#file-node-drafts-service-hwpx[phx-click="workspace.document.open"][phx-value-path="drafts/service.hwpx"])
            )
 
     refute has_element?(lv, "#open-file-drafts-service-hwpx")
@@ -914,19 +919,19 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s(button#local-file-node-drafts-reference-docx[phx-click="workspace.document.open"][phx-value-path="drafts/reference.docx"])
+             ~s(button#file-node-drafts-reference-docx[phx-click="workspace.document.open"][phx-value-path="drafts/reference.docx"])
            )
 
     assert has_element?(
              lv,
-             ~s(button#local-file-node-drafts-ledger-xlsx[phx-click="workspace.document.open"][phx-value-path="drafts/ledger.xlsx"])
+             ~s(button#file-node-drafts-ledger-xlsx[phx-click="workspace.document.open"][phx-value-path="drafts/ledger.xlsx"])
            )
 
     lv
     |> element("#toggle-dir-rulebook-md")
     |> render_click()
 
-    assert has_element?(lv, "#local-file-node-rulebook-md[aria-expanded='true']")
+    assert has_element?(lv, "#file-node-rulebook-md[aria-expanded='true']")
 
     lv
     |> element("#toggle-dir-rulebook-md-acceptance-certificate")
@@ -934,35 +939,35 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "#local-file-node-rulebook-md-acceptance-certificate[data-tree-depth='1']"
+             "#file-node-rulebook-md-acceptance-certificate[data-tree-depth='1']"
            )
 
     assert has_element?(
              lv,
-             "#local-file-node-rulebook-md-acceptance-certificate-acceptance-certificate-md[data-tree-depth='2'][phx-click='workspace.document.open']"
+             "#file-node-rulebook-md-acceptance-certificate-acceptance-certificate-md[data-tree-depth='2'][phx-click='workspace.document.open']"
            )
 
     refute has_element?(
              lv,
-             "#local-file-node-rulebook-md-acceptance-certificate #local-file-node-rulebook-md-acceptance-certificate-acceptance-certificate-md"
+             "#file-node-rulebook-md-acceptance-certificate #file-node-rulebook-md-acceptance-certificate-acceptance-certificate-md"
            )
 
-    refute has_element?(lv, "#local-rhwp-shell")
-    refute has_element?(lv, "#local-rhwp-error")
+    refute has_element?(lv, "#rhwp-shell")
+    refute has_element?(lv, "#rhwp-error")
 
     open_document(lv, "drafts/service.hwpx")
 
-    assert has_element?(lv, "#local-file-node-drafts-service-hwpx[aria-selected='true']")
-    assert has_element?(lv, "#local-file-node-drafts-service-hwpx[class*='bg-base-300/70']")
+    assert has_element?(lv, "#file-node-drafts-service-hwpx[aria-selected='true']")
+    assert has_element?(lv, "#file-node-drafts-service-hwpx[class*='bg-base-300/70']")
     assert has_element?(lv, "#studio-document-tab-drafts-service-hwpx[data-active='true']")
-    refute has_element?(lv, "#local-file-tree-breadcrumb")
+    refute has_element?(lv, "#file-tree-breadcrumb")
 
     sync_liveview(lv)
-    assert has_element?(lv, "#local-rhwp-save-state", "Loaded -")
+    assert has_element?(lv, "#rhwp-save-state", "Loaded -")
 
     open_document(lv, "template.hwpx")
 
-    refute has_element?(lv, "#local-file-tree-breadcrumb")
+    refute has_element?(lv, "#file-tree-breadcrumb")
   end
 
   test "document query reopens a local HWPX in the EHWP shell without SaaS upload UI", %{
@@ -970,11 +975,11 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   } do
     {:ok, lv, _html} = open_workspace(conn, document: "drafts/service.hwpx")
 
-    assert has_element?(lv, "#local-rhwp-shell")
-    assert has_element?(lv, "#local-rhwp-toolbar")
+    assert has_element?(lv, "#rhwp-shell")
+    assert has_element?(lv, "#rhwp-toolbar")
     assert has_element?(lv, "#studio-root[data-component='studio-document-surface']")
     assert has_element?(lv, "#studio-document-header")
-    refute has_element?(lv, "#local-file-tree-breadcrumb")
+    refute has_element?(lv, "#file-tree-breadcrumb")
     assert has_element?(lv, "#studio-document-tabs[data-role='document-tabs']")
     assert has_element?(lv, "#studio-document-tab-drafts-service-hwpx[data-active='true']")
 
@@ -994,36 +999,36 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute has_element?(lv, ~s([data-role="rhwp-export-hwpx"]))
     refute has_element?(lv, ~s([data-role="rhwp-prev-edit-target"]))
     refute has_element?(lv, ~s([data-role="rhwp-next-edit-target"]))
-    assert has_element?(lv, "#local-rhwp-fullscreen[data-role='editor-fullscreen-toggle']")
-    assert has_element?(lv, "#local-rhwp-save-state", "Loaded -")
-    refute has_element?(lv, "#local-rhwp-checkpoint")
-    refute has_element?(lv, "#local-rhwp-save")
-    refute has_element?(lv, ~s([data-role="rhwp-local-checkpoint"]))
-    refute has_element?(lv, ~s([data-role="rhwp-local-save"]))
-    assert has_element?(lv, "#local-rhwp-editor-frame.contents")
+    assert has_element?(lv, "#rhwp-fullscreen[data-role='editor-fullscreen-toggle']")
+    assert has_element?(lv, "#rhwp-save-state", "Loaded -")
+    refute has_element?(lv, "#rhwp-checkpoint")
+    refute has_element?(lv, "#rhwp-save")
+    refute has_element?(lv, ~s([data-role="rhwp-checkpoint"]))
+    refute has_element?(lv, ~s([data-role="rhwp-save"]))
+    assert has_element?(lv, "#rhwp-editor-frame.contents")
 
-    assert has_element?(lv, ~s([data-role="local-hwp-editor"][data-renderer="rhwp-wasm"]))
+    assert has_element?(lv, ~s([data-role="hwp-editor"][data-renderer="rhwp-wasm"]))
 
-    assert_canvas_state(lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state(lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentFormat" => "hwpx"
     })
 
     assert has_element?(
              lv,
-             ~s([data-role="local-hwp-editor"][phx-hook="EcritsWeb.Live.Studio.Components.Canvas.HwpPages.WasmHwpEditor"])
+             ~s([data-role="hwp-editor"][phx-hook="EcritsWeb.Live.Studio.Components.Canvas.HwpPages.WasmHwpEditor"])
            )
 
     # The browser-WASM hook owns the page-stack DOM (phx-update="ignore") and
     # builds the per-page <canvas> nodes client-side from the streamed bytes, so
     # the server-rendered stack is an empty, hook-owned container.
-    assert has_element?(lv, ~s([data-role="local-hwp-pages"][phx-update="ignore"]))
-    assert has_element?(lv, ~s([data-role="local-hwp-pages"].ehwp-document-stack--local))
+    assert has_element?(lv, ~s([data-role="hwp-pages"][phx-update="ignore"]))
+    assert has_element?(lv, ~s([data-role="hwp-pages"].ehwp-document-stack))
 
     # The hook fetches the document's raw bytes from the gated read-only route.
-    assert is_binary(canvas_state(lv, ~s([data-role="local-hwp-editor"]))["bytesUrl"])
+    assert is_binary(canvas_state(lv, ~s([data-role="hwp-editor"]))["bytesUrl"])
 
     refute render(lv) =~ ~s(phx-hook="Rhwp")
-    refute has_element?(lv, ~s([data-role="local-hwp-editor"][data-editable-spec-candidates]))
+    refute has_element?(lv, ~s([data-role="hwp-editor"][data-editable-spec-candidates]))
 
     refute has_element?(lv, ~s([data-role="canvas-empty-upload-action"]))
     refute has_element?(lv, "#document-direct-upload-input")
@@ -1122,29 +1127,29 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = open_workspace(conn, document: "drafts/service.hwpx")
 
     render_async(lv, 2_000)
-    _ = render_local_hwp_editor_html(lv)
+    _ = render_hwp_editor_html(lv)
 
     # HWP/HWPX render entirely in the browser now: the server stands up the
     # WasmHwpEditor shell (no server-side SVG stream) and tells the hook where to
     # fetch the document's raw bytes for `new HwpDocument(bytes)`.
-    assert has_element?(lv, "#local-rhwp-shell")
-    assert has_element?(lv, ~s([data-role="local-hwp-editor"][data-renderer="rhwp-wasm"]))
+    assert has_element?(lv, "#rhwp-shell")
+    assert has_element?(lv, ~s([data-role="hwp-editor"][data-renderer="rhwp-wasm"]))
 
     assert has_element?(
              lv,
-             ~s([data-role="local-hwp-editor"][phx-hook="EcritsWeb.Live.Studio.Components.Canvas.HwpPages.WasmHwpEditor"])
+             ~s([data-role="hwp-editor"][phx-hook="EcritsWeb.Live.Studio.Components.Canvas.HwpPages.WasmHwpEditor"])
            )
 
     # The bytes URL points at the gated read-only route with the workspace +
     # document path, and the server pushes it as `document.hwp.load_command` on open.
-    bytes_url = canvas_state(lv, ~s([data-role="local-hwp-editor"]))["bytesUrl"]
+    bytes_url = canvas_state(lv, ~s([data-role="hwp-editor"]))["bytesUrl"]
 
     assert is_binary(bytes_url)
-    assert bytes_url =~ "/local/document-bytes?"
+    assert bytes_url =~ "/document-bytes?"
     assert bytes_url =~ "document=drafts%2Fservice.hwpx"
 
     # No server-side page rasterization happens; the hook builds the canvases.
-    assert has_element?(lv, ~s([data-role="local-hwp-pages"][phx-update="ignore"]))
+    assert has_element?(lv, ~s([data-role="hwp-pages"][phx-update="ignore"]))
   end
 
   test "document query opens a local DOCX through the client WASM office editor", %{
@@ -1152,7 +1157,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   } do
     {:ok, lv, _html} = open_workspace(conn, document: "drafts/reference.docx")
 
-    assert has_element?(lv, "#local-rhwp-shell")
+    assert has_element?(lv, "#rhwp-shell")
     assert has_element?(lv, "#studio-document-tab-drafts-reference-docx[data-active='true']")
     assert has_element?(lv, "#studio-document-tab-drafts-reference-docx", "reference.docx")
 
@@ -1170,7 +1175,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     refute has_element?(lv, ~s([data-renderer="libreofficex-png-tiles"]))
     refute has_element?(lv, ~s([data-renderer="libreofficex-lok-edit"]))
-    refute has_element?(lv, ~s([data-role="local-hwp-editor"]))
+    refute has_element?(lv, ~s([data-role="hwp-editor"]))
   end
 
   test "VFS semantic edits replay into the visible active office WASM editor", %{conn: conn} do
@@ -1255,7 +1260,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     )
 
     assert is_binary(document_id)
-    assert url =~ "/local/document-bytes?"
+    assert url =~ "/document-bytes?"
     assert url =~ "document=drafts%2Freference.docx"
     assert url =~ "&v="
 
@@ -1309,7 +1314,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   } do
     {:ok, lv, _html} = open_workspace(conn, document: "drafts/ledger.xlsx")
 
-    assert has_element?(lv, "#local-rhwp-shell")
+    assert has_element?(lv, "#rhwp-shell")
     assert has_element?(lv, "#studio-document-tab-drafts-ledger-xlsx[data-active='true']")
     assert has_element?(lv, "#studio-document-tab-drafts-ledger-xlsx", "ledger.xlsx")
 
@@ -1324,7 +1329,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     refute has_element?(lv, ~s([data-renderer="libreofficex-png-tiles"]))
     refute has_element?(lv, ~s([data-renderer="libreofficex-lok-edit"]))
-    refute has_element?(lv, ~s([data-role="local-hwp-editor"]))
+    refute has_element?(lv, ~s([data-role="hwp-editor"]))
   end
 
   test "file tree open event gives XLSX its own active document tab", %{conn: conn} do
@@ -1396,17 +1401,17 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert is_pid(session_pid)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "read this workbook"})
+    |> form("#agent-form", agent: %{message: "read this workbook"})
     |> render_submit()
 
-    assert_receive {:local_agent_adapter_waiting, task_pid}, 2_000
+    assert_receive {:agent_adapter_waiting, task_pid}, 2_000
 
     assert %{active_doc: active_doc, document_path: path} = AgentSession.tool_context(session_pid)
     assert is_binary(active_doc) and String.starts_with?(active_doc, "d_xlsx_")
     assert is_binary(path) and String.ends_with?(path, "drafts/ledger.xlsx")
 
     send(task_pid, :release_xlsx_context_probe)
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 2_000
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 2_000
   end
 
   test "local composer upload imports a selected HWPX into the workspace and opens it", %{
@@ -1422,7 +1427,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = open_workspace(conn, root)
 
     upload =
-      file_input(lv, "#local-agent-provider-options", :local_document_import, [
+      file_input(lv, "#agent-provider-options", :document_import, [
         %{
           name: upload_name,
           content: upload_bytes,
@@ -1435,9 +1440,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     render_upload(upload, upload_name)
 
     assert File.read!(upload_path) == upload_bytes
-    assert has_element?(lv, "#local-rhwp-shell")
+    assert has_element?(lv, "#rhwp-shell")
 
-    assert_canvas_state(lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state(lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentFormat" => "hwpx",
       "documentPath" => upload_name
     })
@@ -1451,7 +1456,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert_has_element_after_open_sync(
       lv,
-      "#local-rhwp-shell[data-component='studio-local-document-surface']"
+      "#rhwp-shell[data-component='studio-document-surface']"
     )
 
     assert_has_element_after_open_sync(
@@ -1460,7 +1465,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     )
 
     assert has_element?(lv, "#studio-document-header")
-    refute has_element?(lv, "#local-file-tree-breadcrumb")
+    refute has_element?(lv, "#file-tree-breadcrumb")
     assert has_element?(lv, "#studio-document-tabs[data-role='document-tabs']")
     assert has_element?(lv, "#studio-document-tab-template-hwpx[data-active='true']")
     assert has_element?(lv, "#studio-document-tab-template-hwpx", "template.hwpx")
@@ -1469,9 +1474,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute has_element?(lv, "#studio-document-header [data-role='document-picker']")
     refute has_element?(lv, "#document-type-badge")
     refute has_element?(lv, "#studio-export-picker")
-    assert has_element?(lv, "#local-rhwp-fullscreen[data-role='editor-fullscreen-toggle']")
+    assert has_element?(lv, "#rhwp-fullscreen[data-role='editor-fullscreen-toggle']")
 
-    assert_canvas_state(lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state(lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentFormat" => "hwpx",
       "documentPath" => "template.hwpx"
     })
@@ -1484,12 +1489,12 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     html = render(lv)
 
-    picker_class = header_action_class(html, "#local-document-element-picker")
+    picker_class = header_action_class(html, "#document-element-picker")
     assert picker_class =~ "inline-flex"
     refute picker_class =~ "md:inline-flex"
     refute picker_class =~ "lg:inline-flex"
 
-    fullscreen_class = header_action_class(html, "#local-rhwp-fullscreen")
+    fullscreen_class = header_action_class(html, "#rhwp-fullscreen")
     assert fullscreen_class =~ "inline-flex"
     refute fullscreen_class =~ "md:inline-flex"
     refute fullscreen_class =~ "lg:inline-flex"
@@ -1497,37 +1502,37 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     fullscreen_click =
       html
       |> LazyHTML.from_fragment()
-      |> LazyHTML.query("#local-rhwp-fullscreen")
+      |> LazyHTML.query("#rhwp-fullscreen")
       |> LazyHTML.attribute("phx-click")
       |> List.first()
 
     assert fullscreen_click == "workspace.editor_fullscreen.toggle"
 
-    lv |> element("#local-rhwp-fullscreen") |> render_click()
+    lv |> element("#rhwp-fullscreen") |> render_click()
 
     assert encoded_state?(
              lv,
-             "#local-workspace-grid",
+             "#workspace-grid",
              "data-workspace-layout",
              %{"editorFullscreen" => true}
            )
 
-    assert has_element?(lv, "#local-rhwp-fullscreen[aria-pressed='true']")
+    assert has_element?(lv, "#rhwp-fullscreen[aria-pressed='true']")
   end
 
   test "document element picker mode is stored in the workspace session", %{conn: conn} do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
 
-    assert has_element?(lv, "#local-document-element-picker[aria-pressed='false']")
+    assert has_element?(lv, "#document-element-picker[aria-pressed='false']")
 
     lv
-    |> element("#local-document-element-picker")
+    |> element("#document-element-picker")
     |> render_click()
 
     assert has_element?(
              lv,
-             "#local-document-element-picker[aria-pressed='true'][data-active='true']"
+             "#document-element-picker[aria-pressed='true'][data-active='true']"
            )
 
     assert encoded_state?(
@@ -1541,8 +1546,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     render_async(lv2, 2_000)
     sync_liveview(lv2)
 
-    assert_has_element_after_open_sync(lv2, "#local-document-element-picker[aria-pressed='true']")
-    assert has_element?(lv2, "#local-document-element-picker[data-active='true']")
+    assert_has_element_after_open_sync(lv2, "#document-element-picker[aria-pressed='true']")
+    assert has_element?(lv2, "#document-element-picker[data-active='true']")
   end
 
   defp header_action_class(html, selector) do
@@ -1562,12 +1567,12 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = open_workspace(conn, root, document: relative_path)
 
     render_async(lv, 2_000)
-    _ = render_local_hwp_editor_html(lv)
+    _ = render_hwp_editor_html(lv)
 
-    document_id = local_rhwp_document_id(lv)
+    document_id = rhwp_document_id(lv)
 
     render_hook(lv, "document.hwp.load", %{"document_id" => document_id})
-    assert has_element?(lv, "#local-rhwp-save-state", "Loaded -")
+    assert has_element?(lv, "#rhwp-save-state", "Loaded -")
 
     render_hook(lv, "document.snapshot.checkpoint", %{
       "document_id" => document_id,
@@ -1576,7 +1581,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     })
 
     assert File.read!(path) == original
-    assert has_element?(lv, "#local-rhwp-save-state", "Checkpointed - canonical file unchanged")
+    assert has_element?(lv, "#rhwp-save-state", "Checkpointed - canonical file unchanged")
 
     saved = File.read!("test/fixtures/hwpx/real_contract.hwpx")
 
@@ -1587,16 +1592,610 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     })
 
     assert File.read!(path) == saved
-    assert has_element?(lv, "#local-rhwp-save-state", "Saved -")
+    assert has_element?(lv, "#rhwp-save-state", "Saved -")
 
     {:ok, reloaded_lv, _html} = open_workspace(conn, root, document: relative_path)
 
     render_async(reloaded_lv, 2_000)
-    _ = render_local_hwp_editor_html(reloaded_lv)
+    _ = render_hwp_editor_html(reloaded_lv)
 
-    assert_canvas_state(reloaded_lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state(reloaded_lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentFormat" => "hwpx"
     })
+  end
+
+  # The upload half of the :octet lane is a programmatic LiveView upload
+  # (hook `uploadBytes`, no live_file_input), which `Phoenix.LiveViewTest`'s
+  # client cannot drive yet — the pipeline is covered by the fork's upload
+  # suites and browser verification. Server-side claim semantics stay here.
+  @tag :edit_failure
+  test "save events referencing an unknown octet id fail truthfully", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    relative_path = "drafts/service.hwpx"
+    path = Path.join(root, relative_path)
+    original = File.read!(path)
+
+    {:ok, lv, _html} = open_workspace(conn, root, document: relative_path)
+
+    render_async(lv, 2_000)
+    _ = render_hwp_editor_html(lv)
+
+    document_id = rhwp_document_id(lv)
+    render_hook(lv, "document.hwp.load", %{"document_id" => document_id})
+
+    render_hook(lv, "document.snapshot.save_requested", %{
+      "document_id" => document_id,
+      "octet_id" => "octet-never-uploaded",
+      "format" => "hwpx"
+    })
+
+    assert File.read!(path) == original
+    refute has_element?(lv, "#rhwp-save-state", "Saved -")
+  end
+
+  # Single-active-transfer is enforced by the octet channel ("upload already
+  # in progress", see OctetChannelTest) and the client FIFO queue (JS suite).
+  # The LiveView's contract is the sink: an unguessable id, subscribed on
+  # mount and rendered for the channel client to join on.
+  test "the octet lane renders its subscribed sink id for the channel client", %{
+    conn: conn
+  } do
+    {:ok, lv, _html} = open_workspace(conn)
+
+    sink_id = liveview_assign(lv, :octet_sink_id)
+    assert is_binary(sink_id) and byte_size(sink_id) >= 32
+    assert render(lv) =~ ~s(data-octet-sink="#{sink_id}")
+
+    bytes = :crypto.strong_rand_bytes(64)
+    send(lv.pid, {:octet_upload, "octet-sink-test", bytes})
+    assert_push_event(lv, "octet:ack", %{id: "octet-sink-test", bytes: 64})
+  end
+
+  @tag :edit_failure
+  test "a timed-out browser VFS write is removed, rolled back, and ignores its late octet reply",
+       %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+
+    assert_canvas_state_after_open_sync(lv, ~s([data-role="hwp-editor"]), %{
+      "localDocumentFormat" => "hwpx",
+      "documentPath" => "template.hwpx"
+    })
+
+    edit_id = "browser-timeout-vfs"
+
+    caller =
+      Task.async(fn ->
+        BrowserBridge.call(lv.pid, :vfs_write, %{edit_id: edit_id, ops: []}, timeout: 50)
+      end)
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        request_id: request_id,
+        document_id: document_id,
+        verb: "vfs_write",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    assert {:error, {:browser_timeout, "viewer did not reply in time"}} =
+             Task.await(caller, 1_000)
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        document_id: ^document_id,
+        verb: "vfs_rollback",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    sync_liveview(lv)
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+
+    octet_id = "late-timeout-octet"
+    put_liveview_octet(lv, octet_id, "late exported document")
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => request_id,
+      "result" => %{"edit_id" => edit_id, "octet_id" => octet_id}
+    })
+
+    assert liveview_assign(lv, :octet_stash) == %{}
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+  end
+
+  test "a dead browser VFS caller is removed and rolled back before a late reply", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+
+    assert_canvas_state_after_open_sync(lv, ~s([data-role="hwp-editor"]), %{
+      "localDocumentFormat" => "hwpx",
+      "documentPath" => "template.hwpx"
+    })
+
+    owner = self()
+    edit_id = "browser-dead-caller-vfs"
+    ref = make_ref()
+
+    caller =
+      spawn(fn ->
+        send(lv.pid, {:doc_browser_request, self(), ref, :vfs_write, %{edit_id: edit_id}})
+        send(owner, {:browser_caller_waiting, self()})
+
+        receive do
+          :never -> :ok
+        end
+      end)
+
+    assert_receive {:browser_caller_waiting, ^caller}
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        request_id: request_id,
+        document_id: document_id,
+        verb: "vfs_write",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    caller_monitor = Process.monitor(caller)
+    Process.exit(caller, :kill)
+    assert_receive {:DOWN, ^caller_monitor, :process, ^caller, :killed}
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        document_id: ^document_id,
+        verb: "vfs_rollback",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    sync_liveview(lv)
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => request_id,
+      "result" => %{"edit_id" => edit_id, "ok" => true}
+    })
+
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+  end
+
+  test "switching documents cancels a pending browser write immediately", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    expected_document_id = liveview_assign(lv, :pool_document_id)
+    edit_id = "browser-switch-vfs"
+
+    caller =
+      Task.async(fn ->
+        BrowserBridge.call(lv.pid, :vfs_write, %{edit_id: edit_id},
+          expected_document_id: expected_document_id,
+          timeout: 1_000
+        )
+      end)
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{document_id: old_view_document_id, verb: "vfs_write", payload: %{edit_id: ^edit_id}},
+      1_000
+    )
+
+    open_document(lv, "drafts/service.hwpx")
+
+    assert {:error, :document_changed} = Task.await(caller, 250)
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        document_id: ^old_view_document_id,
+        verb: "vfs_rollback",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+    assert liveview_assign(lv, :doc_browser_vfs_leases) == %{}
+  end
+
+  test "a routed browser request is rejected after its document changed before dispatch", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    stale_document_id = liveview_assign(lv, :pool_document_id)
+
+    open_document(lv, "drafts/service.hwpx")
+    active_document_id = liveview_assign(lv, :pool_document_id)
+    refute active_document_id == stale_document_id
+
+    assert {:error,
+            {:document_mismatch, %{expected: ^stale_document_id, actual: ^active_document_id}}} =
+             BrowserBridge.call(lv.pid, :vfs_write, %{edit_id: "stale-route"},
+               expected_document_id: stale_document_id,
+               timeout: 1_000
+             )
+
+    refute_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{verb: "vfs_write", payload: %{edit_id: "stale-route"}},
+      100
+    )
+
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+  end
+
+  test "a successful browser write keeps a lease that rolls back when its owner dies", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    expected_document_id = liveview_assign(lv, :pool_document_id)
+    owner = self()
+    edit_id = "browser-leased-vfs"
+
+    caller =
+      spawn(fn ->
+        result =
+          BrowserBridge.call(lv.pid, :vfs_write, %{edit_id: edit_id},
+            expected_document_id: expected_document_id,
+            timeout: 1_000
+          )
+
+        # This system-message barrier is sent by the same process after the
+        # BrowserBridge ACK, so the LiveView has installed the lease before the
+        # test is told the call returned.
+        _ = :sys.get_state(lv.pid)
+        send(owner, {:leased_browser_write_returned, self(), result})
+
+        receive do
+          :hold -> :ok
+        end
+      end)
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        request_id: request_id,
+        document_id: view_document_id,
+        verb: "vfs_write",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => request_id,
+      "result" => %{"edit_id" => edit_id, "bytes" => "exported"}
+    })
+
+    assert_receive {:leased_browser_write_returned, ^caller,
+                    {:ok, %{"edit_id" => ^edit_id, "bytes" => "exported"}}}
+
+    assert map_size(liveview_assign(lv, :doc_browser_vfs_leases)) == 1
+
+    caller_monitor = Process.monitor(caller)
+    Process.exit(caller, :kill)
+    assert_receive {:DOWN, ^caller_monitor, :process, ^caller, :killed}
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        document_id: ^view_document_id,
+        verb: "vfs_rollback",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    sync_liveview(lv)
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+    assert liveview_assign(lv, :doc_browser_vfs_leases) == %{}
+  end
+
+  test "a browser commit reply remains rollback-capable until its bridge completion ACK", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    expected_document_id = liveview_assign(lv, :pool_document_id)
+    edit_id = "browser-unacknowledged-commit"
+
+    write_ref = make_ref()
+
+    send(
+      lv.pid,
+      {:doc_browser_request, self(), write_ref, :vfs_write, %{edit_id: edit_id},
+       expected_document_id}
+    )
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{request_id: write_request_id, verb: "vfs_write", payload: %{edit_id: ^edit_id}},
+      1_000
+    )
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => write_request_id,
+      "result" => %{"edit_id" => edit_id, "bytes" => "exported"}
+    })
+
+    assert_receive {:doc_browser_reply, ^write_ref, {:ok, %{"edit_id" => ^edit_id}}}
+    send(lv.pid, {:doc_browser_request_completed, self(), write_ref})
+    sync_liveview(lv)
+    assert map_size(liveview_assign(lv, :doc_browser_vfs_leases)) == 1
+
+    commit_ref = make_ref()
+
+    send(
+      lv.pid,
+      {:doc_browser_request, self(), commit_ref, :vfs_commit, %{edit_id: edit_id},
+       expected_document_id}
+    )
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{request_id: commit_request_id, verb: "vfs_commit", payload: %{edit_id: ^edit_id}},
+      1_000
+    )
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => commit_request_id,
+      "result" => %{"edit_id" => edit_id, "awaiting_finalize" => true}
+    })
+
+    assert_receive {:doc_browser_reply, ^commit_ref,
+                    {:ok, %{"edit_id" => ^edit_id, "awaiting_finalize" => true}}}
+
+    send(lv.pid, {:doc_browser_request_cancelled, self(), commit_ref, :timeout})
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{verb: "vfs_rollback", payload: %{edit_id: ^edit_id}},
+      1_000
+    )
+
+    refute_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{verb: "vfs_finalize", payload: %{edit_id: ^edit_id}},
+      100
+    )
+
+    sync_liveview(lv)
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+    assert liveview_assign(lv, :doc_browser_vfs_leases) == %{}
+  end
+
+  test "a bridge completion ACK finalizes a successful browser commit exactly once", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    expected_document_id = liveview_assign(lv, :pool_document_id)
+    edit_id = "browser-acknowledged-commit"
+
+    write_ref = make_ref()
+
+    send(
+      lv.pid,
+      {:doc_browser_request, self(), write_ref, :vfs_write, %{edit_id: edit_id},
+       expected_document_id}
+    )
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{request_id: write_request_id, verb: "vfs_write", payload: %{edit_id: ^edit_id}},
+      1_000
+    )
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => write_request_id,
+      "result" => %{"edit_id" => edit_id, "bytes" => "exported"}
+    })
+
+    assert_receive {:doc_browser_reply, ^write_ref, {:ok, %{"edit_id" => ^edit_id}}}
+    send(lv.pid, {:doc_browser_request_completed, self(), write_ref})
+    sync_liveview(lv)
+
+    commit_ref = make_ref()
+
+    send(
+      lv.pid,
+      {:doc_browser_request, self(), commit_ref, :vfs_commit, %{edit_id: edit_id},
+       expected_document_id}
+    )
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{request_id: commit_request_id, verb: "vfs_commit", payload: %{edit_id: ^edit_id}},
+      1_000
+    )
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => commit_request_id,
+      "result" => %{"edit_id" => edit_id, "awaiting_finalize" => true}
+    })
+
+    assert_receive {:doc_browser_reply, ^commit_ref,
+                    {:ok, %{"edit_id" => ^edit_id, "awaiting_finalize" => true}}}
+
+    send(lv.pid, {:doc_browser_request_completed, self(), commit_ref})
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        request_id: finalize_request_id,
+        verb: "vfs_finalize",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    sync_liveview(lv)
+    assert liveview_assign(lv, :doc_browser_vfs_leases) == %{}
+
+    assert %{
+             ^finalize_request_id => %{kind: :vfs_finalize, status: :waiting}
+           } = liveview_assign(lv, :doc_browser_pending)
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => finalize_request_id,
+      "result" => %{"edit_id" => edit_id, "finalized" => true}
+    })
+
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => finalize_request_id,
+      "result" => %{"edit_id" => edit_id, "already_finalized" => true}
+    })
+
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+  end
+
+  test "lost finalize replies retry idempotently then reload committed bytes without rollback", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    expected_document_id = liveview_assign(lv, :pool_document_id)
+    edit_id = "browser-finalize-recovery"
+
+    {finalize_request_id, browser_document_id} =
+      prepare_acknowledged_browser_commit(lv, expected_document_id, edit_id)
+
+    for attempt <- 1..2 do
+      send(lv.pid, {:doc_browser_finalize_timeout, finalize_request_id, attempt})
+
+      assert_push_event(
+        lv,
+        "document.engine.operation.command",
+        %{
+          request_id: ^finalize_request_id,
+          document_id: ^browser_document_id,
+          verb: "vfs_finalize",
+          payload: %{edit_id: ^edit_id}
+        },
+        1_000
+      )
+    end
+
+    send(lv.pid, {:doc_browser_finalize_timeout, finalize_request_id, 3})
+
+    assert_push_event(
+      lv,
+      "document.hwp.load_command",
+      %{
+        document_id: ^browser_document_id,
+        force: true,
+        vfs_recovery: true,
+        vfs_recovery_id: recovery_id,
+        vfs_recovery_attempt: 1
+      },
+      1_000
+    )
+
+    assert %{
+             ^recovery_id => %{kind: :vfs_recovery, status: :waiting, attempt: 1}
+           } = liveview_assign(lv, :doc_browser_pending)
+
+    render_hook(lv, "document.vfs.recovery.replied", %{
+      "recovery_id" => recovery_id,
+      "attempt" => 1,
+      "error" => "canonical document reload failed"
+    })
+
+    assert_push_event(
+      lv,
+      "document.hwp.load_command",
+      %{
+        document_id: ^browser_document_id,
+        force: true,
+        vfs_recovery: true,
+        vfs_recovery_id: ^recovery_id,
+        vfs_recovery_attempt: 2
+      },
+      1_000
+    )
+
+    render_hook(lv, "document.vfs.recovery.replied", %{
+      "recovery_id" => recovery_id,
+      "attempt" => 2,
+      "result" => %{"reloaded" => true}
+    })
+
+    refute_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{verb: "vfs_rollback", payload: %{edit_id: ^edit_id}},
+      100
+    )
+
+    sync_liveview(lv)
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+    assert liveview_assign(lv, :doc_browser_vfs_leases) == %{}
+  end
+
+  test "cancelling missing octet entries leaves the owning LiveView alive", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+
+    {:ok, lv, _html} = open_workspace(conn, root, document: "drafts/service.hwpx")
+    pid = lv.pid
+
+    render_hook(lv, "octet:cancel", %{
+      "id" => "octet-already-finished",
+      "entry_refs" => ["missing-entry"]
+    })
+
+    _ = :sys.get_state(pid)
+    assert lv.pid == pid
+  end
+
+  @tag :edit_failure
+  test "channel cancellation removes an upload that overtook the client stash drop", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "drafts/service.hwpx")
+    id = "octet-cancel-overtake"
+    bytes = "late committed octet"
+
+    _ = render_hook(lv, "octet:cancel", %{"id" => id})
+    assert liveview_assign(lv, :octet_stash) == %{}
+
+    send(lv.pid, {:octet_upload, id, bytes})
+    assert_push_event(lv, "octet:ack", %{id: ^id, bytes: 20})
+    assert liveview_assign(lv, :octet_stash) == %{id => bytes}
+
+    send(lv.pid, {:octet_cancelled, id})
+    sync_liveview(lv)
+
+    assert liveview_assign(lv, :octet_stash) == %{}
   end
 
   test "local rhwp text mutation is acknowledged and does not remount", %{conn: conn} do
@@ -1604,17 +2203,17 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     {:ok, lv, _html} = open_workspace(conn, root, document: "drafts/service.hwpx")
 
-    assert_canvas_state_after_open_sync(lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state_after_open_sync(lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentFormat" => "hwpx",
       "documentPath" => "drafts/service.hwpx"
     })
 
     pid = lv.pid
-    document_id = local_rhwp_document_id(lv)
+    document_id = rhwp_document_id(lv)
 
     render_hook(lv, "document.content.changed", %{
       "documentId" => document_id,
-      "eventId" => "local-edit-1",
+      "eventId" => "edit-1",
       "siteId" => "local",
       "lamport" => 11,
       "body" => %{
@@ -1629,7 +2228,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     _ = :sys.get_state(pid)
     assert lv.pid == pid
 
-    assert_canvas_state(lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state(lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentId" => document_id
     })
 
@@ -1639,7 +2238,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   test "agent form reports real provider unavailable without fake response", %{conn: conn} do
     missing = "ecrits-codex-missing-#{Ecto.UUID.generate()}"
 
-    Application.put_env(:ecrits, :local_agent_ui,
+    Application.put_env(:ecrits, :agent_ui,
       provider: "codex",
       adapter_opts: [
         exmcp_adapter: EcritsWeb.FakeAcpAdapter,
@@ -1652,10 +2251,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "hello local"})
+    |> form("#agent-form", agent: %{message: "hello local"})
     |> render_submit()
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :turn_failed,
                       session_id: ^session_id
@@ -1666,18 +2265,18 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "hello local"
            )
 
     assert has_element?(
              lv,
-             ~s([id^="local-agent-user-"][data-chat-role="chat-message"] [data-role="chat-message-body"]),
+             ~s([id^="agent-user-"][data-chat-role="chat-message"] [data-role="chat-message-body"]),
              "hello local"
            )
 
-    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='failed']")
-    assert has_element?(lv, "#local-agent-error", "Codex ACP unavailable")
+    assert has_element?(lv, "#agent-sidebar[data-agent-status='failed']")
+    assert has_element?(lv, "#agent-error", "Codex ACP unavailable")
     refute render(lv) =~ "Fake response"
   end
 
@@ -1699,10 +2298,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert is_pid(session_pid)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "read this document"})
+    |> form("#agent-form", agent: %{message: "read this document"})
     |> render_submit()
 
-    assert_receive {:local_agent_adapter_waiting, task_pid}, 2_000
+    assert_receive {:agent_adapter_waiting, task_pid}, 2_000
 
     # The agent binds doc.* context at send time — the UNIFIED document handle
     # points at what's on screen without relying on idle session mutation.
@@ -1711,7 +2310,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert is_binary(path) and String.ends_with?(path, "template.hwpx")
 
     send(task_pid, :release_context_probe)
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 2_000
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 2_000
   end
 
   test "ordinary document prompt uses VFS mount when available without embedding selected path",
@@ -1731,7 +2330,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "read this document"})
+    |> form("#agent-form", agent: %{message: "read this document"})
     |> render_submit()
 
     assert_receive {:fake_acp_prompt, _sid, prompt}, 1_000
@@ -1741,76 +2340,47 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     cond do
       mount_status.enabled? and mounted? ->
-        assert prompt =~ "#{doc_vfs_backend_mode_label(mount_status)} mode"
-        assert prompt =~ "doc.open_doc"
-        assert prompt =~ "Do not call `doc.close_doc` in normal edit turns"
-        assert prompt =~ "NEVER type `doc.open_doc` in the shell"
-        assert prompt =~ "resource/tool discovery only to surface `doc.open_doc`"
-        assert prompt =~ "Do not use discovery as a substitute for editing"
-        assert normalized_prompt =~ "returns a `mounted_at` path"
-        assert prompt =~ "The JSONL file itself is IR-only"
-        assert prompt =~ "does NOT contain `mounted_at`"
-        assert prompt =~ "Never treat a missing `mounted_at` field inside"
-        assert prompt =~ "NEVER create, copy, or edit a JSONL projection anywhere else"
-        assert prompt =~ "/tmp/<mount>.jsonl"
-        assert prompt =~ "does NOT route to the document"
-        assert prompt =~ "[ [ [ payload_node"
-        assert prompt =~ "Positional HWPX refs are NOT payload fields"
-        assert prompt =~ "The nested list position"
-        assert prompt =~ "inside an existing paragraph list"
-        assert prompt =~ "not as a metadata object"
+        assert byte_size(normalized_prompt) <= 800
+        assert normalized_prompt =~ "do not edit read-only requests"
+        assert normalized_prompt =~ "Open the document once with `doc.open_doc`"
+        assert normalized_prompt =~ "ACP read/search/edit for text and tables"
+        assert normalized_prompt =~ "shell search stays read-only"
+        assert normalized_prompt =~ "Keep every document mutation in ACP"
+        assert normalized_prompt =~ "scripted shell rewrites"
+        assert normalized_prompt =~ "For brief-driven fills"
+        assert normalized_prompt =~ "every field, list item, and table row"
+        assert normalized_prompt =~ "one `미기재` in each unsupported blank"
+        assert normalized_prompt =~ "reread changed ACP payloads"
+        assert normalized_prompt =~ "one post-commit `doc.find`"
+        assert normalized_prompt =~ "one image-only `doc.edit`"
+        refute normalized_prompt =~ "path: \"current\""
+        refute normalized_prompt =~ "payment schedule"
+        refute normalized_prompt =~ "first recipient"
+        refute normalized_prompt =~ "arbitrator"
+        refute normalized_prompt =~ "Article 51"
+        refute normalized_prompt =~ "annex 631"
+        refute normalized_prompt =~ "`(인)`"
 
-        assert normalized_prompt =~
-                 "create the temp file inside the same `.ecrits/` directory"
-
-        assert prompt =~ "validate that the temp contains exactly one nested"
-        assert prompt =~ "length == 1"
-        assert prompt =~ "only if JSON validation succeeds"
-
-        assert normalized_prompt =~
-                 "Do NOT use `mktemp`, `dd`, or any temp path outside the mount"
-
-        assert prompt =~ "VFS `create`/`write`/`rename` path"
-        assert prompt =~ ~s({"type":"table","cells":[["H1","H2"],["A","B"]],"header":true})
-
-        assert prompt =~ ~s({"type":"picture","src":"/abs/img.png"})
-        assert prompt =~ "readable default size"
-        assert prompt =~ "intentionally resizing in HWPUNIT"
-
-        assert prompt =~ "Move an existing picture by editing"
-        assert prompt =~ "resize by editing `width`/`height`"
-        assert prompt =~ "Delete a picture by removing that picture payload"
-        assert prompt =~ "immediately AFTER that cell payload"
-        assert prompt =~ "Do not edit/reuse an existing picture payload"
-        assert prompt =~ "Structural inserts are one-shot"
-        assert normalized_prompt =~ "picture appears at the intended nested position"
-        assert prompt =~ "ref.cellPath"
-        assert prompt =~ "`src` is only embed input"
-        assert prompt =~ "do not insert another copy"
-        assert prompt =~ "Verify with shell exactly once"
-
-        assert normalized_prompt =~
-                 "Do not reopen editor previews or poll `/local/document-bytes`"
-
-        refute prompt =~ "Positional HWPX refs are lists"
-        assert prompt =~ "READ with `cat`/`sed -n`"
-        assert prompt =~ "FIND with `grep -n`/`rg`"
-        assert prompt =~ "there is no doc.save"
-        assert prompt =~ "Read-only questions: cat/grep and answer, do not edit"
-        assert prompt =~ "No fabrication"
-        assert normalized_prompt =~ "There is NO doc.read"
-        assert prompt =~ "doc.context"
-        refute prompt =~ "current_document.document"
+        # The mounted policy deliberately establishes the edit boundary without
+        # teaching an ACP agent a JSONL rewrite recipe.
+        refute prompt =~ "create the temp file"
+        refute prompt =~ "`mktemp`"
+        refute prompt =~ ~s({"type":"table")
+        refute prompt =~ ~s({"type":"picture")
+        refute prompt =~ "HWPUNIT"
+        refute prompt =~ "ref.cellPath"
+        refute prompt =~ "doc.close_doc"
+        refute prompt =~ "doc.context"
+        refute prompt =~ "temp_path"
+        refute prompt =~ "mounted_at"
 
       mount_status.enabled? ->
         assert prompt =~ "Doc VFS backend is available, but this workspace is not mounted"
         assert prompt =~ mount_status.message
-        assert prompt =~ "doc.open_doc"
-        assert prompt =~ "mounted_at"
-        assert prompt =~ "mount_status"
-        assert prompt =~ "mount_error"
-        assert prompt =~ "Do not use `.md`"
-        assert normalized_prompt =~ "do not shell-read the raw binary document"
+        assert normalized_prompt =~ "Report the unavailable ACP document surface"
+        assert normalized_prompt =~ "Read-only shell search and inspection may continue"
+        assert normalized_prompt =~ "never bypass ACP"
+        assert normalized_prompt =~ "doc.edit for text or tables"
         refute prompt =~ "documents are EDITABLE FILES"
 
       mount_status.backend == :fskit and
@@ -1826,14 +2396,11 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
           assert prompt =~ Ecrits.Fuse.DocMount.settings_url()
         end
 
-        assert prompt =~ "mounted_at"
-        assert prompt =~ "mount_status"
-        assert prompt =~ "Use doc MCP tools"
-        assert prompt =~ "doc.context"
-        assert prompt =~ "current_document.document"
-        assert prompt =~ "doc.open_doc"
+        assert normalized_prompt =~ "Report the unavailable ACP document surface"
+        assert normalized_prompt =~ "Read-only shell search and inspection may continue"
+        assert normalized_prompt =~ "never bypass ACP"
+        assert normalized_prompt =~ "doc.edit for text or tables"
         refute prompt =~ "documents are EDITABLE FILES"
-        assert prompt =~ "Do not use `.md`"
 
       true ->
         assert prompt =~ "Use doc MCP tools"
@@ -1845,7 +2412,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute prompt =~ "template.hwpx"
     refute prompt =~ "pass this as `document`"
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}},
                    1_000
 
     sync_liveview(lv)
@@ -1860,8 +2427,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
     session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "manual-vfs-preview-turn")
 
-    assert_canvas_state_after_open_sync(lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state_after_open_sync(lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentFormat" => "hwpx",
       "documentPath" => "template.hwpx"
     })
@@ -1890,6 +2458,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
           "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root),
           {:vfs_doc_edited,
            %{
+             agent_id: session_id,
+             instance_id: agent_instance_id(session_id),
+             turn_id: "manual-vfs-preview-turn",
              path: Path.join(root, "template.hwpx"),
              doc: "template.hwpx",
              applied: 1,
@@ -1934,11 +2505,15 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root)
     session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "cold-vfs-preview-turn")
 
     send(
       lv.pid,
       {:vfs_doc_edited,
        %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "cold-vfs-preview-turn",
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          applied: 1,
@@ -1970,7 +2545,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute has_element?(lv, ~s([data-role="edit-preview-card"]))
     refute has_element?(lv, ~s([data-role="doc-edit-card"]))
 
-    assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+    assert [%Dialog{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
 
     assert Enum.any?(items, fn item ->
              Map.get(item, :role) == :edit_preview and
@@ -1986,11 +2561,11 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv2, _html2} = open_workspace(conn, root)
 
     lv2
-    |> element("#local-agent-rail-picker")
+    |> element("#agent-rail-picker")
     |> render_click()
 
     lv2
-    |> element("#local-agent-rail-option-#{session_id}")
+    |> element("#agent-rail-option-#{session_id}")
     |> render_click()
 
     sync_liveview(lv2)
@@ -2007,12 +2582,133 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute has_element?(lv2, ~s([data-role="doc-edit-card"]))
   end
 
+  @tag :edit_failure
+  test "the traced VFS event renders one stable chat-rail preview without a full edit trip", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    relative_path = "template.hwpx"
+    markdown_path = "MANIFEST.md"
+    turn_id = "dbg-preview-render-path"
+    edit_id = "dbg-preview-render-edit"
+    tab_id = "dbg-preview-render-tab"
+
+    File.write!(Path.join(root, markdown_path), "# Preview switch target\n")
+
+    {:ok, lv, _html} =
+      open_workspace(conn, root,
+        document: relative_path,
+        chat_rail_tab_id: tab_id
+      )
+
+    session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, turn_id)
+
+    ref = %{"section" => 0, "paragraph" => 0, "offset" => 0}
+
+    ops = [
+      %{"op" => "delete_range", "ref" => ref, "count" => 6},
+      %{"op" => "insert_text", "ref" => ref, "text" => "미리보기 경로 기록"}
+    ]
+
+    highlights = [
+      %{
+        "kind" => "text",
+        "op" => "insert_text",
+        "ref" => ref,
+        "offset" => 0,
+        "length" => 10,
+        "text" => "미리보기 경로 기록"
+      }
+    ]
+
+    info = %{
+      agent_id: session_id,
+      instance_id: agent_instance_id(session_id),
+      turn_id: turn_id,
+      edit_id: edit_id,
+      path: Path.join(root, relative_path),
+      doc: relative_path,
+      applied: 2,
+      delta_applied: 2,
+      progress_index: 1,
+      progress_total: 1,
+      ops: ops,
+      sets: [],
+      highlights: highlights
+    }
+
+    send_vfs_edit_and_wait(lv, info)
+
+    expected_summary =
+      "template.hwpx: 1 change — delete_range; insert_text"
+
+    assert has_element?(lv, ~s([data-role="editor-preview-summary"]), expected_summary)
+
+    assert has_element?(
+             lv,
+             ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
+           )
+
+    assert_preview_state(lv, %{
+      "documentPath" => relative_path,
+      "deltaCount" => 1
+    })
+
+    first_state = mixed_preview_canvas_state(lv)
+    first_rows = mixed_preview_chat_rows(lv)
+    first_preview_id = mixed_preview_row_id(first_rows)
+
+    assert Jason.decode!(first_state["previewHighlights"]) == highlights
+    assert [descriptor] = mixed_preview_descriptors(session_id, turn_id)
+    assert descriptor.edit_id == edit_id
+    assert descriptor.applied == 1
+    assert descriptor.ops == ops
+    assert descriptor.highlights == highlights
+
+    # The runtime trace replayed this exact event. It must upsert the same
+    # descriptor and stream row instead of duplicating the chat preview.
+    send_vfs_edit_and_wait(lv, info)
+
+    assert [_descriptor] = mixed_preview_descriptors(session_id, turn_id)
+    assert mixed_preview_row_id(mixed_preview_chat_rows(lv)) == first_preview_id
+    assert mixed_preview_canvas_state(lv) == first_state
+
+    open_document(lv, markdown_path)
+
+    assert has_element?(lv, ~s([data-role="markdown-editor"]))
+    assert {:safe, _preview_html} = liveview_assign(lv, :markdown_preview_html)
+    assert mixed_preview_row_id(mixed_preview_chat_rows(lv)) == first_preview_id
+    assert mixed_preview_canvas_state(lv) == first_state
+    assert has_element?(lv, ~s([data-role="editor-preview-summary"]), expected_summary)
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, replayed, _html} =
+      open_workspace(conn, root, chat_rail_tab_id: tab_id)
+
+    render_async(replayed, 2_000)
+    sync_liveview(replayed)
+
+    assert subscribe_agent(replayed) == session_id
+    assert mixed_preview_row_id(mixed_preview_chat_rows(replayed)) == first_preview_id
+    assert mixed_preview_canvas_state(replayed) == first_state
+
+    assert has_element?(
+             replayed,
+             ~s([data-role="editor-preview-summary"]),
+             expected_summary
+           )
+  end
+
   test "VFS preview persists edit composition and scroll without rendered image payloads", %{
     conn: conn
   } do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
     session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "composition-vfs-preview-turn")
 
     render_hook(lv, "document.viewport.changed", %{
       "document_path" => "template.hwpx",
@@ -2026,6 +2722,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       lv.pid,
       {:vfs_doc_edited,
        %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "composition-vfs-preview-turn",
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          applied: 2,
@@ -2108,10 +2807,843 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     )
   end
 
+  test "native picture fallback composes into the immutable VFS preview across switch and replay",
+       %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    picture_path = Path.join(root, "signature.png")
+    File.write!(picture_path, "signature image")
+
+    pool_document_id =
+      Ecrits.Doc.Pool.document_id_for(Path.join(root, "template.hwpx"), :hwpx)
+
+    picture_ref = %{
+      "section" => 0,
+      "paragraph" => 0,
+      "offset" => 2,
+      "cellPath" => [%{"controlIndex" => 0, "cellIndex" => 3, "cellParaIndex" => 0}]
+    }
+
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_mixed_preview_turn,
+        script: [
+          %{
+            type: :tool_call_started,
+            id: "mixed-picture-edit",
+            name: "doc.edit",
+            arguments: %{
+              "document" => pool_document_id,
+              "op" => %{
+                "op" => "insert_picture",
+                "ref" => Jason.encode!(picture_ref),
+                "src" => picture_path
+              },
+              "fallback" => %{
+                "attempted" => "vfs",
+                "reason" => "unrepresentable"
+              }
+            }
+          },
+          %{
+            type: :tool_call_completed,
+            id: "mixed-picture-edit",
+            name: "doc.edit",
+            result: %{
+              "ok" => true,
+              "applied" => 1,
+              "native" => [%{"paraIdx" => 0, "controlIdx" => 1}]
+            }
+          },
+          {:text_delta, "완료했습니다."}
+        ]
+      ]
+    )
+
+    conn = init_workspace_session(conn, "mixed-preview-composition", root)
+    tab_id = "mixed-preview-composition-tab"
+
+    {:ok, lv, _html} =
+      open_workspace(conn, root,
+        document: "template.hwpx",
+        chat_rail_tab_id: tab_id
+      )
+
+    session_id = subscribe_agent(lv)
+    assert liveview_assign(lv, :pool_document_id) == pool_document_id
+
+    lv
+    |> form("#agent-form", agent: %{message: "표를 만들고 (인)에 서명을 넣어줘"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, stream_pid}, 1_000
+
+    vfs_ops = [
+      %{
+        "op" => "insert_table",
+        "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+        "rows" => 1,
+        "cols" => 1,
+        "cells" => [["서명"]]
+      },
+      %{
+        "op" => "set_cell",
+        "ref" => %{
+          "section" => 0,
+          "paragraph" => 0,
+          "cell" => %{
+            "parentParaIndex" => 0,
+            "controlIndex" => 0,
+            "cellIndex" => 0,
+            "cellParaIndex" => 0
+          }
+        },
+        "replacement" => "(인)"
+      }
+    ]
+
+    vfs_highlights = [
+      %{
+        "kind" => "table",
+        "op" => "insert_table",
+        "ref" => %{
+          "section" => 0,
+          "paragraph" => 0,
+          "cell" => %{
+            "parentParaIndex" => 0,
+            "controlIndex" => 0,
+            "cellIndex" => 0,
+            "cellParaIndex" => 0
+          }
+        },
+        "text" => "서명"
+      },
+      %{
+        "kind" => "text",
+        "op" => "set_cell",
+        "ref" => picture_ref,
+        "text" => "(인)"
+      }
+    ]
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: turn_id,
+         edit_id: "mixed-vfs-edit",
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 2,
+         progress_index: 1,
+         progress_total: 1,
+         composition_ops: vfs_ops,
+         highlights: vfs_highlights
+       }}
+    )
+
+    sync_liveview(lv)
+
+    before_native = mixed_preview_descriptor(session_id, turn_id)
+    assert before_native.applied == 1
+    assert before_native.ops == vfs_ops
+    before_state = mixed_preview_canvas_state(lv)
+    before_rows = mixed_preview_chat_rows(lv)
+    before_preview_id = mixed_preview_row_id(before_rows)
+    assert mixed_preview_row_index(before_rows, before_preview_id) != nil
+
+    send(stream_pid, :release_mixed_preview_turn)
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :tool_call_completed,
+                      session_id: ^session_id,
+                      turn_id: ^turn_id,
+                      tool_call_id: "mixed-picture-edit"
+                    }},
+                   1_000
+
+    assert_receive {:agent_event,
+                    %{type: :turn_completed, session_id: ^session_id, turn_id: ^turn_id}},
+                   1_000
+
+    sync_liveview(lv)
+
+    [composed] = mixed_preview_descriptors(session_id, turn_id)
+
+    assert composed.edit_id == before_native.edit_id
+    assert composed.preview_identity == before_native.preview_identity
+    assert composed.preview_snapshot == before_native.preview_snapshot
+    assert composed.applied == 2
+
+    assert composed.ops ==
+             vfs_ops ++
+               [
+                 %{
+                   "op" => "insert_picture",
+                   "ref" => Jason.encode!(picture_ref),
+                   "src" => picture_path
+                 }
+               ]
+
+    assert composed.highlights ==
+             vfs_highlights ++
+               [
+                 %{
+                   "kind" => "picture",
+                   "op" => "insert_picture",
+                   "ref" => %{
+                     "section" => 0,
+                     "paragraph" => 0,
+                     "control" => 1,
+                     "type" => "picture"
+                   },
+                   "text" => "signature.png"
+                 }
+               ]
+
+    composed_state = mixed_preview_canvas_state(lv)
+    composed_rows = mixed_preview_chat_rows(lv)
+    assert mixed_preview_row_id(composed_rows) == before_preview_id
+
+    assert mixed_preview_row_index(composed_rows, before_preview_id) <
+             mixed_preview_row_index(composed_rows, "agent-tool-mixed-picture-edit")
+
+    assert_preview_state(lv, %{"deltaCount" => 2})
+    assert Jason.decode!(composed_state["previewHighlights"]) == composed.highlights
+    assert composed_state["bytesUrl"] == before_state["bytesUrl"]
+    refute has_element?(lv, "#agent-error")
+
+    open_document(lv, "drafts/service.hwpx")
+    switched_state = mixed_preview_canvas_state(lv)
+    assert switched_state == composed_state
+    assert mixed_preview_chat_rows(lv) == composed_rows
+    refute has_element?(lv, "#agent-error")
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, replayed_lv, _html} =
+      open_workspace(conn, root, chat_rail_tab_id: tab_id)
+
+    render_async(replayed_lv, 2_000)
+    sync_liveview(replayed_lv)
+    assert subscribe_agent(replayed_lv) == session_id
+    assert mixed_preview_canvas_state(replayed_lv) == composed_state
+    assert mixed_preview_chat_rows(replayed_lv) == composed_rows
+    assert [replayed_descriptor] = mixed_preview_descriptors(session_id, turn_id)
+    assert replayed_descriptor == composed
+    refute has_element?(replayed_lv, "#agent-error")
+  end
+
+  test "committed VFS continuation replaces the racing live preview with durable final bytes", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "immutable-vfs-preview-turn")
+    final_bytes = File.read!(Path.join(root, "template.hwpx"))
+    final_sha256 = Document.sha256(final_bytes)
+
+    edit_id = "vfs-edit-immutable-preview"
+
+    highlights = [
+      %{
+        "kind" => "text",
+        "op" => "replace_text",
+        "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+        "offset" => 0,
+        "length" => 6,
+        "text" => "수정 완료"
+      }
+    ]
+
+    preview_steps = [
+      %{
+        "ops" => [
+          %{
+            "op" => "replace_text",
+            "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+            "query" => "수정 전",
+            "replacement" => "수정 완료"
+          }
+        ],
+        "sets" => [],
+        "highlights" => highlights
+      }
+    ]
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "immutable-vfs-preview-turn",
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         edit_id: edit_id,
+         applied: 0,
+         progress_index: 0,
+         progress_total: 1,
+         preview_only: true,
+         preview_steps: preview_steps,
+         highlights: highlights
+       }}
+    )
+
+    sync_liveview(lv)
+
+    live_state =
+      canvas_state(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+
+    assert String.starts_with?(live_state["bytesUrl"], "/document-bytes?")
+    assert has_element?(lv, ~s([data-role="editor-preview"] [id$="-live-canvas"]))
+
+    immutable_url = "blob:http://localhost/immutable-pre-edit-snapshot"
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "immutable-vfs-preview-turn",
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         edit_id: edit_id,
+         applied: 1,
+         progress_index: 1,
+         progress_total: 1,
+         preview_continuation: true,
+         browser_authority: true,
+         preview_base_url: immutable_url,
+         preview_steps: preview_steps,
+         highlights: highlights
+       }}
+    )
+
+    sync_liveview(lv)
+
+    committed_state =
+      canvas_state(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+
+    assert committed_state["bytesUrl"] =~ "/document-bytes?"
+    assert committed_state["bytesUrl"] =~ "snapshot=#{final_sha256}"
+    refute committed_state["bytesUrl"] == immutable_url
+    assert Jason.decode!(committed_state["previewSteps"]) == []
+    assert has_element?(lv, ~s([data-role="editor-preview"] [id$="-committed-canvas"]))
+    refute has_element?(lv, ~s([data-role="editor-preview"] [id$="-live-canvas"]))
+  end
+
+  test "persisted VFS preview pins edit-time bytes across document switches and transcript replay",
+       %{
+         conn: conn
+       } do
+    root = WorkspaceAdapterStub.valid_path()
+    relative_path = "template.hwpx"
+    path = Path.join(root, relative_path)
+    original_bytes = File.read!(path)
+    edit_time_bytes = rezip_hwpx(original_bytes, "edit-time")
+    later_bytes = rezip_hwpx(original_bytes, "later")
+
+    refute edit_time_bytes == original_bytes
+    refute later_bytes == edit_time_bytes
+    assert {:ok, "hwpx"} = Document.detect_format(relative_path, edit_time_bytes)
+    assert {:ok, "hwpx"} = Document.detect_format(relative_path, later_bytes)
+
+    {:ok, lv, _html} =
+      open_workspace(conn, root,
+        document: relative_path,
+        chat_rail_tab_id: "preview-origin"
+      )
+
+    session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "pinned-vfs-preview-turn")
+    document_id = Document.id_for(root, relative_path)
+
+    on_exit(fn ->
+      snapshot_path =
+        PreviewSnapshot.path(document_id, Document.sha256(edit_time_bytes))
+
+      File.rm_rf(Path.dirname(snapshot_path))
+    end)
+
+    assert {:ok, ^original_bytes} = Document.read(document_id)
+
+    File.write!(path, edit_time_bytes)
+
+    # The already-open Document.Session is deliberately stale. Snapshot capture
+    # must read the committed path at the VFS boundary, never these old bytes.
+    assert {:ok, ^original_bytes} = Document.read(document_id)
+
+    highlights = [
+      %{
+        "kind" => "text",
+        "op" => "replace_text",
+        "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+        "length" => 8,
+        "text" => "EDIT_TIME"
+      }
+    ]
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "pinned-vfs-preview-turn",
+         path: path,
+         doc: relative_path,
+         edit_id: "pinned-preview",
+         applied: 1,
+         highlights: highlights
+       }}
+    )
+
+    sync_liveview(lv)
+
+    selector = ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
+    before = canvas_state(lv, selector)
+
+    assert before["documentPath"] == relative_path
+    assert before["localDocumentId"] == document_id
+    assert Jason.decode!(before["previewHighlights"]) == highlights
+
+    before_uri = URI.parse(before["bytesUrl"])
+    before_query = URI.decode_query(before_uri.query)
+
+    assert before_uri.path == "/document-bytes"
+    assert before_query["path"] == root
+    assert before_query["document"] == relative_path
+    assert before_query["snapshot"] == Document.sha256(edit_time_bytes)
+    assert fetch_document_bytes(before["bytesUrl"]) == edit_time_bytes
+
+    assert [%Dialog{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+
+    assert Enum.any?(items, fn item ->
+             snapshot = Map.get(item, :preview_snapshot)
+
+             Map.get(item, :role) == :edit_preview and is_map(snapshot) and
+               Map.get(snapshot, :document_id) == document_id and
+               Map.get(snapshot, :sha256) == Document.sha256(edit_time_bytes)
+           end)
+
+    File.write!(path, later_bytes)
+    open_document(lv, "drafts/service.hwpx")
+
+    assert_canvas_state_after_open_sync(lv, ~s([data-role="hwp-editor"]), %{
+      "documentPath" => "drafts/service.hwpx"
+    })
+
+    after_switch = canvas_state(lv, selector)
+
+    pinned_keys = [
+      "documentId",
+      "localDocumentId",
+      "documentPath",
+      "bytesUrl",
+      "previewHighlights",
+      "previewSteps"
+    ]
+
+    assert Map.take(after_switch, pinned_keys) == Map.take(before, pinned_keys)
+    assert File.read!(path) == later_bytes
+    assert fetch_document_bytes(after_switch["bytesUrl"]) == edit_time_bytes
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+    File.rm!(path)
+    refute File.exists?(path)
+
+    {:ok, replayed_lv, _html} =
+      open_workspace(conn, root, chat_rail_tab_id: "preview-origin")
+
+    render_async(replayed_lv, 2_000)
+    sync_liveview(replayed_lv)
+    assert subscribe_agent(replayed_lv) == session_id
+
+    replayed = canvas_state(replayed_lv, selector)
+
+    assert Map.take(replayed, pinned_keys) == Map.take(before, pinned_keys)
+    assert fetch_document_bytes(replayed["bytesUrl"]) == edit_time_bytes
+  end
+
+  test "a delayed VFS preview stays with its completed turn while the queued turn is running",
+       %{conn: conn} do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_delayed_preview_turn,
+        script: [{:text_delta, "turn reply"}]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "delayed-preview-origin-turn", root)
+    tab_id = "delayed-preview-origin-turn-tab"
+    {:ok, lv, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#agent-form", agent: %{message: "first edit"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: turn1}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, task1}, 1_000
+
+    lv
+    |> form("#agent-form", agent: %{message: "second edit"})
+    |> render_submit()
+
+    assert_receive {:agent_event, %{type: :turn_queued, session_id: ^session_id, turn_id: turn2}},
+                   1_000
+
+    send(task1, :release_delayed_preview_turn)
+
+    assert_receive {:agent_event,
+                    %{type: :turn_completed, session_id: ^session_id, turn_id: ^turn1}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, task2}, 1_000
+    assert_receive {:agent_event, %{type: :turn_started, turn_id: ^turn2}}, 1_000
+
+    send_vfs_edit_and_wait(lv, %{
+      path: Path.join(root, "template.hwpx"),
+      doc: "template.hwpx",
+      agent_id: session_id,
+      instance_id: agent_instance_id(session_id),
+      turn_id: turn1,
+      edit_id: "delayed-first-turn-edit",
+      applied: 1,
+      progress_index: 1,
+      progress_total: 1,
+      highlights: [
+        %{
+          "kind" => "text",
+          "op" => "replace_text",
+          "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+          "length" => 7,
+          "text" => "FIRST EDIT"
+        }
+      ]
+    })
+
+    assert [%Dialog{turn_id: ^turn1, items: first_items}] =
+             AcpAgent.agent_snapshot(session_id).transcript
+
+    assert [%{turn_id: ^turn1, edit_id: "delayed-first-turn-edit"}] =
+             Enum.filter(first_items, &(&1.role == :edit_preview))
+
+    send(task2, :release_delayed_preview_turn)
+
+    assert_receive {:agent_event,
+                    %{type: :turn_completed, session_id: ^session_id, turn_id: ^turn2}},
+                   1_000
+
+    assert [
+             %Dialog{turn_id: ^turn1, items: replay_first_items},
+             %Dialog{turn_id: ^turn2, items: replay_second_items}
+           ] = AcpAgent.agent_snapshot(session_id).transcript
+
+    assert Enum.any?(replay_first_items, &(&1.role == :edit_preview))
+    refute Enum.any?(replay_second_items, &(&1.role == :edit_preview))
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, replayed, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    sync_liveview(replayed)
+    assert subscribe_agent(replayed) == session_id
+
+    assert chat_stream_roles(replayed) == [
+             "user",
+             "agent",
+             "editor_preview",
+             "user",
+             "agent"
+           ]
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "duplicate committed previews from simultaneous stable-tab LiveViews persist and replay once",
+       %{
+         conn: conn
+       } do
+    use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "reply"}]])
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "duplicate-preview-connections", root)
+    tab_id = "duplicate-preview-tab"
+
+    {:ok, live_a, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    session_id = subscribe_agent(live_a)
+
+    live_a
+    |> form("#agent-form", agent: %{message: "keep reconnect history"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      turn_id: dialog_turn_id
+                    }},
+                   1_000
+
+    sync_liveview(live_a)
+
+    {:ok, live_b, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    assert subscribe_agent(live_b) == session_id
+    sync_liveview(live_a)
+
+    refute has_element?(live_a, "#agent-error")
+    refute has_element?(live_b, "#agent-error")
+    assert has_element?(live_a, ~s(#agent-sidebar[data-agent-status="idle"]))
+    assert has_element?(live_b, ~s(#agent-sidebar[data-agent-status="idle"]))
+
+    assert has_element?(
+             live_b,
+             ~s([data-role="agent-message"][data-message-role="user"]),
+             "keep reconnect history"
+           )
+
+    assert has_element?(
+             live_a,
+             ~s([data-role="agent-message"][data-message-role="user"]),
+             "keep reconnect history"
+           )
+
+    info = %{
+      path: Path.join(root, "template.hwpx"),
+      doc: "template.hwpx",
+      agent_id: session_id,
+      instance_id: agent_instance_id(session_id),
+      turn_id: dialog_turn_id,
+      edit_id: "duplicate-final-preview",
+      applied: 1,
+      progress_index: 1,
+      progress_total: 1,
+      highlights: [
+        %{
+          "kind" => "text",
+          "op" => "replace_text",
+          "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+          "length" => 9,
+          "text" => "ONE FINAL"
+        }
+      ]
+    }
+
+    send_vfs_edit_and_wait(live_a, info)
+    send_vfs_edit_and_wait(live_b, info)
+    send_vfs_edit_and_wait(live_b, info)
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    preview_items =
+      session_id
+      |> AcpAgent.agent_snapshot()
+      |> Map.fetch!(:transcript)
+      |> Enum.flat_map(&Map.get(&1, :items, []))
+      |> Enum.filter(&(Map.get(&1, :role) == :edit_preview))
+
+    assert [preview_item] = preview_items
+    assert preview_item.edit_id == "duplicate-final-preview"
+
+    assert preview_item.preview_identity == %{
+             turn_id: dialog_turn_id,
+             edit_id: "duplicate-final-preview",
+             document_id: Document.id_for(root, "template.hwpx"),
+             snapshot_id: preview_item.preview_snapshot.id
+           }
+
+    preview_count =
+      live_b
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="editor-preview"]))
+      |> LazyHTML.attribute("data-role")
+      |> length()
+
+    assert preview_count == 1
+
+    live_a_preview_count =
+      live_a
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="editor-preview"]))
+      |> LazyHTML.attribute("data-role")
+      |> length()
+
+    assert live_a_preview_count == 1
+
+    stop_pid(live_a.pid)
+    sync_workspace_session(root)
+
+    assert Process.alive?(live_b.pid)
+    assert agent_session_id(live_b) == session_id
+    refute has_element?(live_b, "#agent-error")
+    assert has_element?(live_b, ~s(#agent-sidebar[data-agent-status="idle"]))
+
+    assert has_element?(
+             live_b,
+             ~s([data-role="agent-message"][data-message-role="user"]),
+             "keep reconnect history"
+           )
+
+    stop_pid(live_b.pid)
+    sync_workspace_session(root)
+
+    {:ok, restored, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    sync_liveview(restored)
+
+    assert subscribe_agent(restored) == session_id
+    refute has_element?(restored, "#agent-error")
+    assert has_element?(restored, ~s(#agent-sidebar[data-agent-status="idle"]))
+
+    restored_preview_count =
+      restored
+      |> render()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query(~s([data-role="editor-preview"]))
+      |> LazyHTML.attribute("data-role")
+      |> length()
+
+    assert restored_preview_count == 1
+  end
+
+  test "simultaneous stable-tab LiveViews finalize one terminal turn once", %{conn: conn} do
+    use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "one completion"}]])
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "single-terminal-finalizer", root)
+    tab_id = "single-terminal-finalizer-tab"
+
+    {:ok, live_a, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    session_id = subscribe_agent(live_a)
+    {:ok, live_b, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    assert subscribe_agent(live_b) == session_id
+    :ok = Ecrits.Workspace.Session.subscribe_file_events(root)
+
+    live_a
+    |> form("#agent-form", agent: %{message: "finalize exactly once"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      instance_id: instance_id,
+                      turn_id: turn_id
+                    }},
+                   2_000
+
+    assert_receive {:workspace_turn_finalized,
+                    %{
+                      workspace_path: ^root,
+                      agent_id: ^session_id,
+                      instance_id: ^instance_id,
+                      turn_id: ^turn_id,
+                      result: %{
+                        saved: [],
+                        failed: [],
+                        staged: %{committed: [], pending: []}
+                      },
+                      summary: %{successful?: true}
+                    }},
+                   2_000
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+    assert has_element?(live_a, ~s(#agent-sidebar[data-agent-status="idle"]))
+    assert has_element?(live_b, ~s(#agent-sidebar[data-agent-status="idle"]))
+
+    refute_receive {:workspace_turn_finalized, %{agent_id: ^session_id, turn_id: ^turn_id}},
+                   100
+
+    state = root |> Ecrits.Workspace.Session.whereis() |> :sys.get_state()
+
+    assert %{
+             {^session_id, ^instance_id, ^turn_id} => %{
+               status: :completed,
+               summary: %{successful?: true}
+             }
+           } = state.turn_finalizations
+
+    refute Map.has_key?(state.turn_finalizations[{session_id, instance_id, turn_id}], :result)
+  end
+
+  @tag :edit_failure
+  test "committed preview snapshot failure is explicit and never falls back to mutable bytes", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    tab_id = "unavailable-preview-tab"
+    {:ok, lv, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "failed-vfs-preview-turn")
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "failed-vfs-preview-turn",
+         edit_id: "failed-preview-snapshot",
+         applied: 1,
+         progress_index: 1,
+         progress_total: 1,
+         preview_snapshot_error: "forced_snapshot_failure",
+         highlights: []
+       }}
+    )
+
+    sync_liveview(lv)
+
+    assert has_element?(lv, ~s([data-role="editor-preview-unavailable"]))
+    refute has_element?(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+
+    assert [%Dialog{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+    assert [preview] = Enum.filter(items, &(Map.get(&1, :role) == :edit_preview))
+    assert preview.role == :edit_preview
+    assert preview.preview_unavailable == true
+    assert preview.preview_error == "forced_snapshot_failure"
+    assert preview.preview_snapshot == nil
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, replayed_lv, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    sync_liveview(replayed_lv)
+
+    assert subscribe_agent(replayed_lv) == session_id
+    assert has_element?(replayed_lv, ~s([data-role="editor-preview-unavailable"]))
+
+    refute has_element?(
+             replayed_lv,
+             ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
+           )
+  end
+
   test "VFS preview selects a visible text range after a delete highlight", %{conn: conn} do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root)
-    _session_id = subscribe_agent(lv)
+    session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "delete-highlight-vfs-turn")
 
     ref = %{"section" => 0, "paragraph" => 2}
 
@@ -2119,6 +3651,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       lv.pid,
       {:vfs_doc_edited,
        %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "delete-highlight-vfs-turn",
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          applied: 2,
@@ -2156,12 +3691,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   test "VFS preview prefers a ranged body edit over a stale cell ref", %{conn: conn} do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root)
-    _session_id = subscribe_agent(lv)
+    session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "stale-cell-vfs-turn")
 
     send(
       lv.pid,
       {:vfs_doc_edited,
        %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "stale-cell-vfs-turn",
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          applied: 2,
@@ -2211,12 +3750,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   test "VFS preview sends the exact saved text as a native highlight anchor", %{conn: conn} do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root)
-    _session_id = subscribe_agent(lv)
+    session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "exact-highlight-vfs-turn")
 
     send(
       lv.pid,
       {:vfs_doc_edited,
        %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "exact-highlight-vfs-turn",
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          applied: 1,
@@ -2253,8 +3796,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
     session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "large-vfs-preview-turn")
 
-    assert_canvas_state_after_open_sync(lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state_after_open_sync(lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentFormat" => "hwpx",
       "documentPath" => "template.hwpx"
     })
@@ -2263,6 +3807,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       lv.pid,
       {:vfs_doc_edited,
        %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: "large-vfs-preview-turn",
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          applied: 2,
@@ -2304,9 +3851,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   test "repeated VFS edits replace the previous embedded rail preview", %{conn: conn} do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
-    _session_id = subscribe_agent(lv)
+    session_id = subscribe_agent(lv)
+    seed_known_vfs_turn(session_id, "repeated-vfs-preview-turn")
 
-    assert_canvas_state_after_open_sync(lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state_after_open_sync(lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentFormat" => "hwpx",
       "documentPath" => "template.hwpx"
     })
@@ -2316,6 +3864,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
         lv.pid,
         {:vfs_doc_edited,
          %{
+           agent_id: session_id,
+           instance_id: agent_instance_id(session_id),
+           turn_id: "repeated-vfs-preview-turn",
            path: Path.join(root, "template.hwpx"),
            doc: "template.hwpx",
            applied: 1,
@@ -2361,16 +3912,21 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute has_element?(lv, ~s([data-role="doc-edit-card"]))
   end
 
-  test "one VFS write streams grapheme edit tokens through one stable preview", %{conn: conn} do
+  test "one VFS write streams semantic edit ranges through one stable preview", %{conn: conn} do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
     session_id = subscribe_agent(lv)
     edit_id = "streamed-vfs-edit"
+    turn_id = "streamed-vfs-preview-turn"
+    seed_known_vfs_turn(session_id, turn_id)
 
     send(
       lv.pid,
       {:vfs_doc_edited,
        %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: turn_id,
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          edit_id: edit_id,
@@ -2378,12 +3934,32 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
          progress_total: 2,
          preview_only: true,
          applied: 0,
+         delta_applied: 2,
          marker: "STREAMED_TOKEN_PENDING",
-         highlights: []
+         highlights: [],
+         ops: [%{"op" => "delete_range"}, %{"op" => "insert_text"}]
        }}
     )
 
     sync_liveview(lv)
+
+    assert_preview_state(lv, %{
+      "documentPath" => "template.hwpx",
+      "deltaCount" => 2,
+      "status" => "running"
+    })
+
+    assert has_element?(
+             lv,
+             ~s([data-role="editor-preview"] [data-role="editor-preview-delta-count"]),
+             "2"
+           )
+
+    refute has_element?(
+             lv,
+             ~s([data-role="editor-preview"] [data-role="editor-preview-delta-count"]),
+             "0"
+           )
 
     refute Enum.any?(AcpAgent.agent_snapshot(session_id).transcript, fn turn ->
              Enum.any?(Map.get(turn, :items, []), &(Map.get(&1, :role) == :edit_preview))
@@ -2393,6 +3969,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       lv.pid,
       {:vfs_doc_edited,
        %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: turn_id,
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          edit_id: edit_id,
@@ -2422,7 +4001,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="editor-preview"][id^="local-agent-editor-preview-#{edit_id}-"])
+             ~s([data-role="editor-preview"][id^="agent-editor-preview-#{turn_id}-"])
            )
 
     refute Enum.any?(AcpAgent.agent_snapshot(session_id).transcript, fn turn ->
@@ -2433,6 +4012,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       lv.pid,
       {:vfs_doc_edited,
        %{
+         agent_id: session_id,
+         instance_id: agent_instance_id(session_id),
+         turn_id: turn_id,
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          edit_id: edit_id,
@@ -2460,13 +4042,17 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       "status" => "sent"
     })
 
+    assert has_element?(
+             lv,
+             ~s([data-role="editor-preview"] [data-role="editor-preview-delta-count"]),
+             "2"
+           )
+
     preview_ids =
       lv
       |> render()
       |> LazyHTML.from_fragment()
-      |> LazyHTML.query(
-        ~s([data-role="editor-preview"][id^="local-agent-editor-preview-#{edit_id}-"])
-      )
+      |> LazyHTML.query(~s([data-role="editor-preview"][id^="agent-editor-preview-#{turn_id}-"]))
       |> LazyHTML.attribute("id")
 
     assert length(preview_ids) == 1
@@ -2478,7 +4064,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       |> Enum.flat_map(&Map.get(&1, :items, []))
 
     assert Enum.count(transcript_items, &(Map.get(&1, :role) == :edit_preview)) == 1
-    assert Enum.find(transcript_items, &(Map.get(&1, :role) == :edit_preview)).applied == 4
+    assert Enum.find(transcript_items, &(Map.get(&1, :role) == :edit_preview)).applied == 2
   end
 
   test "VFS property writes are pushed to the open HWP browser editor", %{conn: conn} do
@@ -2486,7 +4072,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
 
-    assert_canvas_state_after_open_sync(lv, ~s([data-role="local-hwp-editor"]), %{
+    assert_canvas_state_after_open_sync(lv, ~s([data-role="hwp-editor"]), %{
       "localDocumentFormat" => "hwpx",
       "documentPath" => "template.hwpx"
     })
@@ -2553,7 +4139,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
         {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
 
         lv
-        |> element("#local-agent-inline-access-full-workspace")
+        |> element("#agent-inline-access-full-workspace")
         |> render_click()
 
         sync_liveview(lv)
@@ -2563,7 +4149,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
         refute Ecrits.Fuse.OpenDocs.writable?(root)
 
         lv
-        |> element("#local-agent-inline-access-full-workspace")
+        |> element("#agent-inline-access-full-workspace")
         |> render_click()
 
         sync_liveview(lv)
@@ -2587,19 +4173,42 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     # Build a conversation so there is something to lose.
     lv
-    |> form("#local-agent-form", agent: %{message: "first question"})
+    |> form("#agent-form", agent: %{message: "first question"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      turn_id: completed_turn_id
+                    }},
                    1_000
 
     sync_liveview(lv)
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "first question"
            )
+
+    send_vfs_edit_and_wait(lv, %{
+      path: Path.join(WorkspaceAdapterStub.valid_path(), "template.hwpx"),
+      doc: "template.hwpx",
+      agent_id: session_id,
+      instance_id: agent_instance_id(session_id),
+      turn_id: completed_turn_id,
+      edit_id: "document-switch-stable-preview",
+      applied: 1,
+      progress_index: 1,
+      progress_total: 1,
+      marker: "PREVIEW_MUST_STAY_ON_DOCUMENT_SWITCH",
+      highlights: []
+    })
+
+    stable_preview = liveview_assign(lv, :agent_vfs_preview_item)
+    assert %{edit_id: "document-switch-stable-preview"} = stable_preview
+    assert has_element?(lv, ~s([data-role="editor-preview"]))
 
     # Expand the drafts directory so its documents become selectable.
     lv
@@ -2612,13 +4221,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     sync_liveview(lv)
 
     # Same session_id, same backing PID, conversation intact.
-    assert local_agent_session_id(lv) == session_id
+    assert agent_session_id(lv) == session_id
     assert AcpAgent.whereis(session_id) == session_pid
     assert Process.alive?(session_pid)
+    assert liveview_assign(lv, :agent_vfs_preview_item) == stable_preview
+    assert has_element?(lv, ~s([data-role="editor-preview"]))
+    refute has_element?(lv, "#agent-error")
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "first question"
            )
 
@@ -2628,13 +4240,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    assert local_agent_session_id(lv) == session_id
+    assert agent_session_id(lv) == session_id
     assert AcpAgent.whereis(session_id) == session_pid
     assert Process.alive?(session_pid)
+    assert liveview_assign(lv, :agent_vfs_preview_item) == stable_preview
+    assert has_element?(lv, ~s([data-role="editor-preview"]))
+    refute has_element?(lv, "#agent-error")
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "first question"
            )
 
@@ -2645,7 +4260,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert is_binary(path) and String.ends_with?(path, "template.hwpx")
   end
 
-  test "a browser refresh starts a fresh rail and keeps the old chat in recents",
+  test "a new browser tab starts a fresh rail and keeps the old chat in recents",
        %{conn: conn} do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "ack reply"}]])
     root = WorkspaceAdapterStub.valid_path()
@@ -2659,10 +4274,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     # A turn that completes → builds the transcript AND derives the auto-title.
     lv
-    |> form("#local-agent-form", agent: %{message: "한 단어로 확인만"})
+    |> form("#agent-form", agent: %{message: "한 단어로 확인만"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
     sync_liveview(lv)
 
     # The durable agent retained the derived title + transcript.
@@ -2670,9 +4285,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     snapshot = AcpAgent.agent_snapshot(session_id)
     assert [%{user: "한 단어로 확인만"} | _] = snapshot.transcript
     refute snapshot.title_user_edited?
-    assert has_element?(lv, "#local-agent-title-label[value='한 단어로 확인만']")
+    assert has_element?(lv, "#agent-title-label[value='한 단어로 확인만']")
 
-    # --- the "refresh": the old LiveView pid dies, then a new one mounts ---
+    # A second browser tab has a distinct tab id, so it starts a fresh rail while
+    # retaining the first tab's completed chat in recents.
     stop_pid(lv.pid)
     sync_workspace_session(root)
 
@@ -2680,59 +4296,1083 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv2)
 
-    # New active rail: refresh survival is intentionally not required.
+    # New active rail: a distinct tab must not inherit the first tab's selection.
     new_session_id = subscribe_agent(lv2)
     refute new_session_id == session_id
     assert AcpAgent.whereis(session_id) == agent_pid
     assert Process.alive?(agent_pid)
 
-    assert has_element?(lv2, "#local-agent-title-label[value='New Chat']")
+    assert has_element?(lv2, "#agent-title-label[value='New Chat']")
 
     refute has_element?(
              lv2,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "한 단어로 확인만"
            )
 
-    assert has_element?(lv2, "#local-agent-rail-picker[data-count='2']")
+    assert has_element?(lv2, "#agent-rail-picker[data-count='2']")
 
     lv2
-    |> element("#local-agent-rail-picker")
+    |> element("#agent-rail-picker")
     |> render_click()
 
-    assert has_element?(lv2, "#local-agent-rail-option-#{session_id}", "한 단어로 확인만")
+    assert chat_rail_agent_ids(lv2) == [new_session_id, session_id]
+    assert has_element?(lv2, "#agent-rail-option-#{session_id}", "한 단어로 확인만")
 
     lv2
-    |> element("#local-agent-rail-option-#{session_id}")
+    |> element("#agent-rail-option-#{session_id}")
     |> render_click()
 
     sync_liveview(lv2)
 
-    assert local_agent_session_id(lv2) == session_id
-    assert has_element?(lv2, "#local-agent-title-label[value='한 단어로 확인만']")
+    assert agent_session_id(lv2) == session_id
+    assert has_element?(lv2, "#agent-title-label[value='한 단어로 확인만']")
 
     send(
       lv2.pid,
-      {:local_agent_event,
-       %{session_id: session_id, type: :title_generated, title: "Provider refined title"}}
+      {:agent_event,
+       %{
+         session_id: session_id,
+         instance_id: AcpAgent.agent_snapshot(session_id).instance_id,
+         type: :title_generated,
+         title: "Provider refined title"
+       }}
     )
 
     sync_liveview(lv2)
 
-    assert has_element?(lv2, "#local-agent-title-label[value='Provider refined title']")
+    assert has_element?(lv2, "#agent-title-label[value='Provider refined title']")
 
     assert has_element?(
              lv2,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "한 단어로 확인만"
            )
+
+    lv2
+    |> element("#agent-rail-picker")
+    |> render_click()
+
+    assert chat_rail_agent_ids(lv2) == [new_session_id, session_id]
+    assert has_element?(lv2, "#agent-rail-option-#{session_id} .hero-check")
+    refute has_element?(lv2, "#agent-rail-option-#{new_session_id} .hero-check")
 
     # Tear down the durable workspace Session + agent so the shared valid_path()
     # doesn't leak this agent into sibling tests.
     on_exit(fn -> stop_workspace_session(root) end)
   end
 
-  test "same workspace path has isolated chat rails across LiveView pids", %{conn: conn} do
+  test "a browser refresh reattaches the selected rail without reordering recents",
+       %{conn: conn} do
+    use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "persisted reply"}]])
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "stable-refresh-session", root)
+    tab_id = "stable-refresh-tab"
+
+    {:ok, lv, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    old_session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#agent-form", agent: %{message: "persist this rail"})
+    |> render_submit()
+
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^old_session_id}},
+                   1_000
+
+    sync_liveview(lv)
+
+    lv
+    |> element("#agent-refresh")
+    |> render_click()
+
+    sync_liveview(lv)
+    new_session_id = subscribe_agent(lv)
+    refute new_session_id == old_session_id
+
+    lv
+    |> element("#agent-rail-picker")
+    |> render_click()
+
+    assert chat_rail_agent_ids(lv) == [new_session_id, old_session_id]
+
+    lv
+    |> element("#agent-rail-option-#{old_session_id}")
+    |> render_click()
+
+    sync_liveview(lv)
+    assert agent_session_id(lv) == old_session_id
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, lv2, _html2} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    sync_liveview(lv2)
+
+    assert subscribe_agent(lv2) == old_session_id
+    assert has_element?(lv2, "#agent-title-label[value='persist this rail']")
+
+    assert has_element?(
+             lv2,
+             ~s([data-role="agent-message"][data-message-role="user"]),
+             "persist this rail"
+           )
+
+    lv2
+    |> element("#agent-rail-picker")
+    |> render_click()
+
+    assert chat_rail_agent_ids(lv2) == [new_session_id, old_session_id]
+    assert has_element?(lv2, "#agent-rail-option-#{old_session_id} .hero-check")
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "same-tab siblings keep different documents while sharing rail state and preview", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_same_tab_turn,
+        script: [{:text_delta, "shared reply"}]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "same-tab-different-documents", root)
+    tab_id = "same-tab-different-documents-id"
+
+    {:ok, live_a, _html} =
+      open_workspace(conn, root,
+        document: "template.hwpx",
+        chat_rail_tab_id: tab_id
+      )
+
+    old_session_id = subscribe_agent(live_a)
+    seed_known_vfs_turn(old_session_id, "same-tab-pinned-preview-turn")
+    template_path = Path.join(root, "template.hwpx")
+    template_bytes = File.read!(template_path)
+    template_document_id = Document.id_for(root, "template.hwpx")
+
+    on_exit(fn ->
+      template_document_id
+      |> PreviewSnapshot.path(Document.sha256(template_bytes))
+      |> Path.dirname()
+      |> File.rm_rf()
+    end)
+
+    preview_info = %{
+      path: template_path,
+      doc: "template.hwpx",
+      agent_id: old_session_id,
+      instance_id: agent_instance_id(old_session_id),
+      turn_id: "same-tab-pinned-preview-turn",
+      edit_id: "same-tab-pinned-preview",
+      applied: 1,
+      highlights: [
+        %{
+          "kind" => "text",
+          "op" => "replace_text",
+          "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+          "length" => 6,
+          "text" => "공유 수정"
+        }
+      ]
+    }
+
+    send_vfs_edit_and_wait(live_a, preview_info)
+    sync_liveview(live_a)
+
+    {:ok, live_b, _html} =
+      open_workspace(conn, root,
+        document: "drafts/service.hwpx",
+        chat_rail_tab_id: tab_id
+      )
+
+    assert subscribe_agent(live_b) == old_session_id
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert liveview_assign(live_a, :active_document_path) == "template.hwpx"
+    assert liveview_assign(live_b, :active_document_path) == "drafts/service.hwpx"
+    refute has_element?(live_a, "#agent-error")
+    refute has_element?(live_b, "#agent-error")
+
+    preview_selector =
+      ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"])
+
+    preview_a = canvas_state(live_a, preview_selector)
+    preview_b = canvas_state(live_b, preview_selector)
+
+    pinned_preview_keys = [
+      "documentId",
+      "localDocumentId",
+      "documentPath",
+      "bytesUrl",
+      "previewHighlights",
+      "previewSteps"
+    ]
+
+    assert Map.take(preview_b, pinned_preview_keys) ==
+             Map.take(preview_a, pinned_preview_keys)
+
+    assert preview_b["documentPath"] == "template.hwpx"
+    assert preview_b["localDocumentId"] == template_document_id
+    assert fetch_document_bytes(preview_b["bytesUrl"]) == template_bytes
+
+    live_a
+    |> form("#agent-form", agent: %{message: "running on the shared rail"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^old_session_id, turn_id: first_turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, first_stream_pid}, 1_000
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert liveview_assign(live_a, :agent_status) == :running
+    assert liveview_assign(live_b, :agent_status) == :running
+
+    assert has_element?(
+             live_b,
+             ~s([data-role="agent-message"][data-message-role="user"]),
+             "running on the shared rail"
+           )
+
+    live_b
+    |> form("#agent-form", agent: %{message: "queued on the shared rail"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_queued, session_id: ^old_session_id, turn_id: second_turn_id}},
+                   1_000
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert Enum.map(liveview_assign(live_a, :agent_queue), & &1.body) ==
+             ["queued on the shared rail"]
+
+    assert Enum.map(liveview_assign(live_b, :agent_queue), & &1.body) ==
+             ["queued on the shared rail"]
+
+    assert has_element?(live_a, "#agent-queued-panel", "queued on the shared rail")
+    assert has_element?(live_b, "#agent-queued-panel", "queued on the shared rail")
+
+    send(first_stream_pid, :release_same_tab_turn)
+
+    assert_receive {:agent_event,
+                    %{type: :turn_completed, session_id: ^old_session_id, turn_id: ^first_turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, second_stream_pid}, 1_000
+    assert_receive {:agent_event, %{type: :turn_started, turn_id: ^second_turn_id}}, 1_000
+    send(second_stream_pid, :release_same_tab_turn)
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^old_session_id,
+                      turn_id: ^second_turn_id
+                    }},
+                   1_000
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert liveview_assign(live_a, :agent_status) == :idle
+    assert liveview_assign(live_b, :agent_status) == :idle
+    assert liveview_assign(live_a, :agent_queue) == []
+    assert liveview_assign(live_b, :agent_queue) == []
+
+    live_a
+    |> element("#agent-refresh")
+    |> render_click()
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    new_session_id = agent_session_id(live_a)
+    refute new_session_id == old_session_id
+    assert agent_session_id(live_b) == new_session_id
+    assert subscribe_agent(live_b) == new_session_id
+    assert liveview_assign(live_a, :active_document_path) == "template.hwpx"
+    assert liveview_assign(live_b, :active_document_path) == "drafts/service.hwpx"
+    refute has_element?(live_a, "#agent-error")
+    refute has_element?(live_b, "#agent-error")
+
+    live_b
+    |> element("#agent-rail-picker")
+    |> render_click()
+
+    live_b
+    |> element("#agent-rail-option-#{old_session_id}")
+    |> render_click()
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert agent_session_id(live_a) == old_session_id
+    assert agent_session_id(live_b) == old_session_id
+    assert liveview_assign(live_a, :active_document_path) == "template.hwpx"
+    assert liveview_assign(live_b, :active_document_path) == "drafts/service.hwpx"
+    refute has_element?(live_a, "#agent-error")
+    refute has_element?(live_b, "#agent-error")
+
+    restored_a = canvas_state(live_a, preview_selector)
+    restored_b = canvas_state(live_b, preview_selector)
+
+    assert Map.take(restored_a, pinned_preview_keys) ==
+             Map.take(preview_a, pinned_preview_keys)
+
+    assert Map.take(restored_b, pinned_preview_keys) ==
+             Map.take(preview_a, pinned_preview_keys)
+
+    for live <- [live_a, live_b] do
+      assert has_element?(
+               live,
+               ~s([data-role="agent-message"][data-message-role="user"]),
+               "running on the shared rail"
+             )
+
+      assert has_element?(
+               live,
+               ~s([data-role="agent-message"][data-message-role="user"]),
+               "queued on the shared rail"
+             )
+    end
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "same-tab provider restart snapshots every sibling when the agent id is reused", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_restarted_provider_turn,
+        echo_opts: true
+      ]
+    )
+
+    put_provider_integrations!(ready_provider_integrations())
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "same-tab-provider-restart", root)
+    tab_id = "same-tab-provider-restart-id"
+
+    {:ok, live_a, _html} =
+      open_workspace(conn, root,
+        document: "template.hwpx",
+        chat_rail_tab_id: tab_id
+      )
+
+    session_id = subscribe_agent(live_a)
+    old_agent_pid = AcpAgent.whereis(session_id)
+    old_instance_id = AcpAgent.agent_snapshot(session_id).instance_id
+    template_path = Path.join(root, "template.hwpx")
+    template_bytes = File.read!(template_path)
+    template_document_id = Document.id_for(root, "template.hwpx")
+
+    on_exit(fn ->
+      template_document_id
+      |> PreviewSnapshot.path(Document.sha256(template_bytes))
+      |> Path.dirname()
+      |> File.rm_rf()
+    end)
+
+    live_a
+    |> form("#agent-form", agent: %{message: "old provider preview"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: preview_turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, preview_stream_pid}, 1_000
+    send(preview_stream_pid, :release_restarted_provider_turn)
+
+    assert_receive {:agent_event,
+                    %{type: :turn_completed, session_id: ^session_id, turn_id: ^preview_turn_id}},
+                   1_000
+
+    sync_liveview(live_a)
+
+    send_vfs_edit_and_wait(live_a, %{
+      path: template_path,
+      doc: "template.hwpx",
+      agent_id: session_id,
+      instance_id: agent_instance_id(session_id),
+      turn_id: preview_turn_id,
+      edit_id: "provider-restart-stale-preview",
+      applied: 1,
+      highlights: [
+        %{
+          "kind" => "text",
+          "op" => "replace_text",
+          "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+          "length" => 6,
+          "text" => "이전 편집"
+        }
+      ]
+    })
+
+    {:ok, live_b, _html} =
+      open_workspace(conn, root,
+        document: "drafts/service.hwpx",
+        chat_rail_tab_id: tab_id
+      )
+
+    assert subscribe_agent(live_b) == session_id
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    live_a
+    |> form("#agent-form", agent: %{message: "old provider running"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: running_turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, _old_stream_pid}, 1_000
+
+    live_b
+    |> form("#agent-form", agent: %{message: "old provider queued"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_queued, session_id: ^session_id, turn_id: queued_turn_id}},
+                   1_000
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    for live <- [live_a, live_b] do
+      assert liveview_assign(live, :agent_status) == :running
+      assert liveview_assign(live, :agent_turn_id) == running_turn_id
+
+      assert Enum.map(liveview_assign(live, :agent_queue), & &1.turn_id) ==
+               [queued_turn_id]
+
+      assert has_element?(live, ~s([data-role="editor-preview"]))
+    end
+
+    live_a
+    |> element("#agent-go-to-provider")
+    |> render_click()
+
+    live_a
+    |> element("#agent-model-detail-claude")
+    |> render_click()
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert agent_session_id(live_a) == session_id
+    assert agent_session_id(live_b) == session_id
+    refute AcpAgent.whereis(session_id) == old_agent_pid
+    refute Process.alive?(old_agent_pid)
+
+    # A running turn makes the provider restart asynchronous: the old process can
+    # be dead before the Workspace Session resumes the fenced replacement and
+    # sends the sibling rebinds. Cross both mailboxes before snapshotting the
+    # reused stable id.
+    sync_workspace_session(root)
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    new_instance_id = AcpAgent.agent_snapshot(session_id).instance_id
+    refute new_instance_id == old_instance_id
+
+    for live <- [live_a, live_b] do
+      assert liveview_assign(live, :agent_status) == :idle
+      assert liveview_assign(live, :agent_turn_id) == nil
+      assert liveview_assign(live, :agent_pending) == 0
+      assert liveview_assign(live, :agent_queue) == []
+      assert liveview_assign(live, :agent_vfs_preview_item) == nil
+      refute has_element?(live, ~s([data-role="agent-message"]))
+      refute has_element?(live, ~s([data-role="editor-preview"]))
+      refute has_element?(live, "#agent-error")
+    end
+
+    assert liveview_assign(live_a, :active_document_path) == "template.hwpx"
+    assert liveview_assign(live_b, :active_document_path) == "drafts/service.hwpx"
+
+    assert %{provider: "claude", model: nil, adapter_opts: restarted_opts} =
+             AcpAgent.agent_snapshot(session_id)
+
+    # A delayed mailbox/PubSub event from the dead provider process still has
+    # the durable agent id, but not the new process incarnation. It must not add
+    # tools, rename the rail, or run terminal persistence on either sibling.
+    stale_events = [
+      %{
+        type: :tool_call_started,
+        session_id: session_id,
+        instance_id: old_instance_id,
+        turn_id: running_turn_id,
+        tool_call_id: "stale-old-tool",
+        name: "Bash",
+        arguments: %{"command" => "false"}
+      },
+      %{
+        type: :thread_title,
+        session_id: session_id,
+        instance_id: old_instance_id,
+        title: "stale provider title"
+      },
+      %{
+        type: :turn_completed,
+        session_id: session_id,
+        instance_id: old_instance_id,
+        turn_id: running_turn_id,
+        text: "stale completion"
+      }
+    ]
+
+    for live <- [live_a, live_b], event <- stale_events do
+      send(live.pid, {:agent_event, event})
+    end
+
+    for live <- [live_a, live_b] do
+      send(
+        live.pid,
+        {:workspace_turn_finalized,
+         %{
+           workspace_path: root,
+           agent_id: session_id,
+           instance_id: old_instance_id,
+           turn_id: running_turn_id,
+           result: %{saved: ["template.hwpx"]}
+         }}
+      )
+    end
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    for live <- [live_a, live_b] do
+      assert liveview_assign(live, :agent_instance_id) == new_instance_id
+      assert liveview_assign(live, :agent_status) == :idle
+      assert liveview_assign(live, :agent_turn_id) == nil
+      refute has_element?(live, "#agent-tool-stale-old-tool")
+      refute has_element?(live, "#agent-title-label[value='stale provider title']")
+      refute has_element?(live, "#flash-info", "Saved 1 document")
+      refute has_element?(live, "#agent-error")
+    end
+
+    assert AcpAgent.agent_snapshot(session_id).transcript == []
+
+    stale_vfs =
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id,
+         instance_id: old_instance_id,
+         turn_id: running_turn_id,
+         edit_id: "stale-old-vfs-edit",
+         path: template_path,
+         doc: "template.hwpx",
+         applied: 1,
+         preview_only: true,
+         highlights: []
+       }}
+
+    for live <- [live_a, live_b] do
+      send(live.pid, stale_vfs)
+      sync_liveview(live)
+      assert liveview_assign(live, :agent_vfs_preview_item) == nil
+      refute has_element?(live, ~s([data-role="editor-preview"]))
+    end
+
+    assert AcpAgent.agent_snapshot(session_id).transcript == []
+
+    # Claude's "default" display choice is represented canonically by omitting
+    # the adapter model option; a stale Codex sibling would send `gpt-5.5` here.
+    assert Keyword.get(restarted_opts, :model) == nil
+
+    for live <- [live_a, live_b] do
+      assert liveview_assign(live, :agent).provider.key == "claude"
+      assert liveview_assign(live, :agent).model == "default"
+
+      assert has_element?(
+               live,
+               "#agent-provider-options[data-selected-provider='claude'][data-selected-model='default']"
+             )
+    end
+
+    live_b
+    |> form("#agent-form", agent: %{message: "send through restarted provider"})
+    |> render_submit()
+
+    assert_receive {:agent_adapter_waiting, restarted_stream_pid}, 1_000
+    send(restarted_stream_pid, :release_restarted_provider_turn)
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      text: restarted_text
+                    }},
+                   1_000
+
+    assert restarted_text =~ "send through restarted provider"
+    refute restarted_text =~ "model="
+    refute restarted_text =~ "model=gpt-5.5"
+
+    assert %{provider: "claude", model: nil, adapter_opts: sent_opts} =
+             AcpAgent.agent_snapshot(session_id)
+
+    assert Keyword.get(sent_opts, :model) == nil
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "simultaneous stable-tab LiveViews follow shared create and select rebinds", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "shared reply"}]])
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "shared-tab-rebind", root)
+    tab_id = "shared-tab-rebind-id"
+
+    {:ok, live_a, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    {:ok, live_b, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    old_session_id = subscribe_agent(live_a)
+    assert agent_session_id(live_b) == old_session_id
+
+    live_a
+    |> form("#agent-form", agent: %{message: "seed shared old rail"})
+    |> render_submit()
+
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^old_session_id}},
+                   1_000
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    render_hook(live_b, "agent.rail.select", %{"rail-key" => "missing-shared-rail"})
+    assert has_element?(live_b, "#agent-error")
+
+    live_a
+    |> element("#agent-refresh")
+    |> render_click()
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    new_session_id = agent_session_id(live_a)
+    refute new_session_id == old_session_id
+    assert agent_session_id(live_b) == new_session_id
+    refute has_element?(live_b, "#agent-error")
+    assert has_element?(live_a, ~s(#agent-sidebar[data-agent-status="idle"]))
+    assert has_element?(live_b, ~s(#agent-sidebar[data-agent-status="idle"]))
+
+    assert subscribe_agent(live_b) == new_session_id
+
+    live_b
+    |> form("#agent-form", agent: %{message: "B sends on created rail"})
+    |> render_submit()
+
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^new_session_id}},
+                   1_000
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    live_a
+    |> element("#agent-rail-picker")
+    |> render_click()
+
+    live_a
+    |> element("#agent-rail-option-#{old_session_id}")
+    |> render_click()
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert agent_session_id(live_a) == old_session_id
+    assert agent_session_id(live_b) == old_session_id
+
+    live_b
+    |> form("#agent-form", agent: %{message: "B sends on selected rail"})
+    |> render_submit()
+
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^old_session_id}},
+                   1_000
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert has_element?(
+             live_b,
+             ~s([data-role="agent-message"][data-message-role="user"]),
+             "B sends on selected rail"
+           )
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "a sibling joining mid-turn keeps the shared rail alive after the sender closes", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_agent_ui,
+        script: [{:text_delta, "shared turn done"}]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "shared-tab-mid-turn", root)
+    tab_id = "shared-tab-mid-turn-id"
+    {:ok, live_a, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    session_id = subscribe_agent(live_a)
+
+    live_a
+    |> form("#agent-form", agent: %{message: "A starts shared turn"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: first_turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, first_stream_pid}, 1_000
+
+    document_id = "shared-mid-turn-owned-document"
+    assert :ok = Ecrits.Workspace.Session.claim_owner(root, document_id, session_id)
+
+    {:ok, live_b, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert agent_session_id(live_b) == session_id
+    assert liveview_assign(live_b, :agent_status) == :running
+    assert liveview_assign(live_b, :agent_turn_id) == first_turn_id
+
+    stop_pid(live_a.pid)
+    sync_workspace_session(root)
+
+    assert Process.alive?(live_b.pid)
+    assert Ecrits.Workspace.Session.owner(root, document_id) == session_id
+
+    send(first_stream_pid, :release_agent_ui)
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      turn_id: ^first_turn_id
+                    }},
+                   1_000
+
+    sync_liveview(live_b)
+    assert liveview_assign(live_b, :agent_status) == :idle
+
+    assert has_element?(
+             live_b,
+             ~s([data-role="agent-message"][data-message-role="agent"]),
+             "shared turn done"
+           )
+
+    live_b
+    |> form("#agent-form", agent: %{message: "B continues shared rail"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: second_turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, second_stream_pid}, 1_000
+    send(second_stream_pid, :release_agent_ui)
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      turn_id: ^second_turn_id
+                    }},
+                   1_000
+
+    sync_liveview(live_b)
+
+    assert has_element?(
+             live_b,
+             ~s([data-role="agent-message"][data-message-role="user"]),
+             "B continues shared rail"
+           )
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "a sibling joining after deltas and a tool start converges on the same in-flight turn", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_snapshot_turn,
+        script: [{:text_delta, " tail"}]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "shared-tab-current-snapshot", root)
+    tab_id = "shared-tab-current-snapshot-id"
+    {:ok, live_a, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    session_id = subscribe_agent(live_a)
+
+    live_a
+    |> form("#agent-form", agent: %{message: "inspect while I join"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_started,
+                      session_id: ^session_id,
+                      turn_id: turn_id,
+                      instance_id: instance_id
+                    }},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, stream_pid}, 1_000
+    agent_pid = AcpAgent.whereis(session_id)
+
+    send(agent_pid, {:turn_event, turn_id, %{type: :reasoning_delta, delta: "plan first"}})
+    send(agent_pid, {:turn_event, turn_id, %{type: :text_delta, delta: "before tool"}})
+
+    send(agent_pid, {
+      :turn_event,
+      turn_id,
+      %{
+        type: :tool_call_started,
+        tool_call_id: "snapshot-shell",
+        name: "Bash",
+        kind: "execute",
+        arguments: %{"command" => "pwd"}
+      }
+    })
+
+    send(agent_pid, {:turn_event, turn_id, %{type: :reasoning_delta, delta: "check result"}})
+
+    send(
+      agent_pid,
+      {:turn_event, turn_id,
+       %{
+         type: :edit_delta,
+         edit_id: "snapshot-edit",
+         path: "template.hwpx",
+         delta: "표 셀을 수정하는 중"
+       }}
+    )
+
+    send(agent_pid, {:turn_event, turn_id, %{type: :text_delta, delta: "after start"}})
+
+    _ = :sys.get_state(agent_pid)
+
+    {:ok, live_b, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert agent_session_id(live_b) == session_id
+    assert liveview_assign(live_b, :agent_instance_id) == instance_id
+    assert liveview_assign(live_b, :agent_turn_id) == turn_id
+    assert liveview_assign(live_b, :agent_status) == :running
+    assert liveview_assign(live_b, :agent_text) == "after start"
+
+    assert %{
+             "snapshot-shell" => %{
+               name: "Bash",
+               args: %{"command" => "pwd"}
+             }
+           } = liveview_assign(live_b, :agent_active_tools)
+
+    for live <- [live_a, live_b] do
+      assert has_element?(live, ~s([data-message-role="user"]), "inspect while I join")
+      assert has_element?(live, ~s([data-message-role="thinking"]), "plan first")
+      assert has_element?(live, ~s([data-message-role="thinking"]), "check result")
+      assert has_element?(live, ~s([data-message-role="agent"]), "after start")
+
+      assert %{text: "표 셀을 수정하는 중", delta_count: 1} =
+               liveview_assign(live, :agent_editor_preview)
+
+      assert has_element?(live, ~s([data-role="editor-preview"]))
+
+      assert has_element?(
+               live,
+               "#agent-tool-snapshot-shell[data-message-status='running']",
+               "Bash"
+             )
+    end
+
+    send(agent_pid, {
+      :turn_event,
+      turn_id,
+      %{
+        type: :tool_call_completed,
+        tool_call_id: "snapshot-shell",
+        name: "Bash",
+        kind: "execute",
+        result: %{"output" => "/tmp"}
+      }
+    })
+
+    send(agent_pid, {:turn_event, turn_id, %{type: :text_delta, delta: " final"}})
+    send(stream_pid, :release_snapshot_turn)
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      turn_id: ^turn_id,
+                      instance_id: ^instance_id
+                    }},
+                   1_000
+
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert chat_stream_roles(live_a) == chat_stream_roles(live_b)
+
+    assert chat_stream_roles(live_b) == [
+             "user",
+             "thinking",
+             "agent",
+             "tool",
+             "thinking",
+             "editor_preview",
+             "agent",
+             "agent"
+           ]
+
+    for live <- [live_a, live_b] do
+      assert has_element?(
+               live,
+               "#agent-tool-snapshot-shell[data-message-status='completed']",
+               "/tmp"
+             )
+
+      assert has_element?(live, ~s([data-message-role="agent"]), "after start")
+      assert has_element?(live, ~s([data-message-role="agent"]), "final tail")
+    end
+
+    assert [%Dialog{turn_id: ^turn_id}] = AcpAgent.agent_snapshot(session_id).transcript
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "a sibling joining while a delta precedes its snapshot applies that delta once", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(adapter_opts: [test_pid: self(), wait_for: :release_cursor_race_turn])
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "shared-tab-snapshot-cursor-race", root)
+    tab_id = "shared-tab-snapshot-cursor-race-id"
+    {:ok, live_a, _html} = open_workspace(conn, root, chat_rail_tab_id: tab_id)
+    session_id = subscribe_agent(live_a)
+
+    live_a
+    |> form("#agent-form", agent: %{message: "join during this edit"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_started,
+                      session_id: ^session_id,
+                      turn_id: turn_id,
+                      instance_id: instance_id
+                    }},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, stream_pid}, 1_000
+    agent_pid = AcpAgent.whereis(session_id)
+    topic = AcpAgent.topic(session_id)
+
+    subscriber_count = length(Registry.lookup(Ecrits.PubSub, topic))
+
+    send(
+      agent_pid,
+      {:turn_event, turn_id,
+       %{
+         type: :edit_delta,
+         edit_id: "cursor-race-edit",
+         path: "template.hwpx",
+         delta: "한 번만 보이는 편집"
+       }}
+    )
+
+    _ = :sys.get_state(agent_pid)
+    covered_snapshot = AcpAgent.agent_snapshot(session_id)
+    covered_seq = covered_snapshot.event_seq
+    parent = self()
+
+    duplicate_event = %{
+      type: :edit_delta,
+      session_id: session_id,
+      instance_id: instance_id,
+      event_seq: covered_seq,
+      turn_id: turn_id,
+      edit_id: "cursor-race-edit",
+      path: "template.hwpx",
+      delta: "한 번만 보이는 편집"
+    }
+
+    debug_fun = fn
+      false, {:in, {:"$gen_call", _from, :agent_snapshot}}, _name ->
+        count = length(Registry.lookup(Ecrits.PubSub, topic))
+        Phoenix.PubSub.broadcast(Ecrits.PubSub, topic, {:agent_event, duplicate_event})
+        send(parent, {:cursor_race_duplicate_delivered, count})
+        true
+
+      delivered?, _event, _name ->
+        delivered?
+    end
+
+    :ok = :sys.install(agent_pid, {:cursor_race_delivery, debug_fun, false})
+
+    on_exit(fn ->
+      if Process.alive?(agent_pid), do: :sys.remove(agent_pid, :cursor_race_delivery)
+      stop_workspace_session(root)
+    end)
+
+    conn = put_workspace_handoff(conn, root)
+    {:ok, live_b, _html} = live(conn, ~p"/workspace")
+    render_hook(live_b, "workspace.chat_rail.tab_ready", %{"id" => tab_id})
+    assert_receive {:cursor_race_duplicate_delivered, joined_count}, 2_000
+    assert joined_count >= subscriber_count + 1
+    :ok = :sys.remove(agent_pid, :cursor_race_delivery)
+    sync_liveview(live_a)
+    sync_liveview(live_b)
+
+    assert agent_session_id(live_b) == session_id
+    assert liveview_assign(live_b, :agent_instance_id) == instance_id
+
+    for live <- [live_a, live_b] do
+      assert %{
+               turn_id: ^turn_id,
+               text: "한 번만 보이는 편집",
+               delta_count: 1,
+               edit_id: "cursor-race-edit"
+             } = liveview_assign(live, :agent_editor_preview)
+
+      assert has_element?(live, ~s([data-role="editor-preview"]))
+    end
+
+    snapshot = AcpAgent.agent_snapshot(session_id)
+    assert liveview_assign(live_b, :agent_event_seq) == snapshot.event_seq
+    assert snapshot.current_turn.edit_preview.delta_count == 1
+
+    send(stream_pid, :release_cursor_race_turn)
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 1_000
+  end
+
+  test "same workspace path has isolated chat rails across browser tabs", %{conn: conn} do
     use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "isolated reply"}]])
 
     root = WorkspaceAdapterStub.valid_path()
@@ -2748,10 +5388,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute AcpAgent.whereis(session_id_a) == AcpAgent.whereis(session_id_b)
 
     lv_a
-    |> form("#local-agent-form", agent: %{message: "only rail a"})
+    |> form("#agent-form", agent: %{message: "only rail a"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id_a}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id_a}},
                    1_000
 
     sync_liveview(lv_a)
@@ -2759,13 +5399,13 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv_a,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "only rail a"
            )
 
     refute has_element?(
              lv_b,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "only rail a"
            )
 
@@ -2773,7 +5413,31 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert AcpAgent.agent_snapshot(session_id_b).transcript == []
   end
 
+  test "waits for the colocated browser-tab hook before attaching a chat rail", %{conn: conn} do
+    use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "ready"}]])
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "tab-ready-hook", root)
+    {:ok, lv, _html} = live(conn, ~p"/workspace")
+
+    assert has_element?(
+             lv,
+             "#workspace-root[phx-hook='EcritsWeb.Workspace.WorkspaceLive.ChatRailTabIdentity']"
+           )
+
+    assert has_element?(lv, "#agent-sidebar[data-session-id='']")
+
+    render_hook(lv, "workspace.chat_rail.tab_ready", %{"id" => "hook-owned-tab"})
+    sync_liveview(lv)
+
+    assert is_binary(subscribe_agent(lv))
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
   test "VFS edit previews route only to the owning chat rail", %{conn: conn} do
+    use_test_agent_adapter!(adapter_opts: [script: [{:text_delta, "owner reply"}]])
+
     root = WorkspaceAdapterStub.valid_path()
     conn = init_workspace_session(conn, "vfs-preview-owner", root)
 
@@ -2782,11 +5446,25 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     session_id_a = subscribe_agent(lv_a)
     session_id_b = subscribe_agent(lv_b)
+    instance_id_a = agent_instance_id(session_id_a)
+
+    lv_a
+    |> form("#agent-form", agent: %{message: "known owner turn"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_completed, session_id: ^session_id_a, turn_id: owned_turn_id}},
+                   1_000
+
+    sync_liveview(lv_a)
 
     event =
       {:vfs_doc_edited,
        %{
          agent_id: session_id_a,
+         instance_id: instance_id_a,
+         turn_id: owned_turn_id,
+         edit_id: "owned-vfs-edit",
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          applied: 1,
@@ -2820,6 +5498,290 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert Enum.any?(items_a, &(Map.get(&1, :role) == :edit_preview))
     assert AcpAgent.agent_snapshot(session_id_b).transcript == []
 
+    owned_preview = liveview_assign(lv_a, :agent_vfs_preview_item)
+    owned_transcript = AcpAgent.agent_snapshot(session_id_a).transcript
+
+    ownerless =
+      {:vfs_doc_edited,
+       %{
+         turn_id: "ownerless-turn",
+         edit_id: "ownerless-edit",
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 1,
+         marker: "OWNERLESS_MUST_NOT_ROUTE",
+         highlights: []
+       }}
+
+    wrong_owner =
+      {:vfs_doc_edited,
+       %{
+         agent_id: "some-other-agent",
+         turn_id: "wrong-owner-turn",
+         edit_id: "wrong-owner-edit",
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 1,
+         marker: "WRONG_OWNER_MUST_NOT_ROUTE",
+         highlights: []
+       }}
+
+    session_id_only_spoof =
+      {:vfs_doc_edited,
+       %{
+         session_id: session_id_a,
+         instance_id: instance_id_a,
+         turn_id: "session-id-spoof-turn",
+         edit_id: "session-id-spoof-edit",
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 1,
+         marker: "SESSION_ID_MUST_NOT_ROUTE",
+         highlights: []
+       }}
+
+    stale_instance =
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id_a,
+         instance_id: "stale-instance",
+         turn_id: "stale-instance-turn",
+         edit_id: "stale-instance-edit",
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 1,
+         marker: "STALE_INSTANCE_MUST_NOT_ROUTE",
+         highlights: []
+       }}
+
+    unknown_turn =
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id_a,
+         instance_id: instance_id_a,
+         turn_id: "unknown-turn",
+         edit_id: "unknown-turn-edit",
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 1,
+         marker: "UNKNOWN_TURN_MUST_NOT_ROUTE",
+         highlights: []
+       }}
+
+    for blocked <- [
+          ownerless,
+          wrong_owner,
+          session_id_only_spoof,
+          stale_instance,
+          unknown_turn
+        ] do
+      send(lv_a.pid, blocked)
+      sync_liveview(lv_a)
+
+      assert liveview_assign(lv_a, :agent_vfs_preview_item) == owned_preview
+      assert AcpAgent.agent_snapshot(session_id_a).transcript == owned_transcript
+    end
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "a rejected atomic VFS edit restores the prior stable chat-rail preview", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        wait_for: :release_rejected_preview_turn,
+        test_pid: self(),
+        script: [{:text_delta, "unreachable"}]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "vfs-preview-rejected", root)
+    {:ok, lv, _html} = open_workspace(conn, root)
+    session_id = subscribe_agent(lv)
+    instance_id = agent_instance_id(session_id)
+    stable_edit_id = "stable-vfs-edit"
+    edit_id = "rejected-vfs-edit"
+
+    lv
+    |> form("#agent-form", agent: %{message: "기존 미리보기를 만들어 줘"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: stable_turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, stable_stream_pid}, 1_000
+    send(stable_stream_pid, :release_rejected_preview_turn)
+
+    assert_receive {:agent_event,
+                    %{type: :turn_completed, session_id: ^session_id, turn_id: ^stable_turn_id}},
+                   1_000
+
+    sync_liveview(lv)
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id,
+         instance_id: instance_id,
+         turn_id: stable_turn_id,
+         edit_id: stable_edit_id,
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 1,
+         progress_index: 1,
+         progress_total: 1,
+         marker: "STABLE_PREVIEW",
+         highlights: []
+       }}
+    )
+
+    sync_liveview(lv)
+    stable_preview = liveview_assign(lv, :agent_vfs_preview_item)
+    assert %{edit_id: ^stable_edit_id} = stable_preview
+
+    assert liveview_assign(lv, :agent_vfs_preview_rollback_item) == nil
+
+    lv
+    |> form("#agent-form", agent: %{message: "계약서를 수정해 줘"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: rejected_turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, stream_pid}, 1_000
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       %{
+         agent_id: session_id,
+         instance_id: instance_id,
+         turn_id: rejected_turn_id,
+         edit_id: edit_id,
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         applied: 1,
+         progress_index: 1,
+         progress_total: 2,
+         marker: "MUST_BE_RETRACTED",
+         highlights: []
+       }}
+    )
+
+    sync_liveview(lv)
+    assert has_element?(lv, ~s([data-role="editor-preview"]))
+    assert %{edit_id: ^edit_id} = liveview_assign(lv, :agent_vfs_preview_item)
+    assert liveview_assign(lv, :agent_vfs_preview_rollback_item) == stable_preview
+
+    lv
+    |> element("#toggle-dir-drafts")
+    |> render_click()
+
+    open_document(lv, "drafts/service.hwpx")
+    sync_liveview(lv)
+
+    assert %{edit_id: ^edit_id} = liveview_assign(lv, :agent_vfs_preview_item)
+    assert liveview_assign(lv, :agent_vfs_preview_rollback_item) == stable_preview
+    refute has_element?(lv, "#agent-error")
+
+    send(
+      lv.pid,
+      {:vfs_doc_edit_rejected,
+       %{
+         agent_id: session_id,
+         instance_id: instance_id,
+         turn_id: "stale-other-turn",
+         edit_id: edit_id,
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         reason: "late rejection from another turn"
+       }}
+    )
+
+    sync_liveview(lv)
+    assert %{edit_id: ^edit_id} = liveview_assign(lv, :agent_vfs_preview_item)
+    assert liveview_assign(lv, :agent_vfs_preview_rollback_item) == stable_preview
+
+    send(
+      lv.pid,
+      {:vfs_doc_edit_rejected,
+       %{
+         agent_id: session_id,
+         instance_id: instance_id,
+         turn_id: rejected_turn_id,
+         edit_id: edit_id,
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         reason: "invalid structural write"
+       }}
+    )
+
+    sync_liveview(lv)
+    assert has_element?(lv, ~s([data-role="editor-preview"]))
+    refute has_element?(lv, "#agent-error")
+    assert liveview_assign(lv, :agent_vfs_preview_item) == stable_preview
+    assert liveview_assign(lv, :agent_vfs_preview_rollback_item) == nil
+
+    send(stream_pid, :release_rejected_preview_turn)
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :turn_completed,
+                      session_id: ^session_id,
+                      turn_id: ^rejected_turn_id
+                    }},
+                   1_000
+
+    sync_liveview(lv)
+    refute has_element?(lv, "#agent-error")
+    refute has_element?(lv, ~s([data-message-role="assistant"]), "Agent failed.")
+    assert has_element?(lv, ~s(#agent-sidebar[data-agent-status="idle"]))
+    assert liveview_assign(lv, :agent_vfs_preview_item) == stable_preview
+
+    persisted_edit_ids =
+      session_id
+      |> AcpAgent.agent_snapshot()
+      |> Map.fetch!(:transcript)
+      |> Enum.flat_map(&Map.get(&1, :items, []))
+      |> Enum.filter(&(Map.get(&1, :role) == :edit_preview))
+      |> Enum.map(&Map.get(&1, :edit_id))
+
+    assert persisted_edit_ids == [stable_edit_id]
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "an ownerless VFS edit resyncs the open editor without entering the chat rail", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "ownerless-editor-resync", root)
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    session_id = subscribe_agent(lv)
+
+    send_vfs_edit_and_wait(lv, %{
+      path: Path.join(root, "template.hwpx"),
+      doc: "template.hwpx",
+      edit_id: "ownerless-resync-edit",
+      applied: 1,
+      ops: [%{"op" => "replace_text", "text" => "resync"}],
+      highlights: []
+    })
+
+    assert_push_event(lv, "document.engine.operation.command", %{
+      verb: "edit",
+      payload: %{resync: true}
+    })
+
+    refute has_element?(lv, ~s([data-role="editor-preview"]))
+    assert liveview_assign(lv, :agent_vfs_preview_item) == nil
+    assert AcpAgent.agent_snapshot(session_id).transcript == []
+
     on_exit(fn -> stop_workspace_session(root) end)
   end
 
@@ -2834,15 +5796,15 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     old_pid = AcpAgent.whereis(session_id)
     assert is_pid(old_pid)
     assert AcpAgent.agent_snapshot(session_id).transcript == []
-    assert has_element?(lv, "#local-agent-rail-picker[data-count='1']")
+    assert has_element?(lv, "#agent-rail-picker[data-count='1']")
 
     lv
-    |> element("#local-agent-refresh")
+    |> element("#agent-refresh")
     |> render_click()
 
     sync_liveview(lv)
 
-    assert local_agent_session_id(lv) == session_id
+    assert agent_session_id(lv) == session_id
 
     new_pid = AcpAgent.whereis(session_id)
     assert is_pid(new_pid)
@@ -2850,9 +5812,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute Process.alive?(old_pid)
 
     assert AcpAgent.agent_snapshot(session_id).transcript == []
-    assert has_element?(lv, "#local-agent-title-label[value='New Chat']")
-    assert has_element?(lv, "#local-agent-rail-picker[data-count='1']")
-    refute has_element?(lv, "#local-agent-rail-picker[data-count='2']")
+    assert has_element?(lv, "#agent-title-label[value='New Chat']")
+    assert has_element?(lv, "#agent-rail-picker[data-count='1']")
+    refute has_element?(lv, "#agent-rail-picker[data-count='2']")
 
     on_exit(fn -> stop_workspace_session(WorkspaceAdapterStub.valid_path()) end)
   end
@@ -2875,7 +5837,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     session_id = subscribe_agent(lv)
 
-    assert has_element?(lv, "#local-agent-picks[data-role='composer-picks']:not([phx-update])")
+    assert has_element?(lv, "#agent-picks[data-role='composer-picks']:not([phx-update])")
 
     picks = [
       %{
@@ -2906,7 +5868,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     Enum.each(picks, &render_hook(lv, "document.element_picker.pick.toggle", &1))
 
     lv
-    |> form("#local-agent-form", agent: %{message: "여기 고쳐줘"})
+    |> form("#agent-form", agent: %{message: "여기 고쳐줘"})
     |> render_submit()
 
     # The agent-visible prompt keeps the exact legacy block format (typed text
@@ -2916,18 +5878,15 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert prompt =~ "Selected document elements (3):"
     assert prompt =~ ~s("ref": "hwp:body/sec/0/tbl/0/cell/0")
 
-    # #32/#34 (path-first): the pick's `document` path IS the tools' document
-    # handle — no separate id is stamped, and the turn tells the agent to skip
-    # doc.context/doc.find discovery and pass the path directly. VFS turns use
-    # the same refs as nested-JSONL target hints instead of doc.edit commands.
+    # Picks are structured target context only. The prompt does not add an
+    # alternate document handle or a tool-specific discovery/edit recipe.
     refute prompt =~ "document_id"
-    assert prompt =~ "Skip doc.context/doc.find discovery"
-    assert prompt =~ "When using doc.* tools"
-    assert prompt =~ "When using mounted #{doc_vfs_backend_mode_label()} JSONL"
-    assert prompt =~ "picture-control order c"
-    assert prompt =~ "`document` value (the file path)"
+    assert prompt =~ "Use this as target context; do not infer a different target from it."
+    refute prompt =~ "Skip doc.context/doc.find discovery"
+    refute prompt =~ "When using doc.* tools"
+    refute prompt =~ "When using mounted"
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}},
                    1_000
 
     sync_liveview(lv)
@@ -2959,13 +5918,13 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     render_hook(lv, "document.element_picker.pick.toggle", hd(picks))
 
     lv
-    |> form("#local-agent-form", agent: %{message: ""})
+    |> form("#agent-form", agent: %{message: ""})
     |> render_submit()
 
     assert_receive {:fake_acp_prompt, _sid, prompt2}, 1_000
     assert prompt2 =~ "Selected document elements (1):"
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}},
                    1_000
 
     sync_liveview(lv)
@@ -2982,16 +5941,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute new_session_id == session_id
 
     lv2
-    |> element("#local-agent-rail-picker")
+    |> element("#agent-rail-picker")
     |> render_click()
 
     lv2
-    |> element("#local-agent-rail-option-#{session_id}")
+    |> element("#agent-rail-option-#{session_id}")
     |> render_click()
 
     sync_liveview(lv2)
 
-    assert local_agent_session_id(lv2) == session_id
+    assert agent_session_id(lv2) == session_id
     assert has_element?(lv2, ~s([data-role="picked-element-chip"]), "급여 및 수당")
     refute render(lv2) =~ "Selected document elements"
   end
@@ -3037,10 +5996,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     agent_pid = AcpAgent.whereis(session_id)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "use one tool"})
+    |> form("#agent-form", agent: %{message: "use one tool"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
     sync_liveview(lv)
 
     assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
@@ -3106,22 +6065,22 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute new_session_id == session_id
 
     lv2
-    |> element("#local-agent-rail-picker")
+    |> element("#agent-rail-picker")
     |> render_click()
 
     lv2
-    |> element("#local-agent-rail-option-#{session_id}")
+    |> element("#agent-rail-option-#{session_id}")
     |> render_click()
 
     sync_liveview(lv2)
 
     assert has_element?(
              lv2,
-             ~s([data-role="local-agent-tool"][data-message-role="tool"][data-message-status="completed"]),
+             ~s([data-role="agent-tool"][data-message-role="tool"][data-message-status="completed"]),
              "doc.edit"
            )
 
-    details = "#local-agent-tool-legacy-doc-edit-details[data-role='operation-details']"
+    details = "#agent-tool-legacy-doc-edit-details[data-role='operation-details']"
 
     assert has_element?(lv2, details, ~s("ok": true))
     refute has_element?(lv2, details, "revision")
@@ -3162,17 +6121,17 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "can you read this pptx?"})
+    |> form("#agent-form", agent: %{message: "can you read this pptx?"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
     sync_liveview(lv)
 
     assert chat_stream_rows(lv) == [
-             {"user", "local-agent-user"},
-             {"tool", "local-agent-tool-tool-ls"},
-             {"tool", "local-agent-tool-tool-unzip"},
-             {"agent", "local-agent-assistant"}
+             {"user", "agent-user"},
+             {"tool", "agent-tool-tool-ls"},
+             {"tool", "agent-tool-tool-unzip"},
+             {"agent", "agent-assistant"}
            ]
   end
 
@@ -3201,16 +6160,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "read it"})
+    |> form("#agent-form", agent: %{message: "read it"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
     sync_liveview(lv)
 
     assert chat_stream_rows(lv) == [
-             {"user", "local-agent-user"},
-             {"tool", "local-agent-tool-tool-grep"},
-             {"agent", "local-agent-assistant"}
+             {"user", "agent-user"},
+             {"tool", "agent-tool-tool-grep"},
+             {"agent", "agent-assistant"}
            ]
   end
 
@@ -3249,22 +6208,22 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "can you read this pptx?"})
+    |> form("#agent-form", agent: %{message: "can you read this pptx?"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
     sync_liveview(lv)
 
     assert chat_stream_rows(lv) == [
-             {"user", "local-agent-user"},
-             {"tool", "local-agent-tool-tool-ls"},
-             {"tool", "local-agent-tool-tool-unzip"},
-             {"agent", "local-agent-assistant"}
+             {"user", "agent-user"},
+             {"tool", "agent-tool-tool-ls"},
+             {"tool", "agent-tool-tool-unzip"},
+             {"agent", "agent-assistant"}
            ]
 
     # The rows carry the real tool name, not the "Tool" fallback.
-    assert has_element?(lv, "#local-agent-tool-tool-ls", "Bash")
-    assert has_element?(lv, "#local-agent-tool-tool-unzip", "Bash")
+    assert has_element?(lv, "#agent-tool-tool-ls", "Bash")
+    assert has_element?(lv, "#agent-tool-tool-unzip", "Bash")
 
     # The durable transcript stores the same order and names for repaint.
     assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
@@ -3277,13 +6236,89 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
            ] = items
   end
 
+  test "thinking and shell rows keep their icons, disclosures, and persisted order", %{conn: conn} do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          %{type: :reasoning_delta, delta: "Plan command"},
+          %{
+            type: :tool_call_started,
+            id: "shell-order",
+            name: "Bash",
+            kind: "execute",
+            arguments: %{"command" => "pwd"}
+          },
+          %{
+            type: :tool_call_completed,
+            id: "shell-order",
+            name: "Bash",
+            kind: "execute",
+            result: %{"output" => "/tmp"}
+          },
+          %{type: :reasoning_delta, delta: "Read output"},
+          {:text_delta, "Finished"}
+        ]
+      ]
+    )
+
+    conn = init_workspace_session(conn, "operation-order-persist")
+    tab_id = "operation-order-persist-tab"
+    {:ok, lv, _html} = open_workspace(conn, chat_rail_tab_id: tab_id)
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#agent-form", agent: %{message: "inspect files"})
+    |> render_submit()
+
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    sync_liveview(lv)
+
+    expected_roles = ["user", "thinking", "tool", "thinking", "agent"]
+    assert chat_stream_roles(lv) == expected_roles
+
+    assert has_element?(
+             lv,
+             ~s(#agent-tool-shell-order [data-role="operation-block"][data-operation-kind="shell"])
+           )
+
+    assert has_element?(lv, "#agent-tool-shell-order-toggle", "Shell:")
+    assert has_element?(lv, "#agent-tool-shell-order-toggle .hero-command-line")
+
+    assert has_element?(
+             lv,
+             ~s([data-message-role="thinking"] details[data-operation-kind="thinking"] .hero-light-bulb)
+           )
+
+    for id <- [
+          "#agent-tool-shell-order-disclosure",
+          ~s([data-message-role="thinking"] details[data-operation-kind="thinking"])
+        ] do
+      assert has_element?(lv, id)
+      assert has_element?(lv, "#{id} > summary[aria-controls]")
+      assert has_element?(lv, "#{id} [data-role='operation-details']")
+    end
+
+    assert [%Dialog{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+    assert Enum.map(items, &Map.fetch!(&1, :role)) == [:user, :thinking, :tool, :thinking, :agent]
+
+    stop_pid(lv.pid)
+    sync_workspace_session(WorkspaceAdapterStub.valid_path())
+
+    {:ok, lv2, _html2} = open_workspace(conn, chat_rail_tab_id: tab_id)
+    sync_liveview(lv2)
+    assert subscribe_agent(lv2) == session_id
+
+    assert chat_stream_roles(lv2) == expected_roles
+    assert has_element?(lv2, "#agent-tool-shell-order-toggle", "Shell:")
+  end
+
   # The visible chat rows (user/tool/agent) in DOM order, as {role, id-prefix}
   # pairs — empty thinking/placeholder rows are excluded.
   defp chat_stream_rows(lv) do
     lv
     |> render()
     |> LazyHTML.from_fragment()
-    |> LazyHTML.query(~s(#local-agent-thread > [data-chat-role="chat-message"]))
+    |> LazyHTML.query(~s(#agent-thread > [data-chat-role="chat-message"]))
     |> Enum.map(fn node ->
       role = node |> LazyHTML.attribute("data-message-role") |> List.first()
       id = node |> LazyHTML.attribute("id") |> List.first() |> to_string()
@@ -3297,59 +6332,88 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     end)
   end
 
+  defp chat_stream_roles(lv) do
+    lv
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query(~s(#agent-thread > [data-chat-role="chat-message"]))
+    |> Enum.map(fn node ->
+      node
+      |> LazyHTML.attribute("data-message-role")
+      |> List.first()
+    end)
+  end
+
+  defp chat_rail_agent_ids(lv) do
+    lv
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query(~s([data-role="chat-rail-option"]))
+    |> Enum.map(fn node ->
+      node
+      |> LazyHTML.attribute("data-agent-id")
+      |> List.first()
+    end)
+  end
+
   test "agent rail shows provider logo in model selector for codex route display", %{conn: conn} do
     {:ok, lv, _html} = open_workspace(conn)
 
     assert has_element?(
              lv,
-             "#local-agent-sidebar[data-component='chat-rail'][data-local-chat-rail='true'][data-provider-key='codex']"
+             "#agent-sidebar[data-component='chat-rail'][data-chat-rail='true'][data-provider-key='codex']"
            )
 
     assert has_element?(
              lv,
-             ~s(#local-agent-model-select[data-role="agent-model-select"] [data-role="agent-model-provider-favicon"][src="/images/icons/openai-blossom.svg"])
+             ~s(#agent-model-select[data-role="agent-model-select"] [data-role="agent-model-provider-favicon"][src="/images/icons/openai-blossom.svg"])
            )
 
-    refute has_element?(lv, "#local-agent-title [data-role='chat-title-favicon']")
+    refute has_element?(lv, "#agent-title [data-role='chat-title-favicon']")
 
     assert has_element?(
              lv,
-             "#local-agent-title-form[phx-change='agent.title.change'][data-role='chat-thread-title-form'] input#local-agent-title-label[data-role='chat-thread-title-label'][name='local_agent_title[title]'][type='text'][value='New Chat'][aria-label='Chat title']"
+             "#agent-title-form[phx-change='agent.title.change'][data-role='chat-thread-title-form'] input#agent-title-label[data-role='chat-thread-title-label'][name='agent_title[title]'][type='text'][value='New Chat'][aria-label='Chat title']"
            )
 
-    refute render(lv) =~ "ecrits-local-ui chat"
-    refute has_element?(lv, "#local-agent-title-label[disabled]")
-    refute has_element?(lv, "#local-agent-title-label[readonly]")
-    refute has_element?(lv, "#local-agent-title-label[tabindex='-1']")
+    refute render(lv) =~ "ecrits-ui chat"
+    refute has_element?(lv, "#agent-title-label[disabled]")
+    refute has_element?(lv, "#agent-title-label[readonly]")
+    refute has_element?(lv, "#agent-title-label[tabindex='-1']")
 
     assert has_element?(
              lv,
-             "#local-agent-sidebar [data-role='chat-rail-controls'] #local-agent-refresh"
+             "#agent-sidebar [data-role='chat-rail-controls'] #agent-refresh"
            )
 
-    refute has_element?(lv, "#local-file-tree-refresh")
-    refute has_element?(lv, "#local-agent-provider")
-    refute has_element?(lv, "#local-agent-provider-icon")
+    refute has_element?(lv, "#file-tree-refresh")
+    refute has_element?(lv, "#agent-provider")
+    refute has_element?(lv, "#agent-provider-icon")
   end
 
   test "agent rail title is manually editable through the title form", %{conn: conn} do
     {:ok, lv, _html} = open_workspace(conn)
 
     lv
-    |> form("#local-agent-title-form", local_agent_title: %{title: "Pricing review"})
+    |> form("#agent-title-form", agent_title: %{title: "Pricing review"})
     |> render_change()
 
     assert has_element?(
              lv,
-             "#local-agent-title-label[value='Pricing review']"
+             "#agent-title-label[value='Pricing review']"
            )
 
-    session_id = local_agent_session_id(lv)
+    session_id = agent_session_id(lv)
 
     send(
       lv.pid,
-      {:local_agent_event,
-       %{session_id: session_id, type: :title_generated, title: "Agent title"}}
+      {:agent_event,
+       %{
+         session_id: session_id,
+         instance_id: AcpAgent.agent_snapshot(session_id).instance_id,
+         type: :title_generated,
+         title: "Agent title"
+       }}
     )
 
     sync_liveview(lv)
@@ -3359,19 +6423,24 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "#local-agent-title-label[value='Pricing review']"
+             "#agent-title-label[value='Pricing review']"
            )
   end
 
   test "agent generated title replaces the untouched default title", %{conn: conn} do
     {:ok, lv, _html} = open_workspace(conn)
 
-    session_id = local_agent_session_id(lv)
+    session_id = agent_session_id(lv)
 
     send(
       lv.pid,
-      {:local_agent_event,
-       %{session_id: session_id, type: :title_generated, title: "Employment review"}}
+      {:agent_event,
+       %{
+         session_id: session_id,
+         instance_id: AcpAgent.agent_snapshot(session_id).instance_id,
+         type: :title_generated,
+         title: "Employment review"
+       }}
     )
 
     sync_liveview(lv)
@@ -3381,12 +6450,12 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "#local-agent-title-label[value='Employment review']"
+             "#agent-title-label[value='Employment review']"
            )
 
     assert has_element?(
              lv,
-             "#local-agent-rail-option-#{session_id}",
+             "#agent-rail-option-#{session_id}",
              "Employment review"
            )
   end
@@ -3403,30 +6472,30 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     old_pid = AcpAgent.whereis(old_session_id)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "reset this chat"})
+    |> form("#agent-form", agent: %{message: "reset this chat"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^old_session_id}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^old_session_id}},
                    1_000
 
     sync_liveview(lv)
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "reset this chat"
            )
 
     assert [%{user: "reset this chat"} | _] = AcpAgent.agent_snapshot(old_session_id).transcript
 
     lv
-    |> element("#local-agent-refresh")
+    |> element("#agent-refresh")
     |> render_click()
 
     sync_liveview(lv)
 
     # The old rail is preserved; the button creates a distinct fresh rail.
-    new_session_id = local_agent_session_id(lv)
+    new_session_id = agent_session_id(lv)
     refute new_session_id == old_session_id
     track_agent_session(new_session_id)
 
@@ -3436,71 +6505,225 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert AcpAgent.whereis(old_session_id) == old_pid
 
     assert AcpAgent.agent_snapshot(new_session_id).transcript == []
-    assert has_element?(lv, "#local-agent-title-label[value='New Chat']")
-    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='idle']")
-    assert has_element?(lv, "#local-agent-rail-picker[data-count='2']")
+    assert has_element?(lv, "#agent-title-label[value='New Chat']")
+    assert has_element?(lv, "#agent-sidebar[data-agent-status='idle']")
+    assert has_element?(lv, "#agent-rail-picker[data-count='2']")
 
     refute has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "reset this chat"
            )
 
     lv
-    |> element("#local-agent-rail-picker")
+    |> element("#agent-rail-picker")
     |> render_click()
 
-    assert has_element?(lv, "#local-agent-rail-picker[data-state='open']")
+    assert has_element?(lv, "#agent-rail-picker[data-state='open']")
 
     assert has_element?(
              lv,
-             "#local-agent-rail-drawer[data-role='chat-rail-dropdown'][data-state='open']"
+             "#agent-rail-drawer[data-role='chat-rail-dropdown'][data-state='open']"
            )
 
     assert has_element?(
              lv,
-             "#local-agent-title > #local-agent-rail-drawer[class*='left-0'][class*='right-0']"
+             "#agent-title > #agent-rail-drawer[class*='left-0'][class*='right-0']"
            )
 
     assert has_element?(
              lv,
-             "#local-agent-rail-drawer[class*='transition-opacity'][class*='duration-75']"
+             "#agent-rail-drawer[class*='transition-opacity'][class*='duration-75']"
            )
 
-    refute has_element?(lv, "#local-agent-rail-drawer[class*='w-72']")
-    refute has_element?(lv, "#local-agent-rail-drawer[class*='translate-y']")
-    refute has_element?(lv, "#local-agent-rail-drawer[class*='scale']")
+    refute has_element?(lv, "#agent-rail-drawer[class*='w-72']")
+    refute has_element?(lv, "#agent-rail-drawer[class*='translate-y']")
+    refute has_element?(lv, "#agent-rail-drawer[class*='scale']")
 
-    assert has_element?(lv, "#local-agent-rail-drawer", "Recent chats")
-    assert has_element?(lv, "#local-agent-rail-option-#{old_session_id}", "reset this chat")
-    assert has_element?(lv, "#local-agent-rail-option-#{new_session_id}", "New Chat")
+    assert has_element?(lv, "#agent-rail-drawer", "Recent chats")
+    assert has_element?(lv, "#agent-rail-option-#{old_session_id}", "reset this chat")
+    assert has_element?(lv, "#agent-rail-option-#{new_session_id}", "New Chat")
 
     lv
-    |> element("#local-agent-rail-picker")
+    |> element("#agent-rail-picker")
     |> render_click()
 
-    assert has_element?(lv, "#local-agent-rail-picker[data-state='closed']")
-    assert has_element?(lv, "#local-agent-rail-drawer[data-state='closed']")
-    assert has_element?(lv, "#local-agent-rail-drawer[class*='opacity-0']")
+    assert has_element?(lv, "#agent-rail-picker[data-state='closed']")
+    assert has_element?(lv, "#agent-rail-drawer[data-state='closed']")
+    assert has_element?(lv, "#agent-rail-drawer[class*='opacity-0']")
 
     lv
-    |> element("#local-agent-rail-picker")
+    |> element("#agent-rail-picker")
     |> render_click()
 
     lv
-    |> element("#local-agent-rail-option-#{old_session_id}")
+    |> element("#agent-rail-option-#{old_session_id}")
     |> render_click()
 
     sync_liveview(lv)
 
-    assert local_agent_session_id(lv) == old_session_id
-    assert has_element?(lv, "#local-agent-title-label[value='reset this chat']")
+    assert agent_session_id(lv) == old_session_id
+    assert has_element?(lv, "#agent-title-label[value='reset this chat']")
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "reset this chat"
            )
+  end
+
+  test "pending new-chat double click and queue flush do not show the generic error banner", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_pending_new_chat,
+        script: [{:text_delta, "late reply"}]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "pending-new-chat-no-error", root)
+    {:ok, lv, _html} = open_workspace(conn, root)
+    old_session_id = subscribe_agent(lv)
+    old_instance_id = agent_instance_id(old_session_id)
+    :ok = Ecrits.Workspace.Session.subscribe_file_events(root)
+
+    lv
+    |> form("#agent-form", agent: %{message: "active before new chat"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, turn_id: turn_id, session_id: ^old_session_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, _adapter_pid}, 1_000
+
+    lv
+    |> form("#agent-form", agent: %{message: "held in old queue"})
+    |> render_submit()
+
+    assert_receive {:agent_event, %{type: :turn_queued, session_id: ^old_session_id}},
+                   1_000
+
+    sync_liveview(lv)
+    assert has_element?(lv, "#agent-queued-flush")
+    refute has_element?(lv, "#agent-error")
+
+    pool_pid = Process.whereis(Ecrits.Doc.Pool)
+    :ok = :sys.suspend(pool_pid)
+
+    try do
+      lv |> element("#agent-refresh") |> render_click()
+      sync_liveview(lv)
+      refute has_element?(lv, "#agent-error")
+
+      lv |> element("#agent-refresh") |> render_click()
+      sync_liveview(lv)
+      refute has_element?(lv, "#agent-error")
+
+      lv |> element("#agent-queued-flush") |> render_click()
+      sync_liveview(lv)
+      refute has_element?(lv, "#agent-error")
+
+      session_pid = Ecrits.Workspace.Session.whereis(root)
+      assert map_size(:sys.get_state(session_pid).foreground_transitions) == 1
+    after
+      :ok = :sys.resume(pool_pid)
+    end
+
+    assert_receive {:workspace_turn_finalized,
+                    %{
+                      agent_id: ^old_session_id,
+                      instance_id: ^old_instance_id,
+                      turn_id: ^turn_id,
+                      summary: %{successful?: true}
+                    }},
+                   2_000
+
+    new_session_id = await_agent_session_change(lv, old_session_id)
+    refute has_element?(lv, "#agent-error")
+    refute new_session_id == old_session_id
+    track_agent_session(new_session_id)
+  end
+
+  test "restart-fence rejection preserves the composer message and selected element chips", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_composer_restart,
+        script: [{:text_delta, "late reply"}]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "restart-fence-composer", root)
+    {:ok, lv, _html} = open_workspace(conn, root, document: "drafts/service.hwpx")
+    old_session_id = subscribe_agent(lv)
+    old_instance_id = agent_instance_id(old_session_id)
+    :ok = Ecrits.Workspace.Session.subscribe_file_events(root)
+
+    lv
+    |> form("#agent-form", agent: %{message: "active before restart"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, turn_id: turn_id, session_id: ^old_session_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, _adapter_pid}, 1_000
+
+    pool_pid = Process.whereis(Ecrits.Doc.Pool)
+    :ok = :sys.suspend(pool_pid)
+
+    pick = %{
+      "document" => "drafts/service.hwpx",
+      "type" => "cell",
+      "ref" => "hwp:body/sec/0/tbl/0/cell/0",
+      "text" => "계약 금액"
+    }
+
+    try do
+      lv |> element("#agent-refresh") |> render_click()
+
+      session_pid = Ecrits.Workspace.Session.whereis(root)
+      assert map_size(:sys.get_state(session_pid).foreground_transitions) == 1
+
+      render_hook(lv, "document.element_picker.pick.toggle", pick)
+      assert has_element?(lv, ~s([data-role="composer-pick-chip"]), "계약 금액")
+
+      lv
+      |> form("#agent-form", agent: %{message: "retry after restart"})
+      |> render_submit()
+
+      sync_liveview(lv)
+
+      assert [%{ref: "hwp:body/sec/0/tbl/0/cell/0", text: "계약 금액"}] =
+               liveview_assign(lv, :document_element_picker).picks
+
+      assert has_element?(lv, ~s([data-role="composer-pick-chip"]), "계약 금액")
+      assert has_element?(lv, "#agent-input", "retry after restart")
+      refute has_element?(lv, "#agent-error")
+    after
+      :ok = :sys.resume(pool_pid)
+    end
+
+    assert_receive {:workspace_turn_finalized,
+                    %{
+                      agent_id: ^old_session_id,
+                      instance_id: ^old_instance_id,
+                      turn_id: ^turn_id
+                    }},
+                   2_000
+
+    sync_workspace_session(root)
+    sync_liveview(lv)
+    new_session_id = agent_session_id(lv)
+    refute new_session_id == old_session_id
+    track_agent_session(new_session_id)
   end
 
   test "agent new-chat button subscribes the live view to the fresh rail stream", %{
@@ -3514,60 +6737,106 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     old_session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "seed old rail"})
+    |> form("#agent-form", agent: %{message: "seed old rail"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^old_session_id}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^old_session_id}},
                    1_000
 
     sync_liveview(lv)
 
     lv
-    |> element("#local-agent-refresh")
+    |> element("#agent-refresh")
     |> render_click()
 
     sync_liveview(lv)
 
-    new_session_id = local_agent_session_id(lv)
+    new_session_id = agent_session_id(lv)
     refute new_session_id == old_session_id
     track_agent_session(new_session_id)
     :ok = AcpAgent.subscribe(new_session_id)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "fresh rail prompt"})
+    |> form("#agent-form", agent: %{message: "fresh rail prompt"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^new_session_id}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^new_session_id}},
                    1_000
 
     sync_liveview(lv)
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "fresh rail prompt"
            )
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"]),
+             ~s([data-role="agent-message"][data-message-role="agent"]),
              "ack reply"
+           )
+  end
+
+  test "selecting the current recent rail repeatedly does not duplicate streamed deltas", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_agent_ui,
+        script: [{:text_delta, "one copy"}]
+      ]
+    )
+
+    {:ok, lv, _html} = open_workspace(conn)
+    session_id = subscribe_agent(lv)
+
+    for _ <- 1..2 do
+      lv
+      |> element("#agent-rail-picker")
+      |> render_click()
+
+      lv
+      |> element("#agent-rail-option-#{session_id}")
+      |> render_click()
+    end
+
+    lv
+    |> form("#agent-form", agent: %{message: "stream once"})
+    |> render_submit()
+
+    assert_receive {:agent_adapter_waiting, stream_pid}, 1_000
+    send(stream_pid, :release_agent_ui)
+
+    assert_push_event(lv, "agent.stream.text_appended", %{piece: "one copy"})
+    refute_push_event(lv, "agent.stream.text_appended", %{piece: "one copy"}, 200)
+
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}},
+                   1_000
+
+    sync_liveview(lv)
+
+    assert has_element?(
+             lv,
+             ~s([data-role="agent-message"][data-message-role="agent"]),
+             "one copy"
            )
   end
 
   test "agent selector supports codex route favicon without provider badge", %{conn: conn} do
     {:ok, lv, _html} = open_workspace(conn)
 
-    assert has_element?(lv, "#local-agent-sidebar[data-provider-key='codex']")
+    assert has_element?(lv, "#agent-sidebar[data-provider-key='codex']")
 
     assert has_element?(
              lv,
-             ~s(#local-agent-model-select[data-role="agent-model-select"] [data-role="agent-model-provider-favicon"][src="/images/icons/openai-blossom.svg"])
+             ~s(#agent-model-select[data-role="agent-model-select"] [data-role="agent-model-provider-favicon"][src="/images/icons/openai-blossom.svg"])
            )
 
-    refute has_element?(lv, "#local-agent-title [data-role='chat-title-favicon']")
-    refute has_element?(lv, "#local-agent-provider")
-    refute has_element?(lv, "#local-agent-provider-icon")
+    refute has_element?(lv, "#agent-title [data-role='chat-title-favicon']")
+    refute has_element?(lv, "#agent-provider")
+    refute has_element?(lv, "#agent-provider-icon")
   end
 
   test "unsupported provider URL state is ignored", %{conn: conn} do
@@ -3577,7 +6846,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
         ~p"/workspace?#{[path: WorkspaceAdapterStub.valid_path(), provider: "bogus"]}"
       )
 
-    assert has_element?(lv, "#local-agent-provider-options[data-selected-provider='codex']")
+    assert has_element?(lv, "#agent-provider-options[data-selected-provider='codex']")
   end
 
   test "agent status is internal and has no icon or provider badge structure", %{conn: conn} do
@@ -3588,58 +6857,275 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       |> render()
       |> LazyHTML.from_fragment()
 
-    assert has_element?(lv, "#local-agent-status[data-role='local-agent-status']", "Idle")
+    assert has_element?(lv, "#agent-status[data-role='agent-status']", "Idle")
 
     assert ["sr-only"] =
              fragment
-             |> LazyHTML.query("#local-agent-status")
+             |> LazyHTML.query("#agent-status")
              |> LazyHTML.attribute("class")
 
     assert [] =
              fragment
-             |> LazyHTML.query(~s([data-role="agent-status"]))
-             |> LazyHTML.attribute("data-role")
-
-    assert [] =
-             fragment
-             |> LazyHTML.query("#local-agent-status img")
+             |> LazyHTML.query("#agent-status img")
              |> LazyHTML.attribute("src")
 
     assert [] =
              fragment
-             |> LazyHTML.query("#local-agent-status [class*='hero-']")
+             |> LazyHTML.query("#agent-status [class*='hero-']")
              |> LazyHTML.attribute("class")
 
     assert [] =
              fragment
-             |> LazyHTML.query("#local-agent-status [data-provider-icon]")
+             |> LazyHTML.query("#agent-status [data-provider-icon]")
              |> LazyHTML.attribute("data-provider-icon")
   end
 
   test "agent body uses chat rail stream and composer structure", %{conn: conn} do
     {:ok, lv, _html} = open_workspace(conn)
 
-    assert has_element?(lv, "#local-agent-thread[data-role='chat-stream'][phx-update='stream']")
-    assert has_element?(lv, "#local-agent-thread[class*='overflow-x-hidden']")
+    assert has_element?(lv, "#agent-thread[data-role='chat-stream'][phx-update='stream']")
+    assert has_element?(lv, "#agent-thread[class*='overflow-x-hidden']")
 
-    refute has_element?(lv, "#local-agent-system")
+    refute has_element?(lv, "#agent-system")
 
-    assert has_element?(lv, "#local-agent-form[data-role='chat-form']")
-    assert has_element?(lv, "#local-agent-input")
-    assert has_element?(lv, "#local-agent-upload[data-role='chat-upload']")
+    assert has_element?(lv, "#agent-form[data-role='chat-form']")
+    assert has_element?(lv, "#agent-input")
+    assert has_element?(lv, "#agent-upload[data-role='chat-upload']")
 
     assert has_element?(
              lv,
-             ~s(#local-agent-provider-options input[type="file"][name="local_document_import"][class="sr-only"][data-role="local-document-upload-file-input"])
+             ~s(#agent-provider-options input[type="file"][name="document_import"][class="sr-only"][data-role="document-import-file-input"])
            )
 
     assert has_element?(
              lv,
-             "#local-agent-submit[type='submit'][data-role='chat-send'][data-action='send']"
+             "#agent-submit[type='submit'][data-role='chat-send'][data-action='send']"
            )
 
     refute has_element?(lv, "#document-direct-upload-input")
     refute has_element?(lv, ~s([phx-hook="DirectR2Upload"]))
+  end
+
+  test "ACP file operations render as persistent file activity, never tool cards", %{conn: conn} do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          %{
+            type: :file_operation_started,
+            id: "acp-file-read",
+            operation: "read_text_file",
+            kind: "read",
+            path: "/workspace/.ecrits/document.jsonl"
+          },
+          %{
+            type: :file_operation_completed,
+            id: "acp-file-read",
+            operation: "read_text_file",
+            kind: "read",
+            path: "/workspace/.ecrits/document.jsonl"
+          },
+          %{
+            type: :file_operation_started,
+            id: "acp-file-search",
+            operation: "search_text_file",
+            kind: "read",
+            path: "/workspace/.ecrits/document.jsonl",
+            query: "수급사업자"
+          },
+          %{
+            type: :file_operation_failed,
+            id: "acp-file-search",
+            operation: "search_text_file",
+            kind: "read",
+            path: "/workspace/.ecrits/document.jsonl",
+            query: "수급사업자",
+            reason: "no matches"
+          },
+          %{
+            type: :file_operation_started,
+            id: "acp-file-edit",
+            operation: "edit_text_file",
+            kind: "edit",
+            path: "/workspace/.ecrits/document.jsonl"
+          },
+          %{
+            type: :file_operation_completed,
+            id: "acp-file-edit",
+            operation: "edit_text_file",
+            kind: "edit",
+            path: "/workspace/.ecrits/document.jsonl"
+          },
+          %{
+            type: :tool_call_completed,
+            id: "doc-open",
+            name: "doc.open_doc",
+            result: %{"ok" => true}
+          },
+          {:text_delta, "done"}
+        ]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "file-activity-persistence", root)
+    tab_id = "file-activity-persistence-tab"
+
+    {:ok, lv, _html} =
+      open_workspace(conn, root, document: "template.hwpx", chat_rail_tab_id: tab_id)
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#agent-form", agent: %{message: "open and edit it"})
+    |> render_submit()
+
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    sync_liveview(lv)
+
+    for {id, label, status} <- [
+          {"acp-file-read", "Read", "completed"},
+          {"acp-file-search", "Search", "failed"},
+          {"acp-file-edit", "Edit", "completed"}
+        ] do
+      refute has_element?(lv, "#agent-tool-#{id}")
+
+      row =
+        "#agent-file-#{id}[data-role='file-activity'][data-message-role='file_activity'][data-message-status='#{status}']"
+
+      assert has_element?(lv, row, label)
+      assert has_element?(lv, row, "/workspace/.ecrits/document.jsonl")
+      refute has_element?(lv, row, "Tool:")
+    end
+
+    assert has_element?(lv, "#agent-file-acp-file-search", "수급사업자")
+    assert has_element?(lv, "#agent-file-acp-file-search", "no matches")
+    assert has_element?(lv, "#agent-tool-doc-open", "doc.open_doc")
+
+    assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+
+    assert Enum.count(items, &(Map.get(&1, :role) == :file_activity)) == 3
+
+    assert Enum.all?(Enum.filter(items, &(Map.get(&1, :role) == :file_activity)), fn item ->
+             Map.get(item, :operation) in [
+               "read_text_file",
+               "search_text_file",
+               "edit_text_file"
+             ]
+           end)
+
+    assert Enum.any?(items, &(Map.get(&1, :name) == "doc.open_doc"))
+
+    open_document(lv, "drafts/service.hwpx")
+
+    for id <- ["acp-file-read", "acp-file-search", "acp-file-edit"] do
+      assert has_element?(lv, "#agent-file-#{id}[data-role='file-activity']")
+      refute has_element?(lv, "#agent-tool-#{id}")
+    end
+
+    agent_pid = AcpAgent.whereis(session_id)
+
+    :sys.replace_state(agent_pid, fn state ->
+      update_in(state.transcript, fn [turn | rest] ->
+        legacy_item = %{
+          role: :tool,
+          tool_call_id: "legacy-hydrated-read",
+          name: "read_text_file",
+          status: :completed,
+          input: Jason.encode!(%{"path" => "legacy/contract.jsonl"})
+        }
+
+        [Map.update!(turn, :items, &(&1 ++ [legacy_item])) | rest]
+      end)
+    end)
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, lv2, _html2} =
+      open_workspace(conn, root,
+        document: "drafts/service.hwpx",
+        chat_rail_tab_id: tab_id
+      )
+
+    sync_liveview(lv2)
+    assert subscribe_agent(lv2) == session_id
+
+    for id <- ["acp-file-read", "acp-file-search", "acp-file-edit"] do
+      assert has_element?(lv2, "#agent-file-#{id}[data-role='file-activity']")
+      refute has_element?(lv2, "#agent-tool-#{id}")
+      refute has_element?(lv2, "#agent-file-#{id}", "Tool:")
+    end
+
+    assert has_element?(lv2, "#agent-file-acp-file-search", "no matches")
+
+    assert has_element?(
+             lv2,
+             "#agent-file-legacy-hydrated-read[data-role='file-activity'][data-message-role='file_activity']",
+             "Read"
+           )
+
+    assert has_element?(lv2, "#agent-file-legacy-hydrated-read", "legacy/contract.jsonl")
+    refute has_element?(lv2, "#agent-tool-legacy-hydrated-read")
+
+    on_exit(fn -> stop_workspace_session(root) end)
+  end
+
+  test "a dangling ACP file activity stays failed after the chat rail reconnects", %{conn: conn} do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        script: [
+          %{
+            type: :tool_call_started,
+            id: "dangling-acp-read",
+            name: "read_text_file",
+            arguments: %{"path" => "mounted/contract.hwpx.jsonl"}
+          }
+        ]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "dangling-file-activity-persistence", root)
+    tab_id = "dangling-file-activity-persistence-tab"
+
+    {:ok, lv, _html} =
+      open_workspace(conn, root, document: "template.hwpx", chat_rail_tab_id: tab_id)
+
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#agent-form", agent: %{message: "read the mounted projection"})
+    |> render_submit()
+
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    sync_liveview(lv)
+
+    failed_row =
+      "#agent-file-dangling-acp-read[data-role='file-activity'][data-message-status='failed']"
+
+    assert has_element?(lv, failed_row, "Turn ended before the file operation finished.")
+    refute has_element?(lv, "#agent-tool-dangling-acp-read")
+
+    assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
+
+    assert %{
+             status: :failed,
+             reason: "Turn ended before the file operation finished.",
+             body: "Turn ended before the file operation finished."
+           } = Enum.find(items, &(Map.get(&1, :file_operation_id) == "dangling-acp-read"))
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, lv2, _html2} =
+      open_workspace(conn, root, document: "template.hwpx", chat_rail_tab_id: tab_id)
+
+    sync_liveview(lv2)
+    assert subscribe_agent(lv2) == session_id
+    assert has_element?(lv2, failed_row, "Turn ended before the file operation finished.")
+    refute has_element?(lv2, "#agent-tool-dangling-acp-read")
+
+    on_exit(fn -> stop_workspace_session(root) end)
   end
 
   test "agent sidebar renders provider tool row events", %{conn: conn} do
@@ -3683,10 +7169,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "read"})
+    |> form("#agent-form", agent: %{message: "read"})
     |> render_submit()
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :tool_call_completed,
                       session_id: ^session_id,
@@ -3694,7 +7180,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
                     }},
                    1_000
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :tool_call_failed,
                       session_id: ^session_id,
@@ -3702,7 +7188,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
                     }},
                    1_000
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :tool_call_completed,
                       session_id: ^session_id,
@@ -3714,54 +7200,56 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             "#local-agent-tool-tool-ui-read[data-role='local-agent-tool'][data-message-status='failed']",
+             "#agent-tool-tool-ui-read[data-role='agent-tool'][data-message-status='failed']",
              "doc.read"
            )
 
     assert has_element?(
              lv,
-             "#local-agent-tool-tool-ui-read[data-chat-role='chat-message'] [data-role='operation-block']"
+             "#agent-tool-tool-ui-read[data-chat-role='chat-message'] [data-role='operation-block']"
            )
+
+    assert has_element?(lv, ~s([data-message-role="user"][class*="mt-2"]))
 
     assert has_element?(
              lv,
-             "#local-agent-tool-tool-ui-json-read-details[data-role='operation-details']",
+             "#agent-tool-tool-ui-json-read-details[data-role='operation-details']",
              ~s("items")
            )
 
     assert has_element?(
              lv,
-             "#local-agent-tool-tool-ui-find[data-role='local-agent-tool']",
+             "#agent-tool-tool-ui-find[data-role='agent-tool']",
              "doc.find"
            )
 
     assert has_element?(
              lv,
-             "#local-agent-tool-tool-ui-json-read-details[data-role='operation-details']",
+             "#agent-tool-tool-ui-json-read-details[data-role='operation-details']",
              ~s("items")
            )
 
     refute has_element?(
              lv,
-             "#local-agent-tool-tool-ui-json-read-details[data-role='operation-details']",
+             "#agent-tool-tool-ui-json-read-details[data-role='operation-details']",
              "%{"
            )
 
     refute has_element?(
              lv,
-             "#local-agent-tool-tool-ui-json-read-details[data-role='operation-details']",
+             "#agent-tool-tool-ui-json-read-details[data-role='operation-details']",
              "=>"
            )
 
     assert has_element?(
              lv,
-             "[data-role='local-agent-thinking'] [data-role='operation-block']",
+             "[data-role='agent-thinking'] [data-role='operation-block']",
              "Thinking:"
            )
 
     assert has_element?(
              lv,
-             "#local-agent-tool-tool-ui-read-details[data-role='operation-details']",
+             "#agent-tool-tool-ui-read-details[data-role='operation-details']",
              "missing document session"
            )
   end
@@ -3839,10 +7327,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "make requested edits"})
+    |> form("#agent-form", agent: %{message: "make requested edits"})
     |> render_submit()
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :tool_call_completed,
                       session_id: ^session_id,
@@ -3850,7 +7338,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
                     }},
                    1_000
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :tool_call_completed,
                       session_id: ^session_id,
@@ -3858,7 +7346,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
                     }},
                    1_000
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}},
                    1_000
 
     sync_liveview(lv)
@@ -3867,10 +7355,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
           {"tool-edit-no-version", "doc.edit"},
           {"tool-save-no-version", "doc.save"}
         ] do
-      row = "#local-agent-tool-#{tool_call_id}"
+      row = "#agent-tool-#{tool_call_id}"
       details = "#{row}-details[data-role='operation-details']"
 
-      assert has_element?(lv, "#{row}[data-role='local-agent-tool']", tool_name)
+      assert has_element?(lv, "#{row}[data-role='agent-tool']", tool_name)
       assert has_element?(lv, details, ~s("ok": true))
       assert has_element?(lv, details, "Input:")
       assert has_element?(lv, details, "Output:")
@@ -3900,7 +7388,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = open_workspace(conn)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "stream"})
+    |> form("#agent-form", agent: %{message: "stream"})
     |> render_submit()
 
     assert_push_event(
@@ -3910,7 +7398,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       1_000
     )
 
-    assert String.starts_with?(reasoning_message_id, "local-agent-thinking-")
+    assert String.starts_with?(reasoning_message_id, "agent-thinking-")
 
     assert_push_event(
       lv,
@@ -3919,7 +7407,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       1_000
     )
 
-    assert String.starts_with?(first_message_id, "local-agent-assistant-")
+    assert String.starts_with?(first_message_id, "agent-assistant-")
 
     assert_push_event(
       lv,
@@ -3932,18 +7420,154 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"]),
+             ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="sent"]),
              "hello world"
            )
 
     assert has_element?(
              lv,
-             ~s([id^="local-agent-assistant-"][data-chat-role="chat-message"][class*="w-full"] [data-role="agent-text"][class*="text-left"])
+             ~s([id^="agent-assistant-"][data-chat-role="chat-message"][class*="w-full"] [data-role="agent-text"][class*="text-left"])
            )
 
     refute has_element?(
              lv,
-             ~s([id^="local-agent-assistant-"][data-chat-role="chat-message"][class*="w-full"] [data-role="agent-text"][class*="text-justify"])
+             ~s([id^="agent-assistant-"][data-chat-role="chat-message"][class*="w-full"] [data-role="agent-text"][class*="text-justify"])
+           )
+  end
+
+  test "agent sidebar renders a thinking row before the turn finishes", %{conn: conn} do
+    use_test_agent_adapter!(adapter_opts: [wait_for: :release_agent_ui, test_pid: self()])
+
+    {:ok, lv, _html} = open_workspace(conn)
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#agent-form", agent: %{message: "stream reasoning"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, stream_pid}, 1_000
+
+    agent_pid = AcpAgent.whereis(session_id)
+    assert is_pid(agent_pid)
+
+    send(agent_pid, {
+      :turn_event,
+      turn_id,
+      %{type: :reasoning_delta, delta: "Inspect workspace"}
+    })
+
+    assert_receive {:agent_event,
+                    %{type: :reasoning_delta, session_id: ^session_id, turn_id: ^turn_id}},
+                   1_000
+
+    sync_liveview(lv)
+    ref = liveview_assign(lv, :agent_reasoning_flush_ref)
+
+    if is_reference(ref) do
+      send(lv.pid, {:flush_agent_reasoning, ref})
+    end
+
+    sync_liveview(lv)
+
+    thinking_row = ~s([data-message-role="thinking"][data-message-status="running"])
+
+    assert has_element?(lv, thinking_row, "Inspect workspace")
+
+    assert has_element?(
+             lv,
+             "#{thinking_row} #agent-thinking-#{turn_id}-0-toggle",
+             "Thinking:"
+           )
+
+    assert has_element?(lv, "#{thinking_row} .hero-light-bulb")
+
+    assert has_element?(
+             lv,
+             "#{thinking_row} [data-role='operation-details']",
+             "Inspect workspace"
+           )
+
+    send(stream_pid, :release_agent_ui)
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+  end
+
+  test "legacy ACP file envelopes become visible file activity instead of tool cards", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(adapter_opts: [wait_for: :release_agent_ui, test_pid: self()])
+
+    {:ok, lv, _html} = open_workspace(conn)
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#agent-form", agent: %{message: "stream reasoning around a file read"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, stream_pid}, 1_000
+    instance_id = AcpAgent.agent_snapshot(session_id).instance_id
+
+    base = %{session_id: session_id, instance_id: instance_id, turn_id: turn_id}
+
+    send(
+      lv.pid,
+      {:agent_event, Map.merge(base, %{type: :reasoning_delta, delta: "Inspect "})}
+    )
+
+    sync_liveview(lv)
+    assert liveview_assign(lv, :agent_reasoning_open?)
+
+    send(
+      lv.pid,
+      {:agent_event,
+       Map.merge(base, %{
+         type: :tool_call_started,
+         tool_call_id: "legacy-file-read",
+         name: "read_text_file",
+         arguments: %{"path" => "contract.jsonl"}
+       })}
+    )
+
+    sync_liveview(lv)
+    refute liveview_assign(lv, :agent_reasoning_open?)
+    refute has_element?(lv, "#agent-tool-legacy-file-read")
+
+    assert has_element?(
+             lv,
+             "#agent-file-legacy-file-read[data-role='file-activity'][data-message-status='running']",
+             "Read"
+           )
+
+    assert has_element?(lv, "#agent-file-legacy-file-read", "contract.jsonl")
+
+    send(
+      lv.pid,
+      {:agent_event, Map.merge(base, %{type: :reasoning_delta, delta: "workspace"})}
+    )
+
+    sync_liveview(lv)
+    ref = liveview_assign(lv, :agent_reasoning_flush_ref)
+    if is_reference(ref), do: send(lv.pid, {:flush_agent_reasoning, ref})
+    sync_liveview(lv)
+
+    assert has_element?(lv, "#agent-thinking-#{turn_id}-0", "Inspect")
+    assert has_element?(lv, "#agent-thinking-#{turn_id}-1", "workspace")
+
+    send(stream_pid, :release_agent_ui)
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    sync_liveview(lv)
+
+    assert has_element?(
+             lv,
+             "#agent-file-legacy-file-read[data-message-status='failed']",
+             "Turn ended before the file operation finished."
            )
   end
 
@@ -3964,7 +7588,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "stream Korean prose"})
+    |> form("#agent-form", agent: %{message: "stream Korean prose"})
     |> render_submit()
 
     assert_push_event(
@@ -3988,7 +7612,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       1_000
     )
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}},
                    1_000
 
     sync_liveview(lv)
@@ -3998,7 +7622,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       |> render()
       |> LazyHTML.from_fragment()
       |> LazyHTML.query(
-        ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"])
+        ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="sent"])
       )
       |> LazyHTML.text()
 
@@ -4019,7 +7643,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     })
 
     lv
-    |> form("#local-agent-form", agent: %{message: "edit workbook"})
+    |> form("#agent-form", agent: %{message: "edit workbook"})
     |> render_submit()
 
     assert_push_event(
@@ -4037,7 +7661,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"]),
+             ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="sent"]),
              "draft"
            )
   end
@@ -4066,24 +7690,24 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "edit the document"})
+    |> form("#agent-form", agent: %{message: "edit the document"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}},
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}},
                    1_000
 
     sync_liveview(lv)
 
     assert_preview_state(lv, %{"documentPath" => "template.hwpx", "deltaCount" => 1})
-    refute has_element?(lv, "#local-agent-tool-acp-edit-1")
-    refute has_element?(lv, "#local-agent-tool-anonymous-before-edit")
-    refute has_element?(lv, "#local-agent-tool-anonymous-after-edit")
+    refute has_element?(lv, "#agent-tool-acp-edit-1")
+    refute has_element?(lv, "#agent-tool-anonymous-before-edit")
+    refute has_element?(lv, "#agent-tool-anonymous-after-edit")
 
     rows =
       lv
       |> render()
       |> LazyHTML.from_fragment()
-      |> LazyHTML.query(~s(#local-agent-thread > [data-chat-role="chat-message"]))
+      |> LazyHTML.query(~s(#agent-thread > [data-chat-role="chat-message"]))
       |> Enum.map(fn node ->
         {
           node |> LazyHTML.attribute("data-message-role") |> List.first(),
@@ -4116,7 +7740,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     use_test_agent_adapter!(
       adapter_opts: [
         test_pid: self(),
-        wait_for: :release_local_agent_ui,
+        wait_for: :release_agent_ui,
         script: [{:text_delta, "streaming reply"}]
       ]
     )
@@ -4126,33 +7750,33 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "go"})
+    |> form("#agent-form", agent: %{message: "go"})
     |> render_submit()
 
-    assert_receive {:local_agent_adapter_waiting, stream_pid}, 1_000
+    assert_receive {:agent_adapter_waiting, stream_pid}, 1_000
     sync_liveview(lv)
 
     # Empty `running` placeholder: the waiting animation IS present.
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="running"] [data-role="agent-loading"])
+             ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="running"] [data-role="agent-loading"])
            )
 
     # Release the turn; deltas stream and the bubble finalizes with body text.
-    send(stream_pid, :release_local_agent_ui)
+    send(stream_pid, :release_agent_ui)
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
     sync_liveview(lv)
 
     # Once the reply carries body text, the waiting indicator must be gone — a
     # bubble that still rendered the dots while showing prose is the freeze bug.
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"]),
+             ~s([data-role="agent-message"][data-message-role="agent"]),
              "streaming reply"
            )
 
-    refute has_element?(lv, ~s([data-role="local-agent-message"] [data-role="agent-loading"]))
+    refute has_element?(lv, ~s([data-role="agent-message"] [data-role="agent-loading"]))
   end
 
   test "agent sidebar renders the streamed reply once when codex re-emits a final full message",
@@ -4176,7 +7800,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "hi"})
+    |> form("#agent-form", agent: %{message: "hi"})
     |> render_submit()
 
     # Only the two streamed deltas should reach the browser as append events —
@@ -4198,7 +7822,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute_push_event(lv, "agent.stream.text_appended", %{piece: "Hi there?"}, 200)
 
     # The accumulated turn text must be the single message, not the doubled one.
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{type: :turn_completed, session_id: ^session_id, text: "Hi there?"}},
                    1_000
 
@@ -4209,7 +7833,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       |> render()
       |> LazyHTML.from_fragment()
       |> LazyHTML.query(
-        ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"])
+        ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="sent"])
       )
       |> LazyHTML.text()
 
@@ -4251,10 +7875,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "summarize"})
+    |> form("#agent-form", agent: %{message: "summarize"})
     |> render_submit()
 
-    assert_receive {:local_agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
+    assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
     sync_liveview(lv)
 
     body =
@@ -4262,7 +7886,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       |> render()
       |> LazyHTML.from_fragment()
       |> LazyHTML.query(
-        ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"])
+        ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="sent"])
       )
       |> LazyHTML.text()
 
@@ -4280,7 +7904,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     # No SINGLE bubble may carry the cumulative whole-turn text (segment A directly
     # followed by segment B inside one element) — that is the overwrite signature.
     sent_bubble =
-      ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"])
+      ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="sent"])
 
     refute has_element?(lv, sent_bubble, "PREAMBLE-APREAMBLE-B"),
            "earlier segments were re-streamed as one cumulative bubble"
@@ -4307,7 +7931,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "no deltas"})
+    |> form("#agent-form", agent: %{message: "no deltas"})
     |> render_submit()
 
     assert_push_event(
@@ -4317,7 +7941,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       1_000
     )
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{type: :turn_completed, session_id: ^session_id, text: "Only final."}},
                    1_000
 
@@ -4325,7 +7949,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="sent"]),
+             ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="sent"]),
              "Only final."
            )
   end
@@ -4350,7 +7974,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     {:ok, lv, _html} = open_workspace(conn)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "markdown"})
+    |> form("#agent-form", agent: %{message: "markdown"})
     |> render_submit()
 
     assert_push_event(
@@ -4385,7 +8009,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     use_test_agent_adapter!(
       adapter_opts: [
         test_pid: self(),
-        wait_for: :release_local_agent_ui,
+        wait_for: :release_agent_ui,
         script: [{:text_delta, "late"}]
       ]
     )
@@ -4395,40 +8019,119 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "wait"})
+    |> form("#agent-form", agent: %{message: "wait"})
     |> render_submit()
 
-    assert_receive {:local_agent_adapter_waiting, _stream_pid}, 1_000
+    assert_receive {:agent_adapter_waiting, _stream_pid}, 1_000
     sync_liveview(lv)
 
-    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='running']")
-    refute has_element?(lv, "#local-agent-cancel")
-    assert has_element?(lv, "#local-agent-submit[data-role='chat-stop'][data-action='stop']")
-    refute has_element?(lv, "#local-agent-submit[data-role='chat-send']")
-    assert has_element?(lv, "#local-agent-input:not([disabled])")
-    assert has_element?(lv, ~s(#local-agent-input[placeholder="Ask about this workspace"]))
+    assert has_element?(lv, "#agent-sidebar[data-agent-status='running']")
+    refute has_element?(lv, "#agent-cancel")
+    assert has_element?(lv, "#agent-submit[data-role='chat-stop'][data-action='stop']")
+    refute has_element?(lv, "#agent-submit[data-role='chat-send']")
+    assert has_element?(lv, "#agent-input:not([disabled])")
+    assert has_element?(lv, ~s(#agent-input[placeholder="Ask about this workspace"]))
     refute render(lv) =~ "Agent is responding"
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="running"] [data-role="agent-loading"])
+             ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="running"] [data-role="agent-loading"])
            )
 
     lv
-    |> element("#local-agent-submit[data-role='chat-stop']")
+    |> element("#agent-submit[data-role='chat-stop']")
     |> render_click()
 
-    assert_receive {:local_agent_event, %{type: :turn_cancelled, session_id: ^session_id}},
+    assert_receive {:agent_event, %{type: :turn_cancelled, session_id: ^session_id}},
                    1_000
 
     sync_liveview(lv)
 
-    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='cancelled']")
+    assert has_element?(lv, "#agent-sidebar[data-agent-status='cancelled']")
 
     refute has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="cancelled"])
+             ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="cancelled"])
            )
+  end
+
+  test "turn cancellation aborts its independent browser VFS request", %{conn: conn} do
+    use_test_agent_adapter!(
+      adapter_opts: [
+        test_pid: self(),
+        wait_for: :release_agent_vfs_cancel,
+        script: [{:text_delta, "late"}]
+      ]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#agent-form", agent: %{message: "edit it"})
+    |> render_submit()
+
+    assert_receive {:agent_adapter_waiting, _stream_pid}, 1_000
+    sync_liveview(lv)
+
+    turn_id = liveview_assign(lv, :agent_turn_id)
+    instance_id = liveview_assign(lv, :agent_instance_id)
+    expected_document_id = liveview_assign(lv, :pool_document_id)
+    edit_id = "turn-cancelled-browser-vfs"
+
+    caller =
+      Task.async(fn ->
+        BrowserBridge.call(
+          lv.pid,
+          :vfs_write,
+          %{
+            edit_id: edit_id,
+            agent_id: session_id,
+            instance_id: instance_id,
+            turn_id: turn_id
+          },
+          expected_document_id: expected_document_id,
+          timeout: 3_000
+        )
+      end)
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        document_id: view_document_id,
+        verb: "vfs_write",
+        payload: %{edit_id: ^edit_id, turn_id: ^turn_id}
+      },
+      1_000
+    )
+
+    lv
+    |> element("#agent-submit[data-role='chat-stop']")
+    |> render_click()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_cancelled, session_id: ^session_id, turn_id: ^turn_id}},
+                   1_000
+
+    sync_liveview(lv)
+    assert {:error, {:turn_cancelled, ^turn_id}} = Task.await(caller, 2_000)
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        document_id: ^view_document_id,
+        verb: "vfs_rollback",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    sync_liveview(lv)
+    assert liveview_assign(lv, :doc_browser_pending) == %{}
+    assert liveview_assign(lv, :doc_browser_vfs_leases) == %{}
   end
 
   test "agent sidebar submit during running queues the next turn", %{
@@ -4437,7 +8140,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     use_test_agent_adapter!(
       adapter_opts: [
         test_pid: self(),
-        wait_for: :release_local_agent_ui,
+        wait_for: :release_agent_ui,
         script: [{:text_delta, "done"}]
       ]
     )
@@ -4447,93 +8150,92 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id = subscribe_agent(lv)
 
     lv
-    |> form("#local-agent-form", agent: %{message: "first"})
+    |> form("#agent-form", agent: %{message: "first"})
     |> render_submit()
 
-    assert_receive {:local_agent_adapter_waiting, first_stream_pid}, 1_000
+    assert_receive {:agent_adapter_waiting, first_stream_pid}, 1_000
     sync_liveview(lv)
 
-    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='running']")
-    assert has_element?(lv, "#local-agent-input:not([disabled])")
-    assert has_element?(lv, "#local-agent-submit[data-role='chat-stop'][data-action='stop']")
-    refute has_element?(lv, "#local-agent-submit[data-role='chat-send']")
+    assert has_element?(lv, "#agent-sidebar[data-agent-status='running']")
+    assert has_element?(lv, "#agent-input:not([disabled])")
+    assert has_element?(lv, "#agent-submit[data-role='chat-stop'][data-action='stop']")
+    refute has_element?(lv, "#agent-submit[data-role='chat-send']")
 
     lv
-    |> form("#local-agent-form", agent: %{message: "second"})
+    |> form("#agent-form", agent: %{message: "second"})
     |> render_submit()
 
-    assert_receive {:local_agent_event,
-                    %{type: :turn_queued, session_id: ^session_id, pending: 1}},
+    assert_receive {:agent_event, %{type: :turn_queued, session_id: ^session_id, pending: 1}},
                    1_000
 
     sync_liveview(lv)
 
     assert has_element?(
              lv,
-             "#local-agent-queued-panel[data-role='queued-messages'][data-queued-count='1'][data-queued-index='1']",
+             "#agent-queued-panel[data-role='queued-messages'][data-queued-count='1'][data-queued-index='1']",
              "Queue 1/1"
            )
 
-    assert has_element?(lv, "#local-agent-queued-title[data-role='queued-count']", "Queue 1/1")
-    assert has_element?(lv, "#local-agent-queued-title[class*='text-[10px]']")
-    assert has_element?(lv, "#local-agent-queued-body[data-role='queued-body']")
-    assert has_element?(lv, "#local-agent-queued-message[data-role='queued-message']", "second")
-    assert has_element?(lv, "#local-agent-queued-message[class*='text-[13px]']")
-    assert has_element?(lv, "#local-agent-queued-flush[title='Send queued']", "Send")
+    assert has_element?(lv, "#agent-queued-title[data-role='queued-count']", "Queue 1/1")
+    assert has_element?(lv, "#agent-queued-title[class*='text-[10px]']")
+    assert has_element?(lv, "#agent-queued-body[data-role='queued-body']")
+    assert has_element?(lv, "#agent-queued-message[data-role='queued-message']", "second")
+    assert has_element?(lv, "#agent-queued-message[class*='text-[13px]']")
+    assert has_element?(lv, "#agent-queued-flush[title='Send queued']", "Send")
 
-    refute_received {:local_agent_event, %{type: :turn_cancelled, session_id: ^session_id}}
+    refute_received {:agent_event, %{type: :turn_cancelled, session_id: ^session_id}}
 
     lv
-    |> element("#local-agent-submit[data-role='chat-stop']")
+    |> element("#agent-submit[data-role='chat-stop']")
     |> render_click()
 
-    assert_receive {:local_agent_event, %{type: :turn_cancelled, session_id: ^session_id}},
+    assert_receive {:agent_event, %{type: :turn_cancelled, session_id: ^session_id}},
                    1_000
 
     sync_liveview(lv)
 
-    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='cancelled']")
+    assert has_element?(lv, "#agent-sidebar[data-agent-status='cancelled']")
 
     assert has_element?(
              lv,
-             "#local-agent-queued-panel[data-role='queued-messages'][data-queued-count='1'][data-queued-index='1']",
+             "#agent-queued-panel[data-role='queued-messages'][data-queued-count='1'][data-queued-index='1']",
              "Queue 1/1"
            )
 
-    assert has_element?(lv, "#local-agent-queued-title[data-role='queued-count']", "Queue 1/1")
-    assert has_element?(lv, "#local-agent-queued-title[class*='text-[10px]']")
-    assert has_element?(lv, "#local-agent-queued-body[data-role='queued-body']")
-    assert has_element?(lv, "#local-agent-queued-message[class*='text-[13px]']")
+    assert has_element?(lv, "#agent-queued-title[data-role='queued-count']", "Queue 1/1")
+    assert has_element?(lv, "#agent-queued-title[class*='text-[10px]']")
+    assert has_element?(lv, "#agent-queued-body[data-role='queued-body']")
+    assert has_element?(lv, "#agent-queued-message[class*='text-[13px]']")
 
     refute has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "second"
            )
 
     lv
-    |> element("#local-agent-queued-flush")
+    |> element("#agent-queued-flush")
     |> render_click()
 
-    assert_receive {:local_agent_adapter_waiting, second_stream_pid}, 1_000
+    assert_receive {:agent_adapter_waiting, second_stream_pid}, 1_000
 
     sync_liveview(lv)
 
-    assert has_element?(lv, "#local-agent-sidebar[data-agent-status='running']")
-    refute has_element?(lv, "#local-agent-queued-panel")
+    assert has_element?(lv, "#agent-sidebar[data-agent-status='running']")
+    refute has_element?(lv, "#agent-queued-panel")
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="user"]),
+             ~s([data-role="agent-message"][data-message-role="user"]),
              "second"
            )
 
-    refute has_element?(lv, "#local-agent-error", "turn_in_progress")
+    refute has_element?(lv, "#agent-error", "turn_in_progress")
 
-    send(first_stream_pid, :release_local_agent_ui)
-    send(second_stream_pid, :release_local_agent_ui)
+    send(first_stream_pid, :release_agent_ui)
+    send(second_stream_pid, :release_agent_ui)
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{type: :turn_completed, session_id: ^session_id, text: "done"}},
                    1_000
 
@@ -4545,7 +8247,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     use_test_agent_adapter!(
       adapter_opts: [
         test_pid: self(),
-        wait_for: :release_local_agent_ui,
+        wait_for: :release_agent_ui,
         script: [{:text_delta, "B-streaming"}]
       ]
     )
@@ -4556,21 +8258,21 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     # Turn A: start it and let it become :running (blocked on wait_for).
     lv
-    |> form("#local-agent-form", agent: %{message: "first"})
+    |> form("#agent-form", agent: %{message: "first"})
     |> render_submit()
 
-    assert_receive {:local_agent_adapter_waiting, first_stream_pid}, 1_000
+    assert_receive {:agent_adapter_waiting, first_stream_pid}, 1_000
     sync_liveview(lv)
 
-    turn_a = liveview_assign(lv, :local_agent_turn_id)
+    turn_a = liveview_assign(lv, :agent_turn_id)
     assert is_binary(turn_a)
 
     # Submit a SECOND message mid-stream: queue B behind A.
     lv
-    |> form("#local-agent-form", agent: %{message: "second"})
+    |> form("#agent-form", agent: %{message: "second"})
     |> render_submit()
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :turn_queued,
                       session_id: ^session_id,
@@ -4583,24 +8285,24 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert is_binary(turn_b)
     assert turn_b != turn_a
-    assert liveview_assign(lv, :local_agent_turn_id) == turn_a
-    assert liveview_assign(lv, :local_agent_status) == :running
+    assert liveview_assign(lv, :agent_turn_id) == turn_a
+    assert liveview_assign(lv, :agent_status) == :running
 
-    send(first_stream_pid, :release_local_agent_ui)
-    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_a}}, 1_000
-    assert_receive {:local_agent_adapter_waiting, second_stream_pid}, 1_000
+    send(first_stream_pid, :release_agent_ui)
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_a}}, 1_000
+    assert_receive {:agent_adapter_waiting, second_stream_pid}, 1_000
 
     sync_liveview(lv)
 
-    assert liveview_assign(lv, :local_agent_status) == :running
-    assert liveview_assign(lv, :local_agent_turn_id) != turn_a
+    assert liveview_assign(lv, :agent_status) == :running
+    assert liveview_assign(lv, :agent_turn_id) != turn_a
 
     assert has_element?(
              lv,
-             ~s([data-role="local-agent-message"][data-message-role="agent"][data-message-status="running"])
+             ~s([data-role="agent-message"][data-message-role="agent"][data-message-status="running"])
            )
 
-    send(second_stream_pid, :release_local_agent_ui)
+    send(second_stream_pid, :release_agent_ui)
   end
 
   test "hook sends during a running turn preserve queue order and visible pending state", %{
@@ -4609,7 +8311,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     use_test_agent_adapter!(
       adapter_opts: [
         test_pid: self(),
-        wait_for: :release_local_agent_ui,
+        wait_for: :release_agent_ui,
         script: [{:text_delta, "done"}]
       ]
     )
@@ -4620,16 +8322,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     render_hook(lv, "agent.message.submit_requested", %{"message" => "first"})
 
-    assert_receive {:local_agent_adapter_waiting, first_stream_pid}, 1_000
+    assert_receive {:agent_adapter_waiting, first_stream_pid}, 1_000
     sync_liveview(lv)
 
-    turn_a = liveview_assign(lv, :local_agent_turn_id)
+    turn_a = liveview_assign(lv, :agent_turn_id)
     assert is_binary(turn_a)
 
     render_hook(lv, "agent.message.submit_requested", %{"message" => "second"})
     render_hook(lv, "agent.message.submit_requested", %{"message" => "third"})
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :turn_queued,
                       session_id: ^session_id,
@@ -4638,7 +8340,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
                     }},
                    1_000
 
-    assert_receive {:local_agent_event,
+    assert_receive {:agent_event,
                     %{
                       type: :turn_queued,
                       session_id: ^session_id,
@@ -4649,39 +8351,39 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    assert liveview_assign(lv, :local_agent_turn_id) == turn_a
-    assert liveview_assign(lv, :local_agent_pending) == 2
-    assert Enum.map(liveview_assign(lv, :local_agent_queue), & &1.body) == ["second", "third"]
+    assert liveview_assign(lv, :agent_turn_id) == turn_a
+    assert liveview_assign(lv, :agent_pending) == 2
+    assert Enum.map(liveview_assign(lv, :agent_queue), & &1.body) == ["second", "third"]
 
     assert has_element?(
              lv,
-             "#local-agent-queued-panel[data-role='queued-messages'][data-queued-count='2'][data-queued-index='1']",
+             "#agent-queued-panel[data-role='queued-messages'][data-queued-count='2'][data-queued-index='1']",
              "Queue 1/2"
            )
 
-    send(first_stream_pid, :release_local_agent_ui)
-    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_a}}, 1_000
-    assert_receive {:local_agent_adapter_waiting, second_stream_pid}, 1_000
-    assert_receive {:local_agent_event, %{type: :turn_started, turn_id: ^turn_b}}, 1_000
+    send(first_stream_pid, :release_agent_ui)
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_a}}, 1_000
+    assert_receive {:agent_adapter_waiting, second_stream_pid}, 1_000
+    assert_receive {:agent_event, %{type: :turn_started, turn_id: ^turn_b}}, 1_000
 
     sync_liveview(lv)
 
-    assert liveview_assign(lv, :local_agent_turn_id) == turn_b
-    assert liveview_assign(lv, :local_agent_pending) == 1
-    assert Enum.map(liveview_assign(lv, :local_agent_queue), & &1.body) == ["third"]
+    assert liveview_assign(lv, :agent_turn_id) == turn_b
+    assert liveview_assign(lv, :agent_pending) == 1
+    assert Enum.map(liveview_assign(lv, :agent_queue), & &1.body) == ["third"]
 
-    send(second_stream_pid, :release_local_agent_ui)
-    assert_receive {:local_agent_event, %{type: :turn_completed, turn_id: ^turn_b}}, 1_000
-    assert_receive {:local_agent_adapter_waiting, third_stream_pid}, 1_000
-    assert_receive {:local_agent_event, %{type: :turn_started, turn_id: ^turn_c}}, 1_000
+    send(second_stream_pid, :release_agent_ui)
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_b}}, 1_000
+    assert_receive {:agent_adapter_waiting, third_stream_pid}, 1_000
+    assert_receive {:agent_event, %{type: :turn_started, turn_id: ^turn_c}}, 1_000
 
     sync_liveview(lv)
 
-    assert liveview_assign(lv, :local_agent_turn_id) == turn_c
-    assert liveview_assign(lv, :local_agent_pending) == 0
-    assert liveview_assign(lv, :local_agent_queue) == []
+    assert liveview_assign(lv, :agent_turn_id) == turn_c
+    assert liveview_assign(lv, :agent_pending) == 0
+    assert liveview_assign(lv, :agent_queue) == []
 
-    send(third_stream_pid, :release_local_agent_ui)
+    send(third_stream_pid, :release_agent_ui)
   end
 
   # Inject the test-only fake ex_mcp ACP adapter so the chat-rail rendering can be
@@ -4689,9 +8391,9 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   defp use_test_agent_adapter!(opts) do
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
 
-    Application.put_env(:ecrits, :local_agent, provider: "codex")
+    Application.put_env(:ecrits, :agent, provider: "codex")
 
-    Application.put_env(:ecrits, :local_agent_ui,
+    Application.put_env(:ecrits, :agent_ui,
       provider: "codex",
       adapter_opts: Keyword.put(adapter_opts, :exmcp_adapter, EcritsWeb.FakeAcpAdapter)
     )
@@ -4699,14 +8401,14 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
   defp put_provider_integrations!(integrations) do
     current =
-      case Application.get_env(:ecrits, :local_agent_ui, []) do
+      case Application.get_env(:ecrits, :agent_ui, []) do
         config when is_list(config) -> config
         _ -> []
       end
 
     Application.put_env(
       :ecrits,
-      :local_agent_ui,
+      :agent_ui,
       Keyword.put(current, :integration_options, integrations)
     )
   end
@@ -4736,8 +8438,12 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   defp open_workspace(conn, path) when is_binary(path), do: open_workspace(conn, path, [])
 
   defp open_workspace(conn, path, opts) do
+    tab_id = Keyword.get(opts, :chat_rail_tab_id, Ecto.UUID.generate())
     conn = put_workspace_handoff(conn, path)
+
     {:ok, lv, html} = live(conn, ~p"/workspace")
+    render_hook(lv, "workspace.chat_rail.tab_ready", %{"id" => tab_id})
+    sync_liveview(lv)
 
     case Keyword.get(opts, :document) do
       nil ->
@@ -4757,7 +8463,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
   end
 
   defp put_workspace_handoff(conn, path) do
-    live_session_id = Plug.Conn.get_session(conn, :local_live_session_id)
+    live_session_id = Plug.Conn.get_session(conn, :live_session_id)
     :ok = WorkspaceHandoff.put_workspace_path(live_session_id, path)
     conn
   end
@@ -4767,16 +8473,27 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
          live_session_id,
          path \\ WorkspaceAdapterStub.valid_path()
        ) do
-    conn = Phoenix.ConnTest.init_test_session(conn, %{local_live_session_id: live_session_id})
+    conn = Phoenix.ConnTest.init_test_session(conn, %{live_session_id: live_session_id})
     put_workspace_handoff(conn, path)
   end
 
   defp subscribe_agent(lv) do
-    session_id = local_agent_session_id(lv)
+    session_id = agent_session_id(lv)
     :ok = AcpAgent.subscribe(session_id)
     track_agent_session(session_id)
 
     session_id
+  end
+
+  defp seed_known_vfs_turn(session_id, turn_id)
+       when is_binary(session_id) and is_binary(turn_id) do
+    :ok =
+      AcpAgent.append_transcript_item(session_id, %{
+        role: :thinking,
+        status: :completed,
+        body: "",
+        turn_id: turn_id
+      })
   end
 
   defp track_agent_session(session_id) do
@@ -4822,12 +8539,12 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     :exit, _ -> :ok
   end
 
-  defp local_agent_session_id(lv) do
+  defp agent_session_id(lv) do
     session_id =
       lv
       |> render()
       |> LazyHTML.from_fragment()
-      |> LazyHTML.query("#local-agent-sidebar")
+      |> LazyHTML.query("#agent-sidebar")
       |> LazyHTML.attribute("data-session-id")
       |> List.first()
 
@@ -4836,9 +8553,180 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     session_id
   end
 
+  defp agent_instance_id(session_id) when is_binary(session_id),
+    do: AcpAgent.agent_snapshot(session_id).instance_id
+
+  defp mixed_preview_descriptor(session_id, turn_id) do
+    assert [descriptor] = mixed_preview_descriptors(session_id, turn_id)
+    descriptor
+  end
+
+  defp mixed_preview_descriptors(session_id, turn_id) do
+    snapshot = AcpAgent.agent_snapshot(session_id)
+
+    (Map.get(snapshot, :transcript, []) ++ List.wrap(Map.get(snapshot, :current_turn)))
+    |> Enum.filter(&(Map.get(&1, :turn_id) == turn_id))
+    |> Enum.flat_map(&Map.get(&1, :items, []))
+    |> Enum.filter(&(Map.get(&1, :role) == :edit_preview))
+  end
+
+  defp mixed_preview_canvas_state(lv) do
+    canvas_state(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+  end
+
+  defp mixed_preview_chat_rows(lv) do
+    lv
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query(~s(#agent-thread > [data-chat-role="chat-message"]))
+    |> Enum.map(fn row ->
+      %{
+        id: row |> LazyHTML.attribute("id") |> List.first(),
+        role: row |> LazyHTML.attribute("data-message-role") |> List.first()
+      }
+    end)
+  end
+
+  defp mixed_preview_row_id(rows) do
+    rows
+    |> Enum.find(&(Map.fetch!(&1, :role) == "editor_preview"))
+    |> Map.fetch!(:id)
+  end
+
+  defp mixed_preview_row_index(rows, id), do: Enum.find_index(rows, &(Map.fetch!(&1, :id) == id))
+
+  defp prepare_acknowledged_browser_commit(lv, expected_document_id, edit_id) do
+    write_ref = make_ref()
+
+    send(
+      lv.pid,
+      {:doc_browser_request, self(), write_ref, :vfs_write, %{edit_id: edit_id},
+       expected_document_id}
+    )
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{request_id: write_request_id, verb: "vfs_write", payload: %{edit_id: ^edit_id}},
+      1_000
+    )
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => write_request_id,
+      "result" => %{"edit_id" => edit_id, "bytes" => "exported"}
+    })
+
+    assert_receive {:doc_browser_reply, ^write_ref, {:ok, %{"edit_id" => ^edit_id}}}
+    send(lv.pid, {:doc_browser_request_completed, self(), write_ref})
+    sync_liveview(lv)
+
+    commit_ref = make_ref()
+
+    send(
+      lv.pid,
+      {:doc_browser_request, self(), commit_ref, :vfs_commit, %{edit_id: edit_id},
+       expected_document_id}
+    )
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{
+        request_id: commit_request_id,
+        document_id: browser_document_id,
+        verb: "vfs_commit",
+        payload: %{edit_id: ^edit_id}
+      },
+      1_000
+    )
+
+    render_hook(lv, "document.engine.operation.replied", %{
+      "request_id" => commit_request_id,
+      "result" => %{"edit_id" => edit_id, "awaiting_finalize" => true}
+    })
+
+    assert_receive {:doc_browser_reply, ^commit_ref,
+                    {:ok, %{"edit_id" => ^edit_id, "awaiting_finalize" => true}}}
+
+    send(lv.pid, {:doc_browser_request_completed, self(), commit_ref})
+
+    assert_push_event(
+      lv,
+      "document.engine.operation.command",
+      %{request_id: finalize_request_id, verb: "vfs_finalize", payload: %{edit_id: ^edit_id}},
+      1_000
+    )
+
+    {finalize_request_id, browser_document_id}
+  end
+
   defp sync_liveview(lv) do
     _ = :sys.get_state(lv.pid)
     :ok
+  end
+
+  defp await_agent_session_change(lv, old_session_id, attempts \\ 200)
+
+  defp await_agent_session_change(lv, old_session_id, attempts) when attempts > 0 do
+    sync_workspace_session(
+      liveview_assign(lv, :workspace_path) || WorkspaceAdapterStub.valid_path()
+    )
+
+    sync_liveview(lv)
+
+    case agent_session_id(lv) do
+      ^old_session_id ->
+        receive do
+        after
+          5 -> await_agent_session_change(lv, old_session_id, attempts - 1)
+        end
+
+      new_session_id ->
+        new_session_id
+    end
+  end
+
+  defp await_agent_session_change(_lv, old_session_id, 0) do
+    flunk("agent session did not change from #{old_session_id}")
+  end
+
+  defp send_vfs_edit_and_wait(lv, info) when is_map(info) do
+    owner = self()
+    target = lv.pid
+    :ok = :dbg.stop()
+    {:ok, _tracer} = :dbg.start()
+
+    {:ok, _tracer} =
+      :dbg.tracer(
+        :process,
+        {fn
+           {:trace, ^target, :call,
+            {EcritsWeb.Workspace.WorkspaceLive, :handle_info, [{:vfs_doc_edited, _info}, _socket]}},
+           _waiting? ->
+             true
+
+           {:trace, ^target, :return_from, {EcritsWeb.Workspace.WorkspaceLive, :handle_info, 2},
+            _result},
+           true ->
+             send(owner, {:vfs_doc_edit_handled, target})
+             false
+
+           _trace, waiting? ->
+             waiting?
+         end, false}
+      )
+
+    {:ok, _matched} = :dbg.p(target, :c)
+
+    {:ok, _matched} =
+      :dbg.tpl(EcritsWeb.Workspace.WorkspaceLive, :handle_info, 2, :x)
+
+    try do
+      send(target, {:vfs_doc_edited, info})
+      assert_receive {:vfs_doc_edit_handled, ^target}, 2_000
+    after
+      :ok = :dbg.stop()
+    end
   end
 
   defp sync_workspace_session(path) do
@@ -4908,6 +8796,28 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     |> Jason.decode!()
   end
 
+  defp fetch_document_bytes(url) do
+    build_conn()
+    |> get(url)
+    |> response(200)
+  end
+
+  defp rezip_hwpx(bytes, marker) do
+    assert {:ok, entries} = :zip.unzip(bytes, [:memory])
+
+    entries =
+      Enum.reject(entries, fn {name, _contents} -> name == ~c"preview-version.txt" end)
+
+    assert {:ok, {_name, rewritten}} =
+             :zip.create(
+               ~c"preview-version.hwpx",
+               entries ++ [{~c"preview-version.txt", marker}],
+               [:memory]
+             )
+
+    rewritten
+  end
+
   defp restore_doc_vfs_env(nil), do: Application.delete_env(:ecrits, :doc_vfs)
   defp restore_doc_vfs_env(value), do: Application.put_env(:ecrits, :doc_vfs, value)
 
@@ -4918,21 +8828,31 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     |> then(& &1.assigns[key])
   end
 
-  defp local_rhwp_document_id(lv) do
+  defp put_liveview_octet(lv, id, bytes) do
+    :sys.replace_state(lv.pid, fn state ->
+      socket = Map.fetch!(state, :socket)
+      stash = Map.put(socket.assigns.octet_stash, id, bytes)
+      Map.put(state, :socket, %{socket | assigns: Map.put(socket.assigns, :octet_stash, stash)})
+    end)
+
+    :ok
+  end
+
+  defp rhwp_document_id(lv) do
     document_id =
       lv
-      |> render_local_hwp_editor_html()
-      |> local_hwp_document_id_from_html()
+      |> render_hwp_editor_html()
+      |> hwp_document_id_from_html()
 
     assert is_binary(document_id)
     assert document_id != ""
     document_id
   end
 
-  defp render_local_hwp_editor_html(lv) do
+  defp render_hwp_editor_html(lv) do
     html = render(lv)
 
-    if local_hwp_document_id_from_html(html) do
+    if hwp_document_id_from_html(html) do
       html
     else
       sync_liveview(lv)
@@ -4940,10 +8860,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     end
   end
 
-  defp local_hwp_document_id_from_html(html) do
+  defp hwp_document_id_from_html(html) do
     html
     |> LazyHTML.from_fragment()
-    |> LazyHTML.query(~s([data-role="local-hwp-editor"]))
+    |> LazyHTML.query(~s([data-role="hwp-editor"]))
     |> LazyHTML.attribute("data-canvas-state")
     |> List.first()
     |> then(fn
@@ -4952,8 +8872,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     end)
   end
 
-  defp prepare_local_workspace_fixture do
-    cleanup_local_workspace_fixture()
+  defp prepare_workspace_fixture do
+    cleanup_workspace_fixture()
 
     root = WorkspaceAdapterStub.valid_path()
     File.mkdir_p!(Path.join(root, "drafts"))
@@ -4969,7 +8889,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     File.write!(Path.join(root, "drafts/ledger.xlsx"), "xlsx fixture")
   end
 
-  defp cleanup_local_workspace_fixture do
+  defp cleanup_workspace_fixture do
     root = WorkspaceAdapterStub.valid_path()
     _ = Ecrits.Fuse.DocMount.teardown(root)
 
@@ -4986,10 +8906,6 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     rm_rf_workspace!(root)
   end
-
-  defp doc_vfs_backend_mode_label(status \\ Ecrits.Fuse.DocMount.status())
-  defp doc_vfs_backend_mode_label(%{backend: :fskit}), do: "FSKit/VFS"
-  defp doc_vfs_backend_mode_label(%{backend: :fuse}), do: "FUSE/VFS"
 
   defp rm_rf_workspace!(root, attempts \\ 3)
 

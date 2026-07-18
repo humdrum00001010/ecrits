@@ -7,16 +7,18 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   require Logger
 
-  alias Ecrits.Doc.Editor, as: DocEditor
+  alias Ecrits.Agent
   alias Ecrits.Doc.Pool, as: DocPool
   alias Ecrits.Doc.Projection
   alias Ecrits.Fuse.DocMount
   alias Ecrits.Fuse.OpenDocs
   alias Ecrits.AcpAgent, as: ACP
   alias Ecrits.Document
+  alias Ecrits.Document.PreviewSnapshot
   alias Ecrits.Document.RhwpAdapter
   alias Ecrits.FileTree
   alias Ecrits.Path, as: WorkspacePath
+  alias Ecrits.Prompt
   alias Ecrits.Workspace
   alias Ecrits.WorkspaceHandoff
   alias Ecrits.Workspace.Session, as: WorkspaceSession
@@ -38,15 +40,21 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   alias EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm
   alias EcritsWeb.Workspace.Adapter
 
-  @local_document_upload_max_size 50_000_000
-  @local_document_upload_accept ~w(.hwp .hwpx .doc .docx .xls .xlsx .ppt .pptx .rtf .md .markdown)
-  @local_document_open_async :open_local_document
+  @document_upload_max_size 50_000_000
+  @document_upload_accept ~w(.hwp .hwpx .doc .docx .xls .xlsx .ppt .pptx .rtf .md .markdown)
+  @document_open_async :open_document
   @doc_vfs_mount_async :ensure_doc_vfs_mount
   # Debounce interval for re-rendering the streaming agent message body as
   # formatted markdown (raw client-side appends give instant sub-debounce
   # feedback; the tick re-renders the accumulated buffer through MDEx).
-  @local_agent_text_flush_ms 120
-  @local_agent_editor_preview_max 5_000
+  @agent_text_flush_ms 120
+  @agent_reasoning_flush_ms 120
+  @agent_editor_preview_max 5_000
+  @acp_file_operation_names ~w(read_text_file search_text_file edit_text_file)
+  @doc_browser_finalize_timeout_ms 1_000
+  @doc_browser_finalize_max_attempts 3
+  @doc_browser_recovery_timeout_ms 5_000
+  @doc_browser_recovery_max_attempts 3
   # Chat-rail document mirrors are expensive if they accumulate. Keep only the
   # newest direct-edit mirror alive; the mirror hook itself renders the edited
   # highlight pages instead of building a full page stack.
@@ -54,16 +62,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # edit (re)arms a per-document timer; when it fires and the doc is still dirty
   # we fire a canonical `doc.save` (the same path Ctrl/Cmd+S uses).
   @autosave_idle_ms 4_000
-  @selectable_local_agent_provider_ids ~w(codex claude)
+  @selectable_agent_provider_ids ~w(codex claude)
   @impl true
   def mount(_params, session, socket) do
     {:ok,
      socket
-     |> assign(:local_live_session_id, local_live_session_id(session))
+     |> assign(:live_session_id, live_session_id(session))
+     |> assign(:chat_rail_tab_id, nil)
      # The durable per-workspace `Ecrits.Workspace.Session` (keyed by canonical
      # path) owns document routing. The active foreground chat agent is scoped by
-     # this LiveView pid; the Phoenix session id above only groups recent chats
-     # after a refresh. `nil` until the first attach.
+     # the stable browser-tab id above, while the Phoenix session id groups recent
+     # chats. `nil` until the first attach.
      |> assign(:workspace_session, nil)
      # NAMED captures (not anon closures): a stream `dom_id` resolver is stored on
      # the long-lived LiveView at mount. An anonymous `& &1.dom_id` is compiled
@@ -72,13 +81,13 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
      # ("points to an old version of the code" -> BadFunctionError on the next
      # stream_insert). A remote capture `&__MODULE__.fun/1` is resolved by name at
      # call time and therefore survives recompiles.
-     |> stream_configure(:local_hwp_pages, dom_id: &__MODULE__.local_hwp_page_dom_id/1)
-     |> stream(:local_hwp_pages, [])
-     |> stream_configure(:local_agent_items, dom_id: &__MODULE__.local_agent_item_dom_id/1)
-     |> stream(:local_agent_items, [])
+     |> stream_configure(:hwp_pages, dom_id: &__MODULE__.hwp_page_dom_id/1)
+     |> stream(:hwp_pages, [])
+     |> stream_configure(:agent_items, dom_id: &__MODULE__.agent_item_dom_id/1)
+     |> stream(:agent_items, [])
      # Markdown (.md/.markdown) editor: plain-text source + live MDEx preview.
      |> assign(:markdown_editor, MarkdownEditorState.new())
-     |> assign(:local_markdown_preview_html, "")
+     |> assign(:markdown_preview_html, "")
      |> assign(:page_title, "Workspace")
      |> assign(:workspace, nil)
      |> assign(:workspace_path, nil)
@@ -88,7 +97,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
      |> assign(:active_document_path, nil)
      |> assign(:active_document, nil)
      |> assign(:active_document_viewport, nil)
-     |> assign(:local_document_bytes_version, nil)
+     |> assign(:document_bytes_version, nil)
      |> assign(:open_documents, [])
      |> assign(:active_document_id, nil)
      |> assign(:document_element_picker, DocumentElementPicker.new())
@@ -103,6 +112,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
      # back to the waiting MCP caller. `doc_browser_pending` maps a per-request
      # ref -> the caller pid so a hook reply finds its requester.
      |> assign(:doc_browser_pending, %{})
+     # A successful vfs_write remains provisional after its request/reply
+     # finishes. Keep its caller monitor alive until that same owner completes
+     # vfs_commit/vfs_rollback, so death or turn cancellation cannot strand the
+     # browser's pending transaction.
+     |> assign(:doc_browser_vfs_leases, %{})
      # Unsaved-changes tracking (LiveView is the source of truth). A document id
      # is in `dirty_document_ids` once it is touched (user edit via
      # `rhwp.text.mutated`, or an agent doc.edit/doc.set routed through the browser
@@ -124,80 +138,102 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
      # doc.save broadcasts the written path there, and we refresh the tree LIVE
      # (mid-turn) when the path is under this workspace's root.
      |> assign(:workspace_files_subscribed?, false)
-     |> assign(:local_document_error, nil)
-     |> assign(:local_document_status, :none)
-     |> assign(:local_document_snapshot, nil)
-     |> assign(:local_hwp_page_count, 0)
-     |> assign(:local_hwp_stream_renderer, nil)
-     |> assign(:local_hwp_stream_document_id, nil)
-     |> assign(:local_hwp_stream_loading?, false)
+     |> assign(:document_error, nil)
+     |> assign(:document_status, :none)
+     |> assign(:document_snapshot, nil)
+     |> assign(:hwp_page_count, 0)
+     |> assign(:hwp_stream_renderer, nil)
+     |> assign(:hwp_stream_document_id, nil)
+     |> assign(:hwp_stream_loading?, false)
      |> assign(:last_caret, nil)
      |> assign(:workspace_error, nil)
-     # The chat thread (title / status / streamed transcript / composer + queue)
-     # is rendered INLINE in this single LiveView (the only LiveView for the
-     # workspace). `local_agent_session_id` is the bound durable foreground-agent
-     # id (set synchronously by attach_workspace_session from the server-side
-     # workspace handoff); it gates the chat send path here.
-     |> assign(:local_agent_session_id, nil)
-     |> assign(:local_agent_status, :starting)
-     |> assign(:local_agent_error, nil)
-     |> assign(:local_agent_turn_id, nil)
+     # Each attached workspace LiveView renders the shared browser-tab rail
+     # inline. `agent_session_id` is the currently bound durable
+     # foreground-agent id; it gates the chat send path here.
+     |> assign(:agent_session_id, nil)
+     # Provider restarts deliberately reuse the durable agent id while replacing
+     # its process. Track that process locally so every same-tab sibling can tell
+     # a real restart from an ordinary same-instance metadata rebind.
+     |> assign(:agent_process_pid, nil)
+     |> assign(:agent_instance_id, nil)
+     |> assign(:agent_event_seq, 0)
+     |> assign(:agent_status, :starting)
+     |> assign(:agent_error, nil)
+     |> assign(:agent_turn_id, nil)
      # Count of mid-turn sends still queued behind the running turn (Phase 5 FIFO
      # queue). Drives the "N 대기" pending indicator; decremented as each queued
      # turn drains.
-     |> assign(:local_agent_pending, 0)
-     |> assign(:local_agent_queue, [])
-     |> assign(:local_agent_queue_index, 0)
-     |> assign(:local_agent_rail_key, nil)
-     |> assign(:local_agent_rails, [])
-     |> assign(:local_agent_rail_drawer_open?, false)
-     |> assign(:local_agent_text, "")
-     |> assign(:local_agent_text_segment, 0)
-     |> assign(:local_agent_text_flush_ref, nil)
-     |> assign(:local_agent_editor_preview, nil)
-     |> assign(:local_agent_vfs_preview_item, nil)
-     |> assign(:local_agent_active_tools, %{})
-     |> assign(:local_agent_reasoning_text, "")
+     |> assign(:agent_pending, 0)
+     |> assign(:agent_queue, [])
+     |> assign(:agent_queue_index, 0)
+     |> assign(:agent_rail_key, nil)
+     |> assign(:agent_rails, [])
+     |> assign(:agent_rail_drawer_open?, false)
+     |> assign(:agent_text, "")
+     |> assign(:agent_text_segment, 0)
+     |> assign(:agent_text_flush_ref, nil)
+     |> assign(:agent_editor_preview, nil)
+     |> assign(:agent_vfs_preview_item, nil)
+     |> assign(:agent_vfs_preview_rollback_item, nil)
+     |> assign(:agent_active_tools, %{})
+     |> assign(:agent_active_file_operations, %{})
+     |> assign(:agent_reasoning_text, "")
+     |> assign(:agent_reasoning_segment, 0)
+     |> assign(:agent_reasoning_flush_ref, nil)
      # Tracks whether reasoning text is being appended contiguously (codex glues
      # reasoning items with no separator); we insert a paragraph break when a new
      # item resumes after a non-reasoning event.
-     |> assign(:local_agent_reasoning_open?, false)
-     |> assign(:local_agent_title, default_local_agent_title())
-     |> assign(:local_agent_title_user_edited?, false)
-     |> assign(:local_agent_title_form, local_agent_title_form())
-     |> assign(:local_agent_form, local_agent_form())
+     |> assign(:agent_reasoning_open?, false)
+     |> assign(:agent_title, default_agent_title())
+     |> assign(:agent_title_user_edited?, false)
+     |> assign(:agent_title_form, agent_title_form())
+     |> assign(:agent_form, agent_form())
      |> assign(
-       :local_agent,
+       :agent,
        AgentConfig.new(%{
-         provider: local_agent_provider_display(),
+         provider: agent_provider_display(),
          provider_warning: nil,
          model: default_agent_model_id(default_provider_id()),
          reasoning_effort: default_reasoning_effort(),
          access: AgentAccess.resolve(default_access_control()),
-         integrations: local_agent_integrations()
+         integrations: agent_integrations()
        })
      )
-     |> assign(:local_agent_model_modal_open, false)
-     |> assign(:local_agent_options_form, local_agent_options_form())
-     |> allow_upload(:local_document_import,
-       accept: @local_document_upload_accept,
+     |> assign(:agent_model_modal_open, false)
+     |> assign(:agent_options_form, agent_options_form())
+     |> allow_upload(:document_import,
+       accept: @document_upload_accept,
        max_entries: 1,
-       max_file_size: @local_document_upload_max_size,
+       max_file_size: @document_upload_max_size,
        auto_upload: true,
-       progress: &handle_local_document_upload/3
-     )}
+       progress: &handle_document_import_upload/3
+     )
+     |> assign(:octet_stash, %{})
+     |> subscribe_octet_sink()}
+  end
+
+  # General binary ingress (:octet): browser engines ship binaries over
+  # `EcritsWeb.OctetChannel` (own socket; one binary frame per upload, the
+  # push reply is the ack — no flow control on this local lane). The channel
+  # broadcasts each committed binary to this LiveView's unguessable sink
+  # topic; `handle_info({:octet_upload, ...})` stashes it and acks the
+  # client. The sink id is rendered into the DOM for the client module to
+  # join on.
+  defp subscribe_octet_sink(socket) do
+    {sink_id, :ok} = PhoenixOctet.Sink.subscribe(Ecrits.PubSub, connected?(socket))
+    assign(socket, :octet_sink_id, sink_id)
   end
 
   @impl true
   def handle_params(_params, _uri, socket) do
-    case WorkspaceHandoff.fetch_workspace_path(socket.assigns.local_live_session_id) do
+    case WorkspaceHandoff.fetch_workspace_path(socket.assigns.live_session_id) do
       {:ok, path} ->
         socket =
           socket
           |> mount_workspace(path)
-          # Attach the durable per-path workspace Session and bind this LiveView pid's
-          # foreground agent. A browser refresh gets a new LiveView pid and therefore
-          # a fresh active rail; prior rails remain in this browser session's recents.
+          # Attach the durable per-path workspace Session and bind this browser tab's
+          # foreground agent. A browser refresh replaces the LiveView pid but reuses
+          # the stable tab id and selected rail.
           # The route query string is deliberately ignored; workspace/document/provider
           # state is owned by LiveView/session state, not by the URL.
           |> attach_workspace_session()
@@ -224,7 +260,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       provider_change?(socket, provider) and agent_bound?(socket) and connected?(socket) ->
         :restart_provider
 
-      model.id != socket.assigns.local_agent.model ->
+      model.id != socket.assigns.agent.model ->
         :live_options
 
       true ->
@@ -233,39 +269,64 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   defp apply_agent_transition(socket, :restart_provider),
-    do: restart_local_agent_for_provider(socket)
+    do: restart_agent_for_provider(socket)
 
   defp apply_agent_transition(socket, :live_options),
-    do: maybe_apply_live_local_agent_options(socket, true)
+    do: maybe_apply_live_agent_options(socket, true)
 
   defp apply_agent_transition(socket, :keep),
-    do: maybe_apply_live_local_agent_options(socket, false)
+    do: maybe_apply_live_agent_options(socket, false)
 
   defp provider_change?(socket, provider),
-    do: provider.key != socket.assigns.local_agent.provider.key
+    do: provider.key != socket.assigns.agent.provider.key
 
-  defp agent_bound?(socket), do: is_binary(socket.assigns.local_agent_session_id)
+  defp agent_bound?(socket), do: is_binary(socket.assigns.agent_session_id)
 
-  defp apply_local_agent_model(socket, %{id: model_id, provider: provider_id} = _model) do
-    provider = local_agent_provider_display(provider_id)
+  defp apply_agent_model(socket, %{id: model_id, provider: provider_id} = _model) do
+    provider = agent_provider_display(provider_id)
     transition = agent_transition(socket, provider, %{id: model_id})
 
     socket
-    |> put_local_agent(
+    |> put_agent(
       provider: provider,
       provider_warning: nil,
       model: model_id,
-      integrations: local_agent_integrations()
+      integrations: agent_integrations()
     )
     |> apply_agent_transition(transition)
   end
 
-  defp apply_local_agent_model(socket, _model), do: socket
+  defp apply_agent_model(socket, _model), do: socket
 
   @impl true
   def handle_event("workspace.file_tree.toggle", _params, socket) do
     {:noreply, update(socket, :workspace_layout, &WorkspaceLayout.toggle_file_tree/1)}
   end
+
+  # Browser-tab identity belongs to the workspace hook because sessionStorage is
+  # browser-only state. Defer agent attachment until it arrives: a mounted hook
+  # runs after the LiveSocket connects, and attaching before this event would
+  # create an orphan foreground rail for the temporary connection.
+  def handle_event("workspace.chat_rail.tab_ready", %{"id" => tab_id}, socket)
+      when is_binary(tab_id) and tab_id != "" do
+    socket =
+      case socket.assigns.chat_rail_tab_id do
+        nil ->
+          socket
+          |> assign(:chat_rail_tab_id, tab_id)
+          |> attach_workspace_session()
+
+        ^tab_id ->
+          attach_workspace_session(socket)
+
+        _different_tab ->
+          socket
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("workspace.chat_rail.tab_ready", _params, socket), do: {:noreply, socket}
 
   def handle_event("workspace.editor_fullscreen.toggle", _params, socket) do
     {:noreply, update(socket, :workspace_layout, &WorkspaceLayout.toggle_editor_fullscreen/1)}
@@ -319,7 +380,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   def handle_event("workspace.document.open", %{"path" => path}, socket) do
-    {:noreply, schedule_local_document_open(socket, path)}
+    {:noreply, schedule_document_open(socket, path)}
   end
 
   def handle_event("document.element_picker.toggle", _params, socket) do
@@ -485,7 +546,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         {:noreply, socket}
 
       %{path: path} ->
-        {:noreply, schedule_local_document_open(socket, path)}
+        {:noreply, schedule_document_open(socket, path)}
     end
   end
 
@@ -499,14 +560,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       socket =
         socket
         |> assign(:active_document, document_summary(response))
-        |> assign(:local_document_status, :loaded)
-        |> assign(:local_document_error, nil)
+        |> assign(:document_status, :loaded)
+        |> assign(:document_error, nil)
 
-      {:reply, local_load_reply(response), socket}
+      {:reply, load_reply(response), socket}
     else
       {:error, reason} ->
         {:reply, %{error: error_message(reason)},
-         assign(socket, :local_document_error, error_message(reason))}
+         assign(socket, :document_error, error_message(reason))}
     end
   end
 
@@ -542,19 +603,90 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         %{"request_id" => request_id} = params,
         socket
       ) do
-    case Map.pop(socket.assigns.doc_browser_pending, request_id) do
-      {{from, ref, verb}, pending} ->
+    # Claim first even when the request was already cancelled. A timed-out
+    # export may finish after its caller has gone away; leaving its octet in the
+    # LiveView stash would retain the complete document binary indefinitely.
+    {socket, params} = claim_octet(socket, params)
+
+    case Map.get(socket.assigns.doc_browser_pending, request_id) do
+      %{kind: :vfs_finalize, status: :waiting} = entry ->
+        result = doc_browser_result(params)
+
+        case result do
+          {:ok, _result} ->
+            release_doc_browser_entry_resources(entry)
+            {:noreply, update(socket, :doc_browser_pending, &Map.delete(&1, request_id))}
+
+          {:error, reason} ->
+            {:noreply, retry_or_recover_doc_browser_finalize(socket, request_id, entry, reason)}
+        end
+
+      %{status: :waiting, from: from, ref: ref, verb: verb} = entry ->
         result = doc_browser_result(params)
         send(from, {:doc_browser_reply, ref, result})
 
         socket =
           socket
-          |> assign(:doc_browser_pending, pending)
+          |> put_doc_browser_pending(
+            request_id,
+            entry |> Map.put(:status, :replied) |> Map.put(:result, result)
+          )
           |> apply_browser_op_dirty(verb, result)
 
         {:noreply, socket}
 
-      {nil, _pending} ->
+      %{status: :replied} ->
+        {:noreply, socket}
+
+      # Hot-code compatibility for requests created before the monitored
+      # pending-entry handshake was loaded.
+      {from, ref, verb} ->
+        result = doc_browser_result(params)
+        send(from, {:doc_browser_reply, ref, result})
+
+        socket =
+          socket
+          |> update(:doc_browser_pending, &Map.delete(&1, request_id))
+          |> apply_browser_op_dirty(verb, result)
+
+        {:noreply, socket}
+
+      nil ->
+        {:noreply, socket}
+    end
+  end
+
+  # Canonical-byte recovery is the fallback after the browser accepted a VFS
+  # commit but did not acknowledge `vfs_finalize`. The reload is itself a
+  # request/reply operation: removing the retained finalize transaction without
+  # hearing that the replacement document loaded would leave the editor locked
+  # indefinitely on fetch/constructor failures.
+  def handle_event(
+        "document.vfs.recovery.replied",
+        %{"recovery_id" => recovery_id} = params,
+        socket
+      ) do
+    case Map.get(socket.assigns.doc_browser_pending, recovery_id) do
+      %{kind: :vfs_recovery, status: :waiting} = entry ->
+        result = doc_browser_result(params)
+        response_attempt = params["attempt"]
+
+        case result do
+          {:ok, _result} ->
+            release_doc_browser_entry_resources(entry)
+            {:noreply, update(socket, :doc_browser_pending, &Map.delete(&1, recovery_id))}
+
+          {:error, reason} when response_attempt == entry.attempt ->
+            {:noreply, retry_or_fail_doc_browser_recovery(socket, recovery_id, entry, reason)}
+
+          # A failure from an earlier timed-out load must not consume the retry
+          # currently in flight. A success from any attempt is accepted above,
+          # since it proves canonical bytes replaced the provisional model.
+          {:error, _stale_reason} ->
+            {:noreply, socket}
+        end
+
+      _other ->
         {:noreply, socket}
     end
   end
@@ -574,16 +706,30 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   def handle_event("document.save.requested", _params, socket), do: {:noreply, socket}
 
+  # Deadline-missed uploads confirm cancellation in two places: the channel
+  # forgets the transfer (its "abort"), and this drops any binary that already
+  # reached the stash so a late claim cannot resurrect it.
+  def handle_event("octet:cancel", %{"id" => id}, socket) when is_binary(id) do
+    {:reply, %{cancelled: true}, update(socket, :octet_stash, &Map.delete(&1, id))}
+  end
+
+  def handle_event("octet:cancel", _params, socket) do
+    {:reply, %{cancelled: false}, socket}
+  end
+
   def handle_event("document.snapshot.checkpoint", params, socket) do
-    persist_local_rhwp_snapshot(:checkpoint, params, socket)
+    {socket, params} = claim_octet(socket, params)
+    persist_rhwp_snapshot(:checkpoint, params, socket)
   end
 
   def handle_event("document.snapshot.save_requested", params, socket) do
-    persist_local_rhwp_snapshot(:save, params, socket)
+    {socket, params} = claim_octet(socket, params)
+    persist_rhwp_snapshot(:save, params, socket)
   end
 
   def handle_event("document.viewer.save_requested", params, socket) do
-    persist_local_viewer_save(params, socket)
+    {socket, params} = claim_octet(socket, params)
+    persist_viewer_save(params, socket)
   end
 
   def handle_event("document.viewer.changed", %{"document_id" => document_id}, socket) do
@@ -667,7 +813,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       socket =
         socket
         |> assign(:markdown_editor, state)
-        |> assign(:local_markdown_preview_html, EcritsWeb.Markdown.to_preview_html(state.source))
+        |> assign(:markdown_preview_html, EcritsWeb.Markdown.to_preview_html(state.source))
         |> mark_doc_dirty(active_document_id(socket))
 
       {:noreply, socket}
@@ -706,7 +852,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       {:noreply, assign(socket, :markdown_editor, MarkdownEditorState.mark_saved(state))}
     else
       {:error, reason} ->
-        {:noreply, assign(socket, :local_document_error, error_message(reason))}
+        {:noreply, assign(socket, :document_error, error_message(reason))}
 
       _ ->
         {:noreply, socket}
@@ -741,30 +887,30 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   def handle_event("agent.model_dialog.open", _params, socket) do
-    {:noreply, assign(socket, :local_agent_model_modal_open, true)}
+    {:noreply, assign(socket, :agent_model_modal_open, true)}
   end
 
   def handle_event("agent.model_dialog.close", _params, socket) do
-    {:noreply, assign(socket, :local_agent_model_modal_open, false)}
+    {:noreply, assign(socket, :agent_model_modal_open, false)}
   end
 
   def handle_event("agent.provider.select", params, socket) do
-    provider = local_agent_provider_param(params)
+    provider = agent_provider_param(params)
 
     case AgentConfig.selectable_provider(provider, selectable_provider_ids()) do
       nil ->
         {:noreply, socket}
 
-      provider_id when provider_id == socket.assigns.local_agent.provider.key ->
-        {:noreply, assign(socket, :local_agent_model_modal_open, false)}
+      provider_id when provider_id == socket.assigns.agent.provider.key ->
+        {:noreply, assign(socket, :agent_model_modal_open, false)}
 
       provider_id ->
-        model = local_agent_model(default_agent_model_id(provider_id))
+        model = agent_model(default_agent_model_id(provider_id))
 
         {:noreply,
          socket
-         |> apply_local_agent_model(model)
-         |> assign(:local_agent_model_modal_open, false)}
+         |> apply_agent_model(model)
+         |> assign(:agent_model_modal_open, false)}
     end
   end
 
@@ -774,22 +920,22 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         params["value"] ||
         get_in(params, ["agent_model", "model"])
 
-    case local_agent_model(model_id) do
+    case agent_model(model_id) do
       nil ->
         {:noreply, socket}
 
       model ->
-        {:noreply, apply_local_agent_model(socket, model)}
+        {:noreply, apply_agent_model(socket, model)}
     end
   end
 
   def handle_event("agent.option.select", params, socket) do
-    case local_agent_option_param(params) do
+    case agent_option_param(params) do
       {"reasoning", value} ->
-        select_local_agent_reasoning(value, socket)
+        select_agent_reasoning(value, socket)
 
       {"access", value} ->
-        select_local_agent_access(value, socket)
+        select_agent_access(value, socket)
 
       _other ->
         {:noreply, socket}
@@ -797,22 +943,22 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   def handle_event("agent.reasoning.select", %{"reasoning" => value}, socket) do
-    select_local_agent_reasoning(value, socket)
+    select_agent_reasoning(value, socket)
   end
 
   def handle_event("agent.access.select", %{"access" => value}, socket) do
-    select_local_agent_access(value, socket)
+    select_agent_access(value, socket)
   end
 
   def handle_event("workspace.document.import.validate", _params, socket) do
-    {:noreply, assign_local_document_upload_errors(socket)}
+    {:noreply, assign_document_upload_errors(socket)}
   end
 
   # ── inline chat events ─────────────────────────────────────────────
 
   def handle_event(
         "agent.title.change",
-        %{"local_agent_title" => %{"title" => title}},
+        %{"agent_title" => %{"title" => title}},
         socket
       ) do
     # Persist the rename on the durable foreground agent so it survives a refresh
@@ -821,42 +967,47 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
     {:noreply,
      socket
-     |> assign(:local_agent_title_user_edited?, true)
-     |> assign_local_agent_title(title)
-     |> refresh_local_agent_rails()}
+     |> assign(:agent_title_user_edited?, true)
+     |> assign_agent_title(title)
+     |> refresh_agent_rails()}
   end
 
   def handle_event("agent.conversation.create", _params, socket) do
-    {:noreply, restart_local_agent_session(socket)}
+    {:noreply, restart_agent_session(socket)}
   end
 
   def handle_event("agent.rail_picker.open", _params, socket) do
     {:noreply,
      socket
-     |> assign(:local_agent_rail_drawer_open?, true)
-     |> refresh_local_agent_rails()}
+     |> assign(:agent_rail_drawer_open?, true)
+     |> refresh_agent_rails()}
   end
 
   def handle_event("agent.rail_picker.close", _params, socket) do
-    {:noreply, assign(socket, :local_agent_rail_drawer_open?, false)}
+    {:noreply, assign(socket, :agent_rail_drawer_open?, false)}
   end
 
   def handle_event("agent.rail.select", %{"rail-key" => rail_key}, socket)
       when is_binary(rail_key) and rail_key != "" do
     path = socket.assigns.workspace_path
 
-    case safe_select_foreground(path, rail_key, local_agent_attach_settings(socket)) do
+    case safe_select_foreground(path, rail_key, agent_attach_settings(socket)) do
       {:ok, %{agent_id: agent_id} = ws} when is_binary(agent_id) ->
-        :ok = WorkspaceSession.subscribe(ws)
-
         {:noreply,
          socket
-         |> snapshot_local_agent(ws, agent_id)
-         |> assign(:local_agent_rail_drawer_open?, false)
-         |> refresh_local_agent_rails()}
+         |> bind_agent_subscription(agent_id)
+         |> snapshot_agent(ws, agent_id)
+         |> assign(:agent_rail_drawer_open?, false)
+         |> refresh_agent_rails()}
+
+      {:pending, _ws} ->
+        {:noreply, assign(socket, :agent_rail_drawer_open?, false)}
+
+      {:error, :foreground_transition_in_progress} ->
+        {:noreply, assign(socket, :agent_rail_drawer_open?, false)}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
+        {:noreply, assign(socket, :agent_error, agent_error(reason))}
     end
   end
 
@@ -875,25 +1026,26 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   def handle_event("agent.turn.cancel", _params, socket) do
-    turn_id = socket.assigns.local_agent_turn_id
+    turn_id = socket.assigns.agent_turn_id
 
     if ws(socket) && turn_id do
       case WorkspaceSession.cancel(ws(socket), turn_id) do
         {:ok, _turn} ->
-          partial = socket.assigns.local_agent_text
-          segment = socket.assigns.local_agent_text_segment
+          partial = socket.assigns.agent_text
+          segment = socket.assigns.agent_text_segment
 
           {:noreply,
            socket
-           |> assign(:local_agent_status, :cancelled)
-           |> assign(:local_agent_turn_id, nil)
-           |> assign(:local_agent_text, "")
+           |> close_agent_reasoning_segment()
+           |> assign(:agent_status, :cancelled)
+           |> assign(:agent_turn_id, nil)
+           |> assign(:agent_text, "")
            |> finalize_inline_editor_preview(turn_id, :cancelled)
            |> finalize_cancelled_agent_text(turn_id, partial, segment)
            |> finalize_dangling_tools("Turn cancelled.")}
 
         {:error, reason} ->
-          {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
+          {:noreply, assign(socket, :agent_error, agent_error(reason))}
       end
     else
       {:noreply, socket}
@@ -901,53 +1053,134 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   def handle_event("agent.queue.previous", _params, socket) do
-    {:noreply, update(socket, :local_agent_queue_index, &max((&1 || 0) - 1, 0))}
+    {:noreply, update(socket, :agent_queue_index, &max((&1 || 0) - 1, 0))}
   end
 
   def handle_event("agent.queue.next", _params, socket) do
-    max_index = max(length(socket.assigns.local_agent_queue) - 1, 0)
-    {:noreply, update(socket, :local_agent_queue_index, &min((&1 || 0) + 1, max_index))}
+    max_index = max(length(socket.assigns.agent_queue) - 1, 0)
+    {:noreply, update(socket, :agent_queue_index, &min((&1 || 0) + 1, max_index))}
   end
 
   def handle_event("agent.queue.flush", _params, socket) do
-    flush_local_agent_queue(socket)
+    flush_agent_queue(socket)
   end
 
   @impl true
-  # Foreground-agent events for the bound session drive BOTH the inline chat
-  # transcript (this is the only LiveView; the chat renders here) AND, on a turn
-  # terminal, the DOCUMENT-side hook (auto-save the agent's dirty docs + re-list
-  # the tree — the agent may stall before its final doc.save, or have created
-  # files). Apply the chat-stream update first, then layer the doc-side hook on
-  # the turn-complete event.
-  def handle_info({:local_agent_event, %{session_id: session_id} = event}, socket)
-      when session_id == socket.assigns.local_agent_session_id do
-    # Close the contiguous-reasoning run on any non-reasoning event so the NEXT
-    # reasoning delta starts a fresh paragraph (codex glues reasoning items).
+  # Foreground-agent events for the rail currently bound to this LiveView drive
+  # its inline transcript. Every sibling LiveView receives the same PubSub
+  # terminal, so document persistence is claimed by Workspace.Session and runs
+  # once outside the LiveViews; a separate workspace broadcast refreshes them.
+  def handle_info(
+        {:agent_event, %{session_id: session_id, instance_id: instance_id} = event},
+        %{
+          assigns: %{
+            agent_session_id: session_id,
+            agent_instance_id: instance_id
+          }
+        } = socket
+      )
+      when is_binary(instance_id) and instance_id != "" do
+    if stale_agent_event?(socket, event) do
+      {:noreply, socket}
+    else
+      socket = advance_agent_event_cursor(socket, event)
+
+      # Close the contiguous-reasoning run on any non-reasoning event so the NEXT
+      # reasoning delta starts a fresh paragraph (codex glues reasoning items).
+      socket =
+        case event do
+          %{type: :reasoning_delta} -> socket
+          _ -> assign(socket, :agent_reasoning_open?, false)
+        end
+
+      socket = apply_agent_event(socket, event)
+
+      socket =
+        case event do
+          %{type: :turn_completed, turn_id: turn_id} ->
+            finalize_agent_turn(socket, instance_id, turn_id)
+
+          _ ->
+            socket
+        end
+
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:agent_event, _event}, socket), do: {:noreply, socket}
+
+  # A committed :octet upload arriving from `EcritsWeb.OctetChannel` via this
+  # LiveView's sink topic. Stash under the client-chosen id until the event
+  # that references it claims it (`claim_octet/2`); ack AFTER the stash write
+  # so the client's next event is ordered behind it. The stash lives in
+  # LiveView state, so unclaimed binaries die with the socket: no spool files,
+  # no sweeper, no HTTP endpoint.
+  def handle_info({:octet_upload, id, bytes}, socket)
+      when is_binary(id) and is_binary(bytes) do
     socket =
-      case event do
-        %{type: :reasoning_delta} -> socket
-        _ -> assign(socket, :local_agent_reasoning_open?, false)
-      end
-
-    socket = apply_local_agent_event(socket, event)
-
-    socket =
-      case event do
-        %{type: :turn_completed} ->
-          socket
-          |> persist_pending_agent_docs()
-          |> flush_staged_vfs_docs()
-          |> refresh_tree()
-
-        _ ->
-          socket
-      end
+      socket
+      |> update(:octet_stash, &Map.put(&1, id, bytes))
+      |> push_event("octet:ack", %{id: id, bytes: byte_size(bytes)})
 
     {:noreply, socket}
   end
 
-  def handle_info({:local_agent_event, _event}, socket), do: {:noreply, socket}
+  # Upload and cancel are serialized in the one channel process, so this
+  # terminal cancellation arrives after any earlier upload delivery for the
+  # same id — even when the client's LiveView `octet:cancel` event overtook
+  # the PubSub delivery. Delete once more to make cancellation final.
+  def handle_info({:octet_cancelled, id}, socket) when is_binary(id) do
+    {:noreply, update(socket, :octet_stash, &Map.delete(&1, id))}
+  end
+
+  def handle_info({:workspace_foreground_rebound, %{path: path, agent_id: agent_id} = ws}, socket)
+      when is_binary(path) and is_binary(agent_id) do
+    if same_workspace_path?(socket.assigns.workspace_path, path) do
+      {:noreply, bind_workspace_foreground(socket, ws, agent_id)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:workspace_foreground_transition_failed, reason}, socket) do
+    {:noreply, assign(socket, :agent_error, agent_error(reason))}
+  end
+
+  def handle_info(
+        {:workspace_turn_finalized,
+         %{
+           workspace_path: path,
+           agent_id: agent_id,
+           instance_id: instance_id,
+           result: result
+         }},
+        socket
+      )
+      when is_binary(path) and is_binary(agent_id) and is_binary(instance_id) do
+    if same_workspace_path?(socket.assigns.workspace_path, path) do
+      socket =
+        if socket.assigns.agent_session_id == agent_id and
+             socket.assigns.agent_instance_id == instance_id do
+          surface_turn_finalization(socket, result)
+        else
+          socket
+        end
+
+      {:noreply, refresh_tree(socket)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:workspace_turn_finalized, %{workspace_path: path}}, socket)
+      when is_binary(path) do
+    if same_workspace_path?(socket.assigns.workspace_path, path) do
+      {:noreply, refresh_tree(socket)}
+    else
+      {:noreply, socket}
+    end
+  end
 
   def handle_info({:editor_preview_delta, payload}, socket) when is_map(payload) do
     {:noreply, push_event(socket, "document.preview.delta_received", payload)}
@@ -956,9 +1189,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # Debounced re-render of the in-flight streaming agent message: re-renders the
   # accumulated buffer through `markdown_body`/MDEx so LiveView pushes formatted
   # HTML that replaces the raw client-side appends.
-  def handle_info({:flush_local_agent_text, ref}, socket) do
-    if socket.assigns.local_agent_text_flush_ref == ref do
-      {:noreply, flush_local_agent_text(socket)}
+  def handle_info({:flush_agent_text, ref}, socket) do
+    if socket.assigns.agent_text_flush_ref == ref do
+      {:noreply, flush_agent_text(socket)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:flush_agent_reasoning, ref}, socket) do
+    if socket.assigns.agent_reasoning_flush_ref == ref do
+      {:noreply, flush_agent_reasoning(socket)}
     else
       {:noreply, socket}
     end
@@ -977,11 +1218,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         {:noreply, socket}
 
       not is_binary(selected_document_id) ->
-        _ = ack_local_rhwp_snapshot_failed(request_id, document_id, :no_document)
+        _ = ack_rhwp_snapshot_failed(request_id, document_id, :no_document)
         {:noreply, socket}
 
       is_binary(document_id) and document_id != selected_document_id ->
-        _ = ack_local_rhwp_snapshot_failed(request_id, document_id, :document_mismatch)
+        _ = ack_rhwp_snapshot_failed(request_id, document_id, :document_mismatch)
         {:noreply, socket}
 
       true ->
@@ -998,10 +1239,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   @impl true
-  def handle_info({:open_local_document, ref, path}, socket) do
+  def handle_info({:open_document, ref, path}, socket) do
     if socket.assigns.pending_document_open_ref == ref and
          socket.assigns.pending_document_path == path do
-      {:noreply, start_local_document_open(socket, ref, path)}
+      {:noreply, start_document_open(socket, ref, path)}
     else
       {:noreply, socket}
     end
@@ -1025,19 +1266,113 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # hook and remember the caller so the hook's reply (a `document.engine.operation.replied`
   # client event) is relayed back to the waiting MCP process.
   def handle_info({:doc_browser_request, from, ref, verb, payload}, socket) do
+    {:noreply, queue_doc_browser_request(socket, from, ref, verb, payload, nil)}
+  end
+
+  def handle_info(
+        {:doc_browser_request, from, ref, verb, payload, expected_document_id},
+        socket
+      ) do
+    {:noreply,
+     queue_doc_browser_request(
+       socket,
+       from,
+       ref,
+       verb,
+       payload,
+       expected_document_id
+     )}
+  end
+
+  # The bridge acknowledges a reply before returning it to its caller. Keeping
+  # the entry until this acknowledgement closes the timeout/reply race: if the
+  # caller's deadline wins, cancellation still has the original edit metadata
+  # needed to roll back the browser transaction. For vfs_commit specifically,
+  # this ACK is the irreversible boundary: only then do we release the owner
+  # lease and ask the browser to discard its retained rollback snapshot.
+  def handle_info({:doc_browser_request_completed, from, ref, ack_ref}, socket) do
     request_id = doc_browser_request_id(ref)
 
-    socket =
-      socket
-      |> update(:doc_browser_pending, &Map.put(&1, request_id, {from, ref, verb}))
-      |> push_event("document.engine.operation.command", %{
-        request_id: request_id,
-        document_id: active_document_id(socket),
-        verb: to_string(verb),
-        payload: doc_browser_payload(payload, socket)
-      })
+    case Map.get(socket.assigns.doc_browser_pending, request_id) do
+      %{from: ^from, ref: ^ref, status: :replied} = entry ->
+        socket = complete_doc_browser_pending(socket, request_id, entry)
+        send(from, {:doc_browser_request_completion_ack, ack_ref, :ok})
+        {:noreply, socket}
 
-    {:noreply, socket}
+      _other ->
+        send(
+          from,
+          {:doc_browser_request_completion_ack, ack_ref, {:error, :request_not_pending}}
+        )
+
+        {:noreply, socket}
+    end
+  end
+
+  # Compatibility for in-process callers/tests created before the two-way
+  # completion handshake. Production BrowserBridge calls use the four-tuple
+  # above and do not return until this LiveView has crossed the commit boundary.
+  def handle_info({:doc_browser_request_completed, from, ref}, socket) do
+    request_id = doc_browser_request_id(ref)
+
+    case Map.get(socket.assigns.doc_browser_pending, request_id) do
+      %{from: ^from, ref: ^ref, status: :replied} = entry ->
+        {:noreply, complete_doc_browser_pending(socket, request_id, entry)}
+
+      _other ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_info({:doc_browser_request_cancelled, from, ref, reason}, socket) do
+    request_id = doc_browser_request_id(ref)
+
+    case Map.get(socket.assigns.doc_browser_pending, request_id) do
+      %{from: ^from, ref: ^ref} = entry ->
+        {:noreply,
+         cancel_doc_browser_pending(socket, request_id, entry,
+           reason: {:bridge_cancelled, reason},
+           reply?: false
+         )}
+
+      _other ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_info({:doc_browser_finalize_timeout, request_id, attempt}, socket) do
+    case Map.get(socket.assigns.doc_browser_pending, request_id) do
+      %{kind: :vfs_finalize, status: :waiting, attempt: ^attempt} = entry ->
+        {:noreply, retry_or_recover_doc_browser_finalize(socket, request_id, entry, :timeout)}
+
+      _other ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_info({:doc_browser_recovery_timeout, recovery_id, attempt}, socket) do
+    case Map.get(socket.assigns.doc_browser_pending, recovery_id) do
+      %{kind: :vfs_recovery, status: :waiting, attempt: ^attempt} = entry ->
+        {:noreply, retry_or_fail_doc_browser_recovery(socket, recovery_id, entry, :timeout)}
+
+      _other ->
+        {:noreply, socket}
+    end
+  end
+
+  # A tool process can be killed before its own timeout handler runs. Each
+  # pending request therefore monitors its caller independently and uses the
+  # same idempotent browser rollback path when that caller disappears.
+  def handle_info({:DOWN, monitor_ref, :process, from, _reason}, socket) do
+    if doc_browser_owner_monitor?(socket, monitor_ref, from) do
+      {:noreply,
+       cancel_doc_browser_owner(socket, from,
+         reason: :caller_down,
+         reply?: false
+       )}
+    else
+      {:noreply, socket}
+    end
   end
 
   # Debounced auto-save tick: the per-document timer fired. Drop it from the
@@ -1053,12 +1388,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  def handle_info({:local_document_saved, %Document{} = document, snapshot}, socket) do
-    {:noreply, apply_local_document_snapshot(socket, :saved, document, snapshot)}
+  def handle_info({:document_saved, %Document{} = document, snapshot}, socket) do
+    {:noreply, apply_document_snapshot(socket, :saved, document, snapshot)}
   end
 
-  def handle_info({:local_document_checkpointed, %Document{} = document, snapshot}, socket) do
-    {:noreply, apply_local_document_snapshot(socket, :checkpointed, document, snapshot)}
+  def handle_info({:document_checkpointed, %Document{} = document, snapshot}, socket) do
+    {:noreply, apply_document_snapshot(socket, :checkpointed, document, snapshot)}
   end
 
   def handle_info({:workspace_fs_event, path}, socket) when is_binary(path) do
@@ -1104,20 +1439,53 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # A DIRECT edit of a mounted `.jsonl` was routed onto the document (doc VFS
   # write-back). Drop a file-viewer card in the chat rail showing where it landed.
   def handle_info({:vfs_doc_edited, info}, socket) when is_map(info) do
+    info = ensure_vfs_preview_snapshot(socket, info)
     turn_id = vfs_doc_edit_turn_id(info)
 
     socket =
       socket
-      |> split_local_agent_text_before_preview()
       |> maybe_route_vfs_doc_edit_preview(info, turn_id)
       |> resync_open_editor_after_vfs_edit(info)
 
     {:noreply, socket}
   end
 
+  # A temp projection may have emitted a preview while its complete bytes were
+  # being prepared. If the atomic rename is rejected, remove that provisional
+  # card instead of presenting bytes that never became document truth.
+  def handle_info({:vfs_doc_edit_rejected, info}, socket) when is_map(info) do
+    socket =
+      if vfs_doc_edit_preview_for_active_agent?(socket, info) do
+        discard_rejected_vfs_preview(socket, info)
+      else
+        socket
+      end
+
+    {:noreply, socket}
+  end
+
+  defp stale_agent_event?(socket, %{event_seq: event_seq})
+       when is_integer(event_seq) and event_seq >= 0 do
+    event_seq <= (socket.assigns[:agent_event_seq] || 0)
+  end
+
+  # Compatibility for synthetic/older in-memory events. Real Session events
+  # always carry a cursor; they are the only source involved in attach races.
+  defp stale_agent_event?(_socket, _event), do: false
+
+  defp advance_agent_event_cursor(socket, %{event_seq: event_seq})
+       when is_integer(event_seq) and event_seq >= 0,
+       do: assign(socket, :agent_event_seq, event_seq)
+
+  defp advance_agent_event_cursor(socket, _event), do: socket
+
   defp maybe_route_vfs_doc_edit_preview(socket, info, turn_id) do
-    if vfs_doc_edit_preview_for_active_agent?(socket, info) do
-      socket = maybe_persist_vfs_edit_preview(socket, info, turn_id)
+    if is_binary(turn_id) and turn_id != "" and
+         vfs_doc_edit_preview_for_active_agent?(socket, info) do
+      socket =
+        socket
+        |> split_agent_text_before_preview()
+        |> maybe_persist_vfs_edit_preview(info, turn_id)
 
       if continuing_live_vfs_preview?(socket, info, turn_id) do
         socket
@@ -1134,26 +1502,94 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   defp continuing_live_vfs_preview?(socket, info, turn_id) do
-    item_field(info, :preview_continuation) == true and
+    not vfs_edit_progress_complete?(info) and
+      item_field(info, :preview_continuation) == true and
+      is_nil(item_field(info, :preview_base_url)) and
+      is_nil(item_field(info, :preview_snapshot)) and
       match?(
         %{role: :editor_preview, turn_id: ^turn_id},
-        socket.assigns[:local_agent_vfs_preview_item]
+        socket.assigns[:agent_vfs_preview_item]
       )
   end
 
-  defp vfs_doc_edit_preview_for_active_agent?(socket, info) do
-    case vfs_doc_edit_agent_id(info) do
-      agent_id when is_binary(agent_id) and agent_id != "" ->
-        agent_id == socket.assigns[:local_agent_session_id]
+  defp discard_rejected_vfs_preview(socket, info) do
+    rejected_edit_id = item_field(info, :edit_id)
+    rejected_turn_id = item_field(info, :turn_id)
 
-      _ ->
-        true
+    case socket.assigns[:agent_vfs_preview_item] do
+      %{role: :editor_preview} = item ->
+        matching_provisional? =
+          provisional_vfs_preview?(item) and
+            is_binary(rejected_edit_id) and rejected_edit_id != "" and
+            item_field(item, :edit_id) == rejected_edit_id and
+            is_binary(rejected_turn_id) and rejected_turn_id != "" and
+            item_field(item, :turn_id) == rejected_turn_id
+
+        if matching_provisional? do
+          socket = stream_delete(socket, :agent_items, item)
+
+          case socket.assigns[:agent_vfs_preview_rollback_item] do
+            %{role: :editor_preview} = rollback_item ->
+              socket
+              |> stream_insert(:agent_items, rollback_item)
+              |> assign(:agent_vfs_preview_item, rollback_item)
+              |> assign(:agent_vfs_preview_rollback_item, nil)
+
+            _other ->
+              socket
+              |> assign(:agent_vfs_preview_item, nil)
+              |> assign(:agent_vfs_preview_rollback_item, nil)
+          end
+        else
+          socket
+        end
+
+      _other ->
+        socket
     end
   end
 
-  defp vfs_doc_edit_agent_id(info) when is_map(info) do
-    item_field(info, :agent_id) || item_field(info, :session_id)
+  defp vfs_doc_edit_preview_for_active_agent?(socket, info) do
+    with turn_id when is_binary(turn_id) and turn_id != "" <- vfs_doc_edit_turn_id(info),
+         agent_id when is_binary(agent_id) and agent_id != "" <- vfs_doc_edit_agent_id(info),
+         instance_id when is_binary(instance_id) and instance_id != "" <-
+           vfs_doc_edit_instance_id(info) do
+      agent_id == socket.assigns[:agent_session_id] and
+        instance_id == socket.assigns[:agent_instance_id] and
+        known_agent_turn?(socket, agent_id, turn_id)
+    else
+      _other -> false
+    end
   end
+
+  defp known_agent_turn?(socket, agent_id, turn_id) do
+    turn_id == socket.assigns[:agent_turn_id] or
+      turn_id == item_field(socket.assigns[:agent_vfs_preview_item], :turn_id) or
+      agent_snapshot_has_turn?(agent_id, turn_id)
+  end
+
+  defp agent_snapshot_has_turn?(agent_id, turn_id) do
+    snapshot = ACP.agent_snapshot(agent_id)
+
+    current_turn_id =
+      snapshot
+      |> Map.get(:current_turn)
+      |> item_field(:turn_id)
+
+    current_turn_id == turn_id or
+      Enum.any?(Map.get(snapshot, :transcript, []), &(item_field(&1, :turn_id) == turn_id))
+  rescue
+    _error -> false
+  catch
+    :exit, _reason -> false
+  end
+
+  defp vfs_doc_edit_agent_id(info) when is_map(info) do
+    item_field(info, :agent_id)
+  end
+
+  defp vfs_doc_edit_instance_id(info) when is_map(info),
+    do: item_field(info, :instance_id)
 
   # A VFS write edits the SERVER document model + saves to disk. This function is
   # not the VFS write path; it only keeps an already-open browser viewer in sync
@@ -1161,13 +1597,13 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # semantic ops/sets, reuse the non-mirror browser hook (`document.engine.operation.command` ->
   # patch the WASM model -> repaint the affected page); that is a post-commit UI
   # resync layer, not the authoring route. (Match by PATH:
-  # `local_hwp_stream_document_id` is the Document struct id "local-…", while the
+  # `hwp_stream_document_id` is the Document struct id "local-…", while the
   # write-back keys the Pool document id.)
   defp resync_open_editor_after_vfs_edit(socket, %{path: edited_abs} = info)
        when is_binary(edited_abs) do
     workspace_path = socket.assigns[:workspace_path]
-    renderer = socket.assigns[:local_hwp_stream_renderer]
-    open_id = socket.assigns[:local_hwp_stream_document_id]
+    renderer = socket.assigns[:hwp_stream_renderer]
+    open_id = socket.assigns[:hwp_stream_document_id]
     open_rel = socket.assigns[:active_document_path]
     ops = Map.get(info, :ops, [])
     sets = Map.get(info, :sets, [])
@@ -1201,9 +1637,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       # saved bytes.
       true ->
         version = System.unique_integer([:positive, :monotonic])
-        socket = assign(socket, :local_document_bytes_version, version)
+        socket = assign(socket, :document_bytes_version, version)
 
-        case local_document_bytes_url(workspace_path, open_rel, version) do
+        case document_bytes_url(workspace_path, open_rel, version) do
           base when is_binary(base) ->
             event =
               if renderer == :rhwp_wasm,
@@ -1260,23 +1696,23 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   @impl true
-  def handle_async(@local_document_open_async, {:ok, {ref, path, result}}, socket) do
+  def handle_async(@document_open_async, {:ok, {ref, path, result}}, socket) do
     if socket.assigns.pending_document_open_ref == ref and
          socket.assigns.pending_document_path == path do
-      {:noreply, apply_local_document_open_result(socket, path, result)}
+      {:noreply, apply_document_open_result(socket, path, result)}
     else
       {:noreply, socket}
     end
   end
 
-  def handle_async(@local_document_open_async, {:exit, {:shutdown, :cancel}}, socket) do
+  def handle_async(@document_open_async, {:exit, {:shutdown, :cancel}}, socket) do
     {:noreply, socket}
   end
 
-  def handle_async(@local_document_open_async, {:exit, reason}, socket) do
+  def handle_async(@document_open_async, {:exit, reason}, socket) do
     case socket.assigns.pending_document_path do
       path when is_binary(path) and path != "" ->
-        {:noreply, apply_local_document_open_result(socket, path, {:error, reason})}
+        {:noreply, apply_document_open_result(socket, path, {:error, reason})}
 
       _other ->
         {:noreply, socket}
@@ -1285,8 +1721,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   @impl true
   def terminate(_reason, socket) do
-    _ = unsubscribe_local_hwp_stream(socket)
-    _ = unregister_local_rhwp_materializer_editor(active_document_id(socket))
+    _ = unsubscribe_hwp_stream(socket)
+    _ = unregister_rhwp_materializer_editor(active_document_id(socket))
     _ = stop_fs_watcher(socket)
     :ok
   end
@@ -1304,12 +1740,48 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       brand_href={~p"/workspace"}
     >
       <div
-        id="local-workspace-root"
+        id="workspace-root"
+        phx-hook=".ChatRailTabIdentity"
+        data-octet-sink={@octet_sink_id}
         class="h-[calc(100dvh-60px)] min-h-0 min-w-[1024px] overflow-hidden bg-[var(--cs-bg)] text-[var(--cs-ink)]"
       >
+        <script :type={Phoenix.LiveView.ColocatedHook} name=".ChatRailTabIdentity">
+          const chatRailTabStorageKey = "ecrits:chat-rail-tab-id"
+
+          const chatRailTabId = () => {
+            const freshId = () => globalThis.crypto.randomUUID()
+
+            try {
+              const storedId = globalThis.sessionStorage.getItem(chatRailTabStorageKey)
+
+              if (storedId) return storedId
+
+              const id = freshId()
+              globalThis.sessionStorage.setItem(chatRailTabStorageKey, id)
+              return id
+            } catch (_error) {
+              return freshId()
+            }
+          }
+
+          const announceChatRailTab = hook => {
+            hook.pushEvent("workspace.chat_rail.tab_ready", {id: chatRailTabId()})
+          }
+
+          export default {
+            mounted() {
+              announceChatRailTab(this)
+            },
+
+            reconnected() {
+              announceChatRailTab(this)
+            }
+          }
+        </script>
+
         <div
           :if={@workspace_error}
-          id="local-workspace-error"
+          id="workspace-error"
           class="mx-auto max-w-xl px-4 py-16"
         >
           <div class="rounded-md border border-error/25 bg-error/10 px-4 py-3 text-sm text-error">
@@ -1320,7 +1792,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
         <div
           :if={!@workspace_error}
-          id="local-workspace-grid"
+          id="workspace-grid"
           data-office-asset-version={OfficeWasm.office_asset_version()}
           data-workspace-layout={WorkspaceLayout.encode(@workspace_layout)}
           style={WorkspaceLayout.grid_style(@workspace_layout)}
@@ -1342,14 +1814,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
               direction: 1,
               minimum: 220,
               maximum: 520,
-              oppositeId: "local-agent-sidebar"
+              oppositeId: "agent-sidebar"
             } : {
               cssVariable: "--workspace-chat-rail-width",
               liveCssVariable: "--workspace-chat-rail-live-width",
               direction: -1,
               minimum: 280,
               maximum: 720,
-              oppositeId: "local-file-tree-panel"
+              oppositeId: "file-tree-panel"
             }
 
             const serverWidth = (grid, panel) => {
@@ -1371,7 +1843,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                 if (drag) return
                 const panel = hook.el.dataset.panel
                 const config = panelConfig(panel)
-                const grid = document.getElementById("local-workspace-grid")
+                const grid = document.getElementById("workspace-grid")
                 if (!grid) return
                 const width = serverWidth(grid, panel)
                 if (width !== null) grid.style.setProperty(config.cssVariable, `${width}px`)
@@ -1404,7 +1876,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                 event.preventDefault()
                 const panel = hook.el.dataset.panel
                 const controlled = document.getElementById(hook.el.getAttribute("aria-controls"))
-                const grid = document.getElementById("local-workspace-grid")
+                const grid = document.getElementById("workspace-grid")
                 if (!controlled || !grid) return
                 drag = {
                   panel,
@@ -1508,10 +1980,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
             }
           </script>
           <aside
-            id="local-file-tree-panel"
+            id="file-tree-panel"
             aria-label="Workspace files"
             data-component="repo-browser"
-            data-local-file-tree-panel="true"
+            data-file-tree-panel="true"
             data-collapsed={to_string(@workspace_layout.file_tree_collapsed?)}
             class={[
               "relative min-h-0 flex-col overflow-hidden border-r border-base-300 bg-base-100",
@@ -1519,7 +1991,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
             ]}
           >
             <div
-              id="local-file-tree-content"
+              id="file-tree-content"
               data-role="file-tree-content"
               aria-hidden={to_string(@workspace_layout.file_tree_collapsed?)}
               class={[
@@ -1539,12 +2011,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                     </h1>
                   </div>
                   <button
-                    id="local-file-tree-hide"
+                    id="file-tree-hide"
                     type="button"
                     phx-click="workspace.file_tree.toggle"
                     data-role="file-tree-hide"
                     aria-label="Hide file tree"
-                    aria-controls="local-file-tree-content"
+                    aria-controls="file-tree-content"
                     aria-expanded={to_string(not @workspace_layout.file_tree_collapsed?)}
                     class="inline-flex size-7 shrink-0 items-center justify-center rounded text-base-content/55 transition-colors hover:bg-base-200 hover:text-base-content focus:outline-none focus-visible:ring-2 focus-visible:ring-base-content/35"
                   >
@@ -1555,14 +2027,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
               <div class="min-h-0 flex-1 overflow-auto">
                 <WorkspaceFileTree.tree
-                  id="local-file-tree"
+                  id="file-tree"
                   state={@file_tree}
                 />
               </div>
             </div>
 
             <div
-              id="local-file-tree-restore"
+              id="file-tree-restore"
               data-role="file-tree-restore"
               class={[
                 "bg-base-100 px-1.5 py-1.5",
@@ -1570,12 +2042,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
               ]}
             >
               <button
-                id="local-file-tree-show"
+                id="file-tree-show"
                 type="button"
                 phx-click="workspace.file_tree.toggle"
                 data-role="file-tree-show"
                 aria-label="Show file tree"
-                aria-controls="local-file-tree-content"
+                aria-controls="file-tree-content"
                 aria-expanded={to_string(not @workspace_layout.file_tree_collapsed?)}
                 class="inline-flex size-7 items-center justify-center rounded text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content focus:outline-none focus-visible:ring-2 focus-visible:ring-base-content/35"
               >
@@ -1584,13 +2056,13 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
             </div>
 
             <button
-              id="local-file-tree-resizer"
+              id="file-tree-resizer"
               type="button"
               phx-hook=".WorkspacePanelResize"
               data-panel="file_tree"
               data-role="file-tree-resizer"
               aria-label="Resize file tree"
-              aria-controls="local-file-tree-panel"
+              aria-controls="file-tree-panel"
               hidden={@workspace_layout.file_tree_collapsed?}
               data-dragging={
                 to_string(
@@ -1605,34 +2077,33 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                 "before:bg-base-300 before:transition-colors before:duration-150",
                 "hover:before:bg-base-content/35 data-[dragging=true]:before:bg-base-content/35"
               ]}
-            >
-            </button>
+            ></button>
           </aside>
 
           <section
-            id="local-editor-shell"
-            data-local-editor-shell="true"
+            id="editor-shell"
+            data-editor-shell="true"
             class="relative z-[var(--workspace-editor-z)] h-full min-h-0 min-w-0 overflow-hidden bg-[var(--cs-bg)]"
           >
-            <EditorSurface.local_document
+            <EditorSurface.document
               :if={@active_document || @open_documents != []}
-              shell_id="local-rhwp-shell"
-              toolbar_id="local-rhwp-toolbar"
-              frame_id="local-rhwp-editor-frame"
+              shell_id="rhwp-shell"
+              toolbar_id="rhwp-toolbar"
+              frame_id="rhwp-editor-frame"
               state={
                 EditorSurfaceState.new(%{
                   document: @active_document,
                   document_path: @active_document_path,
                   document_viewport: @active_document_viewport,
-                  document_loading?: @local_document_status == :loading,
-                  document_spec: @active_document && local_document_spec(@active_document),
-                  canvas_id: @active_document && local_rhwp_dom_id(@active_document),
+                  document_loading?: @document_status == :loading,
+                  document_spec: @active_document && document_spec(@active_document),
+                  canvas_id: @active_document && rhwp_dom_id(@active_document),
                   hwp_bytes_url:
                     @active_document &&
-                      local_document_bytes_url(
+                      document_bytes_url(
                         @workspace_path,
                         @active_document.relative_path,
-                        @local_document_bytes_version
+                        @document_bytes_version
                       ),
                   open_documents: @open_documents,
                   active_document_id: @active_document_id,
@@ -1640,44 +2111,44 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                   document_element_picker: @document_element_picker,
                   editor_toolbar: @editor_toolbar,
                   document_search: @document_search,
-                  hwp_page_count: @local_hwp_page_count,
+                  hwp_page_count: @hwp_page_count,
                   markdown_editor: @markdown_editor,
-                  markdown_preview_html: @local_markdown_preview_html,
+                  markdown_preview_html: @markdown_preview_html,
                   workspace_layout: @workspace_layout,
                   save_state:
                     @active_document &&
-                      local_save_state(
+                      save_state(
                         @active_document,
-                        @local_document_snapshot,
-                        @local_document_status
+                        @document_snapshot,
+                        @document_status
                       )
                 })
               }
-              hwp_pages={@streams.local_hwp_pages}
+              hwp_pages={@streams.hwp_pages}
             />
           </section>
 
           <aside
-            id="local-agent-sidebar"
+            id="agent-sidebar"
             data-default-visible="true"
-            data-session-id={@local_agent_session_id || ""}
-            data-agent-status={to_string(@local_agent_status)}
+            data-session-id={@agent_session_id || ""}
+            data-agent-status={to_string(@agent_status)}
             data-component="chat-rail"
-            data-local-chat-rail="true"
-            data-provider-key={@local_agent.provider.key}
+            data-chat-rail="true"
+            data-provider-key={@agent.provider.key}
             class={[
               "relative z-[var(--workspace-agent-rail-z)] col-start-3 h-full min-h-0 flex-col overflow-visible border-l border-base-300 bg-base-200 text-base-content",
               if(@workspace_layout.editor_fullscreen?, do: "hidden", else: "flex")
             ]}
           >
             <button
-              id="local-agent-rail-resizer"
+              id="agent-rail-resizer"
               type="button"
               phx-hook=".WorkspacePanelResize"
               data-panel="chat_rail"
               data-role="chat-rail-resizer"
               aria-label="Resize chat rail"
-              aria-controls="local-agent-sidebar"
+              aria-controls="agent-sidebar"
               data-dragging={
                 to_string(
                   not is_nil(@workspace_layout.drag) and
@@ -1691,47 +2162,42 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                 "before:bg-base-300 before:transition-colors before:duration-150",
                 "hover:before:bg-base-content/35 data-[dragging=true]:before:bg-base-content/35"
               ]}
-            >
-            </button>
+            ></button>
 
             <p
-              :if={@local_agent.provider_warning}
-              id="local-agent-provider-warning"
+              :if={@agent.provider_warning}
+              id="agent-provider-warning"
               class="border-b border-warning/20 bg-warning/10 px-3 py-2 text-xs leading-5 text-warning"
             >
-              {@local_agent.provider_warning}
+              {@agent.provider_warning}
             </p>
 
-            <%!-- The chat thread + composer + queue + title are rendered INLINE
-                 in this single LiveView (the only LiveView for the workspace).
-                 The title / status controls, the streamed transcript, the error
-                 banner and the composer (with the provider/model/reasoning/access
-                 options EMBEDDED in the composer box, ChatGPT-style) all live
-                 here. A browser refresh gets a fresh active rail; older rails
-                 remain selectable from the same browser's recent-chat list. --%>
+            <%!-- Each attached workspace LiveView renders the selected shared
+                 browser-tab rail inline. The Session synchronizes create/select
+                 rebinds across simultaneous processes for that tab. --%>
             <div
               data-role="chat-rail-controls"
               class="flex shrink-0 items-center justify-between gap-1.5 border-b border-base-300 bg-base-200/95 px-1.5 py-0.5"
             >
               <div
-                id="local-agent-title"
+                id="agent-title"
                 data-role="chat-thread-title"
-                title={@local_agent_title}
+                title={@agent_title}
                 phx-click-away="agent.rail_picker.close"
                 class="relative flex min-w-0 flex-1 items-center gap-1.5 text-sm font-semibold leading-5 text-base-content"
               >
                 <.form
-                  for={@local_agent_title_form}
-                  id="local-agent-title-form"
+                  for={@agent_title_form}
+                  id="agent-title-form"
                   phx-change="agent.title.change"
                   phx-submit="agent.title.change"
                   data-role="chat-thread-title-form"
                   class="min-w-0 flex-1"
                 >
                   <input
-                    id="local-agent-title-label"
-                    name={@local_agent_title_form[:title].name}
-                    value={@local_agent_title}
+                    id="agent-title-label"
+                    name={@agent_title_form[:title].name}
+                    value={@agent_title}
                     type="text"
                     autocomplete="off"
                     maxlength="120"
@@ -1742,50 +2208,50 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                 </.form>
 
                 <button
-                  id="local-agent-rail-picker"
+                  id="agent-rail-picker"
                   type="button"
                   phx-click={
-                    if(@local_agent_rail_drawer_open?,
+                    if(@agent_rail_drawer_open?,
                       do: "agent.rail_picker.close",
                       else: "agent.rail_picker.open"
                     )
                   }
                   data-role="chat-rail-picker"
-                  data-open={@local_agent_rail_drawer_open?}
-                  data-state={if(@local_agent_rail_drawer_open?, do: "open", else: "closed")}
-                  data-count={length(@local_agent_rails)}
+                  data-open={@agent_rail_drawer_open?}
+                  data-state={if(@agent_rail_drawer_open?, do: "open", else: "closed")}
+                  data-count={length(@agent_rails)}
                   aria-label="Select chat rail"
-                  aria-expanded={@local_agent_rail_drawer_open?}
-                  aria-controls="local-agent-rail-drawer"
+                  aria-expanded={@agent_rail_drawer_open?}
+                  aria-controls="agent-rail-drawer"
                   class={[
                     "inline-flex h-7 shrink-0 items-center gap-1 rounded px-1.5 text-xs transition-colors",
-                    @local_agent_rail_drawer_open? &&
+                    @agent_rail_drawer_open? &&
                       "bg-base-100 text-base-content",
-                    not @local_agent_rail_drawer_open? &&
+                    not @agent_rail_drawer_open? &&
                       "text-base-content/55 hover:bg-base-100 hover:text-base-content"
                   ]}
                 >
                   <.icon name="hero-chat-bubble-left-right" class="size-4" />
                   <span
-                    :if={length(@local_agent_rails) > 1}
+                    :if={length(@agent_rails) > 1}
                     data-role="chat-rail-count"
                     class="tabular-nums"
                   >
-                    {length(@local_agent_rails)}
+                    {length(@agent_rails)}
                   </span>
                 </button>
 
                 <div
-                  id="local-agent-rail-drawer"
+                  id="agent-rail-drawer"
                   data-role="chat-rail-dropdown"
-                  data-open={@local_agent_rail_drawer_open?}
-                  data-state={if(@local_agent_rail_drawer_open?, do: "open", else: "closed")}
+                  data-open={@agent_rail_drawer_open?}
+                  data-state={if(@agent_rail_drawer_open?, do: "open", else: "closed")}
                   class={[
                     "absolute left-0 right-0 top-8 z-30 origin-top rounded border border-base-300 bg-base-100 p-1.5 shadow-sm",
                     "transition-opacity duration-75 ease-out",
-                    @local_agent_rail_drawer_open? &&
+                    @agent_rail_drawer_open? &&
                       "visible opacity-100",
-                    not @local_agent_rail_drawer_open? &&
+                    not @agent_rail_drawer_open? &&
                       "invisible pointer-events-none opacity-0"
                   ]}
                 >
@@ -1794,18 +2260,18 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                       Recent chats
                     </p>
                     <p
-                      :if={length(@local_agent_rails) > 1}
+                      :if={length(@agent_rails) > 1}
                       data-role="chat-rail-dropdown-count"
                       class="text-[10px] leading-4 text-base-content/45"
                     >
-                      {length(@local_agent_rails)} rails
+                      {length(@agent_rails)} rails
                     </p>
                   </div>
 
                   <div class="flex max-h-64 flex-col gap-0.5 overflow-y-auto">
                     <button
-                      :for={rail <- @local_agent_rails}
-                      id={"local-agent-rail-option-#{rail.agent_id}"}
+                      :for={rail <- @agent_rails}
+                      id={"agent-rail-option-#{rail.agent_id}"}
                       type="button"
                       phx-click="agent.rail.select"
                       phx-value-rail-key={rail.rail_key}
@@ -1827,13 +2293,13 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                           data-role="chat-rail-option-title"
                           class="block truncate text-[13px] font-medium leading-4"
                         >
-                          {local_agent_rail_title(rail)}
+                          {agent_rail_title(rail)}
                         </span>
                         <span
                           data-role="chat-rail-option-meta"
                           class="mt-0.5 block truncate text-[11px] leading-4 text-base-content/50"
                         >
-                          {local_agent_rail_meta(rail)}
+                          {agent_rail_meta(rail)}
                         </span>
                       </span>
                       <.icon
@@ -1843,8 +2309,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                       />
                     </button>
                     <p
-                      :if={@local_agent_rails == []}
-                      id="local-agent-rail-empty"
+                      :if={@agent_rails == []}
+                      id="agent-rail-empty"
                       class="px-2 py-2 text-xs text-base-content/45"
                     >
                       No recent chats
@@ -1853,31 +2319,31 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                 </div>
               </div>
               <span
-                id="local-agent-status"
-                data-role="local-agent-status"
+                id="agent-status"
+                data-role="agent-status"
                 aria-live="polite"
                 class="sr-only"
               >
-                {agent_status_label(@local_agent_status)}
+                {agent_status_label(@agent_status)}
               </span>
               <span
-                :if={@local_agent_pending > 0}
-                id="local-agent-pending"
-                data-role="local-agent-pending"
-                data-pending={@local_agent_pending}
+                :if={@agent_pending > 0}
+                id="agent-pending"
+                data-role="agent-pending"
+                data-pending={@agent_pending}
                 aria-live="polite"
                 title="Queued messages waiting for the current turn"
                 class="inline-flex h-5 shrink-0 items-center rounded-full border border-base-content/20 bg-base-100 px-2 text-[11px] font-medium text-base-content/70"
               >
-                {@local_agent_pending} 대기
+                {@agent_pending} 대기
               </span>
               <button
-                id="local-agent-refresh"
+                id="agent-refresh"
                 type="button"
                 phx-click="agent.conversation.create"
                 class="inline-flex size-7 shrink-0 items-center justify-center rounded text-base-content/55 hover:bg-base-100 hover:text-base-content disabled:pointer-events-none disabled:opacity-45"
                 aria-label="New agent chat"
-                disabled={@local_agent_status == :starting}
+                disabled={@agent_status == :starting}
               >
                 <.icon name="hero-arrow-path" class="size-4" />
               </button>
@@ -1885,7 +2351,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
             <div data-role="chat-rail-body" class="flex min-h-0 flex-1 flex-col overflow-visible">
               <div
-                id="local-agent-thread"
+                id="agent-thread"
                 phx-update="stream"
                 phx-hook=".StickToBottom"
                 data-scroll-follow-state={ScrollFollow.encode(@chat_scroll_follow)}
@@ -1893,7 +2359,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                 class="flex min-h-0 flex-1 flex-col items-stretch gap-3 overflow-x-hidden overflow-y-auto px-4 py-3"
               >
                 <article
-                  :for={{dom_id, item} <- @streams.local_agent_items}
+                  :for={{dom_id, item} <- @streams.agent_items}
                   id={dom_id}
                   data-role={agent_item_data_role(item)}
                   data-chat-role="chat-message"
@@ -1902,27 +2368,52 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                   class={agent_item_class(item)}
                 >
                   <%= case agent_item_role(item) do %>
+                    <% "file_activity" -> %>
+                      <div
+                        data-role="file-activity-row"
+                        data-operation-kind={file_activity_kind(item)}
+                        class="flex min-w-0 items-center gap-1.5 px-3 py-1 text-[12px] text-base-content/60"
+                      >
+                        <.icon
+                          name={file_activity_icon(item)}
+                          class="size-3.5 shrink-0"
+                        />
+                        <span class="shrink-0">{file_activity_label(item)}:</span>
+                        <span
+                          class="min-w-0 truncate font-mono"
+                          title={file_activity_detail(item)}
+                        >
+                          {file_activity_detail(item)}
+                        </span>
+                        <span class="ml-auto shrink-0 text-[11px] text-base-content/45">
+                          {agent_item_status_label(item)}
+                        </span>
+                      </div>
                     <% "tool" -> %>
                       <% render_files = agent_item_render_files(item) %>
                       <div
                         data-role="operation-block"
+                        data-operation-kind={agent_item_operation_kind(item)}
                         class="min-w-0 px-3 py-1 text-[12px] text-base-content/60"
                       >
-                        <details id={"#{dom_id}-disclosure"}>
+                        <details id={"#{dom_id}-disclosure"} class="group">
                           <summary
                             id={"#{dom_id}-toggle"}
                             aria-controls={"#{dom_id}-details"}
                             class="flex w-full min-w-0 cursor-pointer list-none items-center gap-1.5 text-left hover:text-base-content"
                           >
-                            <.icon name="hero-wrench-screwdriver" class="size-3.5 shrink-0" />
-                            <span class="shrink-0">Tool:</span>
+                            <.icon
+                              name={agent_item_operation_icon(item)}
+                              class="size-3.5 shrink-0"
+                            />
+                            <span class="shrink-0">{agent_item_operation_label(item)}:</span>
                             <span class="min-w-0 truncate font-mono">{agent_item_title(item)}</span>
                             <span class="ml-auto shrink-0 text-[11px] text-base-content/45">
                               {agent_item_status_label(item)}
                             </span>
                             <.icon
                               name="hero-chevron-down"
-                              class="size-3 shrink-0 text-base-content/45"
+                              class="size-3 shrink-0 text-base-content/45 transition-transform duration-150 group-open:rotate-180"
                             />
                           </summary>
                           <div
@@ -1942,14 +2433,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                         >
                           <a
                             :for={file <- render_files}
-                            href={"/local/render-preview?file=#{URI.encode_www_form(file)}"}
+                            href={"/render-preview?file=#{URI.encode_www_form(file)}"}
                             target="_blank"
                             rel="noopener"
                             title={Path.basename(file)}
                             class="block max-w-full overflow-hidden rounded border border-base-300 bg-white shadow-sm transition-shadow hover:shadow"
                           >
                             <img
-                              src={"/local/render-preview?file=#{URI.encode_www_form(file)}"}
+                              src={"/render-preview?file=#{URI.encode_www_form(file)}"}
                               alt={"Rendered page " <> Path.basename(file)}
                               loading="lazy"
                               class="block max-h-48 w-auto"
@@ -1966,15 +2457,31 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                         >
                           {agent_editor_preview_summary(item)}
                         </div>
-                        <EditorSurface.embedded_document
-                          id={"#{dom_id}-surface"}
-                          state={agent_editor_preview_state(item)}
-                        />
+                        <%= if agent_editor_preview_unavailable?(item) do %>
+                          <div
+                            data-role="editor-preview-unavailable"
+                            role="status"
+                            class="flex items-center gap-2 border border-base-300 bg-base-200/40 px-3 py-2 text-xs text-base-content/65"
+                          >
+                            <.icon
+                              name="hero-exclamation-triangle"
+                              class="size-4 shrink-0"
+                            />
+                            <span>Saved document preview is unavailable.</span>
+                          </div>
+                        <% else %>
+                          <EditorSurface.embedded_document
+                            id={"#{dom_id}-surface"}
+                            state={agent_editor_preview_state(item)}
+                          />
+                        <% end %>
                       </div>
                     <% "thinking" -> %>
                       <details
+                        id={"#{dom_id}-disclosure"}
                         data-role="operation-block"
-                        class="min-w-0 px-3 py-1 text-[12px] text-base-content/60"
+                        data-operation-kind="thinking"
+                        class="group min-w-0 px-3 py-1 text-[12px] text-base-content/60"
                       >
                         <summary
                           id={"#{dom_id}-toggle"}
@@ -1992,7 +2499,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                           </span>
                           <.icon
                             name="hero-chevron-down"
-                            class="ml-auto size-3 shrink-0 text-base-content/45"
+                            class="ml-auto size-3 shrink-0 text-base-content/45 transition-transform duration-150 group-open:rotate-180"
                           />
                         </summary>
                         <div
@@ -2044,7 +2551,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                       <div
                         data-role="agent-text"
                         data-message-id={dom_id}
-                        aria-busy={agent_item_loading?(item, @local_agent_editor_preview)}
+                        aria-busy={agent_item_loading?(item, @agent_editor_preview)}
                         class="block min-w-0 px-3 py-1 text-left text-[14px] leading-relaxed break-words text-base-content"
                       >
                         <div data-role="agent-text-body" data-message-id={dom_id}>
@@ -2054,7 +2561,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                           />
                         </div>
                         <span
-                          :if={agent_item_loading?(item, @local_agent_editor_preview)}
+                          :if={agent_item_loading?(item, @agent_editor_preview)}
                           id={"#{dom_id}-loading"}
                           phx-update="ignore"
                           data-role="agent-loading"
@@ -2065,18 +2572,15 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                           <span
                             aria-hidden="true"
                             class="size-1 rounded-full bg-current motion-safe:animate-bounce [animation-delay:-240ms]"
-                          >
-                          </span>
+                          ></span>
                           <span
                             aria-hidden="true"
                             class="size-1 rounded-full bg-current motion-safe:animate-bounce [animation-delay:-120ms]"
-                          >
-                          </span>
+                          ></span>
                           <span
                             aria-hidden="true"
                             class="size-1 rounded-full bg-current motion-safe:animate-bounce"
-                          >
-                          </span>
+                          ></span>
                         </span>
                       </div>
                   <% end %>
@@ -2084,61 +2588,61 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
               </div>
 
               <p
-                :if={@local_agent_error}
-                id="local-agent-error"
+                :if={@agent_error}
+                id="agent-error"
                 class="mx-3 mb-3 rounded border border-error/25 bg-error/10 px-3 py-2 text-sm text-error"
               >
-                {@local_agent_error}
+                {@agent_error}
               </p>
 
               <% queued_item =
-                local_agent_queued_item(@local_agent_queue, @local_agent_queue_index) %>
+                agent_queued_item(@agent_queue, @agent_queue_index) %>
               <div
                 :if={queued_item}
-                id="local-agent-queued-panel"
+                id="agent-queued-panel"
                 data-role="queued-messages"
-                data-queued-count={length(@local_agent_queue)}
-                data-queued-index={@local_agent_queue_index + 1}
+                data-queued-count={length(@agent_queue)}
+                data-queued-index={@agent_queue_index + 1}
                 class="mb-1.5 shrink-0 flex min-h-11 min-w-0 items-center gap-1.5 rounded border border-base-300 bg-base-100 px-1.5 py-1 text-xs text-base-content/70"
               >
                 <button
-                  id="local-agent-queued-prev"
+                  id="agent-queued-prev"
                   type="button"
                   phx-click="agent.queue.previous"
-                  disabled={@local_agent_queue_index <= 0}
+                  disabled={@agent_queue_index <= 0}
                   aria-label="Previous queued message"
                   class="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-base-content/40 transition-colors hover:bg-base-200 hover:text-base-content disabled:pointer-events-none disabled:opacity-25"
                 >
                   <.icon name="hero-chevron-left" class="size-3.5" />
                 </button>
                 <button
-                  id="local-agent-queued-next"
+                  id="agent-queued-next"
                   type="button"
                   phx-click="agent.queue.next"
-                  disabled={@local_agent_queue_index >= length(@local_agent_queue) - 1}
+                  disabled={@agent_queue_index >= length(@agent_queue) - 1}
                   aria-label="Next queued message"
                   class="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-base-content/40 transition-colors hover:bg-base-200 hover:text-base-content disabled:pointer-events-none disabled:opacity-25"
                 >
                   <.icon name="hero-chevron-right" class="size-3.5" />
                 </button>
                 <div
-                  id="local-agent-queued-body"
+                  id="agent-queued-body"
                   data-role="queued-body"
                   class="min-w-0 flex-1"
                 >
                   <p
-                    id="local-agent-queued-title"
+                    id="agent-queued-title"
                     data-role="queued-count"
-                    aria-label={"Queued message #{@local_agent_queue_index + 1} of #{length(@local_agent_queue)}"}
+                    aria-label={"Queued message #{@agent_queue_index + 1} of #{length(@agent_queue)}"}
                     class="flex h-3 items-center gap-1 text-[10px] font-medium leading-3 text-base-content/45"
                   >
                     <span>Queue</span>
                     <span class="tabular-nums text-base-content/80">
-                      {@local_agent_queue_index + 1}/{length(@local_agent_queue)}
+                      {@agent_queue_index + 1}/{length(@agent_queue)}
                     </span>
                   </p>
                   <div
-                    id="local-agent-queued-message"
+                    id="agent-queued-message"
                     data-role="queued-message"
                     data-turn-id={queued_item.turn_id}
                     class="min-w-0 truncate text-[13px] font-medium leading-4 text-base-content/90"
@@ -2161,7 +2665,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                   </div>
                 </div>
                 <button
-                  id="local-agent-queued-flush"
+                  id="agent-queued-flush"
                   type="button"
                   phx-click="agent.queue.flush"
                   title="Send queued"
@@ -2179,11 +2683,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                      native `phx-submit` form; the colocated `.ChatInput` hook adds
                      Enter-to-send while the button uses native form submission.
                      The options stay a SEPARATE sibling
-                     form (`local-agent-provider-options`) so they never submit a
+                     form (`agent-provider-options`) so they never submit a
                      chat turn. --%>
               <div class="shrink-0 rounded border border-base-300 bg-base-100 transition-colors focus-within:border-base-content/40">
                 <div
-                  id="local-agent-picks"
+                  id="agent-picks"
                   data-role="composer-picks"
                   class="flex flex-wrap gap-1 px-2 pt-1.5 empty:hidden empty:p-0"
                 >
@@ -2212,21 +2716,21 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                   </span>
                 </div>
                 <.form
-                  for={@local_agent_form}
-                  id="local-agent-form"
+                  for={@agent_form}
+                  id="agent-form"
                   phx-submit="agent.message.submit_requested"
                   phx-hook=".ChatInput"
                   data-role="chat-form"
                 >
                   <.input
-                    field={@local_agent_form[:message]}
-                    id="local-agent-input"
+                    field={@agent_form[:message]}
+                    id="agent-input"
                     type="textarea"
                     rows="1"
                     autocomplete="off"
                     data-role="chat-textarea"
-                    disabled={@local_agent_status in [:offline, :starting]}
-                    placeholder={agent_input_placeholder(@local_agent_status)}
+                    disabled={@agent_status in [:offline, :starting]}
+                    placeholder={agent_input_placeholder(@agent_status)}
                     wrapper_class="m-0 p-0 gap-0"
                     label_class="m-0 block"
                     class="block max-h-40 min-h-7 w-full resize-none overflow-y-auto border-0 bg-transparent px-3 pt-1.5 pb-0.5 text-[13px] leading-snug text-base-content outline-none placeholder:text-base-content/35 focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:text-base-content/40"
@@ -2235,17 +2739,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                     <%!-- 📎 attach sits next to Send; its hidden file input stays
                            in the options form below (upload phx-change binding). --%>
                     <label
-                      id="local-agent-upload"
+                      id="agent-upload"
                       data-role="chat-upload"
-                      for={@uploads.local_document_import.ref}
+                      for={@uploads.document_import.ref}
                       class="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content"
                       aria-label="Open local document"
                     >
                       <.icon name="hero-paper-clip" class="size-3.5" />
                     </label>
                     <button
-                      :if={@local_agent_status == :running}
-                      id="local-agent-submit"
+                      :if={@agent_status == :running}
+                      id="agent-submit"
                       type="submit"
                       phx-click="agent.turn.cancel"
                       data-role="chat-stop"
@@ -2257,12 +2761,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                       <span class="sr-only">Stop</span>
                     </button>
                     <button
-                      :if={@local_agent_status != :running}
-                      id="local-agent-submit"
+                      :if={@agent_status != :running}
+                      id="agent-submit"
                       type="submit"
                       data-role="chat-send"
                       data-action="send"
-                      disabled={@local_agent_status in [:offline, :starting]}
+                      disabled={@agent_status in [:offline, :starting]}
                       class="inline-flex size-6 items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content disabled:cursor-not-allowed disabled:opacity-35"
                       aria-label="Send"
                     >
@@ -2273,35 +2777,35 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                 </.form>
 
                 <.form
-                  for={@local_agent_options_form}
-                  id="local-agent-provider-options"
+                  for={@agent_options_form}
+                  id="agent-provider-options"
                   phx-change="workspace.document.import.validate"
                   data-role="provider-options"
-                  data-selected-provider={@local_agent.provider.key}
-                  data-selected-model={@local_agent.model}
-                  data-selected-reasoning={@local_agent.reasoning_effort}
-                  data-selected-access={@local_agent.access.id}
+                  data-selected-provider={@agent.provider.key}
+                  data-selected-model={@agent.model}
+                  data-selected-reasoning={@agent.reasoning_effort}
+                  data-selected-access={@agent.access.id}
                   class="flex min-w-0 flex-wrap items-center gap-1 border-t border-base-300 px-2 py-1.5 text-[11px] leading-5 text-base-content/60"
                 >
                   <div class="block min-w-0 shrink-0">
                     <span class="sr-only">Model</span>
                     <details
-                      id="local-agent-model-select"
+                      id="agent-model-select"
                       data-role="agent-model-select"
-                      data-selected-provider={@local_agent.provider.key}
-                      data-selected-model={@local_agent.model}
+                      data-selected-provider={@agent.provider.key}
+                      data-selected-model={@agent.model}
                       class="group relative inline-block min-w-0 max-w-32 align-top"
                     >
                       <summary class="inline-flex h-7 max-w-32 min-w-0 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-left text-[11px] text-base-content transition-colors hover:border-base-content/25 marker:hidden">
                         <img
-                          src={@local_agent.provider.favicon_src}
+                          src={@agent.provider.favicon_src}
                           data-role="agent-model-provider-favicon"
                           aria-hidden="true"
                           alt=""
                           class="size-3.5 shrink-0 opacity-90 [filter:brightness(0)_invert(0.82)]"
                         />
                         <span class="min-w-0 truncate">
-                          {local_agent_selected_model_label(@local_agent.model)}
+                          {agent_selected_model_label(@agent.model)}
                         </span>
                         <.icon
                           name="hero-chevron-down"
@@ -2313,19 +2817,19 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                         class="absolute bottom-8 left-0 z-40 max-h-[min(24rem,calc(100vh-8rem))] w-[min(17rem,calc(100vw-2rem))] max-w-[calc(var(--workspace-chat-rail-width,340px)-2rem)] overflow-y-auto rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm"
                       >
                         <button
-                          :for={model <- local_agent_models_for_provider(@local_agent.provider.key)}
-                          id={"local-agent-inline-model-#{model.id}"}
+                          :for={model <- agent_models_for_provider(@agent.provider.key)}
+                          id={"agent-inline-model-#{model.id}"}
                           type="button"
                           phx-click="agent.model.select"
                           phx-value-model={model.id}
                           data-role="agent-model-option"
                           data-model={model.id}
                           data-provider={model.provider}
-                          data-selected={to_string(@local_agent.model == model.id)}
+                          data-selected={to_string(@agent.model == model.id)}
                           title={model.description}
                           class={[
                             "flex w-full items-start justify-between gap-2 px-2 py-1.5 text-left transition-colors hover:bg-base-200/70",
-                            if(@local_agent.model == model.id,
+                            if(@agent.model == model.id,
                               do: "text-base-content",
                               else: "text-base-content/70"
                             )
@@ -2346,14 +2850,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                             </span>
                           </span>
                           <.icon
-                            :if={@local_agent.model == model.id}
+                            :if={@agent.model == model.id}
                             name="hero-check"
                             class="size-3.5 shrink-0 text-base-content/65"
                           />
                         </button>
                         <div class="my-1 border-t border-base-300" />
                         <button
-                          id="local-agent-go-to-provider"
+                          id="agent-go-to-provider"
                           type="button"
                           phx-click="agent.model_dialog.open"
                           data-role="agent-provider-config-open"
@@ -2372,19 +2876,19 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                          moved up next to Send, but this input must stay inside this
                          options form (it carries the upload's phx-change binding). --%>
                   <.live_file_input
-                    upload={@uploads.local_document_import}
+                    upload={@uploads.document_import}
                     class="sr-only"
-                    data-role="local-document-upload-file-input"
+                    data-role="document-import-file-input"
                   />
                   <details
-                    id="local-agent-reasoning-select"
+                    id="agent-reasoning-select"
                     data-role="provider-reasoning-select"
-                    data-selected-reasoning={@local_agent.reasoning_effort}
+                    data-selected-reasoning={@agent.reasoning_effort}
                     class="group relative min-w-0 max-w-28"
                   >
                     <summary class="inline-flex h-6 min-w-0 max-w-28 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-[11px] text-base-content transition-colors hover:border-base-content/25 marker:hidden">
                       <span class="min-w-0 truncate">
-                        {local_agent_reasoning_short_label(@local_agent.reasoning_effort)}
+                        {agent_reasoning_short_label(@agent.reasoning_effort)}
                       </span>
                       <.icon
                         name="hero-chevron-down"
@@ -2393,28 +2897,28 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                     </summary>
                     <div class="absolute bottom-7 right-0 z-40 w-52 rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm">
                       <button
-                        :for={effort <- local_agent_reasoning_efforts(@local_agent.provider.key)}
-                        id={"local-agent-inline-reasoning-#{effort}"}
+                        :for={effort <- agent_reasoning_efforts(@agent.provider.key)}
+                        id={"agent-inline-reasoning-#{effort}"}
                         type="button"
                         phx-click="agent.reasoning.select"
                         phx-value-reasoning={effort}
                         data-role="provider-reasoning-option"
                         data-value={effort}
-                        data-selected={to_string(@local_agent.reasoning_effort == effort)}
-                        title={local_agent_reasoning_title(effort)}
+                        data-selected={to_string(@agent.reasoning_effort == effort)}
+                        title={agent_reasoning_title(effort)}
                         class={[
                           "flex h-8 w-full items-center justify-between gap-2 px-2 text-left transition-colors hover:bg-base-200/70",
-                          if(@local_agent.reasoning_effort == effort,
+                          if(@agent.reasoning_effort == effort,
                             do: "text-base-content",
                             else: "text-base-content/70"
                           )
                         ]}
                       >
                         <span class="min-w-0 flex-1 truncate">
-                          {local_agent_reasoning_label(effort)}
+                          {agent_reasoning_label(effort)}
                         </span>
                         <.icon
-                          :if={@local_agent.reasoning_effort == effort}
+                          :if={@agent.reasoning_effort == effort}
                           name="hero-check"
                           class="size-3.5 shrink-0 text-base-content/65"
                         />
@@ -2422,31 +2926,31 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                     </div>
                   </details>
                   <details
-                    id="local-agent-access-select"
+                    id="agent-access-select"
                     data-role="agent-access-control"
-                    data-selected-access={@local_agent.access.id}
+                    data-selected-access={@agent.access.id}
                     class="group relative min-w-0 max-w-36"
                   >
                     <summary class="inline-flex h-7 min-w-0 max-w-36 cursor-pointer list-none items-center justify-between gap-1 rounded border border-base-300 bg-base-100 px-1.5 text-xs text-base-content transition-colors hover:border-base-content/25 marker:hidden">
                       <span class="min-w-0 truncate">
-                        {AgentAccess.resolve(@local_agent.access.id).label}
+                        {AgentAccess.resolve(@agent.access.id).label}
                       </span>
                       <.icon name="hero-chevron-down" class="size-3 shrink-0 text-base-content/45" />
                     </summary>
                     <div class="absolute bottom-8 right-0 z-20 w-40 rounded border border-base-300 bg-base-100 py-1 text-xs shadow-sm">
                       <button
-                        :for={access <- local_agent_access_controls()}
-                        id={"local-agent-inline-access-#{access.id}"}
+                        :for={access <- agent_access_controls()}
+                        id={"agent-inline-access-#{access.id}"}
                         type="button"
                         phx-click="agent.access.select"
                         phx-value-access={access.id}
                         data-role="agent-access-option"
                         data-access={access.id}
-                        data-selected={to_string(@local_agent.access.id == access.id)}
+                        data-selected={to_string(@agent.access.id == access.id)}
                         title={access.title}
                         class={[
                           "flex h-8 w-full items-center justify-between gap-2 px-2 text-left transition-colors hover:bg-base-200/70",
-                          if(@local_agent.access.id == access.id,
+                          if(@agent.access.id == access.id,
                             do: "text-base-content",
                             else: "text-base-content/70"
                           )
@@ -2454,7 +2958,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                       >
                         <span class="whitespace-nowrap">{access.label}</span>
                         <.icon
-                          :if={@local_agent.access.id == access.id}
+                          :if={@agent.access.id == access.id}
                           name="hero-check"
                           class="size-3.5 shrink-0 text-base-content/65"
                         />
@@ -2466,30 +2970,30 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
             </div>
 
             <div
-              :if={@local_agent_model_modal_open}
-              id="local-agent-model-modal"
+              :if={@agent_model_modal_open}
+              id="agent-model-modal"
               class="fixed inset-0 z-50"
               role="dialog"
               aria-modal="true"
-              aria-labelledby="local-agent-model-modal-title"
+              aria-labelledby="agent-model-modal-title"
               phx-window-keydown="agent.model_dialog.close"
               phx-key="Escape"
             >
               <div
-                id="local-agent-model-modal-backdrop"
+                id="agent-model-modal-backdrop"
                 class="absolute inset-0 bg-base-content/20"
                 phx-click="agent.model_dialog.close"
               />
               <div class="relative mx-3 mt-20 max-w-[420px] rounded-md border border-base-300 bg-base-100 shadow-sm sm:mx-auto">
                 <header class="flex h-10 items-center justify-between border-b border-base-300 px-3">
                   <h3
-                    id="local-agent-model-modal-title"
+                    id="agent-model-modal-title"
                     class="text-sm font-semibold text-base-content"
                   >
                     Provider config
                   </h3>
                   <button
-                    id="local-agent-model-modal-close"
+                    id="agent-model-modal-close"
                     type="button"
                     phx-click="agent.model_dialog.close"
                     aria-label="Close provider config"
@@ -2499,22 +3003,22 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                   </button>
                 </header>
                 <div class="divide-y divide-base-300 px-3 py-1">
-                  <%= for provider <- local_agent_provider_details(@local_agent.integrations) do %>
+                  <%= for provider <- agent_provider_details(@agent.integrations) do %>
                     <.link
                       :if={provider_setup_required?(provider)}
-                      id={"local-agent-model-detail-#{provider.id}"}
-                      href={local_agent_provider_setup_href(assigns, provider.id)}
+                      id={"agent-model-detail-#{provider.id}"}
+                      href={agent_provider_setup_href(assigns, provider.id)}
                       target="_blank"
                       rel="noopener"
                       data-role="agent-provider-setup"
                       data-provider={provider.id}
-                      data-selected={to_string(provider.id == @local_agent.provider.key)}
+                      data-selected={to_string(provider.id == @agent.provider.key)}
                       data-status={to_string(provider.status)}
-                      aria-current={to_string(provider.id == @local_agent.provider.key)}
+                      aria-current={to_string(provider.id == @agent.provider.key)}
                       class={[
                         "flex w-full items-center justify-between gap-3 py-2 text-left text-sm transition-colors hover:bg-base-200/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-base-content/25",
-                        provider.id == @local_agent.provider.key && "text-base-content",
-                        provider.id != @local_agent.provider.key && "text-base-content/75"
+                        provider.id == @agent.provider.key && "text-base-content",
+                        provider.id != @agent.provider.key && "text-base-content/75"
                       ]}
                     >
                       <div class="flex min-w-0 items-center gap-2">
@@ -2535,19 +3039,19 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                     </.link>
                     <button
                       :if={!provider_setup_required?(provider)}
-                      id={"local-agent-model-detail-#{provider.id}"}
+                      id={"agent-model-detail-#{provider.id}"}
                       type="button"
                       phx-click="agent.provider.select"
                       phx-value-provider={provider.id}
                       data-role="agent-provider-select"
                       data-provider={provider.id}
-                      data-selected={to_string(provider.id == @local_agent.provider.key)}
+                      data-selected={to_string(provider.id == @agent.provider.key)}
                       data-status={to_string(provider.status)}
-                      aria-pressed={to_string(provider.id == @local_agent.provider.key)}
+                      aria-pressed={to_string(provider.id == @agent.provider.key)}
                       class={[
                         "flex w-full items-center justify-between gap-3 py-2 text-left text-sm transition-colors hover:bg-base-200/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-base-content/25",
-                        provider.id == @local_agent.provider.key && "text-base-content",
-                        provider.id != @local_agent.provider.key && "text-base-content/75"
+                        provider.id == @agent.provider.key && "text-base-content",
+                        provider.id != @agent.provider.key && "text-base-content/75"
                       ]}
                     >
                       <div class="flex min-w-0 items-center gap-2">
@@ -2695,7 +3199,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     if socket.assigns[:workspace_path] == path do
       socket
       |> put_doc_vfs_mount_state(path, mounted?)
-      |> maybe_apply_live_local_agent_options(true)
+      |> maybe_apply_live_agent_options(true)
     else
       socket
     end
@@ -2724,7 +3228,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp vfs_writable?(socket) do
     if socket.assigns[:fuse_mode] == true do
-      case socket.assigns[:local_agent] do
+      case socket.assigns[:agent] do
         %{access: %{id: "full-workspace"}} -> true
         _ -> false
       end
@@ -2772,15 +3276,50 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp sync_doc_vfs_subscription(socket, _root, _mounted?), do: unsubscribe_doc_vfs(socket)
 
   defp vfs_doc_edit_turn_id(info) when is_map(info) do
-    case item_field(info, :edit_id) do
-      edit_id when is_binary(edit_id) and edit_id != "" -> edit_id
-      _other -> vfs_doc_edit_turn_id()
+    case item_field(info, :turn_id) do
+      turn_id when is_binary(turn_id) and turn_id != "" -> turn_id
+      _other -> nil
     end
   end
 
-  defp vfs_doc_edit_turn_id do
-    "vfs-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+  # Projection attaches this at the final committed write boundary. The fallback
+  # keeps synthetic/older VFS broadcasters safe without letting a later tab
+  # switch turn their chat card into a view of mutable canonical bytes.
+  defp ensure_vfs_preview_snapshot(socket, info) do
+    cond do
+      is_map(item_field(info, :preview_snapshot)) ->
+        info
+
+      not is_nil(item_field(info, :preview_snapshot_error)) ->
+        info
+
+      item_field(info, :preview_only) == true ->
+        info
+
+      not vfs_edit_progress_complete?(info) ->
+        info
+
+      true ->
+        workspace_path = socket.assigns[:workspace_path]
+        edited_abs = item_field(info, :path)
+
+        with true <- is_binary(workspace_path) and is_binary(edited_abs),
+             {:ok, relative_path} <- vfs_preview_relative_path(workspace_path, edited_abs),
+             {:ok, args} <- Document.open_args(workspace_path, relative_path),
+             document_id = Keyword.fetch!(args, :id),
+             path = Keyword.fetch!(args, :path),
+             {:ok, bytes} <- File.read(path),
+             {:ok, snapshot} <- PreviewSnapshot.put(document_id, bytes) do
+          Map.put(info, :preview_snapshot, snapshot)
+        else
+          {:error, reason} -> Map.put(info, :preview_snapshot_error, preview_error(reason))
+          other -> Map.put(info, :preview_snapshot_error, preview_error(other))
+        end
+    end
   end
+
+  defp preview_error(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp preview_error(reason), do: inspect(reason, limit: 8, printable_limit: 160)
 
   # The chat-rail view for a DIRECT file edit (write_back broadcast). Render the
   # saved document itself, including cold/replayed docs; the browser hook narrows
@@ -2790,26 +3329,49 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   defp replace_live_vfs_editor_preview(socket, item) do
+    previous = socket.assigns[:agent_vfs_preview_item]
+    socket = remember_vfs_preview_rollback(socket, previous, item)
+
     socket =
-      case {socket.assigns[:local_agent_vfs_preview_item], item} do
+      case {previous, item} do
         {%{role: :editor_preview, dom_id: dom_id}, %{role: :editor_preview, dom_id: dom_id}} ->
           socket
 
         {%{role: :editor_preview} = previous, _item} ->
-          stream_delete(socket, :local_agent_items, previous)
+          stream_delete(socket, :agent_items, previous)
 
         {_previous, _item} ->
           socket
       end
 
     case item do
-      %{role: :editor_preview} -> assign(socket, :local_agent_vfs_preview_item, item)
-      _other -> assign(socket, :local_agent_vfs_preview_item, nil)
+      %{role: :editor_preview} -> assign(socket, :agent_vfs_preview_item, item)
+      _other -> assign(socket, :agent_vfs_preview_item, nil)
     end
   end
 
+  defp remember_vfs_preview_rollback(socket, previous, item) do
+    cond do
+      provisional_vfs_preview?(item) and stable_editor_preview?(previous) ->
+        assign(socket, :agent_vfs_preview_rollback_item, previous)
+
+      provisional_vfs_preview?(item) ->
+        socket
+
+      true ->
+        assign(socket, :agent_vfs_preview_rollback_item, nil)
+    end
+  end
+
+  defp provisional_vfs_preview?(item), do: item_field(item, :provisional) == true
+
+  defp stable_editor_preview?(%{role: :editor_preview} = item),
+    do: not provisional_vfs_preview?(item)
+
+  defp stable_editor_preview?(_item), do: false
+
   defp maybe_stream_agent_item(socket, nil), do: socket
-  defp maybe_stream_agent_item(socket, item), do: stream_insert(socket, :local_agent_items, item)
+  defp maybe_stream_agent_item(socket, item), do: stream_insert(socket, :agent_items, item)
 
   defp vfs_editor_preview_item(socket, %{path: edited_abs} = info, turn_id)
        when is_binary(edited_abs) do
@@ -2823,26 +3385,66 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
              Document.markdown_format?(document.format) do
       highlights = vfs_preview_highlights(info)
 
+      preview_snapshot =
+        preview_snapshot_for_document(item_field(info, :preview_snapshot), document)
+
+      document = pin_preview_document(document, preview_snapshot)
+
+      committed_preview? =
+        vfs_edit_progress_complete?(info) and item_field(info, :preview_only) != true
+
+      preview_unavailable? = committed_preview? and not is_map(preview_snapshot)
+
+      bytes_url =
+        cond do
+          preview_unavailable? ->
+            nil
+
+          is_map(preview_snapshot) ->
+            preview_snapshot_bytes_url(
+              workspace_path,
+              relative_path,
+              document,
+              preview_snapshot
+            )
+
+          true ->
+            item_field(info, :preview_base_url) ||
+              workspace_path
+              |> document_bytes_url(relative_path)
+              |> cache_bust_url()
+        end
+
       state = %{
         turn_id: turn_id,
+        edit_id: item_field(info, :edit_id) || turn_id,
         document_id: document.id,
         document: document,
         document_path: relative_path,
-        document_spec: local_document_spec(document),
+        document_spec: document_spec(document),
         canvas_id:
-          "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-canvas",
-        bytes_url:
-          item_field(info, :preview_base_url) ||
-            workspace_path
-            |> local_document_bytes_url(relative_path)
-            |> cache_bust_url(),
+          "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-#{if(committed_preview?, do: "committed", else: "live")}-canvas",
+        bytes_url: bytes_url,
         text: "",
-        delta_count: item_field(info, :progress_index) || info[:applied] || 1,
+        delta_count: vfs_edit_change_count(info, 1),
         highlights: highlights,
-        preview_steps: vfs_preview_steps(info),
+        preview_steps:
+          if(is_map(preview_snapshot) or preview_unavailable?,
+            do: [],
+            else: vfs_preview_steps(info)
+          ),
         scroll: session_document_viewport(socket, relative_path),
         marker: info[:marker] || "",
         summary: vfs_edit_summary(info),
+        preview_snapshot: preview_snapshot,
+        preview_unavailable: preview_unavailable?,
+        preview_error:
+          if(preview_unavailable?,
+            do: item_field(info, :preview_snapshot_error) || "snapshot_unavailable",
+            else: nil
+          ),
+        provisional:
+          item_field(info, :preview_only) == true or not vfs_edit_progress_complete?(info),
         status: if(vfs_edit_progress_complete?(info), do: :sent, else: :running)
       }
 
@@ -2867,6 +3469,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
         props =
           (set["props"] || set[:props] || %{})
+          |> strip_transient_preview_bytes()
           |> Map.keys()
           |> Enum.reject(&(&1 in ["kind", :kind]))
 
@@ -2876,15 +3479,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
     details = Enum.reject(details, &(&1 in [nil, ""]))
 
-    {count, unit, progress} =
-      case {item_field(info, :progress_index), item_field(info, :progress_total)} do
-        {index, total}
-        when is_integer(index) and is_integer(total) and index >= 0 and total >= index ->
-          {index, if(index == 1, do: "token", else: "tokens"), " · #{index}/#{total}"}
+    count = vfs_edit_change_count(info, length(details))
+    unit = if(count == 1, do: "change", else: "changes")
 
-        _other ->
-          count = info[:applied] || length(details)
-          {count, if(count == 1, do: "change", else: "changes"), ""}
+    change_label =
+      if item_field(info, :preview_only) == true do
+        "previewing #{count} #{unit}"
+      else
+        "#{count} #{unit}"
       end
 
     suffix =
@@ -2893,7 +3495,35 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         shown -> " — " <> Enum.join(shown, "; ")
       end
 
-    "#{doc}: #{count} #{unit}#{progress}#{suffix}"
+    "#{doc}: #{change_label}#{suffix}"
+  end
+
+  # `applied` and `delta_applied` count raw engine operations, while projection
+  # progress counts logical edit groups. A replacement remains a delete+insert
+  # pair in `ops`, but is one visible change in both the provisional and final
+  # rail state.
+  defp vfs_edit_change_count(info, fallback) when is_map(info) and is_integer(fallback) do
+    progress_index = item_field(info, :progress_index)
+    progress_total = item_field(info, :progress_total)
+
+    candidates =
+      if item_field(info, :preview_only) == true do
+        [
+          progress_total,
+          item_field(info, :delta_applied),
+          item_field(info, :applied),
+          progress_index
+        ]
+      else
+        [
+          progress_index,
+          item_field(info, :applied),
+          item_field(info, :delta_applied),
+          progress_total
+        ]
+      end
+
+    Enum.find(candidates, &(is_integer(&1) and &1 > 0)) || max(fallback, 0)
   end
 
   # "page[page1]/shape[title]" -> "shape[title]"; sensible for short/nil refs.
@@ -2940,8 +3570,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp vfs_preview_highlights(_info), do: []
-
   defp vfs_preview_steps(info) when is_map(info) do
     case item_field(info, :preview_steps) do
       steps when is_list(steps) -> steps
@@ -2956,8 +3584,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       _ -> ""
     end
   end
-
-  defp vfs_preview_marker(_info), do: ""
 
   defp vfs_preview_marker_from_highlights(highlights) when is_list(highlights) do
     highlights
@@ -2989,8 +3615,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp cache_bust_url(url), do: url
 
   defp maybe_persist_vfs_edit_preview(socket, info, turn_id) do
-    if vfs_edit_progress_complete?(info) do
-      case socket.assigns[:local_agent_session_id] do
+    if is_binary(turn_id) and turn_id != "" and vfs_edit_progress_complete?(info) do
+      case socket.assigns[:agent_session_id] do
         session_id when is_binary(session_id) ->
           if item = vfs_edit_preview_transcript_item(socket, info, turn_id) do
             _ = ACP.append_transcript_item(session_id, item)
@@ -3019,26 +3645,40 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp vfs_edit_progress_complete?(_info), do: true
 
   defp vfs_edit_preview_transcript_item(socket, %{path: edited_abs} = info, turn_id)
-       when is_binary(edited_abs) do
+       when is_binary(edited_abs) and is_binary(turn_id) and turn_id != "" do
     workspace_path = socket.assigns[:workspace_path]
     highlights = vfs_preview_highlights(info)
 
     with true <- is_binary(workspace_path),
          {:ok, relative_path} <- vfs_preview_relative_path(workspace_path, edited_abs),
-         {:ok, format} <- Document.detect_format(relative_path),
+         {:ok, format} <- preview_document_format(info, relative_path),
          true <- Document.ehwp_format?(format) or Document.libreoffice_format?(format) do
+      document_id = Document.id_for(Path.expand(workspace_path), relative_path)
       version = vfs_edit_preview_file_version(edited_abs)
       preview_ref = edit_preview_ref(highlights)
+      edit_id = item_field(info, :edit_id) || turn_id
+      hash = edit_preview_hash(highlights)
+
+      preview_snapshot =
+        preview_snapshot_for_document(
+          item_field(info, :preview_snapshot),
+          %Document{id: document_id}
+        )
+
+      preview_unavailable? = not is_map(preview_snapshot)
+      snapshot_id = item_field(preview_snapshot, :id) || "unavailable"
 
       %{
         role: :edit_preview,
         status: :sent,
         turn_id: turn_id,
+        edit_id: edit_id,
         doc: item_field(info, :doc) || Path.basename(relative_path),
+        document_id: document_id,
         document_path: relative_path,
         backend: edit_preview_backend(format),
         format: format,
-        applied: item_field(info, :applied) |> preview_positive_int(1),
+        applied: vfs_edit_change_count(info, 1),
         ops:
           persistable_preview_payload(
             item_field(info, :composition_ops) || item_field(info, :ops)
@@ -3047,8 +3687,23 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         highlights: persistable_preview_payload(highlights),
         ref: strip_transient_preview_bytes(preview_ref),
         scroll: session_document_viewport(socket, relative_path),
-        hash: edit_preview_hash(highlights),
+        marker: vfs_preview_marker(info),
+        summary: vfs_edit_summary(info),
+        hash: hash,
         version: version,
+        preview_snapshot: strip_transient_preview_bytes(preview_snapshot),
+        preview_unavailable: preview_unavailable?,
+        preview_error:
+          if(preview_unavailable?,
+            do: item_field(info, :preview_snapshot_error) || "snapshot_unavailable",
+            else: nil
+          ),
+        preview_identity: %{
+          turn_id: turn_id,
+          edit_id: edit_id,
+          document_id: document_id,
+          snapshot_id: snapshot_id
+        },
         mode: "descriptor"
       }
     else
@@ -3066,6 +3721,24 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
+  defp preview_document_format(info, relative_path) when is_map(info) do
+    case item_field(info, :format) do
+      format when is_binary(format) ->
+        Document.normalize_format(format)
+
+      format when is_atom(format) and not is_nil(format) ->
+        Document.normalize_format(Atom.to_string(format))
+
+      _ ->
+        Document.detect_format(relative_path)
+    end
+  end
+
+  defp previewable_document_format?(format) do
+    Document.ehwp_format?(format) or Document.libreoffice_format?(format) or
+      Document.markdown_format?(format)
+  end
+
   defp vfs_edit_preview_file_version(path) when is_binary(path) do
     case File.stat(path, time: :posix) do
       {:ok, stat} -> %{byte_size: stat.size, mtime: stat.mtime}
@@ -3073,36 +3746,73 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp transcript_edit_preview_item(socket, turn_id, item, index) do
+  defp transcript_edit_preview_item(socket, turn_id, item, _index) do
     document_path = item_field(item, :document_path) || item_field(item, :document)
     applied = item_field(item, :applied) |> preview_positive_int(1)
+    workspace_path = socket.assigns[:workspace_path]
 
-    with relative_path when is_binary(relative_path) and relative_path != "" <-
+    with workspace_path when is_binary(workspace_path) and workspace_path != "" <- workspace_path,
+         relative_path when is_binary(relative_path) and relative_path != "" <-
            document_path && to_string(document_path),
          {:ok, path} <- transcript_edit_preview_path(socket, relative_path),
-         {:ok, %{document: document, relative_path: relative_path}} <-
-           vfs_preview_document(socket, path),
-         true <-
-           Document.ehwp_format?(document.format) or Document.libreoffice_format?(document.format) or
-             Document.markdown_format?(document.format) do
+         {:ok, relative_path} <- WorkspacePath.normalize(relative_path),
+         {:ok, fallback_format} <- preview_document_format(item, relative_path),
+         true <- previewable_document_format?(fallback_format) do
+      workspace_path = Path.expand(workspace_path)
+      document_id = Document.id_for(workspace_path, relative_path)
+      dom_id = "agent-editor-preview-#{turn_id}-#{dom_token(document_id)}"
+
+      {document, preview_snapshot, preview_error} =
+        replay_preview_document(
+          workspace_path,
+          relative_path,
+          path,
+          document_id,
+          fallback_format,
+          item_field(item, :preview_snapshot)
+        )
+
+      preview_unavailable? = not is_map(preview_snapshot)
+
       state = %{
-        dom_id: "local-agent-editor-preview-#{dom_token(turn_id)}-#{index}",
+        # The committed VFS card already occupies this stable turn/document row.
+        # Rebuilding it from its durable descriptor must update that row in
+        # place, both live and on replay, instead of moving it to the stream tail.
+        dom_id: dom_id,
         turn_id: turn_id,
+        edit_id: item_field(item, :edit_id) || item_field(item, :hash) || turn_id,
         document_id: document.id,
         document: document,
         document_path: relative_path,
-        document_spec: local_document_spec(document),
-        canvas_id: "local-agent-editor-preview-#{dom_token(turn_id)}-#{index}-canvas",
+        document_spec: document_spec(document),
+        canvas_id:
+          "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-committed-canvas",
         bytes_url:
-          socket.assigns.workspace_path
-          |> local_document_bytes_url(relative_path)
-          |> cache_bust_url(),
+          if(is_map(preview_snapshot),
+            do:
+              preview_snapshot_bytes_url(
+                workspace_path,
+                relative_path,
+                document,
+                preview_snapshot
+              ),
+            else: nil
+          ),
         text: "",
         delta_count: applied,
         highlights: vfs_preview_highlights(item),
         preview_steps: [],
         scroll: item_field(item, :scroll) || session_document_viewport(socket, relative_path),
         marker: vfs_preview_marker(item),
+        summary: item_field(item, :summary) || "",
+        preview_snapshot: preview_snapshot,
+        preview_identity: item_field(item, :preview_identity),
+        preview_unavailable: preview_unavailable?,
+        preview_error:
+          if(preview_unavailable?,
+            do: item_field(item, :preview_error) || preview_error || "snapshot_unavailable",
+            else: nil
+          ),
         status: :sent
       }
 
@@ -3117,13 +3827,132 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
     with root when is_binary(root) and root != "" <- root,
          {:ok, rel} <- WorkspacePath.normalize(relative_path),
-         {:ok, path} <- WorkspacePath.join(root, rel),
-         true <- File.regular?(path) do
+         {:ok, path} <- WorkspacePath.join(root, rel) do
       {:ok, path}
     else
       _ -> :error
     end
   end
+
+  defp preview_snapshot_for_document(snapshot, %Document{id: document_id})
+       when is_map(snapshot) do
+    case fetch_preview_snapshot(snapshot, document_id) do
+      {:ok, verified_snapshot, _bytes} -> verified_snapshot
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp preview_snapshot_for_document(_snapshot, _document), do: nil
+
+  defp fetch_preview_snapshot(snapshot, document_id)
+       when is_map(snapshot) and is_binary(document_id) do
+    snapshot_id = item_field(snapshot, :id)
+
+    with ^document_id <- item_field(snapshot, :document_id),
+         true <- PreviewSnapshot.valid_id?(snapshot_id),
+         {:ok, bytes} <- PreviewSnapshot.fetch(document_id, snapshot_id) do
+      {:ok,
+       %{
+         id: snapshot_id,
+         document_id: document_id,
+         byte_size: byte_size(bytes),
+         sha256: Document.sha256(bytes)
+       }, bytes}
+    else
+      false -> {:error, :invalid_snapshot_ref}
+      nil -> {:error, :invalid_snapshot_ref}
+      value when is_binary(value) -> {:error, :snapshot_document_mismatch}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_snapshot_ref}
+    end
+  end
+
+  defp fetch_preview_snapshot(_snapshot, _document_id), do: {:error, :missing_snapshot}
+
+  defp replay_preview_document(
+         workspace_path,
+         relative_path,
+         path,
+         document_id,
+         fallback_format,
+         snapshot
+       ) do
+    case fetch_preview_snapshot(snapshot, document_id) do
+      {:ok, verified_snapshot, bytes} ->
+        case Document.detect_format(relative_path, bytes) do
+          {:ok, format} ->
+            if previewable_document_format?(format) do
+              args = [
+                id: document_id,
+                workspace_root: workspace_path,
+                relative_path: relative_path,
+                path: path,
+                format: format
+              ]
+
+              {Document.build(args, bytes), verified_snapshot, nil}
+            else
+              {unavailable_preview_document(
+                 workspace_path,
+                 relative_path,
+                 path,
+                 document_id,
+                 fallback_format
+               ), nil, "unsupported_snapshot_format"}
+            end
+
+          {:error, reason} ->
+            {unavailable_preview_document(
+               workspace_path,
+               relative_path,
+               path,
+               document_id,
+               fallback_format
+             ), nil, preview_error(reason)}
+        end
+
+      {:error, reason} ->
+        {unavailable_preview_document(
+           workspace_path,
+           relative_path,
+           path,
+           document_id,
+           fallback_format
+         ), nil, preview_error(reason)}
+    end
+  end
+
+  defp unavailable_preview_document(
+         workspace_path,
+         relative_path,
+         path,
+         document_id,
+         format
+       ) do
+    %Document{
+      id: document_id,
+      workspace_root: workspace_path,
+      relative_path: relative_path,
+      path: path,
+      format: format,
+      byte_size: 0,
+      sha256: "",
+      metadata_dir: nil
+    }
+  end
+
+  defp pin_preview_document(%Document{} = document, snapshot) when is_map(snapshot) do
+    byte_size = item_field(snapshot, :byte_size)
+    sha256 = item_field(snapshot, :sha256)
+
+    if is_integer(byte_size) and byte_size >= 0 and is_binary(sha256) do
+      %Document{document | byte_size: byte_size, sha256: sha256}
+    else
+      document
+    end
+  end
+
+  defp pin_preview_document(document, _snapshot), do: document
 
   defp preview_positive_int(value, _default) when is_integer(value) and value >= 1, do: value
 
@@ -3183,53 +4012,53 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         # Workspace failed to mount (bad / inaccessible path) — send the user
         # back to the folder picker ("/") rather than a dead-end error page.
         socket
-        |> unsubscribe_local_hwp_stream()
+        |> unsubscribe_hwp_stream()
         |> assign(:workspace_path, nil)
         |> assign(:active_document, nil)
         |> assign(:active_document_path, nil)
-        |> clear_local_hwp_pages()
+        |> clear_hwp_pages()
         |> push_navigate(to: ~p"/")
     end
   end
 
-  defp schedule_local_document_open(%{assigns: %{workspace: nil}} = socket, _path), do: socket
+  defp schedule_document_open(%{assigns: %{workspace: nil}} = socket, _path), do: socket
 
-  defp schedule_local_document_open(socket, path) do
+  defp schedule_document_open(socket, path) do
     ref = make_ref()
 
     socket
-    |> prepare_local_document_loading(path)
+    |> prepare_document_loading(path)
     |> assign(:pending_document_open_ref, ref)
     |> assign(:pending_document_path, path)
-    |> start_local_document_open(ref, path)
+    |> start_document_open(ref, path)
   end
 
-  defp start_local_document_open(socket, ref, path) do
+  defp start_document_open(socket, ref, path) do
     root = workspace_root_path(socket.assigns.workspace)
 
-    start_async(socket, @local_document_open_async, fn ->
+    start_async(socket, @document_open_async, fn ->
       {ref, path, Document.open(root, path)}
     end)
   end
 
-  defp prepare_local_document_loading(socket, path) do
+  defp prepare_document_loading(socket, path) do
     previous_document_id = active_document_id(socket)
-    _ = unregister_local_rhwp_materializer_editor(previous_document_id)
+    _ = unregister_rhwp_materializer_editor(previous_document_id)
 
     socket
     |> reset_document_search()
-    |> unsubscribe_local_hwp_stream()
+    |> unsubscribe_hwp_stream()
     |> clear_pool_document()
     |> upsert_open_document_tab(path)
     |> update(:file_tree, &FileTree.select(&1, path))
     |> assign(:active_document_path, path)
     |> assign(:active_document, nil)
     |> assign(:active_document_viewport, session_document_viewport(socket, path))
-    |> assign(:local_document_bytes_version, nil)
-    |> assign(:local_document_status, :loading)
-    |> assign(:local_document_snapshot, nil)
-    |> assign(:local_document_error, nil)
-    |> clear_local_hwp_pages()
+    |> assign(:document_bytes_version, nil)
+    |> assign(:document_status, :loading)
+    |> assign(:document_snapshot, nil)
+    |> assign(:document_error, nil)
+    |> clear_hwp_pages()
   end
 
   # Open-or-focus tab tracking. The id is a deterministic token of the relative
@@ -3266,7 +4095,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       |> assign(:open_documents, tabs)
 
     if is_binary(active_document_path) and Enum.any?(tabs, &(&1.path == active_document_path)) do
-      schedule_local_document_open(socket, active_document_path)
+      schedule_document_open(socket, active_document_path)
     else
       socket
     end
@@ -3434,7 +4263,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
         socket =
           if active? do
-            cancel_local_document_open(socket)
+            cancel_document_open(socket)
           else
             socket
           end
@@ -3445,14 +4274,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
           remaining == [] ->
             socket
-            |> tear_down_active_local_document()
+            |> tear_down_active_document()
             |> assign(:active_document_id, nil)
             |> update(:file_tree, &FileTree.select(&1, nil))
 
           true ->
             neighbor = Enum.at(remaining, min(index, length(remaining) - 1))
 
-            schedule_local_document_open(socket, neighbor.path)
+            schedule_document_open(socket, neighbor.path)
         end
     end
   end
@@ -3482,40 +4311,40 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp release_office_twin_on_close(socket, _tab), do: socket
 
   # Close streams/handles for the currently active document, mirroring the
-  # teardown that `maybe_open_local_document/2` performs on empty navigation.
-  defp tear_down_active_local_document(socket) do
+  # teardown that `maybe_open_document/2` performs on empty navigation.
+  defp tear_down_active_document(socket) do
     previous_document_id = active_document_id(socket)
-    _ = unregister_local_rhwp_materializer_editor(previous_document_id)
+    _ = unregister_rhwp_materializer_editor(previous_document_id)
 
     socket
     |> reset_document_search()
-    |> unsubscribe_local_hwp_stream()
+    |> unsubscribe_hwp_stream()
     |> clear_pool_document()
     |> assign(:active_document_path, nil)
     |> assign(:active_document, nil)
     |> assign(:active_document_viewport, nil)
-    |> assign(:local_document_bytes_version, nil)
-    |> assign(:local_document_status, :none)
-    |> assign(:local_document_snapshot, nil)
-    |> assign(:local_document_error, nil)
-    |> clear_local_hwp_pages()
+    |> assign(:document_bytes_version, nil)
+    |> assign(:document_status, :none)
+    |> assign(:document_snapshot, nil)
+    |> assign(:document_error, nil)
+    |> clear_hwp_pages()
   end
 
-  defp cancel_local_document_open(socket) do
+  defp cancel_document_open(socket) do
     socket
-    |> cancel_async(@local_document_open_async)
+    |> cancel_async(@document_open_async)
     |> assign(:pending_document_open_ref, nil)
     |> assign(:pending_document_path, nil)
   end
 
-  defp apply_local_document_open_result(socket, path, result) do
+  defp apply_document_open_result(socket, path, result) do
     previous_document_id = active_document_id(socket)
 
     case result do
       {:ok, %Document{} = document} ->
         if connected?(socket) do
           :ok = Document.subscribe(document.id)
-          update_local_rhwp_materializer_editor(previous_document_id, document.id)
+          update_rhwp_materializer_editor(previous_document_id, document.id)
         end
 
         socket =
@@ -3525,31 +4354,31 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
           |> assign(:active_document, document_summary(document))
           |> assign(:pending_document_open_ref, nil)
           |> assign(:pending_document_path, nil)
-          |> assign(:local_document_status, :opened)
-          |> assign(:local_document_snapshot, nil)
-          |> assign(:local_document_error, nil)
+          |> assign(:document_status, :opened)
+          |> assign(:document_snapshot, nil)
+          |> assign(:document_error, nil)
           |> register_pool_document(document)
           |> persist_session_open_document(document)
-          |> render_local_document_pages(document)
+          |> render_document_pages(document)
 
         socket
 
       {:error, reason} ->
-        _ = unregister_local_rhwp_materializer_editor(previous_document_id)
+        _ = unregister_rhwp_materializer_editor(previous_document_id)
 
         socket
         |> clear_pool_document()
-        |> unsubscribe_local_hwp_stream()
+        |> unsubscribe_hwp_stream()
         |> update(:file_tree, &FileTree.select(&1, path))
         |> assign(:active_document_path, nil)
         |> assign(:active_document, nil)
         |> assign(:active_document_viewport, nil)
-        |> assign(:local_document_bytes_version, nil)
+        |> assign(:document_bytes_version, nil)
         |> assign(:pending_document_open_ref, nil)
         |> assign(:pending_document_path, nil)
-        |> assign(:local_document_status, :error)
-        |> assign(:local_document_error, error_message(reason))
-        |> clear_local_hwp_pages()
+        |> assign(:document_status, :error)
+        |> assign(:document_error, error_message(reason))
+        |> clear_hwp_pages()
     end
   end
 
@@ -3570,14 +4399,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     case DocPool.open(path, kind: kind) do
       {:ok, doc_id} ->
         # NOTE: the Session viewer (browser authority for doc.* routing) is NOT
-        # attached here. The editor hook pushes `local_document.viewer_ready`
+        # attached here. The editor hook pushes `document.viewer_ready`
         # once the WASM model has ACTUALLY loaded, and the handler attaches
         # then — a tab whose editor failed to load (e.g. office WASM in a
         # non-isolated context) must never capture routing; the doc stays
         # `:server`-backed so reads/renders keep working.
         socket
+        |> cancel_all_doc_browser_pending()
         |> assign(:pool_document_id, doc_id)
-        |> assign(:doc_browser_pending, %{})
 
       {:error, _reason} ->
         # Pool registration is best-effort: a backend open failure must not
@@ -3588,7 +4417,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   # Office formats (docx/pptx/xlsx) are viewed through the browser-WASM office model.
   # Do NOT cold-open the server LibreOffice/UNO twin while rendering that viewer:
-  # the hook will claim browser authority via `local_document.viewer_ready`, and
+  # the hook will claim browser authority via `document.viewer_ready`, and
   # headless `doc.open` still opens the server twin through DocPool directly.
   defp register_pool_document(socket, %Document{path: path, format: format})
        when format in ["docx", "pptx", "xlsx"] do
@@ -3596,8 +4425,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     doc_id = DocPool.document_id_for(path, kind)
 
     socket
+    |> cancel_all_doc_browser_pending()
     |> assign(:pool_document_id, doc_id)
-    |> assign(:doc_browser_pending, %{})
   end
 
   defp register_pool_document(socket, %Document{}), do: clear_pool_document(socket)
@@ -3629,10 +4458,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp clear_pool_document(%{assigns: %{pool_document_id: doc_id}} = socket)
        when is_binary(doc_id) do
     if connected?(socket), do: detach_session_viewer(socket, doc_id)
-    assign(socket, :pool_document_id, nil)
+
+    socket
+    |> cancel_all_doc_browser_pending()
+    |> assign(:pool_document_id, nil)
   end
 
-  defp clear_pool_document(socket), do: assign(socket, :pool_document_id, nil)
+  defp clear_pool_document(socket) do
+    socket
+    |> cancel_all_doc_browser_pending()
+    |> assign(:pool_document_id, nil)
+  end
 
   defp detach_session_viewer(socket, doc_id) do
     case socket.assigns[:workspace_path] do
@@ -3650,6 +4486,464 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # Stable string id for a pending browser request (ref is not JSON-serialisable
   # for the client round-trip, so we key by an inspected ref string).
   defp doc_browser_request_id(ref), do: "dbr:" <> (:erlang.ref_to_list(ref) |> List.to_string())
+
+  defp queue_doc_browser_request(
+         socket,
+         from,
+         ref,
+         verb,
+         payload,
+         expected_document_id
+       ) do
+    request_id = doc_browser_request_id(ref)
+    document_id = active_document_id(socket)
+    wire_payload = doc_browser_payload(payload, socket)
+    routed_document_id = socket.assigns[:pool_document_id]
+
+    if valid_doc_browser_route?(expected_document_id, routed_document_id) do
+      entry = %{
+        from: from,
+        ref: ref,
+        verb: verb,
+        payload: wire_payload,
+        document_id: document_id,
+        expected_document_id: expected_document_id,
+        identity: doc_browser_identity(payload),
+        monitor_ref: Process.monitor(from),
+        status: :waiting
+      }
+
+      socket
+      |> put_doc_browser_pending(request_id, entry)
+      |> push_event("document.engine.operation.command", %{
+        request_id: request_id,
+        document_id: document_id,
+        verb: to_string(verb),
+        payload: wire_payload
+      })
+    else
+      send(
+        from,
+        {:doc_browser_reply, ref,
+         {:error,
+          {:document_mismatch, %{expected: expected_document_id, actual: routed_document_id}}}}
+      )
+
+      socket
+    end
+  end
+
+  defp valid_doc_browser_route?(nil, _actual), do: true
+  defp valid_doc_browser_route?(expected, actual), do: expected == actual
+
+  defp put_doc_browser_pending(socket, request_id, entry) do
+    assign(
+      socket,
+      :doc_browser_pending,
+      Map.put(socket.assigns.doc_browser_pending, request_id, entry)
+    )
+  end
+
+  defp complete_doc_browser_pending(socket, request_id, entry) do
+    socket = update(socket, :doc_browser_pending, &Map.delete(&1, request_id))
+
+    cond do
+      entry.verb == :vfs_write and match?({:ok, _result}, entry.result) ->
+        lease_doc_browser_write(socket, entry)
+
+      entry.verb == :vfs_commit and match?({:ok, _result}, entry.result) ->
+        release_doc_browser_entry_resources(entry)
+
+        socket
+        |> release_doc_browser_lease(entry)
+        |> queue_doc_browser_finalize(entry)
+
+      entry.verb == :vfs_rollback and match?({:ok, _result}, entry.result) ->
+        release_doc_browser_entry_resources(entry)
+        release_doc_browser_lease(socket, entry)
+
+      true ->
+        release_doc_browser_entry_resources(entry)
+        socket
+    end
+  end
+
+  defp queue_doc_browser_finalize(socket, entry) do
+    edit_id = doc_browser_edit_id(entry.payload)
+
+    if is_binary(edit_id) and edit_id != "" do
+      request_id = "dbr-finalize:#{System.unique_integer([:positive, :monotonic])}"
+
+      finalize_entry = %{
+        # LiveView owns this cleanup request after the caller ACK. It has no
+        # caller monitor and must never be converted back into a rollback by a
+        # later turn/document teardown.
+        kind: :vfs_finalize,
+        verb: :vfs_finalize,
+        payload: entry.payload,
+        document_id: entry.document_id,
+        expected_document_id: entry.expected_document_id,
+        attempt: 1,
+        status: :waiting
+      }
+
+      push_doc_browser_finalize_attempt(socket, request_id, finalize_entry)
+    else
+      socket
+    end
+  end
+
+  defp push_doc_browser_finalize_attempt(socket, request_id, entry) do
+    timer_ref =
+      Process.send_after(
+        self(),
+        {:doc_browser_finalize_timeout, request_id, entry.attempt},
+        @doc_browser_finalize_timeout_ms
+      )
+
+    entry = Map.put(entry, :timer_ref, timer_ref)
+
+    socket
+    |> put_doc_browser_pending(request_id, entry)
+    |> push_event("document.engine.operation.command", %{
+      request_id: request_id,
+      document_id: entry.document_id,
+      verb: "vfs_finalize",
+      payload: entry.payload
+    })
+  end
+
+  defp retry_or_recover_doc_browser_finalize(socket, request_id, entry, reason) do
+    release_doc_browser_entry_resources(entry)
+
+    if entry.attempt < @doc_browser_finalize_max_attempts and
+         doc_browser_finalize_route_active?(socket, entry) do
+      Logger.warning(
+        "retrying browser VFS finalize attempt=#{entry.attempt + 1} reason=#{inspect(reason)}"
+      )
+
+      entry =
+        entry
+        |> Map.put(:attempt, entry.attempt + 1)
+        |> Map.delete(:timer_ref)
+
+      push_doc_browser_finalize_attempt(socket, request_id, entry)
+    else
+      recover_doc_browser_finalize(socket, request_id, entry, reason)
+    end
+  end
+
+  defp doc_browser_finalize_route_active?(socket, entry) do
+    entry.document_id == active_document_id(socket) and
+      valid_doc_browser_route?(entry.expected_document_id, socket.assigns[:pool_document_id])
+  end
+
+  defp recover_doc_browser_finalize(socket, request_id, entry, reason) do
+    Logger.error(
+      "browser VFS finalize exhausted retries; reloading committed bytes reason=#{inspect(reason)}"
+    )
+
+    socket = update(socket, :doc_browser_pending, &Map.delete(&1, request_id))
+
+    if doc_browser_finalize_route_active?(socket, entry) and
+         socket.assigns[:hwp_stream_renderer] == :rhwp_wasm do
+      recovery_id = "dbr-recovery:#{System.unique_integer([:positive, :monotonic])}"
+
+      recovery_entry = %{
+        # The commit completion ACK already crossed the irreversible boundary.
+        # This server-owned request may retry or fail visibly, but teardown must
+        # never convert it into a browser rollback.
+        kind: :vfs_recovery,
+        verb: :vfs_recovery,
+        document_id: entry.document_id,
+        expected_document_id: entry.expected_document_id,
+        attempt: 1,
+        status: :waiting,
+        finalize_reason: reason
+      }
+
+      push_doc_browser_recovery_attempt(socket, recovery_id, recovery_entry)
+    else
+      socket
+    end
+  end
+
+  defp push_doc_browser_recovery_attempt(socket, recovery_id, entry) do
+    version = System.unique_integer([:positive, :monotonic])
+    workspace_path = socket.assigns[:workspace_path]
+    relative_path = socket.assigns[:active_document_path]
+
+    case document_bytes_url(workspace_path, relative_path, version) do
+      url when is_binary(url) ->
+        timer_ref =
+          Process.send_after(
+            self(),
+            {:doc_browser_recovery_timeout, recovery_id, entry.attempt},
+            @doc_browser_recovery_timeout_ms
+          )
+
+        entry = Map.put(entry, :timer_ref, timer_ref)
+
+        socket
+        |> assign(:document_bytes_version, version)
+        |> put_doc_browser_pending(recovery_id, entry)
+        |> push_event("document.hwp.load_command", %{
+          url: url,
+          document_id: entry.document_id,
+          force: true,
+          vfs_recovery: true,
+          vfs_recovery_id: recovery_id,
+          vfs_recovery_attempt: entry.attempt
+        })
+
+      _missing_url ->
+        fail_doc_browser_recovery(socket, recovery_id, entry, :missing_document_url)
+    end
+  end
+
+  defp retry_or_fail_doc_browser_recovery(socket, recovery_id, entry, reason) do
+    release_doc_browser_entry_resources(entry)
+
+    if entry.attempt < @doc_browser_recovery_max_attempts and
+         doc_browser_finalize_route_active?(socket, entry) do
+      Logger.warning(
+        "retrying browser canonical recovery attempt=#{entry.attempt + 1} reason=#{inspect(reason)}"
+      )
+
+      entry =
+        entry
+        |> Map.put(:attempt, entry.attempt + 1)
+        |> Map.put(:last_reason, reason)
+        |> Map.delete(:timer_ref)
+
+      push_doc_browser_recovery_attempt(socket, recovery_id, entry)
+    else
+      fail_doc_browser_recovery(socket, recovery_id, entry, reason)
+    end
+  end
+
+  defp fail_doc_browser_recovery(socket, recovery_id, entry, reason) do
+    release_doc_browser_entry_resources(entry)
+
+    Logger.error(
+      "browser canonical recovery failed after commit attempt=#{entry.attempt} reason=#{inspect(reason)}"
+    )
+
+    failed_entry =
+      entry
+      |> Map.put(:status, :failed)
+      |> Map.put(:last_reason, reason)
+      |> Map.delete(:timer_ref)
+
+    socket
+    |> put_doc_browser_pending(recovery_id, failed_entry)
+    |> assign(
+      :document_error,
+      "The edit was saved, but the browser could not reload the committed document."
+    )
+  end
+
+  defp lease_doc_browser_write(socket, entry) do
+    case doc_browser_edit_id(entry.payload) do
+      edit_id when is_binary(edit_id) and edit_id != "" ->
+        key = {edit_id, entry.from}
+        lease = Map.drop(entry, [:ref, :result, :status])
+
+        socket =
+          case Map.get(socket.assigns.doc_browser_vfs_leases, key) do
+            nil -> socket
+            existing -> cancel_doc_browser_entries(socket, [], [{key, existing}], reply?: false)
+          end
+
+        assign(
+          socket,
+          :doc_browser_vfs_leases,
+          Map.put(socket.assigns.doc_browser_vfs_leases, key, lease)
+        )
+
+      _missing ->
+        release_doc_browser_entry_resources(entry)
+        socket
+    end
+  end
+
+  defp release_doc_browser_lease(socket, entry) do
+    key = {doc_browser_edit_id(entry.payload), entry.from}
+
+    case Map.pop(socket.assigns.doc_browser_vfs_leases, key) do
+      {nil, _leases} ->
+        socket
+
+      {lease, leases} ->
+        release_doc_browser_entry_resources(lease)
+        assign(socket, :doc_browser_vfs_leases, leases)
+    end
+  end
+
+  defp cancel_doc_browser_pending(socket, request_id, entry, opts) do
+    lease_matches =
+      if entry.verb in [:vfs_commit, :vfs_rollback] do
+        key = {doc_browser_edit_id(entry.payload), entry.from}
+
+        case Map.get(socket.assigns.doc_browser_vfs_leases, key) do
+          nil -> []
+          lease -> [{key, lease}]
+        end
+      else
+        []
+      end
+
+    cancel_doc_browser_entries(socket, [{request_id, entry}], lease_matches, opts)
+  end
+
+  defp cancel_all_doc_browser_pending(socket) do
+    cancel_doc_browser_entries(
+      socket,
+      Map.to_list(socket.assigns.doc_browser_pending),
+      Map.to_list(socket.assigns.doc_browser_vfs_leases),
+      reason: :document_changed,
+      reply?: true
+    )
+  end
+
+  defp cancel_doc_browser_owner(socket, from, opts) do
+    pending =
+      Enum.filter(socket.assigns.doc_browser_pending, fn {_id, entry} ->
+        entry_owner?(entry, from)
+      end)
+
+    leases =
+      Enum.filter(socket.assigns.doc_browser_vfs_leases, fn {_id, entry} ->
+        entry_owner?(entry, from)
+      end)
+
+    cancel_doc_browser_entries(socket, pending, leases, opts)
+  end
+
+  defp cancel_doc_browser_identity(socket, identity, opts) do
+    pending =
+      Enum.filter(socket.assigns.doc_browser_pending, fn {_id, entry} ->
+        entry_identity?(entry, identity)
+      end)
+
+    leases =
+      Enum.filter(socket.assigns.doc_browser_vfs_leases, fn {_id, entry} ->
+        entry_identity?(entry, identity)
+      end)
+
+    cancel_doc_browser_entries(socket, pending, leases, opts)
+  end
+
+  defp cancel_doc_browser_entries(socket, pending, leases, opts) do
+    reason = Keyword.get(opts, :reason, :cancelled)
+
+    if Keyword.get(opts, :reply?, false) do
+      Enum.each(pending, fn
+        {_request_id, %{from: from, ref: ref}} ->
+          send(from, {:doc_browser_reply, ref, {:error, reason}})
+
+        {_request_id, {from, ref, _verb}} ->
+          send(from, {:doc_browser_reply, ref, {:error, reason}})
+
+        _legacy ->
+          :ok
+      end)
+    end
+
+    Enum.each(pending ++ leases, fn {_key, entry} ->
+      release_doc_browser_entry_resources(entry)
+    end)
+
+    pending_keys = Enum.map(pending, &elem(&1, 0))
+    lease_keys = Enum.map(leases, &elem(&1, 0))
+
+    socket
+    |> assign(:doc_browser_pending, Map.drop(socket.assigns.doc_browser_pending, pending_keys))
+    |> assign(
+      :doc_browser_vfs_leases,
+      Map.drop(socket.assigns.doc_browser_vfs_leases, lease_keys)
+    )
+    |> push_doc_browser_rollbacks(Enum.map(pending ++ leases, &elem(&1, 1)))
+  end
+
+  defp release_doc_browser_entry_resources(entry) when is_map(entry) do
+    case entry[:monitor_ref] do
+      monitor_ref when is_reference(monitor_ref) -> Process.demonitor(monitor_ref, [:flush])
+      _other -> false
+    end
+
+    case entry[:timer_ref] do
+      timer_ref when is_reference(timer_ref) -> Process.cancel_timer(timer_ref)
+      _other -> false
+    end
+
+    :ok
+  end
+
+  defp release_doc_browser_entry_resources(_entry), do: false
+
+  defp doc_browser_owner_monitor?(socket, monitor_ref, from) do
+    Enum.any?(
+      Map.values(socket.assigns.doc_browser_pending) ++
+        Map.values(socket.assigns.doc_browser_vfs_leases),
+      fn
+        %{monitor_ref: ^monitor_ref, from: ^from} -> true
+        _entry -> false
+      end
+    )
+  end
+
+  defp entry_owner?(%{from: from}, from), do: true
+  defp entry_owner?(_entry, _from), do: false
+
+  defp entry_identity?(%{identity: identity}, identity) when is_map(identity), do: true
+  defp entry_identity?(_entry, _identity), do: false
+
+  defp push_doc_browser_rollbacks(socket, entries) do
+    entries
+    |> Enum.flat_map(fn
+      entry when is_map(entry) ->
+        edit_id = doc_browser_edit_id(entry[:payload])
+
+        # vfs_finalize is intentionally absent: the bridge completion ACK is
+        # already the commit point, so teardown may abandon/reload cleanup but
+        # must not roll the browser model back to the pre-commit snapshot.
+        if entry[:verb] in [:vfs_write, :vfs_commit, :vfs_rollback] and is_binary(edit_id) and
+             edit_id != "" do
+          [{{entry[:document_id], edit_id}, entry}]
+        else
+          []
+        end
+
+      _legacy_entry ->
+        []
+    end)
+    |> Map.new()
+    |> Enum.reduce(socket, fn {{document_id, edit_id}, _entry}, socket ->
+      push_event(socket, "document.engine.operation.command", %{
+        request_id: "dbr-cancel:#{System.unique_integer([:positive, :monotonic])}",
+        document_id: document_id,
+        verb: "vfs_rollback",
+        payload: %{edit_id: edit_id, document_id: document_id}
+      })
+    end)
+  end
+
+  defp doc_browser_edit_id(payload) when is_map(payload) do
+    payload[:edit_id] || payload["edit_id"] || payload[:editId] || payload["editId"]
+  end
+
+  defp doc_browser_edit_id(_payload), do: nil
+
+  defp doc_browser_identity(payload) when is_map(payload) do
+    identity = %{
+      agent_id: payload[:agent_id] || payload["agent_id"],
+      instance_id: payload[:instance_id] || payload["instance_id"],
+      turn_id: payload[:turn_id] || payload["turn_id"]
+    }
+
+    if Enum.all?(Map.values(identity), &(is_binary(&1) and &1 != "")), do: identity, else: nil
+  end
 
   # Augment the verb payload with the doc id. Values cross the wire as JSON, so
   # keyword lists (e.g. doc.read's `opts`) are coerced into plain maps the client
@@ -3674,13 +4968,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp doc_browser_result(_params), do: {:error, "browser_apply_failed"}
 
   # Attach this LiveView to the durable per-workspace `Ecrits.Workspace.Session`
-  # (keyed by canonical path) and START + SEED this LiveView pid's foreground
-  # agent. This is the
-  # ONLY LiveView for the workspace: it holds the provider/model/access +
-  # open-document seed, starts the agent, subscribes to it, and renders the chat
-  # inline. Re-attaching in the same LiveView pid reuses the same agent; a browser
-  # refresh mounts a new pid and starts a fresh active rail. The static
-  # (disconnected) render spawns nothing.
+  # and bind the foreground agent selected by this browser tab. Simultaneous
+  # LiveViews with the same stable tab id share that selection; a refresh reuses
+  # it. The static (disconnected) render spawns nothing.
   defp attach_workspace_session(%{assigns: %{workspace_error: error}} = socket)
        when is_binary(error),
        do: socket
@@ -3692,6 +4982,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       not connected?(socket) ->
         socket
 
+      not is_binary(socket.assigns.chat_rail_tab_id) ->
+        socket
+
       not (is_binary(path) and path != "") ->
         socket
 
@@ -3701,82 +4994,142 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   defp do_attach_workspace_session(socket, path) do
-    case safe_attach_workspace_session(path, local_agent_attach_settings(socket)) do
+    case safe_attach_workspace_session(path, agent_attach_settings(socket)) do
       {:ok, %{agent_id: agent_id} = ws} when is_binary(agent_id) ->
-        # Subscribe + snapshot ONCE per foreground agent. This LiveView is the
-        # ONLY LiveView for the workspace and renders the chat inline, so it both
-        # drives the document-side turn-end hook AND repaints the chat transcript.
-        # A same-agent re-attach must not double-subscribe (it would deliver every
-        # event twice) or re-snapshot (it would wipe the live transcript). Snapshot
-        # only on a FRESH bind (the
-        # initial mount or selecting an older recent rail), which repaints that
-        # rail's transcript + title + status + pending count.
-        if socket.assigns.local_agent_session_id != agent_id do
-          :ok = WorkspaceSession.subscribe(ws)
+        bind_workspace_foreground(socket, ws, agent_id)
 
-          socket
-          |> assign(:workspace_session, ws)
-          |> maybe_restore_session_documents(ws)
-          |> snapshot_local_agent(ws, agent_id)
-        else
-          socket
-          |> assign(:workspace_session, ws)
-          |> assign(:local_agent_session_id, agent_id)
-          |> assign(:local_agent_rail_key, Map.get(ws, :rail_key))
-          |> maybe_restore_session_documents(ws)
-          |> refresh_local_agent_rails()
-          |> apply_vfs_write_policy()
-        end
-
-      {:error, _reason, _ws} ->
+      {:pending, _ws} ->
         socket
 
-      {:error, _reason} ->
+      {:error, reason, _ws} ->
+        Logger.warning("workspace agent attach failed: #{inspect(reason)}")
+        socket
+
+      {:error, reason} ->
+        Logger.warning("workspace agent attach failed: #{inspect(reason)}")
         socket
     end
   end
 
+  # A same-agent rebind refreshes durable metadata without replaying over a live
+  # stream. A provider restart keeps the same durable id but replaces the agent
+  # process, so that path must repaint every sibling from the new empty snapshot.
+  # A changed selection swaps PubSub topics and repaints as usual. Every
+  # successful path clears any stale rail-selection error.
+  defp bind_workspace_foreground(socket, ws, agent_id) do
+    agent_pid = ACP.whereis(agent_id)
+
+    cond do
+      socket.assigns.agent_session_id != agent_id ->
+        socket
+        |> bind_agent_subscription(agent_id)
+        |> assign(:workspace_session, ws)
+        |> maybe_restore_session_documents(ws)
+        |> snapshot_agent(ws, agent_id)
+
+      agent_process_changed?(socket, agent_pid) ->
+        socket
+        |> assign(:workspace_session, ws)
+        |> maybe_restore_session_documents(ws)
+        |> snapshot_agent(ws, agent_id)
+
+      true ->
+        socket
+        |> assign(:workspace_session, ws)
+        |> assign(:agent_session_id, agent_id)
+        |> assign(:agent_rail_key, Map.get(ws, :rail_key))
+        |> assign(:agent_error, nil)
+        |> maybe_restore_session_documents(ws)
+        |> refresh_agent_rails()
+        |> apply_vfs_write_policy()
+    end
+  end
+
+  defp agent_process_changed?(socket, agent_pid) when is_pid(agent_pid) do
+    Map.get(socket.assigns, :agent_process_pid) != agent_pid
+  end
+
+  defp agent_process_changed?(_socket, _agent_pid), do: false
+
+  defp same_workspace_path?(left, right) when is_binary(left) and is_binary(right) do
+    Path.expand(left) == Path.expand(right)
+  end
+
+  defp same_workspace_path?(_left, _right), do: false
+
   # Bind + repaint the inline chat from the foreground agent's display-only
   # snapshot (initial bind / selecting a recent rail). codex `thread/resume`
-  # restores MEMORY but does NOT re-stream past messages, so without this the
-  # does not re-stream past messages, so repaint the prior bubbles from the transcript.
-  defp snapshot_local_agent(socket, ws, agent_id) do
+  # restores memory but does not re-stream past messages, so repaint the prior
+  # bubbles from the durable transcript.
+  defp snapshot_agent(socket, ws, agent_id) do
     snapshot = WorkspaceSession.snapshot(ws)
     stored_opts = Map.get(snapshot, :adapter_opts, [])
 
     socket
-    |> cancel_local_agent_text_flush()
+    |> cancel_agent_text_flush()
+    |> cancel_agent_reasoning_flush()
     |> assign(:workspace_session, ws)
-    |> assign(:local_agent_session_id, agent_id)
-    |> assign(:local_agent_rail_key, Map.get(ws, :rail_key))
-    |> assign(:local_agent_error, nil)
-    |> assign(:local_agent_status, snapshot.status)
-    |> assign(:local_agent_turn_id, snapshot_current_turn_id(snapshot))
-    |> assign(:local_agent_text, "")
-    |> assign(:local_agent_text_segment, 0)
-    |> assign(:local_agent_editor_preview, nil)
-    |> assign(:local_agent_vfs_preview_item, nil)
-    |> assign(:local_agent_reasoning_text, "")
-    |> assign(:local_agent_reasoning_open?, false)
-    |> assign(:local_agent_active_tools, %{})
+    |> assign(:agent_session_id, agent_id)
+    |> assign(:agent_process_pid, ACP.whereis(agent_id))
+    |> assign(:agent_instance_id, Map.get(snapshot, :instance_id))
+    |> assign(:agent_event_seq, Map.get(snapshot, :event_seq, 0))
+    |> assign(:agent_rail_key, Map.get(ws, :rail_key))
+    |> assign(:agent_error, nil)
+    |> assign(:agent_status, snapshot.status)
+    |> assign(:agent_turn_id, snapshot_current_turn_id(snapshot))
+    |> assign(:agent_text, "")
+    |> assign(:agent_text_segment, 0)
+    |> assign(:agent_editor_preview, nil)
+    |> assign(:agent_vfs_preview_item, nil)
+    |> assign(:agent_vfs_preview_rollback_item, nil)
+    |> assign(:agent_reasoning_text, "")
+    |> assign(:agent_reasoning_segment, 0)
+    |> assign(:agent_reasoning_open?, false)
+    |> assign(:agent_active_tools, %{})
+    |> assign(:agent_active_file_operations, %{})
     # Restore the pending-queue count from the selected rail (Phase 5). A snapshot from a
     # pre-Phase-5 agent has no `:pending` key → default 0.
-    |> assign(:local_agent_pending, Map.get(snapshot, :pending, 0))
-    |> assign(:local_agent_queue, queued_items_from_snapshot(Map.get(snapshot, :queued, [])))
-    |> assign(:local_agent_queue_index, 0)
+    |> assign(:agent_pending, Map.get(snapshot, :pending, 0))
+    |> assign(:agent_queue, queued_items_from_snapshot(Map.get(snapshot, :queued, [])))
+    |> assign(:agent_queue_index, 0)
     |> restore_agent_title(snapshot.title, Map.get(snapshot, :title_user_edited?, false))
+    |> hydrate_agent_display_from_snapshot(snapshot)
     # Hydrate reasoning/access from the selected rail's stored adapter_opts — not
     # route params (which are deliberately ignored for these settings).
     |> hydrate_agent_options_from_session(stored_opts)
     |> apply_vfs_write_policy()
-    |> stream(:local_agent_items, [], reset: true)
-    |> replay_local_agent_transcript(snapshot.transcript)
-    |> refresh_local_agent_rails()
+    |> stream(:agent_items, [], reset: true)
+    |> replay_agent_transcript(snapshot.transcript)
+    |> replay_agent_current(Map.get(snapshot, :current_turn))
+    |> refresh_agent_rails()
   end
 
   defp snapshot_current_turn_id(%{current_turn: %{id: id}}) when is_binary(id), do: id
   defp snapshot_current_turn_id(%{current_turn: %{"id" => id}}) when is_binary(id), do: id
   defp snapshot_current_turn_id(_snapshot), do: nil
+
+  defp hydrate_agent_display_from_snapshot(socket, snapshot) when is_map(snapshot) do
+    stored_opts = Map.get(snapshot, :adapter_opts, [])
+    provider_id = Map.get(snapshot, :provider)
+
+    model_id =
+      Map.get(snapshot, :model) || Keyword.get(stored_opts, :model) ||
+        default_agent_model_id(provider_id)
+
+    with provider_id when is_binary(provider_id) <-
+           AgentConfig.allowed_provider(provider_id, allowed_provider_ids()),
+         model_id when is_binary(model_id) <- model_id,
+         %{provider: ^provider_id} <- agent_model(model_id) do
+      put_agent(socket,
+        provider: agent_provider_display(provider_id),
+        provider_warning: nil,
+        model: model_id,
+        integrations: agent_integrations()
+      )
+    else
+      _ -> socket
+    end
+  end
 
   # Settings the durable session OWNS and we hydrate back into the assigns on
   # attach. Each is resolved optimistically as `session_value || default` — read
@@ -3785,12 +5138,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # branching). access_control is the stored id; a legacy/initial session that
   # only has `permission_mode` is mapped back through it before the default.
   defp hydrate_agent_options_from_session(socket, opts) when is_list(opts) do
-    provider_key = socket.assigns.local_agent.provider.key
+    provider_key = socket.assigns.agent.provider.key
 
     reasoning =
       AgentConfig.reasoning_effort(
         opts[:reasoning_effort] || default_reasoning_effort(),
-        local_agent_reasoning_efforts(provider_key)
+        agent_reasoning_efforts(provider_key)
       )
 
     access =
@@ -3798,8 +5151,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         default_access_control()
 
     socket
-    |> put_local_agent(reasoning_effort: reasoning)
-    |> put_local_agent_access(access)
+    |> put_agent(reasoning_effort: reasoning)
+    |> put_agent_access(access)
   end
 
   defp hydrate_agent_options_from_session(socket, _), do: socket
@@ -3814,16 +5167,19 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # agent and START a fresh one (new adapter + the now-updated provider/model/
   # access settings), then re-bind the LiveView to a genuinely-new, EMPTY session:
   #   * the path-keyed agent id is unchanged, so the LiveView's existing PubSub
-  #     subscription to `local_agent:<id>` still routes the NEW agent's events —
+  #     subscription to `agent:<id>` still routes the NEW agent's events —
   #     we must NOT re-subscribe (that would double-deliver every event); and
   #   * the transcript is CLEARED, title reset to "New Chat", queue/pending/turn/
   #     error cleared — no chat-log replay across providers.
-  defp restart_local_agent_for_provider(socket) do
+  defp restart_agent_for_provider(socket) do
     path = socket.assigns.workspace_path
 
-    case safe_restart_foreground(path, local_agent_attach_settings(socket)) do
+    case safe_restart_foreground(path, agent_attach_settings(socket)) do
       {:ok, %{agent_id: agent_id} = ws} when is_binary(agent_id) ->
-        bind_fresh_local_agent_session(socket, ws, agent_id)
+        bind_fresh_agent_session(socket, ws, agent_id)
+
+      {:pending, _ws} ->
+        socket
 
       _ ->
         # Restart failed (provider CLI missing / infra down). Leave the existing
@@ -3866,11 +5222,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp safe_select_foreground(_path, _rail_key, _settings), do: {:error, :not_found}
 
-  defp refresh_local_agent_rails(%{assigns: %{workspace_session: %{} = ws}} = socket) do
-    assign(socket, :local_agent_rails, safe_recent_foregrounds(ws))
+  defp refresh_agent_rails(%{assigns: %{workspace_session: %{} = ws}} = socket) do
+    assign(socket, :agent_rails, safe_recent_foregrounds(ws))
   end
 
-  defp refresh_local_agent_rails(socket), do: assign(socket, :local_agent_rails, [])
+  defp refresh_agent_rails(socket), do: assign(socket, :agent_rails, [])
 
   defp safe_recent_foregrounds(ws) do
     WorkspaceSession.recent_foregrounds(ws)
@@ -3880,31 +5236,41 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     :exit, _ -> []
   end
 
-  defp bind_fresh_local_agent_session(socket, ws, agent_id) do
+  defp bind_fresh_agent_session(socket, ws, agent_id) do
+    snapshot = ACP.agent_snapshot(agent_id)
+    instance_id = Map.get(snapshot, :instance_id)
+
     socket
-    |> cancel_local_agent_text_flush()
+    |> cancel_agent_text_flush()
+    |> cancel_agent_reasoning_flush()
     |> assign(:workspace_session, ws)
-    |> assign(:local_agent_session_id, agent_id)
-    |> assign(:local_agent_rail_key, Map.get(ws, :rail_key))
-    |> assign(:local_agent_error, nil)
-    |> assign(:local_agent_status, :idle)
-    |> assign(:local_agent_pending, 0)
-    |> assign(:local_agent_queue, [])
-    |> assign(:local_agent_queue_index, 0)
-    |> assign(:local_agent_turn_id, nil)
-    |> assign(:local_agent_text, "")
-    |> assign(:local_agent_text_segment, 0)
-    |> assign(:local_agent_editor_preview, nil)
-    |> assign(:local_agent_vfs_preview_item, nil)
-    |> assign(:local_agent_reasoning_text, "")
-    |> assign(:local_agent_reasoning_open?, false)
-    |> assign(:local_agent_active_tools, %{})
-    |> assign(:local_agent_title_user_edited?, false)
-    |> assign_local_agent_title(default_local_agent_title())
-    |> assign(:local_agent_form, local_agent_form())
-    |> stream(:local_agent_items, [], reset: true)
-    |> refresh_local_agent_rails()
-    |> push_event("agent.title.reset", %{title: default_local_agent_title()})
+    |> assign(:agent_session_id, agent_id)
+    |> assign(:agent_process_pid, ACP.whereis(agent_id))
+    |> assign(:agent_instance_id, instance_id)
+    |> assign(:agent_event_seq, Map.get(snapshot, :event_seq, 0))
+    |> assign(:agent_rail_key, Map.get(ws, :rail_key))
+    |> assign(:agent_error, nil)
+    |> assign(:agent_status, :idle)
+    |> assign(:agent_pending, 0)
+    |> assign(:agent_queue, [])
+    |> assign(:agent_queue_index, 0)
+    |> assign(:agent_turn_id, nil)
+    |> assign(:agent_text, "")
+    |> assign(:agent_text_segment, 0)
+    |> assign(:agent_editor_preview, nil)
+    |> assign(:agent_vfs_preview_item, nil)
+    |> assign(:agent_vfs_preview_rollback_item, nil)
+    |> assign(:agent_reasoning_text, "")
+    |> assign(:agent_reasoning_segment, 0)
+    |> assign(:agent_reasoning_open?, false)
+    |> assign(:agent_active_tools, %{})
+    |> assign(:agent_active_file_operations, %{})
+    |> assign(:agent_title_user_edited?, false)
+    |> assign_agent_title(default_agent_title())
+    |> assign(:agent_form, agent_form())
+    |> stream(:agent_items, [], reset: true)
+    |> refresh_agent_rails()
+    |> push_event("agent.title.reset", %{title: default_agent_title()})
   end
 
   # Tolerate the workspace-Session supervision infra not being up yet (e.g. the
@@ -3919,30 +5285,34 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   # Settings used to SEED the foreground agent on first attach. Same-pid attaches
-  # re-use the active rail and apply live settings. Mirrors local_agent_session_opts
+  # re-use the active rail and apply live settings. Mirrors agent_session_opts
   # minus the explicit `:id` (the Session derives the id from path + rail key).
-  defp local_agent_attach_settings(socket) do
+  defp agent_attach_settings(socket) do
     socket
-    |> local_agent_session_opts()
-    |> Keyword.put(:live_session_id, socket.assigns.local_live_session_id)
+    |> agent_session_opts()
+    |> Keyword.put(:live_session_id, socket.assigns.live_session_id)
+    |> Keyword.put(
+      :chat_rail_id,
+      Map.get(socket.assigns, :chat_rail_tab_id, socket.assigns.live_session_id)
+    )
     |> Keyword.delete(:id)
   end
 
-  defp local_live_session_id(session) when is_map(session) do
-    case session["local_live_session_id"] || session[:local_live_session_id] do
+  defp live_session_id(session) when is_map(session) do
+    case session["live_session_id"] || session[:live_session_id] do
       id when is_binary(id) and id != "" -> id
       _ -> Ecto.UUID.generate()
     end
   end
 
-  defp local_live_session_id(_session), do: Ecto.UUID.generate()
+  defp live_session_id(_session), do: Ecto.UUID.generate()
 
   # Apply per-turn option changes (access/reasoning/model/provider) to the LIVE
   # foreground agent without recreating it, preserving the conversation. No agent
   # bound yet -> nothing to do (the first attach seeds these from the assigns).
-  defp maybe_apply_live_local_agent_options(socket, false), do: socket
+  defp maybe_apply_live_agent_options(socket, false), do: socket
 
-  defp maybe_apply_live_local_agent_options(
+  defp maybe_apply_live_agent_options(
          %{assigns: %{workspace_session: %{} = ws}} = socket,
          true
        ) do
@@ -3951,93 +5321,49 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     _ =
       WorkspaceSession.update_options(
         ws,
-        local_agent_adapter_opts(socket, workspace_path)
+        agent_adapter_opts(socket, workspace_path)
       )
 
     socket
   end
 
-  defp maybe_apply_live_local_agent_options(socket, _changed?), do: socket
+  defp maybe_apply_live_agent_options(socket, _changed?), do: socket
 
-  # Turn-completion auto-save safety net. The agent may stall/stop BEFORE its
-  # final `doc.save` (observed with codex/gpt-5.5 on "make a worksheet …"),
-  # leaving in-memory edits that never reach disk — so the file the user opens
-  # stays the unedited template. On turn end we persist any server-backed pooled
-  # doc that is *dirty* and carries a real
-  # save-target path (the created/cloned/headless worksheet case). It is
-  # idempotent: a turn that already `doc.save`d leaves nothing dirty -> no-op.
-  # `Pool.dirty_docs/1` already excludes browser-backed (viewed) docs, so a doc
-  # the agent did not edit through the server Editor is never auto-overwritten.
-  defp persist_pending_agent_docs(socket) do
-    case safe_dirty_docs() do
-      [] ->
+  defp finalize_agent_turn(
+         %{assigns: %{workspace_session: %{} = ws}} = socket,
+         instance_id,
+         turn_id
+       ) do
+    case WorkspaceSession.finalize_turn(ws, turn_id, instance_id: instance_id) do
+      {:ok, status} when status in [:started, :queued, :running] ->
         socket
 
-      docs ->
-        saved =
-          Enum.reduce(docs, [], fn doc, acc ->
-            case auto_save_doc(doc) do
-              :ok -> [doc.path | acc]
-              :error -> acc
-            end
-          end)
+      {:ok, {:completed, _summary}} ->
+        # A late subscriber may receive the terminal after the one completion
+        # broadcast. The work is already durable; it only needs a fresh tree.
+        refresh_tree(socket)
 
-        case saved do
-          [] -> socket
-          paths -> after_auto_save(socket, Enum.reverse(paths))
-        end
+      {:error, reason} ->
+        Logger.warning("turn finalizer: could not claim #{turn_id}: #{inspect(reason)}")
+        socket
     end
   end
 
-  defp flush_staged_vfs_docs(socket) do
-    path = socket.assigns[:workspace_path]
-    if is_binary(path), do: _ = Ecrits.Fuse.DocFs.flush_staged(path)
+  defp finalize_agent_turn(socket, _instance_id, _turn_id), do: socket
+
+  defp surface_turn_finalization(socket, %{saved: paths}) when is_list(paths) do
+    if paths == [], do: socket, else: after_auto_save(socket, paths)
+  end
+
+  defp surface_turn_finalization(socket, {:error, reason}) do
+    Logger.warning("turn finalizer: terminal work failed: #{inspect(reason)}")
     socket
   end
 
-  defp safe_dirty_docs do
-    DocPool.dirty_docs()
-  rescue
-    error ->
-      Logger.warning("auto-save: dirty_docs enumeration failed: #{inspect(error)}")
-      []
-  catch
-    :exit, reason ->
-      Logger.warning("auto-save: dirty_docs enumeration exited: #{inspect(reason)}")
-      []
-  end
+  defp surface_turn_finalization(socket, _result), do: socket
 
-  defp auto_save_doc(%{editor: editor, kind: kind, path: path}) do
-    case DocEditor.save(editor, format: auto_save_format(kind), path: path) do
-      :ok ->
-        Logger.info("auto-save: persisted dirty doc to #{path} on turn end")
-        :ok
-
-      {:ok, _} ->
-        Logger.info("auto-save: persisted dirty doc to #{path} on turn end")
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("auto-save: failed to persist #{path}: #{inspect(reason)}")
-        :error
-    end
-  rescue
-    error ->
-      Logger.warning("auto-save: exception persisting doc: #{inspect(error)}")
-      :error
-  catch
-    :exit, reason ->
-      Logger.warning("auto-save: editor exited while persisting: #{inspect(reason)}")
-      :error
-  end
-
-  defp auto_save_format(:hwpx), do: :hwpx
-  defp auto_save_format(_kind), do: :hwp
-
-  # NOTE: the tree refresh that used to live here moved to the `:turn_completed`
-  # handler, which now ALWAYS re-lists after persist_pending_agent_docs/1 (so a
-  # turn that created+saved its own file — leaving nothing dirty here — still
-  # refreshes). This callback just surfaces the auto-save flash.
+  # The Session's single finalizer broadcasts the result to every LiveView. The
+  # bound rail surfaces the save notice while all workspace views refresh once.
   defp after_auto_save(socket, paths) do
     put_flash(
       socket,
@@ -4046,37 +5372,54 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     )
   end
 
-  defp handle_local_document_upload(:local_document_import, entry, socket) do
+  # Resolve a hook-supplied `octet_id` stash reference into the binary it names
+  # before the params reach persistence or an agent reply. Agent-routed op
+  # replies nest the saved fields under "result".
+  defp claim_octet(socket, %{"octet_id" => id} = params) when is_binary(id) do
+    {bytes, stash} = Map.pop(socket.assigns.octet_stash, id)
+    socket = assign(socket, :octet_stash, stash)
+    params = Map.delete(params, "octet_id")
+    {socket, if(is_binary(bytes), do: Map.put(params, "bytes", bytes), else: params)}
+  end
+
+  defp claim_octet(socket, %{"result" => %{"octet_id" => _} = result} = params) do
+    {socket, result} = claim_octet(socket, result)
+    {socket, Map.put(params, "result", result)}
+  end
+
+  defp claim_octet(socket, params), do: {socket, params}
+
+  defp handle_document_import_upload(:document_import, entry, socket) do
     if entry.done? do
       socket
-      |> import_local_document_entry(entry)
+      |> import_document_entry(entry)
       |> case do
         {:ok, socket} ->
           {:noreply, socket}
 
         {:error, reason} ->
-          {:noreply, assign(socket, :local_document_error, error_message(reason))}
+          {:noreply, assign(socket, :document_error, error_message(reason))}
       end
     else
       {:noreply, socket}
     end
   end
 
-  defp import_local_document_entry(%{assigns: %{workspace: nil}}, _entry),
+  defp import_document_entry(%{assigns: %{workspace: nil}}, _entry),
     do: {:error, :workspace_not_mounted}
 
-  defp import_local_document_entry(socket, entry) do
+  defp import_document_entry(socket, entry) do
     root = workspace_root_path(socket.assigns.workspace)
 
     case consume_uploaded_entry(socket, entry, fn %{path: path} ->
-           {:ok, import_local_document_file(root, path, entry.client_name)}
+           {:ok, import_document_file(root, path, entry.client_name)}
          end) do
       {:ok, relative_path} ->
         socket =
           socket
-          |> assign(:local_document_error, nil)
+          |> assign(:document_error, nil)
           |> refresh_tree()
-          |> schedule_local_document_open(relative_path)
+          |> schedule_document_open(relative_path)
 
         {:ok, socket}
 
@@ -4085,8 +5428,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp import_local_document_file(root, source_path, client_name) do
-    with {:ok, relative_path} <- unique_local_import_path(root, client_name),
+  defp import_document_file(root, source_path, client_name) do
+    with {:ok, relative_path} <- unique_import_path(root, client_name),
          {:ok, bytes} <- File.read(source_path),
          {:ok, _format} <- Document.detect_format(relative_path, bytes),
          :ok <- Workspace.write_file(root, relative_path, bytes) do
@@ -4094,14 +5437,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp unique_local_import_path(root, client_name) do
-    with {:ok, base_name} <- local_import_base_name(client_name),
+  defp unique_import_path(root, client_name) do
+    with {:ok, base_name} <- import_base_name(client_name),
          {:ok, _format} <- Document.detect_format(base_name) do
       0..999
       |> Enum.reduce_while(nil, fn index, _acc ->
-        candidate = local_import_candidate(base_name, index)
+        candidate = import_candidate(base_name, index)
 
-        case local_import_path_exists?(root, candidate) do
+        case import_path_exists?(root, candidate) do
           {:ok, false} -> {:halt, {:ok, candidate}}
           {:ok, true} -> {:cont, nil}
           {:error, reason} -> {:halt, {:error, reason}}
@@ -4114,7 +5457,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp local_import_base_name(client_name) when is_binary(client_name) do
+  defp import_base_name(client_name) when is_binary(client_name) do
     client_name
     |> Path.basename()
     |> String.trim()
@@ -4124,56 +5467,56 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp local_import_base_name(_client_name), do: {:error, :invalid_path}
+  defp import_base_name(_client_name), do: {:error, :invalid_path}
 
-  defp local_import_candidate(base_name, 0), do: base_name
+  defp import_candidate(base_name, 0), do: base_name
 
-  defp local_import_candidate(base_name, index) do
+  defp import_candidate(base_name, index) do
     extension = Path.extname(base_name)
     stem = Path.rootname(base_name)
 
     "#{stem}-#{index + 1}#{extension}"
   end
 
-  defp local_import_path_exists?(root, relative_path) do
+  defp import_path_exists?(root, relative_path) do
     with {:ok, path} <- WorkspacePath.join(root, relative_path) do
       {:ok, File.exists?(path)}
     end
   end
 
-  defp assign_local_document_upload_errors(socket) do
-    case local_document_upload_errors(socket) do
+  defp assign_document_upload_errors(socket) do
+    case document_upload_errors(socket) do
       [] -> socket
-      errors -> assign(socket, :local_document_error, local_document_upload_error(errors))
+      errors -> assign(socket, :document_error, document_upload_error(errors))
     end
   end
 
-  defp local_document_upload_errors(socket) do
-    upload = socket.assigns.uploads.local_document_import
+  defp document_upload_errors(socket) do
+    upload = socket.assigns.uploads.document_import
 
     Phoenix.Component.upload_errors(upload) ++
       Enum.flat_map(upload.entries, &Phoenix.Component.upload_errors(upload, &1))
   end
 
-  defp local_document_upload_error([:not_accepted | _errors]), do: "Select a supported document."
-  defp local_document_upload_error([:too_large | _errors]), do: "Selected file is too large."
-  defp local_document_upload_error([:too_many_files | _errors]), do: "Select one file at a time."
-  defp local_document_upload_error([_error | _errors]), do: "Local document import failed."
+  defp document_upload_error([:not_accepted | _errors]), do: "Select a supported document."
+  defp document_upload_error([:too_large | _errors]), do: "Selected file is too large."
+  defp document_upload_error([:too_many_files | _errors]), do: "Select one file at a time."
+  defp document_upload_error([_error | _errors]), do: "Local document import failed."
 
-  defp local_agent_session_opts(socket) do
+  defp agent_session_opts(socket) do
     workspace = socket.assigns.workspace || %{}
     workspace_path = workspace_root_path(workspace)
-    local_agent_ui = Application.get_env(:ecrits, :local_agent_ui, [])
+    agent_ui = Application.get_env(:ecrits, :agent_ui, [])
 
     adapter_opts =
-      local_agent_ui
+      agent_ui
       |> Keyword.get(:adapter_opts, [])
-      |> Keyword.merge(local_agent_adapter_opts(socket, workspace_path))
+      |> Keyword.merge(agent_adapter_opts(socket, workspace_path))
 
-    local_agent_ui
-    |> Keyword.put(:provider, socket.assigns.local_agent.provider.key)
-    |> Keyword.put(:approval_policy, socket.assigns.local_agent.access.approval_policy)
-    |> Keyword.put(:access_control, socket.assigns.local_agent.access.id)
+    agent_ui
+    |> Keyword.put(:provider, socket.assigns.agent.provider.key)
+    |> Keyword.put(:approval_policy, socket.assigns.agent.access.approval_policy)
+    |> Keyword.put(:access_control, socket.assigns.agent.access.id)
     |> Keyword.put(:adapter_opts, adapter_opts)
     |> Keyword.put(:workspace_root, workspace_path)
     |> Keyword.put(:document_path, socket.assigns.active_document_path)
@@ -4184,8 +5527,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     # canonical workspace path and this LiveView's active rail key.
   end
 
-  defp local_agent_adapter_opts(socket, workspace_path) do
-    socket.assigns.local_agent
+  defp agent_adapter_opts(socket, workspace_path) do
+    socket.assigns.agent
     |> AgentConfig.adapter_opts(workspace_path)
     |> Keyword.put(
       :doc_vfs_mounted,
@@ -4322,8 +5665,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp fs_relevant_path?(_path), do: false
-
   # Matches `Ecrits.FS.tmp_path/1`: ".<basename>.tmp-<monotonic-int>".
   defp atomic_write_temp?(base) do
     String.starts_with?(base, ".") and base =~ ~r/\.tmp-\d+$/
@@ -4374,7 +5715,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
           kept == [] ->
             socket
-            |> tear_down_active_local_document()
+            |> tear_down_active_document()
             |> assign(:active_document_id, nil)
             |> update(:file_tree, &FileTree.select(&1, nil))
 
@@ -4386,7 +5727,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
             neighbor =
               Enum.at(kept, min(dropped_index, length(kept) - 1)) || List.first(kept)
 
-            schedule_local_document_open(socket, neighbor.path)
+            schedule_document_open(socket, neighbor.path)
         end
     end
   end
@@ -4415,7 +5756,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp error_message({:invalid_path, message}) when is_binary(message), do: message
   defp error_message({:error, message}) when is_binary(message), do: message
-  defp error_message({:local_substrate_unavailable, message}) when is_binary(message), do: message
+  defp error_message({:substrate_unavailable, message}) when is_binary(message), do: message
   defp error_message({:write_failed, message}) when is_binary(message), do: message
   defp error_message({:render_failed, message}) when is_binary(message), do: message
   defp error_message({:office_replay_failed, message}) when is_binary(message), do: message
@@ -4437,32 +5778,32 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp error_message(message) when is_binary(message), do: message
   defp error_message(_reason), do: "Workspace could not be loaded."
 
-  defp persist_local_rhwp_snapshot(_action, %{"error" => error} = params, socket)
+  defp persist_rhwp_snapshot(_action, %{"error" => error} = params, socket)
        when is_binary(error) do
     request_id = params["request_id"] || params["requestId"]
     document_id = params["document_id"] || active_document_id(socket)
-    _ = ack_local_rhwp_snapshot_failed(request_id, document_id, error)
+    _ = ack_rhwp_snapshot_failed(request_id, document_id, error)
 
-    {:reply, %{error: error}, assign(socket, :local_document_error, error)}
+    {:reply, %{error: error}, assign(socket, :document_error, error)}
   end
 
-  defp persist_local_rhwp_snapshot(action, params, socket) when action in [:checkpoint, :save] do
+  defp persist_rhwp_snapshot(action, params, socket) when action in [:checkpoint, :save] do
     document_id = params["document_id"] || active_document_id(socket)
     request_id = params["request_id"] || params["requestId"]
 
     with :ok <- verify_snapshot_document(action, socket, document_id),
-         {:ok, response} <- local_rhwp_persist(action, document_id, params) do
-      _ = ack_local_rhwp_snapshot_committed(request_id, document_id, response)
+         {:ok, response} <- rhwp_persist(action, document_id, params) do
+      _ = ack_rhwp_snapshot_committed(request_id, document_id, response)
 
       socket =
         if document_id == active_document_id(socket) do
           socket
           |> assign(:active_document, document_summary(response))
-          |> assign(:local_document_status, action_status(action))
-          |> assign(:local_document_snapshot, response.snapshot)
-          |> assign(:local_document_error, nil)
+          |> assign(:document_status, action_status(action))
+          |> assign(:document_snapshot, response.snapshot)
+          |> assign(:document_error, nil)
           |> maybe_clear_dirty_on_save(action, document_id)
-          |> maybe_render_active_local_hwp_pages(document_id)
+          |> maybe_render_active_hwp_pages(document_id)
         else
           # Flush-before-detach checkpoint for a doc that is no longer the
           # active tab: persist it (that is the whole point — the edits must
@@ -4479,10 +5820,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
        }, socket}
     else
       {:error, reason} ->
-        _ = ack_local_rhwp_snapshot_failed(request_id, document_id, reason)
+        _ = ack_rhwp_snapshot_failed(request_id, document_id, reason)
         error = error_message(reason)
 
-        {:reply, %{error: error}, assign(socket, :local_document_error, error)}
+        {:reply, %{error: error}, assign(socket, :document_error, error)}
     end
   end
 
@@ -4499,31 +5840,31 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp verify_snapshot_document(_action, socket, document_id),
     do: verify_active_document(socket, document_id)
 
-  defp local_rhwp_persist(:checkpoint, document_id, params),
+  defp rhwp_persist(:checkpoint, document_id, params),
     do: RhwpAdapter.checkpoint(document_id, params)
 
-  defp local_rhwp_persist(:save, document_id, params),
+  defp rhwp_persist(:save, document_id, params),
     do: RhwpAdapter.save(document_id, params)
 
-  defp persist_local_viewer_save(%{"error" => error} = params, socket)
+  defp persist_viewer_save(%{"error" => error} = params, socket)
        when is_binary(error) do
     if replay_viewer_save?(params) do
-      do_persist_local_viewer_save(params, socket, &RhwpAdapter.save_replay/2)
+      do_persist_viewer_save(params, socket, &RhwpAdapter.save_replay/2)
     else
       error = error_message(error)
 
-      {:reply, %{error: error}, assign(socket, :local_document_error, error)}
+      {:reply, %{error: error}, assign(socket, :document_error, error)}
     end
   end
 
-  defp persist_local_viewer_save(params, socket) when is_map(params) do
+  defp persist_viewer_save(params, socket) when is_map(params) do
     persist =
       if replay_viewer_save?(params), do: &RhwpAdapter.save_replay/2, else: &RhwpAdapter.save/2
 
-    do_persist_local_viewer_save(params, socket, persist)
+    do_persist_viewer_save(params, socket, persist)
   end
 
-  defp do_persist_local_viewer_save(params, socket, persist) when is_function(persist, 2) do
+  defp do_persist_viewer_save(params, socket, persist) when is_function(persist, 2) do
     document_id = params["document_id"] || active_document_id(socket)
 
     with :ok <- verify_active_document(socket, document_id),
@@ -4531,9 +5872,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       socket =
         socket
         |> assign(:active_document, document_summary(response))
-        |> assign(:local_document_status, :saved)
-        |> assign(:local_document_snapshot, response.snapshot)
-        |> assign(:local_document_error, nil)
+        |> assign(:document_status, :saved)
+        |> assign(:document_snapshot, response.snapshot)
+        |> assign(:document_error, nil)
         |> mark_doc_clean(document_id)
 
       {:reply,
@@ -4546,7 +5887,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       {:error, reason} ->
         error = error_message(reason)
 
-        {:reply, %{error: error}, assign(socket, :local_document_error, error)}
+        {:reply, %{error: error}, assign(socket, :document_error, error)}
     end
   end
 
@@ -4620,7 +5961,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
       socket
       |> assign(:markdown_editor, state)
-      |> assign(:local_markdown_preview_html, EcritsWeb.Markdown.to_preview_html(state.source))
+      |> assign(:markdown_preview_html, EcritsWeb.Markdown.to_preview_html(state.source))
       |> mark_doc_dirty(active_document_id(socket))
     else
       case EditorToolbar.command(
@@ -4724,10 +6065,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp save_document(socket, id) do
     case socket.assigns[:active_document] do
       %{id: ^id, format: format} ->
-        if local_viewer_save_format?(format) do
+        if viewer_save_format?(format) do
           push_event(socket, "document.save.command", %{
             document_id: id,
-            request_id: "local-save:#{System.unique_integer([:positive])}"
+            request_id: "save:#{System.unique_integer([:positive])}"
           })
         else
           save_pool_document(socket, id)
@@ -4751,23 +6092,23 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     socket
   end
 
-  defp local_viewer_save_format?(format) when is_binary(format),
+  defp viewer_save_format?(format) when is_binary(format),
     do: Document.ehwp_format?(format) or Document.libreoffice_format?(format)
 
-  defp local_viewer_save_format?(_format), do: false
+  defp viewer_save_format?(_format), do: false
 
   defp action_status(:checkpoint), do: :checkpointed
   defp action_status(:save), do: :saved
 
-  defp apply_local_document_snapshot(socket, status, %Document{id: id} = document, snapshot) do
+  defp apply_document_snapshot(socket, status, %Document{id: id} = document, snapshot) do
     socket =
       if id == active_document_id(socket) do
         socket
         |> assign(:active_document, document_summary(document))
-        |> assign(:local_document_status, status)
-        |> assign(:local_document_snapshot, snapshot)
-        |> assign(:local_document_error, nil)
-        |> render_local_document_pages(document)
+        |> assign(:document_status, status)
+        |> assign(:document_snapshot, snapshot)
+        |> assign(:document_error, nil)
+        |> render_document_pages(document)
       else
         socket
       end
@@ -4795,7 +6136,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     }
   end
 
-  defp local_load_reply(response) do
+  defp load_reply(response) do
     response
     |> Map.delete(:bytes)
     |> Map.put(:bytes_base64, Base.encode64(response.bytes))
@@ -4808,47 +6149,47 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     }
   end
 
-  defp local_document_spec(%{format: "hwp"} = document) do
+  defp document_spec(%{format: "hwp"} = document) do
     %{
-      key: "local_hwp",
+      key: "hwp",
       name: Path.basename(document.relative_path),
       template_hwp_path: document.relative_path
     }
   end
 
-  defp local_document_spec(document) do
+  defp document_spec(document) do
     %{
-      key: "local_hwpx",
+      key: "hwpx",
       name: Path.basename(document.relative_path),
       template_hwpx_path: document.relative_path
     }
   end
 
-  defp local_rhwp_dom_id(%{id: id}), do: "local-rhwp-editor-#{dom_token(id)}"
+  defp rhwp_dom_id(%{id: id}), do: "rhwp-editor-#{dom_token(id)}"
 
-  defp render_local_document_pages(socket, %Document{format: format} = document) do
+  defp render_document_pages(socket, %Document{format: format} = document) do
     cond do
-      Document.ehwp_format?(format) -> render_local_hwp_pages(socket, document)
-      Document.markdown_format?(format) -> render_local_markdown(socket, document)
-      true -> render_local_office_wasm(socket, document)
+      Document.ehwp_format?(format) -> render_hwp_pages(socket, document)
+      Document.markdown_format?(format) -> render_markdown(socket, document)
+      true -> render_office_wasm(socket, document)
     end
   end
 
   # Markdown (.md/.markdown) is plain text — no engine, no stream, no LOK/WASM.
   # We load the canonical workspace bytes as UTF-8 source into the editable
   # textarea and render a live MDEx preview alongside it. Re-entrant on save
-  # (the `:local_document_saved` broadcast re-renders), so we only reseed the
+  # (the `:document_saved` broadcast re-renders), so we only reseed the
   # source when it actually differs from what's already in the editor — the
   # textarea is phx-update="ignore" anyway, so this just keeps the assign honest
   # and the preview in sync without clobbering the user's in-flight edits.
-  defp render_local_markdown(socket, %Document{} = document) do
+  defp render_markdown(socket, %Document{} = document) do
     socket =
       socket
-      |> unsubscribe_local_hwp_stream()
-      |> clear_local_hwp_pages()
-      |> assign(:local_hwp_stream_renderer, :markdown)
-      |> assign(:local_hwp_stream_document_id, document.id)
-      |> assign(:local_hwp_stream_loading?, false)
+      |> unsubscribe_hwp_stream()
+      |> clear_hwp_pages()
+      |> assign(:hwp_stream_renderer, :markdown)
+      |> assign(:hwp_stream_document_id, document.id)
+      |> assign(:hwp_stream_loading?, false)
 
     source =
       case Document.read(document.id) do
@@ -4860,25 +6201,25 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
     socket
     |> assign(:markdown_editor, state)
-    |> assign(:local_markdown_preview_html, EcritsWeb.Markdown.to_preview_html(state.source))
+    |> assign(:markdown_preview_html, EcritsWeb.Markdown.to_preview_html(state.source))
   end
 
   # HWP/HWPX now render entirely in the browser via rhwp_core WASM. The server
   # no longer rasterizes pages (the `ehwp` NIF is gone); it just tells the
   # `WasmHwpEditor` hook where to fetch the document's raw bytes, and the hook
   # does `new HwpDocument(bytes)` + renderPageToCanvas + hitTest locally.
-  defp render_local_hwp_pages(socket, %Document{} = document) do
+  defp render_hwp_pages(socket, %Document{} = document) do
     socket =
       socket
-      |> unsubscribe_local_hwp_stream()
-      |> clear_local_hwp_pages()
-      |> assign(:local_hwp_stream_renderer, :rhwp_wasm)
-      |> assign(:local_hwp_stream_document_id, document.id)
-      |> assign(:local_hwp_stream_loading?, false)
+      |> unsubscribe_hwp_stream()
+      |> clear_hwp_pages()
+      |> assign(:hwp_stream_renderer, :rhwp_wasm)
+      |> assign(:hwp_stream_document_id, document.id)
+      |> assign(:hwp_stream_loading?, false)
 
     if connected?(socket) do
       url =
-        local_document_bytes_url(socket.assigns.workspace_path, document.relative_path)
+        document_bytes_url(socket.assigns.workspace_path, document.relative_path)
 
       push_event(socket, "document.hwp.load_command", %{
         url: url,
@@ -4890,20 +6231,30 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   # Read-only raw-bytes URL the WasmHwpEditor hook fetches to feed rhwp_core.
-  defp local_document_bytes_url(workspace_path, relative_path)
+  defp document_bytes_url(workspace_path, relative_path)
        when is_binary(workspace_path) and is_binary(relative_path) do
-    "/local/document-bytes?" <>
+    "/document-bytes?" <>
       URI.encode_query(%{"path" => workspace_path, "document" => relative_path})
   end
 
-  defp local_document_bytes_url(_workspace_path, _relative_path), do: nil
+  defp document_bytes_url(_workspace_path, _relative_path), do: nil
 
-  defp local_document_bytes_url(workspace_path, relative_path, nil),
-    do: local_document_bytes_url(workspace_path, relative_path)
+  defp document_bytes_url(workspace_path, relative_path, nil),
+    do: document_bytes_url(workspace_path, relative_path)
 
-  defp local_document_bytes_url(workspace_path, relative_path, version) do
-    case local_document_bytes_url(workspace_path, relative_path) do
+  defp document_bytes_url(workspace_path, relative_path, version) do
+    case document_bytes_url(workspace_path, relative_path) do
       base when is_binary(base) -> base <> "&v=" <> URI.encode_www_form(to_string(version))
+      _ -> nil
+    end
+  end
+
+  defp preview_snapshot_bytes_url(workspace_path, relative_path, document, snapshot) do
+    with snapshot when is_map(snapshot) <- preview_snapshot_for_document(snapshot, document),
+         snapshot_id when is_binary(snapshot_id) <- item_field(snapshot, :id),
+         base when is_binary(base) <- document_bytes_url(workspace_path, relative_path) do
+      base <> "&snapshot=" <> URI.encode_www_form(snapshot_id)
+    else
       _ -> nil
     end
   end
@@ -4912,17 +6263,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # in-browser LibreOffice WASM editor (the `WasmOfficeEditor` hook): the server
   # only tells the hook where to fetch the raw bytes — all open/render happens
   # client-side. Mirrors the HWP `:rhwp_wasm` branch; no server stream/session.
-  defp render_local_office_wasm(socket, %Document{} = document) do
+  defp render_office_wasm(socket, %Document{} = document) do
     socket =
       socket
-      |> unsubscribe_local_hwp_stream()
-      |> clear_local_hwp_pages()
-      |> assign(:local_hwp_stream_renderer, :office_wasm)
-      |> assign(:local_hwp_stream_document_id, document.id)
-      |> assign(:local_hwp_stream_loading?, false)
+      |> unsubscribe_hwp_stream()
+      |> clear_hwp_pages()
+      |> assign(:hwp_stream_renderer, :office_wasm)
+      |> assign(:hwp_stream_document_id, document.id)
+      |> assign(:hwp_stream_loading?, false)
 
     if connected?(socket) do
-      url = local_document_bytes_url(socket.assigns.workspace_path, document.relative_path)
+      url = document_bytes_url(socket.assigns.workspace_path, document.relative_path)
 
       push_event(socket, "document.office.load_command", %{
         url: url,
@@ -4933,26 +6284,26 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp maybe_render_active_local_hwp_pages(socket, document_id) do
+  defp maybe_render_active_hwp_pages(socket, document_id) do
     case Document.document(document_id) do
-      {:ok, %Document{} = document} -> render_local_document_pages(socket, document)
+      {:ok, %Document{} = document} -> render_document_pages(socket, document)
       {:error, _reason} -> socket
     end
   end
 
-  defp clear_local_hwp_pages(socket) do
+  defp clear_hwp_pages(socket) do
     socket
-    |> assign(:local_hwp_page_count, 0)
-    |> assign(:local_hwp_stream_renderer, nil)
-    |> assign(:local_hwp_stream_document_id, nil)
-    |> assign(:local_hwp_stream_loading?, false)
-    |> stream(:local_hwp_pages, [], reset: true)
+    |> assign(:hwp_page_count, 0)
+    |> assign(:hwp_stream_renderer, nil)
+    |> assign(:hwp_stream_document_id, nil)
+    |> assign(:hwp_stream_loading?, false)
+    |> stream(:hwp_pages, [], reset: true)
   end
 
   # HWP/HWPX render entirely in the browser via rhwp_core WASM and office
   # documents via the LibreOffice WASM hook, so there is no server-side stream to
   # tear down. Kept as a no-op so callers (and `terminate/2`) stay uniform.
-  defp unsubscribe_local_hwp_stream(socket), do: socket
+  defp unsubscribe_hwp_stream(socket), do: socket
 
   defp markdown_document_active?(%{assigns: %{active_document: %{format: format}}})
        when is_binary(format),
@@ -4971,28 +6322,28 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp maybe_put_base_snapshot(payload, _base_snapshot), do: payload
 
-  defp register_local_rhwp_materializer_editor(document_id) when is_binary(document_id) do
+  defp register_rhwp_materializer_editor(document_id) when is_binary(document_id) do
     Ecrits.RhwpSnapshot.Materializer.register_editor(document_id)
   end
 
-  defp register_local_rhwp_materializer_editor(_document_id), do: :ok
+  defp register_rhwp_materializer_editor(_document_id), do: :ok
 
-  defp unregister_local_rhwp_materializer_editor(document_id) when is_binary(document_id) do
+  defp unregister_rhwp_materializer_editor(document_id) when is_binary(document_id) do
     Ecrits.RhwpSnapshot.Materializer.unregister_editor(document_id)
   end
 
-  defp unregister_local_rhwp_materializer_editor(_document_id), do: :ok
+  defp unregister_rhwp_materializer_editor(_document_id), do: :ok
 
-  defp update_local_rhwp_materializer_editor(previous_document_id, next_document_id)
+  defp update_rhwp_materializer_editor(previous_document_id, next_document_id)
        when previous_document_id == next_document_id,
        do: :ok
 
-  defp update_local_rhwp_materializer_editor(previous_document_id, next_document_id) do
-    _ = unregister_local_rhwp_materializer_editor(previous_document_id)
-    register_local_rhwp_materializer_editor(next_document_id)
+  defp update_rhwp_materializer_editor(previous_document_id, next_document_id) do
+    _ = unregister_rhwp_materializer_editor(previous_document_id)
+    register_rhwp_materializer_editor(next_document_id)
   end
 
-  defp ack_local_rhwp_snapshot_committed(request_id, document_id, response)
+  defp ack_rhwp_snapshot_committed(request_id, document_id, response)
        when is_binary(request_id) and request_id != "" do
     Ecrits.RhwpSnapshot.Materializer.ack(request_id, %{
       status: :committed,
@@ -5005,9 +6356,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     })
   end
 
-  defp ack_local_rhwp_snapshot_committed(_request_id, _document_id, _response), do: :ok
+  defp ack_rhwp_snapshot_committed(_request_id, _document_id, _response), do: :ok
 
-  defp ack_local_rhwp_snapshot_failed(request_id, document_id, reason)
+  defp ack_rhwp_snapshot_failed(request_id, document_id, reason)
        when is_binary(request_id) and request_id != "" do
     Ecrits.RhwpSnapshot.Materializer.ack(request_id, %{
       status: :failed,
@@ -5017,7 +6368,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     })
   end
 
-  defp ack_local_rhwp_snapshot_failed(_request_id, _document_id, _reason), do: :ok
+  defp ack_rhwp_snapshot_failed(_request_id, _document_id, _reason), do: :ok
 
   defp dom_token(value) do
     value
@@ -5030,7 +6381,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp local_save_state(document, snapshot, status) do
+  defp save_state(document, snapshot, status) do
     size = document.byte_size || 0
 
     case {status, snapshot} do
@@ -5056,17 +6407,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp format_byte_size(size) when is_integer(size), do: "#{size} B"
   defp format_byte_size(_size), do: "0 B"
 
-  defp local_agent_options_form do
+  defp agent_options_form do
     to_form(%{}, as: :agent_options)
   end
 
-  defp local_agent_provider_param(params) do
+  defp agent_provider_param(params) do
     params["provider"] ||
       params["value"] ||
       get_in(params, ["agent_model", "provider"])
   end
 
-  defp local_agent_option_param(params) do
+  defp agent_option_param(params) do
     option = params["option"]
     value = params["value"] || params[option]
 
@@ -5089,22 +6440,22 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # canonical session-owned bundle (session_owned_agent_opts/1). Re-persisting
   # the unchanged fields is idempotent — the session merges identical opts — so
   # the old `if value == current, do: noop` branches are dead weight.
-  defp select_local_agent_reasoning(value, socket) do
+  defp select_agent_reasoning(value, socket) do
     effort =
       AgentConfig.reasoning_effort(
         value,
-        local_agent_reasoning_efforts(socket.assigns.local_agent.provider.key)
+        agent_reasoning_efforts(socket.assigns.agent.provider.key)
       )
 
     socket
-    |> put_local_agent(reasoning_effort: effort)
+    |> put_agent(reasoning_effort: effort)
     |> persist_agent_options()
     |> noreply()
   end
 
-  defp select_local_agent_access(value, socket) do
+  defp select_agent_access(value, socket) do
     socket
-    |> put_local_agent_access(AgentConfig.access_control(value))
+    |> put_agent_access(AgentConfig.access_control(value))
     |> apply_vfs_write_policy()
     |> persist_agent_options()
     |> noreply()
@@ -5116,7 +6467,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     _ =
       WorkspaceSession.update_options(
         ws,
-        AgentConfig.session_opts(socket.assigns.local_agent)
+        AgentConfig.session_opts(socket.assigns.agent)
       )
 
     socket
@@ -5126,7 +6477,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp noreply(socket), do: {:noreply, socket}
 
-  defp local_agent_provider_display(provider \\ default_provider_id()) do
+  defp agent_provider_display(provider \\ default_provider_id()) do
     provider_id =
       AgentConfig.allowed_provider(provider, allowed_provider_ids()) ||
         default_provider_id()
@@ -5140,36 +6491,36 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     }
   end
 
-  defp local_agent_model(model_id) when is_binary(model_id) do
+  defp agent_model(model_id) when is_binary(model_id) do
     AgentModels.get(model_id)
   end
 
-  defp local_agent_model(_model_id), do: nil
+  defp agent_model(_model_id), do: nil
 
-  defp local_agent_models_for_provider(provider_id) do
+  defp agent_models_for_provider(provider_id) do
     AgentModels.for_provider(provider_id)
   end
 
   defp default_agent_model_id("claude"), do: "default"
   defp default_agent_model_id(_provider), do: "gpt-5.5"
 
-  defp local_agent_config(key) do
-    local_agent_ui = Application.get_env(:ecrits, :local_agent_ui, [])
-    local_agent = Application.get_env(:ecrits, :local_agent, [])
+  defp agent_config(key) do
+    agent_ui = Application.get_env(:ecrits, :agent_ui, [])
+    agent = Application.get_env(:ecrits, :agent, [])
 
-    Keyword.get(local_agent_ui, key) || Keyword.get(local_agent, key)
+    Keyword.get(agent_ui, key) || Keyword.get(agent, key)
   end
 
   defp default_provider_id do
     configured =
-      local_agent_config(:provider) ||
-        local_agent_adapter_provider(local_agent_config(:adapter))
+      agent_config(:provider) ||
+        agent_adapter_provider(agent_config(:adapter))
 
     AgentConfig.allowed_provider(configured, allowed_provider_ids()) || "codex"
   end
 
-  defp local_agent_adapter_provider(nil), do: nil
-  defp local_agent_adapter_provider(adapter), do: AgentConfig.provider(adapter)
+  defp agent_adapter_provider(nil), do: nil
+  defp agent_adapter_provider(adapter), do: AgentConfig.provider(adapter)
 
   defp provider_metadata(provider_id) do
     Enum.find(ACP.provider_metadata(), &(&1.id == provider_id))
@@ -5182,12 +6533,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp selectable_provider_ids do
     ACP.provider_metadata()
     |> Enum.map(& &1.id)
-    |> Enum.filter(&(&1 in @selectable_local_agent_provider_ids))
+    |> Enum.filter(&(&1 in @selectable_agent_provider_ids))
   end
 
-  defp local_agent_providers do
+  defp agent_providers do
     ACP.provider_metadata()
-    |> Enum.filter(&(&1.id in @selectable_local_agent_provider_ids))
+    |> Enum.filter(&(&1.id in @selectable_agent_provider_ids))
     |> Enum.map(fn provider ->
       %{
         id: provider.id,
@@ -5197,10 +6548,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end)
   end
 
-  defp local_agent_provider_details(integrations) do
+  defp agent_provider_details(integrations) do
     integrations_by_id = Map.new(integrations, &{&1.id, &1})
 
-    local_agent_providers()
+    agent_providers()
     |> Enum.map(fn provider ->
       integration = Map.get(integrations_by_id, provider.id, %{})
       status = Map.get(integration, :status, :unavailable)
@@ -5216,11 +6567,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp provider_setup_required?(%{status: :ready}), do: false
   defp provider_setup_required?(_provider), do: true
 
-  defp local_agent_provider_setup_href(_assigns, provider_id) do
+  defp agent_provider_setup_href(_assigns, provider_id) do
     ~p"/local/agent-providers/#{provider_id}/setup?#{[return_to: ~p"/workspace"]}"
   end
 
-  defp local_agent_selected_model_label(model_id) do
+  defp agent_selected_model_label(model_id) do
     case AgentModels.get(model_id) do
       %{label: label} -> label
       _missing -> "Model"
@@ -5230,9 +6581,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp default_reasoning_effort do
     AgentConfig.reasoning_effort(
       :ecrits
-      |> Application.get_env(:local_agent, [])
+      |> Application.get_env(:agent, [])
       |> Keyword.get(:reasoning_effort, "medium"),
-      local_agent_reasoning_efforts("codex")
+      agent_reasoning_efforts("codex")
     )
   end
 
@@ -5240,72 +6591,72 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # We surface `max` as the top "Ultracode" tier in the rail — Claude Code's most
   # exhaustive reasoning mode — and additionally fire the `ultrathink` workflow
   # keyword for it (see acp_stream). Internally the tier id is "ultracode".
-  defp local_agent_reasoning_efforts("claude"), do: ~w(low medium high xhigh ultracode)
-  defp local_agent_reasoning_efforts(_provider), do: ~w(minimal low medium high xhigh)
+  defp agent_reasoning_efforts("claude"), do: ~w(low medium high xhigh ultracode)
+  defp agent_reasoning_efforts(_provider), do: ~w(minimal low medium high xhigh)
 
-  defp local_agent_reasoning_label("minimal"), do: "Minimal - fastest, least tokens"
-  defp local_agent_reasoning_label("low"), do: "Low - light reasoning, lower tokens"
-  defp local_agent_reasoning_label("medium"), do: "Medium - balanced reasoning/tokens"
-  defp local_agent_reasoning_label("high"), do: "High - deeper reasoning, more tokens"
-  defp local_agent_reasoning_label("xhigh"), do: "XHigh - maximum reasoning/tokens"
+  defp agent_reasoning_label("minimal"), do: "Minimal - fastest, least tokens"
+  defp agent_reasoning_label("low"), do: "Low - light reasoning, lower tokens"
+  defp agent_reasoning_label("medium"), do: "Medium - balanced reasoning/tokens"
+  defp agent_reasoning_label("high"), do: "High - deeper reasoning, more tokens"
+  defp agent_reasoning_label("xhigh"), do: "XHigh - maximum reasoning/tokens"
 
-  defp local_agent_reasoning_label("ultracode"),
+  defp agent_reasoning_label("ultracode"),
     do: "Ultracode - exhaustive reasoning"
 
-  defp local_agent_reasoning_label(reasoning), do: reasoning
+  defp agent_reasoning_label(reasoning), do: reasoning
 
-  defp local_agent_reasoning_short_label("minimal"), do: "Minimal"
-  defp local_agent_reasoning_short_label("low"), do: "Low"
-  defp local_agent_reasoning_short_label("medium"), do: "Medium"
-  defp local_agent_reasoning_short_label("high"), do: "High"
-  defp local_agent_reasoning_short_label("xhigh"), do: "XHigh"
-  defp local_agent_reasoning_short_label("ultracode"), do: "Ultracode"
-  defp local_agent_reasoning_short_label(reasoning), do: reasoning
+  defp agent_reasoning_short_label("minimal"), do: "Minimal"
+  defp agent_reasoning_short_label("low"), do: "Low"
+  defp agent_reasoning_short_label("medium"), do: "Medium"
+  defp agent_reasoning_short_label("high"), do: "High"
+  defp agent_reasoning_short_label("xhigh"), do: "XHigh"
+  defp agent_reasoning_short_label("ultracode"), do: "Ultracode"
+  defp agent_reasoning_short_label(reasoning), do: reasoning
 
-  defp local_agent_reasoning_title("minimal"),
+  defp agent_reasoning_title("minimal"),
     do: "Fastest responses with the smallest token budget."
 
-  defp local_agent_reasoning_title("low"),
+  defp agent_reasoning_title("low"),
     do: "Lower-cost reasoning for routine edits and lookups."
 
-  defp local_agent_reasoning_title("medium"), do: "Balanced reasoning depth and token usage."
-  defp local_agent_reasoning_title("high"), do: "More planning tokens for harder document work."
-  defp local_agent_reasoning_title("xhigh"), do: "Maximum reasoning budget for complex tasks."
+  defp agent_reasoning_title("medium"), do: "Balanced reasoning depth and token usage."
+  defp agent_reasoning_title("high"), do: "More planning tokens for harder document work."
+  defp agent_reasoning_title("xhigh"), do: "Maximum reasoning budget for complex tasks."
 
-  defp local_agent_reasoning_title("ultracode"),
+  defp agent_reasoning_title("ultracode"),
     do: "Claude's most exhaustive mode: top effort tier plus the ultrathink keyword."
 
-  defp local_agent_reasoning_title(reasoning), do: reasoning
+  defp agent_reasoning_title(reasoning), do: reasoning
 
-  defp local_agent_integrations, do: ACP.integration_options()
+  defp agent_integrations, do: ACP.integration_options()
 
   defp provider_integration_status_label(:ready), do: "ready"
   defp provider_integration_status_label(:login_required), do: "login"
   defp provider_integration_status_label(:missing), do: "install"
   defp provider_integration_status_label(_status), do: "setup"
 
-  # Merge fields into the bound `%AgentConfig{}` (the `:local_agent` assign) —
+  # Merge fields into the bound `%AgentConfig{}` (the `:agent` assign) —
   # the ONE seam every provider/model/reasoning/access update flows through.
-  defp put_local_agent(socket, fields) do
+  defp put_agent(socket, fields) do
     assign(
       socket,
-      :local_agent,
-      AgentConfig.put(socket.assigns.local_agent, Map.new(fields))
+      :agent,
+      AgentConfig.put(socket.assigns.agent, Map.new(fields))
     )
   end
 
   # Resolve an access-mode id to its full record and store it as `access`, so the
-  # five access-derived values read off `@local_agent.access.*`.
-  defp put_local_agent_access(socket, access_control) do
-    put_local_agent(socket, access: AgentAccess.resolve(access_control))
+  # five access-derived values read off `@agent.access.*`.
+  defp put_agent_access(socket, access_control) do
+    put_agent(socket, access: AgentAccess.resolve(access_control))
   end
 
-  defp local_agent_access_controls, do: AgentAccess.all()
+  defp agent_access_controls, do: AgentAccess.all()
 
   defp default_access_control do
-    local_agent = Application.get_env(:ecrits, :local_agent, [])
-    local_agent_ui = Application.get_env(:ecrits, :local_agent_ui, [])
-    config = Keyword.merge(local_agent, local_agent_ui)
+    agent = Application.get_env(:ecrits, :agent, [])
+    agent_ui = Application.get_env(:ecrits, :agent_ui, [])
+    config = Keyword.merge(agent, agent_ui)
     adapter_opts = Keyword.get(config, :adapter_opts, [])
 
     AgentConfig.access_control(
@@ -5346,7 +6697,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # stream_configure (see mount/3). A named capture survives dev hot-reloads,
   # unlike an anonymous closure compiled into this module.
   @doc false
-  def local_hwp_page_dom_id(%{id: id}), do: id
+  def hwp_page_dom_id(%{id: id}), do: id
 
   # ── inline chat: send / queue ──────────────────────────────────────
 
@@ -5357,15 +6708,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp submit_agent_message(socket, message) do
     picks = DocumentElementPicker.compact_picks(socket.assigns.document_element_picker, [])
-
-    socket =
-      assign(
-        socket,
-        :document_element_picker,
-        DocumentElementPicker.clear(socket.assigns.document_element_picker)
-      )
-
     handle_send(socket, message, picks)
+  end
+
+  defp clear_document_element_picks(socket) do
+    update(socket, :document_element_picker, &DocumentElementPicker.clear/1)
   end
 
   defp handle_send(socket, message, picks) do
@@ -5376,65 +6723,43 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       # queued FLUSHES the head — cancel the in-flight turn and run the next
       # queued message NOW instead of waiting for the running turn to finish.
       # A picks-only send is NOT this gesture: the chips are the message.
-      message == "" and picks == [] and socket.assigns.local_agent_pending > 0 ->
-        flush_local_agent_queue(socket)
+      message == "" and picks == [] and socket.assigns.agent_pending > 0 ->
+        socket
+        |> clear_document_element_picks()
+        |> flush_agent_queue()
 
       message == "" and picks == [] ->
-        {:noreply, assign(socket, :local_agent_form, local_agent_form())}
+        {:noreply,
+         socket
+         |> clear_document_element_picks()
+         |> assign(:agent_form, agent_form())}
 
-      is_nil(socket.assigns.local_agent_session_id) ->
-        {:noreply, assign(socket, :local_agent_error, "Agent session is not ready.")}
+      is_nil(socket.assigns.agent_session_id) ->
+        {:noreply,
+         socket
+         |> clear_document_element_picks()
+         |> assign(:agent_error, "Agent session is not ready.")}
 
       # A turn is in flight (or a message is already queued): ENQUEUE this send
       # behind the running turn rather than cancelling it (Phase 5). It drains in
       # order when the running turn finishes.
-      socket.assigns.local_agent_status == :running or socket.assigns.local_agent_pending > 0 ->
-        enqueue_local_agent_turn(socket, message, picks)
+      socket.assigns.agent_status == :running or socket.assigns.agent_pending > 0 ->
+        enqueue_agent_turn(socket, message, picks)
 
       true ->
-        send_local_agent_turn(socket, message, picks)
+        send_agent_turn(socket, message, picks)
     end
   end
 
-  defp doc_vfs_backend_mode_label do
-    case DocMount.backend() do
-      :fskit -> "FSKit/VFS"
-      :fuse -> "FUSE/VFS"
-    end
-  end
-
-  # The agent-visible prompt: typed text + the picked-element JSON block (the
-  # format the picker used to inject into the textarea), plus the #32 read-path
-  # override — the refs are already resolved, so the turn must not burn calls
-  # on doc.context/doc.find rediscovery. The pick's `document` (its workspace
-  # path) IS the tools' document handle: doc.* resolves paths directly,
-  # auto-opening from disk when needed (#34 path-first).
-  defp compose_picks_message(message, []), do: message
-
-  defp compose_picks_message(message, picks) do
-    block =
-      "Selected document elements (#{length(picks)}):\n```json\n" <>
-        Jason.encode!(picks, pretty: true) <>
-        "\n```\n" <>
-        "Picked refs are authoritative. Skip doc.context/doc.find discovery. " <>
-        "When using doc.* tools, call doc.read/doc.edit/doc.set directly on these refs, passing each " <>
-        "pick's `document` value (the file path) as the tools' `document` param. " <>
-        "When using mounted #{doc_vfs_backend_mode_label()} JSONL, treat picked refs as target hints for the nested JSONL; " <>
-        "for HWP picture refs like {\"section\":s,\"paragraph\":p,\"control\":c}, edit the picture payload " <>
-        "in section s / paragraph p at picture-control order c. " <>
-        "For existing HWP paragraph division, use doc.edit op `split` at offsets; " <>
-        "do not use replace_text with newlines.\n"
-
-    sep = if message == "" or String.ends_with?(message, "\n"), do: "", else: "\n\n"
-    message <> sep <> block
-  end
+  defp compose_picks_message(message, picks),
+    do: Prompt.with_selected_elements(message, picks, DocMount.backend())
 
   # Enqueue a mid-turn send: record the user bubble immediately (so the user sees
   # their message), bump the pending count, and let the durable agent drain it
   # when the running turn terminates. The placeholders (reasoning / assistant
   # bubble) are rendered later, when the queued turn actually drains (its
-  # `turn_started` event arrives with `local_agent_turn_id` nil).
-  defp enqueue_local_agent_turn(socket, message, picks) do
+  # `turn_started` event arrives with `agent_turn_id` nil).
+  defp enqueue_agent_turn(socket, message, picks) do
     case WorkspaceSession.send_turn(
            ws(socket),
            compose_picks_message(message, picks),
@@ -5447,30 +6772,40 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       {:ok, %{id: queued_id}} ->
         {:noreply,
          socket
-         |> update_local_agent_queue(queue_display_item(queued_id, message, picks))
-         |> sync_local_agent_pending()
-         |> assign(:local_agent_error, nil)
-         |> assign(:local_agent_form, local_agent_form())}
+         |> update_agent_queue(queue_display_item(queued_id, message, picks))
+         |> sync_agent_pending()
+         |> assign(:agent_error, nil)
+         |> clear_document_element_picks()
+         |> assign(:agent_form, agent_form())}
+
+      {:error, :foreground_transition_in_progress} ->
+        {:noreply, assign(socket, :agent_form, agent_form(%{"message" => message}))}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
+        {:noreply,
+         socket
+         |> clear_document_element_picks()
+         |> assign(:agent_error, agent_error(reason))}
     end
   end
 
-  defp flush_local_agent_queue(socket) do
+  defp flush_agent_queue(socket) do
     case WorkspaceSession.flush_queue(ws(socket)) do
       {:ok, _turn} ->
-        {:noreply, assign(socket, :local_agent_form, local_agent_form())}
+        {:noreply, assign(socket, :agent_form, agent_form())}
 
       {:error, :empty_queue} ->
         {:noreply,
          socket
-         |> assign(:local_agent_pending, 0)
-         |> assign(:local_agent_queue, [])
-         |> assign(:local_agent_queue_index, 0)}
+         |> assign(:agent_pending, 0)
+         |> assign(:agent_queue, [])
+         |> assign(:agent_queue_index, 0)}
+
+      {:error, :foreground_transition_in_progress} ->
+        {:noreply, socket}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
+        {:noreply, assign(socket, :agent_error, agent_error(reason))}
     end
   end
 
@@ -5502,18 +6837,18 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     }
   end
 
-  defp maybe_update_local_agent_queue_from_event(socket, %{turn_id: turn_id} = event)
+  defp maybe_update_agent_queue_from_event(socket, %{turn_id: turn_id} = event)
        when is_binary(turn_id) do
-    update_local_agent_queue(
+    update_agent_queue(
       socket,
       queue_display_item(turn_id, Map.get(event, :input, ""), Map.get(event, :picks, []))
     )
   end
 
-  defp maybe_update_local_agent_queue_from_event(socket, _event), do: socket
+  defp maybe_update_agent_queue_from_event(socket, _event), do: socket
 
-  defp update_local_agent_queue(socket, %{turn_id: turn_id} = item) do
-    queue = socket.assigns.local_agent_queue || []
+  defp update_agent_queue(socket, %{turn_id: turn_id} = item) do
+    queue = socket.assigns.agent_queue || []
 
     queue =
       if Enum.any?(queue, &(&1.turn_id == turn_id)) do
@@ -5526,40 +6861,40 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       end
 
     socket
-    |> assign(:local_agent_queue, queue)
-    |> clamp_local_agent_queue_index()
+    |> assign(:agent_queue, queue)
+    |> clamp_agent_queue_index()
   end
 
-  defp remove_local_agent_queue_item(socket, turn_id) when is_binary(turn_id) do
+  defp remove_agent_queue_item(socket, turn_id) when is_binary(turn_id) do
     queue =
-      socket.assigns.local_agent_queue
+      socket.assigns.agent_queue
       |> List.wrap()
       |> Enum.reject(&(&1.turn_id == turn_id))
 
     socket
-    |> assign(:local_agent_queue, queue)
-    |> clamp_local_agent_queue_index()
+    |> assign(:agent_queue, queue)
+    |> clamp_agent_queue_index()
   end
 
-  defp clamp_local_agent_queue_index(socket) do
-    max_index = max(length(socket.assigns.local_agent_queue) - 1, 0)
-    index = socket.assigns.local_agent_queue_index || 0
-    assign(socket, :local_agent_queue_index, min(index, max_index))
+  defp clamp_agent_queue_index(socket) do
+    max_index = max(length(socket.assigns.agent_queue) - 1, 0)
+    index = socket.assigns.agent_queue_index || 0
+    assign(socket, :agent_queue_index, min(index, max_index))
   end
 
-  defp sync_local_agent_pending(socket, min_pending \\ 0) do
+  defp sync_agent_pending(socket, min_pending \\ 0) do
     assign(
       socket,
-      :local_agent_pending,
-      max(min_pending, length(socket.assigns.local_agent_queue || []))
+      :agent_pending,
+      max(min_pending, length(socket.assigns.agent_queue || []))
     )
   end
 
-  defp local_agent_queued_item(queue, index) when is_list(queue) do
+  defp agent_queued_item(queue, index) when is_list(queue) do
     Enum.at(queue, index || 0) || List.first(queue)
   end
 
-  defp local_agent_queued_item(_queue, _index), do: nil
+  defp agent_queued_item(_queue, _index), do: nil
 
   # The composer's CURRENT options ride on every send: the turn runs with
   # exactly what the UI shows at send time, instead of trusting that an earlier
@@ -5570,13 +6905,13 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     workspace_path = workspace_root_path(socket.assigns.workspace || %{})
 
     [
-      adapter_opts: local_agent_adapter_opts(socket, workspace_path),
+      adapter_opts: agent_adapter_opts(socket, workspace_path),
       document_path: socket.assigns[:active_document_path],
       pool_document_id: socket.assigns[:pool_document_id]
     ]
   end
 
-  defp send_local_agent_turn(socket, message, picks) do
+  defp send_agent_turn(socket, message, picks) do
     case WorkspaceSession.send_turn(
            ws(socket),
            compose_picks_message(message, picks),
@@ -5585,286 +6920,426 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       {:ok, %{id: turn_id}} ->
         {:noreply,
          socket
-         |> stream_insert(:local_agent_items, agent_user_item(turn_id, message, picks))
-         |> stream_insert(:local_agent_items, agent_reasoning_item(turn_id, "", :pending))
-         |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "", :running, 0))
-         |> assign(:local_agent_turn_id, turn_id)
-         |> assign(:local_agent_text, "")
-         |> assign(:local_agent_text_segment, 0)
-         |> assign(:local_agent_reasoning_text, "")
-         |> assign(:local_agent_status, :running)
-         |> assign(:local_agent_error, nil)
-         |> assign(:local_agent_form, local_agent_form())}
+         |> cancel_agent_reasoning_flush()
+         |> stream_insert(:agent_items, agent_user_item(turn_id, message, picks))
+         |> stream_insert(:agent_items, agent_reasoning_item(turn_id, "", :pending, 0))
+         |> stream_insert(:agent_items, agent_assistant_item(turn_id, "", :running, 0))
+         |> assign(:agent_turn_id, turn_id)
+         |> assign(:agent_text, "")
+         |> assign(:agent_text_segment, 0)
+         |> assign(:agent_reasoning_text, "")
+         |> assign(:agent_reasoning_segment, 0)
+         |> assign(:agent_status, :running)
+         |> assign(:agent_error, nil)
+         |> clear_document_element_picks()
+         |> assign(:agent_form, agent_form())}
+
+      {:error, :foreground_transition_in_progress} ->
+        {:noreply, assign(socket, :agent_form, agent_form(%{"message" => message}))}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :local_agent_error, local_agent_error(reason))}
+        {:noreply,
+         socket
+         |> clear_document_element_picks()
+         |> assign(:agent_error, agent_error(reason))}
     end
   end
 
   # Start a fresh foreground rail while preserving the older rail in the recent
-  # drawer. The current LiveView pid owns the active rail; older rails stay in
-  # the browser session's recent list.
-  defp restart_local_agent_session(socket) do
-    _ = maybe_cancel_active_local_agent(socket)
+  # drawer. The current browser tab owns the active rail; older rails stay in the
+  # browser session's recent list.
+  defp restart_agent_session(socket) do
+    _ = maybe_cancel_active_agent(socket)
 
     case safe_new_foreground(
            socket.assigns.workspace_path,
-           local_agent_attach_settings(socket)
+           agent_attach_settings(socket)
          ) do
       {:ok, %{agent_id: agent_id} = ws} when is_binary(agent_id) ->
-        socket =
-          if socket.assigns.local_agent_session_id != agent_id do
-            :ok = WorkspaceSession.subscribe(ws)
-            socket
-          else
-            socket
-          end
+        socket
+        |> bind_agent_subscription(agent_id)
+        |> bind_fresh_agent_session(ws, agent_id)
 
-        bind_fresh_local_agent_session(socket, ws, agent_id)
+      {:pending, _ws} ->
+        socket
+
+      {:error, :foreground_transition_in_progress} ->
+        socket
 
       {:error, reason} ->
-        assign(socket, :local_agent_error, local_agent_error(reason))
+        assign(socket, :agent_error, agent_error(reason))
     end
   end
 
-  defp maybe_cancel_active_local_agent(%{
-         assigns: %{workspace_session: %{} = ws, local_agent_turn_id: turn_id}
+  defp maybe_cancel_active_agent(%{
+         assigns: %{workspace_session: %{} = ws, agent_turn_id: turn_id}
        })
        when is_binary(turn_id) do
     _ = WorkspaceSession.cancel(ws, turn_id)
     :ok
   end
 
-  defp maybe_cancel_active_local_agent(_socket), do: :ok
+  defp maybe_cancel_active_agent(_socket), do: :ok
+
+  # A LiveView process may only hold one foreground-agent subscription. PubSub
+  # does not deduplicate repeated subscribe calls, so selecting the same recent
+  # rail again used to deliver every streaming delta multiple times. Switching
+  # rails also releases the old topic instead of accumulating dormant topics for
+  # the lifetime of the workspace LiveView.
+  defp bind_agent_subscription(socket, agent_id) when is_binary(agent_id) do
+    previous_agent_id = socket.assigns.agent_session_id
+
+    cond do
+      previous_agent_id == agent_id ->
+        socket
+
+      is_binary(previous_agent_id) ->
+        :ok = Phoenix.PubSub.unsubscribe(Ecrits.PubSub, ACP.topic(previous_agent_id))
+        :ok = WorkspaceSession.subscribe_agent(agent_id)
+        socket
+
+      true ->
+        :ok = WorkspaceSession.subscribe_agent(agent_id)
+        socket
+    end
+  end
 
   # ── inline chat: streaming event application ───────────────────────
 
   # A mid-turn send was enqueued behind the running turn (Phase 5). The agent is
   # the source of truth for the pending count; sync it from the event so a flush /
   # drain elsewhere never drifts the indicator.
-  defp apply_local_agent_event(socket, %{type: :turn_queued, pending: pending} = event)
+  defp apply_agent_event(socket, %{type: :turn_queued, pending: pending} = event)
        when is_integer(pending) do
     socket
-    |> maybe_update_local_agent_queue_from_event(event)
-    |> sync_local_agent_pending(pending)
+    |> maybe_update_agent_queue_from_event(event)
+    |> sync_agent_pending(pending)
   end
 
-  # `send_local_agent_turn/2` already set `local_agent_turn_id` (and :running)
+  # `send_agent_turn/2` already set `agent_turn_id` (and :running)
   # from the synchronous send_turn reply, which carries the SAME id this event
   # echoes. So a turn_started whose id != the current turn is stale and must be
   # ignored; the catch-all clause drops the rest.
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
+  defp apply_agent_event(
+         %{assigns: %{agent_turn_id: turn_id}} = socket,
          %{type: :turn_started, turn_id: turn_id}
        ) do
     socket
-    |> assign(:local_agent_turn_id, turn_id)
-    |> assign(:local_agent_status, :running)
-    |> assign(:local_agent_editor_preview, nil)
+    |> cancel_agent_reasoning_flush()
+    |> assign(:agent_turn_id, turn_id)
+    |> assign(:agent_status, :running)
+    |> assign(:agent_editor_preview, nil)
   end
 
-  # A QUEUED turn just drained (Phase 5): `local_agent_turn_id` was nil (the prior
+  # A QUEUED turn just drained (Phase 5): `agent_turn_id` was nil (the prior
   # turn cleared it) and this is a fresh id — i.e. the chat context just SWITCHED
   # to this message. Render the user bubble NOW (it is intentionally NOT rendered
   # at enqueue time, so a queued message only appears once the agent is actually
   # on it), then the reasoning + assistant placeholders, reset the per-turn
   # buffers, and decrement pending. The bubble's `input`/`picks` ride on the event.
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: nil}} = socket,
+  defp apply_agent_event(
+         %{assigns: %{agent_turn_id: nil}} = socket,
          %{type: :turn_started, turn_id: turn_id} = event
        )
        when is_binary(turn_id) do
     socket
-    |> assign(:local_agent_turn_id, turn_id)
-    |> assign(:local_agent_status, :running)
-    |> assign(:local_agent_text, "")
-    |> assign(:local_agent_text_segment, 0)
-    |> assign(:local_agent_editor_preview, nil)
-    |> assign(:local_agent_reasoning_text, "")
-    |> remove_local_agent_queue_item(turn_id)
-    |> sync_local_agent_pending()
+    |> assign(:agent_turn_id, turn_id)
+    |> assign(:agent_status, :running)
+    |> assign(:agent_text, "")
+    |> assign(:agent_text_segment, 0)
+    |> assign(:agent_editor_preview, nil)
+    |> assign(:agent_reasoning_text, "")
+    |> assign(:agent_reasoning_segment, 0)
+    |> cancel_agent_reasoning_flush()
+    |> remove_agent_queue_item(turn_id)
+    |> sync_agent_pending()
     |> stream_insert(
-      :local_agent_items,
+      :agent_items,
       agent_user_item(turn_id, Map.get(event, :input, ""), Map.get(event, :picks, []))
     )
-    |> stream_insert(:local_agent_items, agent_reasoning_item(turn_id, "", :pending))
-    |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "", :running, 0))
+    |> stream_insert(:agent_items, agent_reasoning_item(turn_id, "", :pending, 0))
+    |> stream_insert(:agent_items, agent_assistant_item(turn_id, "", :running, 0))
   end
 
-  defp apply_local_agent_event(socket, %{type: type, title: title})
+  defp apply_agent_event(socket, %{type: type, title: title})
        when type in [:title_generated, :title_updated, :thread_title] and is_binary(title) do
-    if socket.assigns.local_agent_title_user_edited? do
+    if socket.assigns.agent_title_user_edited? do
       socket
     else
       persist_generated_agent_title(socket, title)
 
       socket
-      |> assign_local_agent_title(title)
-      |> refresh_local_agent_rails()
+      |> assign_agent_title(title)
+      |> refresh_agent_rails()
     end
   end
 
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
+  defp apply_agent_event(
+         %{assigns: %{agent_turn_id: turn_id}} = socket,
          %{type: :text_delta, turn_id: turn_id, delta: delta}
        )
        when is_binary(delta) do
-    text = socket.assigns.local_agent_text <> delta
-    segment = socket.assigns.local_agent_text_segment
+    socket = close_agent_reasoning_segment(socket)
+    text = socket.assigns.agent_text <> delta
+    segment = socket.assigns.agent_text_segment
 
     socket
-    |> assign(:local_agent_text, text)
+    |> ensure_agent_text_placeholder()
+    |> assign(:agent_text, text)
     |> push_event("agent.stream.text_appended", %{
       message_id: agent_assistant_dom_id(turn_id, segment),
       piece: String.replace(delta, ~r/\n{2,}/, "\n")
     })
-    |> schedule_local_agent_text_flush()
+    |> schedule_agent_text_flush()
   end
 
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
+  defp apply_agent_event(
+         %{assigns: %{agent_turn_id: turn_id}} = socket,
          %{type: :edit_delta, turn_id: turn_id, delta: delta} = event
        )
        when is_binary(delta) do
     socket
-    |> split_local_agent_text_before_preview()
+    |> split_agent_text_before_preview()
+    |> close_agent_reasoning_segment()
     |> ensure_inline_editor_preview(turn_id, Map.get(event, :path))
-    |> inline_editor_preview_accumulate_delta(turn_id, delta, Map.get(event, :path))
+    |> inline_editor_preview_accumulate_delta(
+      turn_id,
+      delta,
+      Map.get(event, :path),
+      Map.get(event, :edit_id)
+    )
   end
 
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
-         %{type: :reasoning_delta, turn_id: turn_id, delta: delta}
+  defp apply_agent_event(
+         %{assigns: %{agent_turn_id: turn_id}} = socket,
+         %{type: :reasoning_delta, turn_id: turn_id, delta: delta} = event
        )
        when is_binary(delta) do
-    prev = socket.assigns.local_agent_reasoning_text
+    segment = Map.get(event, :segment, socket.assigns.agent_reasoning_segment)
 
-    # New reasoning item resuming after a tool call / other event: separate it
-    # from the previous item with a paragraph break. Contiguous deltas within one
-    # item append raw.
-    piece =
-      if socket.assigns[:local_agent_reasoning_open?] or prev == "",
-        do: delta,
-        else: "\n\n" <> delta
+    socket =
+      socket
+      |> close_agent_text_segment()
+      |> prepare_agent_reasoning_segment(turn_id, segment)
+
+    prev = socket.assigns.agent_reasoning_text
 
     socket
-    |> assign(:local_agent_reasoning_text, prev <> piece)
-    |> assign(:local_agent_reasoning_open?, true)
+    |> assign(:agent_reasoning_text, prev <> delta)
+    |> assign(:agent_reasoning_open?, true)
     |> push_event("agent.stream.reasoning_appended", %{
-      message_id: agent_reasoning_dom_id(turn_id),
-      piece: piece
+      message_id: agent_reasoning_dom_id(turn_id, segment),
+      piece: delta
     })
+    |> schedule_agent_reasoning_flush()
   end
 
-  defp apply_local_agent_event(socket, %{
-         type: :tool_call_started,
-         tool_call_id: tool_call_id,
-         name: name,
-         arguments: arguments
-       }) do
+  defp apply_agent_event(socket, %{type: type} = event)
+       when type in [
+              :file_operation_started,
+              :file_operation_completed,
+              :file_operation_failed
+            ] do
+    apply_file_operation_event(socket, event, file_operation_event_status(type))
+  end
+
+  # Older ACP snapshots and adapters reported editor file I/O using the generic
+  # tool-call envelope. Keep those rows visible while classifying them with the
+  # same file-activity semantics as the current dedicated events.
+  defp apply_agent_event(
+         socket,
+         %{type: :tool_call_started, tool_call_id: id, name: name} = event
+       )
+       when name in @acp_file_operation_names do
+    event
+    |> Map.put(:file_operation_id, id)
+    |> Map.put(:operation, name)
+    |> then(&apply_file_operation_event(socket, &1, :running))
+  end
+
+  defp apply_agent_event(
+         socket,
+         %{type: :tool_call_completed, tool_call_id: id, name: name} = event
+       )
+       when name in @acp_file_operation_names do
+    event
+    |> Map.put(:file_operation_id, id)
+    |> Map.put(:operation, name)
+    |> then(&apply_file_operation_event(socket, &1, :completed))
+  end
+
+  defp apply_agent_event(
+         socket,
+         %{type: :tool_call_failed, tool_call_id: id, name: name} = event
+       )
+       when name in @acp_file_operation_names do
+    event
+    |> Map.put(:file_operation_id, id)
+    |> Map.put(:operation, name)
+    |> then(&apply_file_operation_event(socket, &1, :failed))
+  end
+
+  defp apply_agent_event(
+         socket,
+         %{
+           type: :tool_call_started,
+           tool_call_id: tool_call_id,
+           name: name,
+           arguments: arguments
+         } = event
+       ) do
     input = agent_tool_payload(name, arguments)
+    kind = Map.get(event, :kind)
 
     socket
-    |> close_local_agent_text_segment()
+    |> close_agent_text_segment()
+    |> close_agent_reasoning_segment()
     |> maybe_remove_empty_agent_placeholder()
     |> update(
-      :local_agent_active_tools,
-      &Map.put(&1 || %{}, tool_call_id, %{name: name, input: input, args: arguments})
+      :agent_active_tools,
+      &Map.put(&1 || %{}, tool_call_id, %{
+        name: name,
+        kind: kind,
+        input: input,
+        args: arguments
+      })
     )
     |> stream_insert(
-      :local_agent_items,
-      agent_tool_item(tool_call_id, name, :running, tool_io_body(input, nil))
+      :agent_items,
+      agent_tool_item(tool_call_id, name, :running, tool_io_body(input, nil), kind)
     )
   end
 
-  defp apply_local_agent_event(socket, %{
-         type: :tool_call_completed,
-         tool_call_id: tool_call_id,
-         name: name,
-         result: result
-       }) do
-    active = Map.get(socket.assigns.local_agent_active_tools || %{}, tool_call_id, %{})
+  defp apply_agent_event(
+         socket,
+         %{
+           type: :tool_call_completed,
+           tool_call_id: tool_call_id,
+           name: name,
+           result: result
+         } = event
+       ) do
+    active = Map.get(socket.assigns.agent_active_tools || %{}, tool_call_id, %{})
     input = active[:input]
+    kind = active[:kind] || Map.get(event, :kind)
     output = agent_tool_payload(name, result)
     # Close the text segment / drop the empty placeholder here too: a provider
     # that only reports terminal tool updates (no started event) must not leave
     # the turn-start placeholder parked ABOVE this row soaking up the reply.
     socket =
       socket
-      |> close_local_agent_text_segment()
+      |> close_agent_text_segment()
+      |> close_agent_reasoning_segment()
       |> maybe_remove_empty_agent_placeholder()
-      |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
+      |> update(:agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
       |> stream_insert(
-        :local_agent_items,
-        agent_tool_item(tool_call_id, name, :completed, tool_io_body(input, output))
+        :agent_items,
+        agent_tool_item(tool_call_id, name, :completed, tool_io_body(input, output), kind)
       )
 
-    # A successful doc.edit also drops a bounded document-renderer preview
-    # focused on the edited highlight region.
-    case maybe_doc_edit_preview_item(socket, tool_call_id, name, active[:args], result) do
-      nil ->
-        socket
-
-      preview ->
+    # A native picture fallback that follows a committed VFS edit belongs to
+    # that same immutable descriptor. Persist the semantic picture delta onto
+    # the exact turn/document snapshot before repainting it; a standalone
+    # doc.edit keeps the older bounded live-preview fallback.
+    case maybe_compose_doc_edit_preview(
+           socket,
+           Map.get(event, :turn_id),
+           tool_call_id,
+           name,
+           active[:args],
+           result
+         ) do
+      {:ok, preview} ->
         socket
         |> replace_live_vfs_editor_preview(preview)
-        |> stream_insert(:local_agent_items, preview)
+        |> stream_insert(:agent_items, preview)
+
+      :not_applicable ->
+        case maybe_doc_edit_preview_item(socket, tool_call_id, name, active[:args], result) do
+          nil ->
+            socket
+
+          preview ->
+            socket
+            |> replace_live_vfs_editor_preview(preview)
+            |> stream_insert(:agent_items, preview)
+        end
+
+      {:error, _reason} ->
+        socket
     end
   end
 
-  defp apply_local_agent_event(socket, %{
-         type: :tool_call_failed,
-         tool_call_id: tool_call_id,
-         name: name,
-         reason: reason
-       }) do
-    active = Map.get(socket.assigns.local_agent_active_tools || %{}, tool_call_id, %{})
+  defp apply_agent_event(
+         socket,
+         %{
+           type: :tool_call_failed,
+           tool_call_id: tool_call_id,
+           name: name,
+           reason: reason
+         } = event
+       ) do
+    active = Map.get(socket.assigns.agent_active_tools || %{}, tool_call_id, %{})
     input = active[:input]
+    kind = active[:kind] || Map.get(event, :kind)
 
     socket
-    |> close_local_agent_text_segment()
+    |> close_agent_text_segment()
+    |> close_agent_reasoning_segment()
     |> maybe_remove_empty_agent_placeholder()
-    |> update(:local_agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
+    |> update(:agent_active_tools, &Map.delete(&1 || %{}, tool_call_id))
     |> stream_insert(
-      :local_agent_items,
-      agent_tool_item(tool_call_id, name, :failed, tool_io_body(input, reason))
+      :agent_items,
+      agent_tool_item(tool_call_id, name, :failed, tool_io_body(input, reason), kind)
     )
   end
 
-  defp apply_local_agent_event(socket, %{
-         type: :tool_approval_required,
-         tool_call_id: tool_call_id,
-         name: name,
-         arguments: arguments
-       }) do
+  defp apply_agent_event(
+         socket,
+         %{
+           type: :tool_approval_required,
+           tool_call_id: tool_call_id,
+           name: name,
+           arguments: arguments
+         } = event
+       ) do
     input = agent_tool_payload(name, arguments)
 
     stream_insert(
-      socket |> maybe_remove_empty_agent_placeholder(),
-      :local_agent_items,
-      agent_tool_item(tool_call_id, name, :approval_required, tool_io_body(input, nil))
+      socket
+      |> close_agent_reasoning_segment()
+      |> maybe_remove_empty_agent_placeholder(),
+      :agent_items,
+      agent_tool_item(
+        tool_call_id,
+        name,
+        :approval_required,
+        tool_io_body(input, nil),
+        Map.get(event, :kind)
+      )
     )
   end
 
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
+  defp apply_agent_event(
+         %{assigns: %{agent_turn_id: turn_id}} = socket,
          %{type: :turn_completed, turn_id: turn_id}
        ) do
     # Flush ONLY the still-pending text segment (text streamed AFTER the last tool
     # call). Every earlier segment was already emitted at its tool boundary by
-    # close_local_agent_text_segment/1.
-    pending = socket.assigns.local_agent_text
-    segment = socket.assigns.local_agent_text_segment
-    editor_preview? = editor_preview_turn?(socket.assigns[:local_agent_editor_preview], turn_id)
+    # close_agent_text_segment/1.
+    pending = socket.assigns.agent_text
+    segment = socket.assigns.agent_text_segment
+    editor_preview? = editor_preview_turn?(socket.assigns[:agent_editor_preview], turn_id)
 
     socket
-    |> cancel_local_agent_text_flush()
-    |> assign(:local_agent_turn_id, nil)
-    |> assign(:local_agent_text, "")
+    |> cancel_agent_text_flush()
+    |> close_agent_reasoning_segment()
+    |> assign(:agent_turn_id, nil)
+    |> assign(:agent_text, "")
     |> finalize_inline_editor_preview(turn_id, :sent)
-    |> assign(:local_agent_status, :idle)
-    |> maybe_remove_empty_reasoning(turn_id)
-    |> assign(:local_agent_reasoning_text, "")
+    |> assign(:agent_status, :idle)
+    |> assign(:agent_reasoning_text, "")
+    |> assign(:agent_reasoning_segment, 0)
     |> maybe_remove_empty_agent_placeholder_for_editor_preview(
       turn_id,
       pending,
@@ -5875,47 +7350,107 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     |> finalize_dangling_tools("Turn ended before the tool finished.")
   end
 
-  defp apply_local_agent_event(
-         %{assigns: %{local_agent_turn_id: turn_id}} = socket,
+  defp apply_agent_event(
+         %{assigns: %{agent_turn_id: turn_id}} = socket,
          %{type: :turn_failed, turn_id: turn_id, reason: reason}
        ) do
     socket
-    |> cancel_local_agent_text_flush()
-    |> assign(:local_agent_turn_id, nil)
-    |> assign(:local_agent_text, "")
+    |> cancel_agent_text_flush()
+    |> close_agent_reasoning_segment()
+    |> assign(:agent_turn_id, nil)
+    |> assign(:agent_text, "")
     |> finalize_inline_editor_preview(turn_id, :failed)
-    |> assign(:local_agent_status, :failed)
-    |> assign(:local_agent_error, local_agent_error(reason))
-    |> maybe_remove_empty_reasoning(turn_id)
-    |> assign(:local_agent_reasoning_text, "")
-    |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, "Agent failed.", :failed))
+    |> assign(:agent_status, :failed)
+    |> assign(:agent_error, agent_error(reason))
+    |> assign(:agent_reasoning_text, "")
+    |> assign(:agent_reasoning_segment, 0)
+    |> stream_insert(
+      :agent_items,
+      agent_assistant_item(turn_id, "Agent failed.", :failed)
+    )
     |> finalize_dangling_tools("Turn failed.")
   end
 
-  defp apply_local_agent_event(%{assigns: %{local_agent_turn_id: turn_id}} = socket, %{
-         type: :turn_cancelled,
-         turn_id: turn_id
-       }) do
-    partial = socket.assigns.local_agent_text
-    segment = socket.assigns.local_agent_text_segment
+  defp apply_agent_event(
+         %{assigns: %{agent_turn_id: turn_id}} = socket,
+         %{type: :turn_cancelled, turn_id: turn_id} = event
+       ) do
+    partial = socket.assigns.agent_text
+    segment = socket.assigns.agent_text_segment
+
+    identity = %{
+      agent_id: event[:session_id],
+      instance_id: event[:instance_id],
+      turn_id: turn_id
+    }
 
     socket
-    |> cancel_local_agent_text_flush()
-    |> assign(:local_agent_turn_id, nil)
-    |> assign(:local_agent_text, "")
+    |> cancel_doc_browser_identity(identity,
+      reason: {:turn_cancelled, turn_id},
+      reply?: true
+    )
+    |> cancel_agent_text_flush()
+    |> close_agent_reasoning_segment()
+    |> assign(:agent_turn_id, nil)
+    |> assign(:agent_text, "")
     |> finalize_inline_editor_preview(turn_id, :cancelled)
-    |> assign(:local_agent_status, :cancelled)
-    |> maybe_remove_empty_reasoning(turn_id)
-    |> assign(:local_agent_reasoning_text, "")
+    |> assign(:agent_status, :cancelled)
+    |> assign(:agent_reasoning_text, "")
+    |> assign(:agent_reasoning_segment, 0)
     |> finalize_cancelled_agent_text(turn_id, partial, segment)
     |> finalize_dangling_tools("Turn cancelled.")
   end
 
-  defp apply_local_agent_event(socket, %{type: :turn_cancelled}), do: socket
-  defp apply_local_agent_event(socket, _event), do: socket
+  # The stop button clears the visible turn id eagerly before the PubSub event
+  # returns to this LiveView. Transaction cancellation must still consume that
+  # terminal event, even when there is no longer UI state left to finalize.
+  defp apply_agent_event(socket, %{type: :turn_cancelled, turn_id: turn_id} = event) do
+    cancel_doc_browser_identity(
+      socket,
+      %{
+        agent_id: event[:session_id],
+        instance_id: event[:instance_id],
+        turn_id: turn_id
+      },
+      reason: {:turn_cancelled, turn_id},
+      reply?: true
+    )
+  end
+
+  defp apply_agent_event(socket, _event), do: socket
+
+  defp file_operation_event_status(:file_operation_started), do: :running
+  defp file_operation_event_status(:file_operation_completed), do: :completed
+  defp file_operation_event_status(:file_operation_failed), do: :failed
+
+  defp apply_file_operation_event(socket, event, status) do
+    operation_id = file_operation_id(event)
+
+    active =
+      socket.assigns.agent_active_file_operations
+      |> Map.get(operation_id, %{})
+
+    item = agent_file_activity_item(operation_id, event, active, status)
+
+    active_file_operations =
+      case status do
+        :running ->
+          Map.put(socket.assigns.agent_active_file_operations, operation_id, item)
+
+        _terminal ->
+          Map.delete(socket.assigns.agent_active_file_operations, operation_id)
+      end
+
+    socket
+    |> close_agent_text_segment()
+    |> close_agent_reasoning_segment()
+    |> maybe_remove_empty_agent_placeholder()
+    |> assign(:agent_active_file_operations, active_file_operations)
+    |> stream_insert(:agent_items, item)
+  end
 
   defp persist_generated_agent_title(socket, title) do
-    case socket.assigns.local_agent_session_id do
+    case socket.assigns.agent_session_id do
       session_id when is_binary(session_id) -> ACP.set_generated_title(session_id, title)
       _ -> :ok
     end
@@ -5929,39 +7464,207 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp restore_agent_title(socket, title, title_user_edited?)
        when is_binary(title) and title != "" do
     socket
-    |> assign(:local_agent_title_user_edited?, title_user_edited? == true)
-    |> assign_local_agent_title(title)
+    |> assign(:agent_title_user_edited?, title_user_edited? == true)
+    |> assign_agent_title(title)
   end
 
   defp restore_agent_title(socket, _title, _title_user_edited?) do
     socket
-    |> assign(:local_agent_title_user_edited?, false)
-    |> assign_local_agent_title(default_local_agent_title())
+    |> assign(:agent_title_user_edited?, false)
+    |> assign_agent_title(default_agent_title())
   end
 
   # Repaint the chat pane from the selected agent's display-only transcript.
   # New transcript entries store ordered display rows (`items`) so tool-call
   # history survives in the recent-chat list.
   # Older in-memory sessions only have %{turn_id, user, agent}; keep that fallback.
-  defp replay_local_agent_transcript(socket, turns) when is_list(turns) do
-    Enum.reduce(turns, socket, fn turn, acc ->
-      case transcript_items(turn) do
-        items when is_list(items) and items != [] ->
-          items
-          |> Enum.with_index()
-          |> Enum.reduce(acc, fn {item, index}, item_acc ->
-            stream_transcript_item(item_acc, turn, item, index)
-          end)
+  defp replay_agent_transcript(socket, turns) when is_list(turns) do
+    {socket, _seen_preview_identities} =
+      Enum.reduce(turns, {socket, MapSet.new()}, fn turn, {acc, seen} ->
+        case transcript_items(turn) do
+          items when is_list(items) and items != [] ->
+            items
+            |> Enum.with_index()
+            |> Enum.reduce({acc, seen}, fn {item, index}, {item_acc, item_seen} ->
+              case Agent.edit_preview_identity(item, turn_id(turn)) do
+                nil ->
+                  {stream_transcript_item(item_acc, turn, item, index), item_seen}
 
-        _empty ->
-          acc
-          |> maybe_stream_transcript_user(turn)
-          |> maybe_stream_transcript_agent(turn)
+                identity ->
+                  if MapSet.member?(item_seen, identity) do
+                    {item_acc, item_seen}
+                  else
+                    {
+                      stream_transcript_item(item_acc, turn, item, index),
+                      MapSet.put(item_seen, identity)
+                    }
+                  end
+              end
+            end)
+
+          _empty ->
+            {
+              acc
+              |> maybe_stream_transcript_user(turn)
+              |> maybe_stream_transcript_agent(turn),
+              seen
+            }
+        end
+      end)
+
+    socket
+  end
+
+  defp replay_agent_transcript(socket, _turns), do: socket
+
+  # A same-tab sibling can attach after a turn has already emitted deltas and
+  # tool starts. Repaint the immutable Session snapshot using the same stable
+  # DOM ids as the live event path, then restore the open buffers so later
+  # deltas and the terminal event continue that turn instead of creating a
+  # second display-only copy.
+  defp replay_agent_current(socket, current) when is_map(current) do
+    turn_id = item_field(current, :turn_id) || item_field(current, :id)
+
+    if is_binary(turn_id) and turn_id != "" do
+      current = Map.put(current, :turn_id, turn_id)
+      items = current |> item_field(:items) |> List.wrap()
+
+      socket =
+        items
+        |> Enum.with_index()
+        |> Enum.reduce(socket, fn {item, index}, acc ->
+          stream_transcript_item(acc, current, item, index)
+        end)
+
+      socket =
+        restore_current_edit_preview(
+          socket,
+          turn_id,
+          item_field(current, :edit_preview)
+        )
+
+      pending_text = snapshot_text(item_field(current, :pending_text))
+      text_segment = snapshot_segment(item_field(current, :text_segment))
+      pending_reasoning = snapshot_text(item_field(current, :pending_reasoning))
+      reasoning_segment = snapshot_segment(item_field(current, :reasoning_segment))
+
+      socket
+      |> assign(:agent_turn_id, turn_id)
+      |> assign(:agent_text, pending_text)
+      |> assign(:agent_text_segment, text_segment)
+      |> assign(:agent_reasoning_text, pending_reasoning)
+      |> assign(:agent_reasoning_segment, reasoning_segment)
+      |> assign(:agent_reasoning_open?, pending_reasoning != "")
+      |> assign(
+        :agent_active_tools,
+        snapshot_active_tools(item_field(current, :active_tools))
+      )
+      |> assign(:agent_active_file_operations, snapshot_active_file_operations(items))
+      |> maybe_stream_current_reasoning(turn_id, pending_reasoning, reasoning_segment)
+      |> maybe_stream_current_text(turn_id, pending_text, text_segment)
+    else
+      socket
+    end
+  end
+
+  defp replay_agent_current(socket, _current), do: socket
+
+  defp restore_current_edit_preview(socket, turn_id, preview) when is_map(preview) do
+    path = item_field(preview, :path)
+
+    case inline_editor_preview_seed(socket, turn_id, path) do
+      nil ->
+        socket
+
+      seed ->
+        state =
+          Map.merge(seed, %{
+            edit_id: item_field(preview, :edit_id),
+            text: snapshot_text(item_field(preview, :text)),
+            delta_count: snapshot_delta_count(item_field(preview, :delta_count)),
+            status: :running
+          })
+
+        socket
+        |> assign(:agent_editor_preview, state)
+        |> stream_insert(:agent_items, agent_editor_preview_item(state))
+    end
+  end
+
+  defp restore_current_edit_preview(socket, _turn_id, _preview), do: socket
+
+  defp maybe_stream_current_text(socket, _turn_id, "", _segment), do: socket
+
+  defp maybe_stream_current_text(socket, turn_id, text, segment) do
+    stream_insert(
+      socket,
+      :agent_items,
+      agent_assistant_item(turn_id, text, :running, segment)
+    )
+  end
+
+  defp maybe_stream_current_reasoning(socket, _turn_id, "", _segment), do: socket
+
+  defp maybe_stream_current_reasoning(socket, turn_id, text, segment) do
+    stream_insert(
+      socket,
+      :agent_items,
+      agent_reasoning_item(turn_id, text, :running, segment)
+    )
+  end
+
+  defp snapshot_active_tools(tools) when is_map(tools) do
+    Enum.reduce(tools, %{}, fn {tool_call_id, tool}, acc ->
+      if is_binary(tool_call_id) and is_map(tool) do
+        name = item_field(tool, :name) || "tool"
+        args = item_field(tool, :args) || %{}
+
+        Map.put(acc, tool_call_id, %{
+          name: name,
+          kind: item_field(tool, :kind),
+          input: item_field(tool, :input) || agent_tool_payload(name, args),
+          args: args
+        })
+      else
+        acc
       end
     end)
   end
 
-  defp replay_local_agent_transcript(socket, _turns), do: socket
+  defp snapshot_active_tools(_tools), do: %{}
+
+  defp snapshot_active_file_operations(items) when is_list(items) do
+    items
+    |> Enum.with_index()
+    |> Enum.reduce(%{}, fn {item, index}, acc ->
+      role = item_field(item, :role) |> to_string()
+      operation = item_field(item, :operation) || item_field(item, :name)
+      status = transcript_status(item_field(item, :status))
+
+      if status == :running and
+           (role == "file_activity" or
+              (role == "tool" and operation in @acp_file_operation_names)) do
+        operation_id =
+          item_field(item, :file_operation_id) ||
+            item_field(item, :tool_call_id) ||
+            item_field(item, :id) || "current-#{index}"
+
+        activity = agent_file_activity_item(operation_id, item, %{}, :running)
+        Map.put(acc, operation_id, activity)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp snapshot_text(text) when is_binary(text), do: text
+  defp snapshot_text(_text), do: ""
+
+  defp snapshot_segment(segment) when is_integer(segment) and segment >= 0, do: segment
+  defp snapshot_segment(_segment), do: 0
+
+  defp snapshot_delta_count(count) when is_integer(count) and count >= 0, do: count
+  defp snapshot_delta_count(_count), do: 0
 
   defp transcript_items(%{items: items}) when is_list(items), do: items
   defp transcript_items(%{"items" => items}) when is_list(items), do: items
@@ -5983,7 +7686,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         picks = DocumentElementPicker.compact_picks(item_field(item, :picks))
 
         if body != "" or picks != [] do
-          stream_insert(socket, :local_agent_items, agent_user_item(turn_id, body, picks))
+          stream_insert(socket, :agent_items, agent_user_item(turn_id, body, picks))
         else
           socket
         end
@@ -5995,13 +7698,31 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
             stream_insert(
               socket,
-              :local_agent_items,
+              :agent_items,
               agent_assistant_item(turn_id, body, :sent, segment)
             )
 
           _empty ->
             socket
         end
+
+      "thinking" ->
+        case item_field(item, :body) do
+          body when is_binary(body) and body != "" ->
+            segment = item_field(item, :segment) |> transcript_segment(index)
+
+            stream_insert(
+              socket,
+              :agent_items,
+              agent_reasoning_item(turn_id, body, :sent, segment)
+            )
+
+          _empty ->
+            socket
+        end
+
+      "file_activity" ->
+        stream_transcript_file_activity(socket, turn_id, item, index)
 
       "tool" ->
         tool_call_id =
@@ -6010,20 +7731,32 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
             "#{turn_id}-#{index}"
 
         name = item_field(item, :name) || item_field(item, :title) || "tool"
-        input = agent_tool_body(name, item_field(item, :input))
-        output = agent_tool_body(name, item_field(item, :output))
-        body = tool_io_body(input, output) || agent_tool_body(name, item_field(item, :body))
 
-        stream_insert(
-          socket,
-          :local_agent_items,
-          agent_tool_item(
-            tool_call_id,
-            name,
-            transcript_status(item_field(item, :status)),
-            body
+        if name in @acp_file_operation_names do
+          item =
+            item
+            |> Map.put_new(:file_operation_id, tool_call_id)
+            |> Map.put_new(:operation, name)
+
+          stream_transcript_file_activity(socket, turn_id, item, index)
+        else
+          kind = item_field(item, :kind)
+          input = agent_tool_body(name, item_field(item, :input))
+          output = agent_tool_body(name, item_field(item, :output))
+          body = tool_io_body(input, output) || agent_tool_body(name, item_field(item, :body))
+
+          stream_insert(
+            socket,
+            :agent_items,
+            agent_tool_item(
+              tool_call_id,
+              name,
+              transcript_status(item_field(item, :status)),
+              body,
+              kind
+            )
           )
-        )
+        end
 
       "edit_preview" ->
         case transcript_edit_preview_item(socket, turn_id, item, index) do
@@ -6033,12 +7766,30 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
           preview ->
             socket
             |> replace_live_vfs_editor_preview(preview)
-            |> stream_insert(:local_agent_items, preview)
+            |> stream_insert(:agent_items, preview)
         end
 
       _other ->
         socket
     end
+  end
+
+  defp stream_transcript_file_activity(socket, turn_id, item, index) do
+    operation_id =
+      item_field(item, :file_operation_id) ||
+        item_field(item, :tool_call_id) ||
+        item_field(item, :id) ||
+        "#{turn_id}-#{index}"
+
+    activity =
+      agent_file_activity_item(
+        operation_id,
+        item,
+        %{},
+        transcript_status(item_field(item, :status))
+      )
+
+    stream_insert(socket, :agent_items, activity)
   end
 
   defp turn_id(%{turn_id: turn_id}), do: turn_id
@@ -6079,14 +7830,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp maybe_stream_transcript_user(socket, %{turn_id: turn_id, user: user})
        when is_binary(user) and user != "" do
-    stream_insert(socket, :local_agent_items, agent_user_item(turn_id, user))
+    stream_insert(socket, :agent_items, agent_user_item(turn_id, user))
   end
 
   defp maybe_stream_transcript_user(socket, _turn), do: socket
 
   defp maybe_stream_transcript_agent(socket, %{turn_id: turn_id, agent: agent})
        when is_binary(agent) and agent != "" do
-    stream_insert(socket, :local_agent_items, agent_assistant_item(turn_id, agent, :sent))
+    stream_insert(socket, :agent_items, agent_assistant_item(turn_id, agent, :sent))
   end
 
   defp maybe_stream_transcript_agent(socket, _turn), do: socket
@@ -6099,7 +7850,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         socket
 
       seed ->
-        state = socket.assigns[:local_agent_editor_preview]
+        state = socket.assigns[:agent_editor_preview]
 
         if state && state.turn_id == turn_id && state.document_id == seed.document_id do
           socket
@@ -6107,36 +7858,43 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
           state = Map.merge(seed, %{text: "", delta_count: 0, status: :running})
 
           socket
-          |> assign(:local_agent_editor_preview, state)
-          |> stream_insert(:local_agent_items, agent_editor_preview_item(state))
+          |> assign(:agent_editor_preview, state)
+          |> stream_insert(:agent_items, agent_editor_preview_item(state))
         end
     end
   end
 
   defp ensure_inline_editor_preview(socket, _turn_id, _path), do: socket
 
-  defp inline_editor_preview_accumulate_delta(socket, turn_id, delta, path)
+  defp inline_editor_preview_accumulate_delta(socket, turn_id, delta, path, edit_id)
        when is_binary(turn_id) and is_binary(delta) do
     socket = ensure_inline_editor_preview(socket, turn_id, path)
 
-    case socket.assigns[:local_agent_editor_preview] do
+    case socket.assigns[:agent_editor_preview] do
       %{turn_id: ^turn_id, document_id: document_id} = state when is_binary(document_id) ->
         text = preview_text_append(state.text, delta)
-        state = %{state | text: text, delta_count: state.delta_count + 1, status: :running}
+
+        state =
+          state
+          |> Map.put(:text, text)
+          |> Map.put(:delta_count, state.delta_count + 1)
+          |> Map.put(:status, :running)
+          |> Map.put(:edit_id, edit_id || Map.get(state, :edit_id))
 
         payload = %{
           turn_id: turn_id,
           document_id: document_id,
           delta: delta,
           text: text,
-          delta_count: state.delta_count
+          delta_count: state.delta_count,
+          edit_id: Map.get(state, :edit_id)
         }
 
         Process.send_after(self(), {:editor_preview_delta, payload}, 0)
 
         socket
-        |> assign(:local_agent_editor_preview, state)
-        |> stream_insert(:local_agent_items, agent_editor_preview_item(state))
+        |> assign(:agent_editor_preview, state)
+        |> stream_insert(:agent_items, agent_editor_preview_item(state))
         |> push_event("document.preview.delta_received", payload)
 
       _other ->
@@ -6144,16 +7902,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp inline_editor_preview_accumulate_delta(socket, _turn_id, _delta, _path), do: socket
+  defp inline_editor_preview_accumulate_delta(socket, _turn_id, _delta, _path, _edit_id),
+    do: socket
 
   defp finalize_inline_editor_preview(socket, turn_id, status) when is_binary(turn_id) do
-    case socket.assigns[:local_agent_editor_preview] do
+    case socket.assigns[:agent_editor_preview] do
       %{turn_id: ^turn_id} = state ->
         state = %{state | status: status}
 
         socket
-        |> assign(:local_agent_editor_preview, nil)
-        |> stream_insert(:local_agent_items, agent_editor_preview_item(state))
+        |> assign(:agent_editor_preview, nil)
+        |> stream_insert(:agent_items, agent_editor_preview_item(state))
 
       _other ->
         socket
@@ -6185,10 +7944,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         document_id: document_id,
         document: document,
         document_path: path || relative_path,
-        document_spec: local_document_spec(document),
-        canvas_id:
-          "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-canvas",
-        bytes_url: local_document_bytes_url(socket.assigns.workspace_path, relative_path)
+        document_spec: document_spec(document),
+        canvas_id: "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-canvas",
+        bytes_url: document_bytes_url(socket.assigns.workspace_path, relative_path)
       }
     else
       _other -> nil
@@ -6201,10 +7959,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       document_id: document.id,
       document: document,
       document_path: relative_path,
-      document_spec: local_document_spec(document),
-      canvas_id:
-        "local-agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-canvas",
-      bytes_url: local_document_bytes_url(socket.assigns.workspace_path, relative_path)
+      document_spec: document_spec(document),
+      canvas_id: "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-canvas",
+      bytes_url: document_bytes_url(socket.assigns.workspace_path, relative_path)
     }
   end
 
@@ -6244,36 +8001,146 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp preview_text_append(text, delta) do
     text = (text || "") <> delta
 
-    if String.length(text) <= @local_agent_editor_preview_max do
+    if String.length(text) <= @agent_editor_preview_max do
       text
     else
-      start = String.length(text) - @local_agent_editor_preview_max
-      "..." <> String.slice(text, start, @local_agent_editor_preview_max)
+      start = String.length(text) - @agent_editor_preview_max
+      "..." <> String.slice(text, start, @agent_editor_preview_max)
     end
   end
 
-  defp close_local_agent_text_segment(socket) do
-    socket = cancel_local_agent_text_flush(socket)
+  defp close_agent_text_segment(socket) do
+    socket = cancel_agent_text_flush(socket)
 
-    case socket.assigns.local_agent_text do
+    case socket.assigns.agent_text do
       text when is_binary(text) and text != "" ->
-        turn_id = socket.assigns.local_agent_turn_id
-        segment = socket.assigns.local_agent_text_segment
+        turn_id = socket.assigns.agent_turn_id
+        segment = socket.assigns.agent_text_segment
 
         socket
-        |> stream_insert(:local_agent_items, agent_assistant_item(turn_id, text, :sent, segment))
-        |> assign(:local_agent_text, "")
-        |> assign(:local_agent_text_segment, segment + 1)
+        |> stream_insert(:agent_items, agent_assistant_item(turn_id, text, :sent, segment))
+        |> assign(:agent_text, "")
+        |> assign(:agent_text_segment, segment + 1)
 
       _empty ->
         socket
     end
   end
 
-  defp split_local_agent_text_before_preview(socket) do
-    if is_binary(socket.assigns[:local_agent_turn_id]) do
+  defp ensure_agent_text_placeholder(socket) do
+    if socket.assigns.agent_text == "" do
+      stream_insert(
+        socket,
+        :agent_items,
+        agent_assistant_item(
+          socket.assigns.agent_turn_id,
+          "",
+          :running,
+          socket.assigns.agent_text_segment
+        )
+      )
+    else
       socket
-      |> close_local_agent_text_segment()
+    end
+  end
+
+  defp prepare_agent_reasoning_segment(socket, turn_id, segment) do
+    socket =
+      if socket.assigns.agent_reasoning_segment == segment do
+        socket
+      else
+        socket
+        |> cancel_agent_reasoning_flush()
+        |> assign(:agent_reasoning_text, "")
+        |> assign(:agent_reasoning_segment, segment)
+      end
+
+    if socket.assigns.agent_reasoning_text == "" do
+      stream_insert(
+        socket,
+        :agent_items,
+        agent_reasoning_item(turn_id, "", :pending, segment)
+      )
+    else
+      socket
+    end
+  end
+
+  defp close_agent_reasoning_segment(socket) do
+    socket = cancel_agent_reasoning_flush(socket)
+    turn_id = socket.assigns.agent_turn_id
+    segment = socket.assigns.agent_reasoning_segment
+
+    socket =
+      case socket.assigns.agent_reasoning_text do
+        text when is_binary(text) and text != "" ->
+          stream_insert(
+            socket,
+            :agent_items,
+            agent_reasoning_item(turn_id, text, :sent, segment)
+          )
+
+        _empty ->
+          stream_delete(
+            socket,
+            :agent_items,
+            agent_reasoning_item(turn_id, "", :pending, segment)
+          )
+      end
+
+    socket
+    |> assign(:agent_reasoning_text, "")
+    |> assign(:agent_reasoning_segment, segment + 1)
+    |> assign(:agent_reasoning_open?, false)
+  end
+
+  # The empty thinking placeholder stays hidden. Once reasoning has text, a
+  # debounced stream refresh makes the existing disclosure visible mid-turn.
+  defp schedule_agent_reasoning_flush(socket) do
+    if socket.assigns.agent_reasoning_flush_ref do
+      socket
+    else
+      ref = make_ref()
+
+      Process.send_after(
+        self(),
+        {:flush_agent_reasoning, ref},
+        @agent_reasoning_flush_ms
+      )
+
+      assign(socket, :agent_reasoning_flush_ref, ref)
+    end
+  end
+
+  defp flush_agent_reasoning(socket) do
+    socket = assign(socket, :agent_reasoning_flush_ref, nil)
+
+    case {socket.assigns.agent_turn_id, socket.assigns.agent_reasoning_text} do
+      {turn_id, text} when is_binary(turn_id) and text != "" ->
+        stream_insert(
+          socket,
+          :agent_items,
+          agent_reasoning_item(
+            turn_id,
+            text,
+            :running,
+            socket.assigns.agent_reasoning_segment
+          )
+        )
+
+      _empty ->
+        socket
+    end
+  end
+
+  defp cancel_agent_reasoning_flush(socket) do
+    assign(socket, :agent_reasoning_flush_ref, nil)
+  end
+
+  defp split_agent_text_before_preview(socket) do
+    if is_binary(socket.assigns[:agent_turn_id]) do
+      socket
+      |> close_agent_text_segment()
       |> maybe_remove_empty_agent_placeholder()
     else
       socket
@@ -6284,27 +8151,27 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # ref guards a flush that fires after the buffer was already finalized (tool
   # boundary / turn completion). Only one timer is outstanding; while it is
   # pending, new deltas extend the buffer and it renders the latest.
-  defp schedule_local_agent_text_flush(socket) do
-    if socket.assigns.local_agent_text_flush_ref do
+  defp schedule_agent_text_flush(socket) do
+    if socket.assigns.agent_text_flush_ref do
       socket
     else
       ref = make_ref()
-      Process.send_after(self(), {:flush_local_agent_text, ref}, @local_agent_text_flush_ms)
-      assign(socket, :local_agent_text_flush_ref, ref)
+      Process.send_after(self(), {:flush_agent_text, ref}, @agent_text_flush_ms)
+      assign(socket, :agent_text_flush_ref, ref)
     end
   end
 
-  defp flush_local_agent_text(socket) do
-    socket = assign(socket, :local_agent_text_flush_ref, nil)
+  defp flush_agent_text(socket) do
+    socket = assign(socket, :agent_text_flush_ref, nil)
 
-    case socket.assigns.local_agent_text do
+    case socket.assigns.agent_text do
       text when is_binary(text) and text != "" ->
-        turn_id = socket.assigns.local_agent_turn_id
-        segment = socket.assigns.local_agent_text_segment
+        turn_id = socket.assigns.agent_turn_id
+        segment = socket.assigns.agent_text_segment
 
         stream_insert(
           socket,
-          :local_agent_items,
+          :agent_items,
           agent_assistant_item(turn_id, text, :running, segment)
         )
 
@@ -6313,28 +8180,21 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp cancel_local_agent_text_flush(socket) do
-    assign(socket, :local_agent_text_flush_ref, nil)
-  end
-
-  defp maybe_remove_empty_reasoning(socket, turn_id) do
-    case socket.assigns.local_agent_reasoning_text do
-      "" -> stream_delete(socket, :local_agent_items, agent_reasoning_item(turn_id, "", :pending))
-      _text -> socket
-    end
+  defp cancel_agent_text_flush(socket) do
+    assign(socket, :agent_text_flush_ref, nil)
   end
 
   defp maybe_remove_empty_agent_placeholder(socket) do
-    case socket.assigns.local_agent_text do
+    case socket.assigns.agent_text do
       "" ->
         stream_delete(
           socket,
-          :local_agent_items,
+          :agent_items,
           agent_assistant_item(
-            socket.assigns.local_agent_turn_id,
+            socket.assigns.agent_turn_id,
             "",
             :running,
-            socket.assigns.local_agent_text_segment
+            socket.assigns.agent_text_segment
           )
         )
 
@@ -6346,8 +8206,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp maybe_stream_final_agent_text(socket, turn_id, text) when is_binary(text) and text != "" do
     stream_insert(
       socket,
-      :local_agent_items,
-      agent_assistant_item(turn_id, text, :sent, socket.assigns.local_agent_text_segment)
+      :agent_items,
+      agent_assistant_item(turn_id, text, :sent, socket.assigns.agent_text_segment)
     )
   end
 
@@ -6363,7 +8223,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
        when pending in [nil, ""] do
     stream_delete(
       socket,
-      :local_agent_items,
+      :agent_items,
       agent_assistant_item(turn_id, "", :running, segment)
     )
   end
@@ -6384,13 +8244,13 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     if is_binary(partial_text) and partial_text != "" do
       stream_insert(
         socket,
-        :local_agent_items,
+        :agent_items,
         agent_assistant_item(turn_id, partial_text, :sent, segment)
       )
     else
       stream_delete(
         socket,
-        :local_agent_items,
+        :agent_items,
         agent_assistant_item(turn_id, "", :running, segment)
       )
     end
@@ -6409,28 +8269,46 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # stuck on "running" forever. On every turn terminal, flip any still-tracked
   # in-flight tool_calls to :failed.
   defp finalize_dangling_tools(socket, reason) do
-    active = socket.assigns[:local_agent_active_tools] || %{}
+    active = socket.assigns[:agent_active_tools] || %{}
+    active_file_operations = socket.assigns[:agent_active_file_operations] || %{}
 
     socket =
       Enum.reduce(active, socket, fn {tool_call_id, tool}, acc ->
         name = active_tool_name(tool)
         input = active_tool_input(tool)
+        kind = active_tool_kind(tool)
 
         stream_insert(
           acc,
-          :local_agent_items,
-          agent_tool_item(tool_call_id, name, :failed, tool_io_body(input, reason))
+          :agent_items,
+          agent_tool_item(tool_call_id, name, :failed, tool_io_body(input, reason), kind)
         )
       end)
 
-    assign(socket, :local_agent_active_tools, %{})
+    socket =
+      Enum.reduce(active_file_operations, socket, fn {operation_id, activity}, acc ->
+        stream_insert(
+          acc,
+          :agent_items,
+          agent_file_activity_item(
+            operation_id,
+            %{reason: "Turn ended before the file operation finished."},
+            activity,
+            :failed
+          )
+        )
+      end)
+
+    socket
+    |> assign(:agent_active_tools, %{})
+    |> assign(:agent_active_file_operations, %{})
   end
 
   # ── inline chat: stream item builders ──────────────────────────────
 
   defp agent_user_item(turn_id, body, picks \\ []) do
     %{
-      dom_id: "local-agent-user-#{turn_id}",
+      dom_id: "agent-user-#{turn_id}",
       role: :user,
       status: :sent,
       body: body,
@@ -6448,31 +8326,116 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     }
   end
 
-  defp agent_reasoning_item(turn_id, body, status) do
+  defp agent_reasoning_item(turn_id, body, status, segment) do
     %{
-      dom_id: agent_reasoning_dom_id(turn_id),
+      dom_id: agent_reasoning_dom_id(turn_id, segment),
       role: :thinking,
       status: status,
       title: "Thinking",
-      body: body
+      body: body,
+      segment: segment
     }
   end
 
-  defp agent_tool_item(tool_call_id, name, status, body) do
+  defp agent_tool_item(tool_call_id, name, status, body, kind) do
     %{
-      dom_id: "local-agent-tool-#{tool_call_id}",
+      dom_id: "agent-tool-#{tool_call_id}",
       role: :tool,
       title: name,
+      kind: kind,
       status: status,
       body: body || ""
     }
   end
 
+  defp agent_file_activity_item(operation_id, event, active, status) do
+    operation =
+      file_activity_value(event, :operation) ||
+        file_activity_value(event, :name) ||
+        item_field(active, :operation) || "file_operation"
+
+    path = file_activity_value(event, :path) || item_field(active, :path)
+    query = file_activity_value(event, :query) || item_field(active, :query)
+    reason = file_activity_value(event, :reason) || item_field(active, :reason)
+    result = item_field(event, :result) || item_field(active, :result)
+
+    %{
+      dom_id: "agent-file-#{dom_token(operation_id)}",
+      role: :file_activity,
+      file_operation_id: operation_id,
+      operation: to_string(operation),
+      path: normalize_file_activity_text(path),
+      query: normalize_file_activity_text(query),
+      reason: normalize_file_activity_text(reason),
+      result: result,
+      status: status
+    }
+  end
+
+  defp file_operation_id(event) do
+    case file_activity_value(event, :file_operation_id) ||
+           file_activity_value(event, :tool_call_id) ||
+           file_activity_value(event, :id) do
+      id when is_binary(id) and id != "" ->
+        id
+
+      id when not is_nil(id) ->
+        to_string(id)
+
+      _missing ->
+        fingerprint =
+          {
+            file_activity_value(event, :operation) || file_activity_value(event, :name),
+            file_activity_value(event, :path),
+            file_activity_value(event, :query),
+            file_activity_value(event, :turn_id)
+          }
+          |> :erlang.phash2()
+
+        "activity-#{fingerprint}"
+    end
+  end
+
+  defp file_activity_value(map, key) when is_map(map) do
+    item_field(map, key) ||
+      Enum.find_value([:arguments, :args, :input], fn container_key ->
+        map
+        |> item_field(container_key)
+        |> file_activity_container_value(key)
+      end)
+  end
+
+  defp file_activity_value(_map, _key), do: nil
+
+  defp file_activity_container_value(container, key) when is_map(container),
+    do: item_field(container, key)
+
+  defp file_activity_container_value(container, key) when is_binary(container) do
+    case Jason.decode(container) do
+      {:ok, decoded} when is_map(decoded) -> item_field(decoded, key)
+      _other -> nil
+    end
+  end
+
+  defp file_activity_container_value(_container, _key), do: nil
+
+  defp normalize_file_activity_text(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> case do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp normalize_file_activity_text(nil), do: nil
+  defp normalize_file_activity_text(value), do: inspect(value)
+
   defp agent_editor_preview_item(state) do
     %{
       dom_id:
         Map.get(state, :dom_id) ||
-          "local-agent-editor-preview-#{state.turn_id}-#{dom_token(state.document_id)}",
+          "agent-editor-preview-#{state.turn_id}-#{dom_token(state.document_id)}",
       role: :editor_preview,
       status: state.status,
       turn_id: state.turn_id,
@@ -6488,8 +8451,249 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       preview_steps: Map.get(state, :preview_steps, []),
       scroll: Map.get(state, :scroll, %{scroll_top: 0, scroll_left: 0}),
       marker: Map.get(state, :marker, ""),
-      summary: Map.get(state, :summary, "")
+      summary: Map.get(state, :summary, ""),
+      edit_id: Map.get(state, :edit_id),
+      preview_snapshot: Map.get(state, :preview_snapshot),
+      preview_identity: Map.get(state, :preview_identity),
+      preview_unavailable: Map.get(state, :preview_unavailable, false),
+      preview_error: Map.get(state, :preview_error),
+      provisional: Map.get(state, :provisional, false)
     }
+  end
+
+  defp maybe_compose_doc_edit_preview(
+         socket,
+         turn_id,
+         tool_call_id,
+         "doc.edit",
+         args,
+         result
+       )
+       when is_binary(turn_id) and turn_id != "" and is_binary(tool_call_id) and
+              tool_call_id != "" and is_map(args) do
+    with %{} = op <- doc_edit_primary_op(args),
+         "insert_picture" <- item_field(op, :op),
+         {:ok, path} <- resolve_edit_doc_path(socket, args),
+         {:ok, %{document: document, relative_path: relative_path}} <-
+           vfs_preview_document(socket, path),
+         {:ok, descriptor, index} <-
+           persisted_vfs_edit_preview(socket, turn_id, document.id, relative_path) do
+      {descriptor, changed?} =
+        compose_picture_edit_descriptor(descriptor, tool_call_id, op, result)
+
+      with :ok <- maybe_persist_composed_edit_preview(socket, descriptor, changed?),
+           %{} = preview <- transcript_edit_preview_item(socket, turn_id, descriptor, index) do
+        {:ok, preview}
+      else
+        nil -> {:error, :preview_unavailable}
+        {:error, _reason} = error -> error
+        other -> {:error, other}
+      end
+    else
+      :not_applicable -> :not_applicable
+      {:error, _reason} = error -> error
+      _other -> :not_applicable
+    end
+  end
+
+  defp maybe_compose_doc_edit_preview(
+         _socket,
+         _turn_id,
+         _tool_call_id,
+         _name,
+         _args,
+         _result
+       ),
+       do: :not_applicable
+
+  defp persisted_vfs_edit_preview(socket, turn_id, document_id, relative_path) do
+    case socket.assigns[:agent_vfs_preview_item] do
+      %{role: :editor_preview} = live_preview ->
+        if item_field(live_preview, :turn_id) == turn_id and
+             item_field(live_preview, :document_id) == document_id and
+             item_field(live_preview, :document_path) == relative_path do
+          with session_id when is_binary(session_id) and session_id != "" <-
+                 socket.assigns[:agent_session_id],
+               identity when not is_nil(identity) <-
+                 live_edit_preview_identity(live_preview, turn_id) do
+            snapshot = ACP.agent_snapshot(session_id)
+
+            snapshot
+            |> edit_preview_turn_items(turn_id)
+            |> Enum.with_index()
+            |> Enum.find_value(fn {item, index} ->
+              if item_field(item, :role) |> to_string() == "edit_preview" and
+                   item_field(item, :document_id) == document_id and
+                   item_field(item, :document_path) == relative_path and
+                   Agent.edit_preview_identity(item, turn_id) == identity do
+                {:ok, item, index}
+              end
+            end)
+            |> case do
+              {:ok, _item, _index} = found -> found
+              _other -> {:error, :persisted_preview_not_found}
+            end
+          else
+            _other -> {:error, :live_preview_identity_mismatch}
+          end
+        else
+          :not_applicable
+        end
+
+      _other ->
+        :not_applicable
+    end
+  rescue
+    _error -> {:error, :preview_snapshot_unavailable}
+  catch
+    :exit, _reason -> {:error, :preview_snapshot_unavailable}
+  end
+
+  defp live_edit_preview_identity(live_preview, turn_id) do
+    Agent.edit_preview_identity(
+      %{
+        role: :edit_preview,
+        turn_id: item_field(live_preview, :turn_id),
+        edit_id: item_field(live_preview, :edit_id),
+        document_id: item_field(live_preview, :document_id),
+        preview_snapshot: item_field(live_preview, :preview_snapshot),
+        preview_unavailable: item_field(live_preview, :preview_unavailable)
+      },
+      turn_id
+    )
+  end
+
+  defp edit_preview_turn_items(snapshot, turn_id) when is_map(snapshot) do
+    current = Map.get(snapshot, :current_turn)
+
+    turn =
+      if item_field(current, :turn_id) == turn_id do
+        current
+      else
+        Enum.find(
+          Map.get(snapshot, :transcript, []),
+          &(item_field(&1, :turn_id) == turn_id)
+        )
+      end
+
+    case item_field(turn, :items) do
+      items when is_list(items) -> items
+      _other -> []
+    end
+  end
+
+  defp edit_preview_turn_items(_snapshot, _turn_id), do: []
+
+  defp compose_picture_edit_descriptor(descriptor, tool_call_id, op, result) do
+    composed_tool_call_ids =
+      descriptor
+      |> item_field(:composed_tool_call_ids)
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+
+    if tool_call_id in composed_tool_call_ids do
+      {descriptor, false}
+    else
+      highlights = List.wrap(item_field(descriptor, :highlights))
+      highlights = highlights ++ [doc_edit_picture_highlight(op, result)]
+      applied = persisted_edit_applied(descriptor) + doc_edit_delta_count(result)
+
+      descriptor =
+        descriptor
+        |> Map.put(:applied, applied)
+        |> Map.put(
+          :ops,
+          List.wrap(item_field(descriptor, :ops)) ++ [strip_transient_preview_bytes(op)]
+        )
+        |> Map.put(:highlights, highlights)
+        |> Map.put(:hash, edit_preview_hash(highlights))
+        |> Map.put(:composed_tool_call_ids, composed_tool_call_ids ++ [tool_call_id])
+
+      {descriptor, true}
+    end
+  end
+
+  defp persisted_edit_applied(descriptor) do
+    case item_field(descriptor, :applied) do
+      applied when is_integer(applied) and applied >= 0 -> applied
+      _other -> 0
+    end
+  end
+
+  defp maybe_persist_composed_edit_preview(_socket, _descriptor, false), do: :ok
+
+  defp maybe_persist_composed_edit_preview(socket, descriptor, true) do
+    case socket.assigns[:agent_session_id] do
+      session_id when is_binary(session_id) and session_id != "" ->
+        ACP.append_transcript_item(session_id, descriptor)
+
+      _other ->
+        {:error, :agent_session_unavailable}
+    end
+  end
+
+  defp doc_edit_picture_highlight(op, result) do
+    %{
+      "kind" => "picture",
+      "op" => "insert_picture",
+      "ref" => doc_edit_picture_highlight_ref(op, result),
+      "text" => doc_edit_picture_marker(op)
+    }
+  end
+
+  defp doc_edit_picture_highlight_ref(op, result) do
+    ref = op |> item_field(:ref) |> decode_doc_edit_ref()
+
+    case doc_edit_inserted_control(result) do
+      {:ok, paragraph, control} ->
+        %{
+          "section" => item_field(ref, :section) || 0,
+          "paragraph" => paragraph,
+          "control" => control,
+          "type" => "picture"
+        }
+
+      :error when is_map(ref) ->
+        Map.put(ref, "type", "picture")
+
+      :error ->
+        ref
+    end
+  end
+
+  defp doc_edit_inserted_control(result) when is_map(result) do
+    result = item_field(result, :structuredContent) || result
+
+    candidate =
+      case item_field(result, :native) do
+        [first | _rest] when is_map(first) -> item_field(first, :extra) || first
+        _other -> item_field(result, :extra) || result
+      end
+
+    paragraph = item_field(candidate, :paraIdx)
+    control = item_field(candidate, :controlIdx)
+
+    if is_integer(paragraph) and is_integer(control),
+      do: {:ok, paragraph, control},
+      else: :error
+  end
+
+  defp doc_edit_inserted_control(_result), do: :error
+
+  defp decode_doc_edit_ref(ref) when is_binary(ref) do
+    case Jason.decode(ref) do
+      {:ok, decoded} when is_map(decoded) -> decoded
+      _other -> ref
+    end
+  end
+
+  defp decode_doc_edit_ref(ref), do: ref
+
+  defp doc_edit_picture_marker(op) do
+    case item_field(op, :src) do
+      src when is_binary(src) and src != "" -> Path.basename(src)
+      _other -> "picture"
+    end
   end
 
   # Build the document-renderer preview for a completed doc.edit. nil for
@@ -6508,16 +8712,16 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       highlights = doc_edit_preview_highlights(op, marker)
 
       state = %{
-        dom_id: "local-agent-docedit-preview-#{dom_token(tool_call_id)}",
+        dom_id: "agent-docedit-preview-#{dom_token(tool_call_id)}",
         turn_id: tool_call_id,
         document_id: document.id,
         document: document,
         document_path: relative_path,
-        document_spec: local_document_spec(document),
-        canvas_id: "local-agent-docedit-preview-#{dom_token(tool_call_id)}-canvas",
+        document_spec: document_spec(document),
+        canvas_id: "agent-docedit-preview-#{dom_token(tool_call_id)}-canvas",
         bytes_url:
           socket.assigns.workspace_path
-          |> local_document_bytes_url(relative_path)
+          |> document_bytes_url(relative_path)
           |> cache_bust_url(),
         text: "",
         delta_count: doc_edit_delta_count(result),
@@ -6656,6 +8860,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp active_tool_input(%{input: input}), do: input
   defp active_tool_input(_tool), do: nil
 
+  defp active_tool_kind(%{kind: kind}), do: kind
+  defp active_tool_kind(_tool), do: nil
+
   defp tool_io_body(input, output) do
     parts =
       []
@@ -6672,21 +8879,24 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp maybe_tool_io_part(parts, _label, ""), do: parts
   defp maybe_tool_io_part(parts, label, body), do: parts ++ ["#{label}:\n#{body}"]
 
-  defp agent_assistant_dom_id(turn_id, segment), do: "local-agent-assistant-#{turn_id}-#{segment}"
-  defp agent_reasoning_dom_id(turn_id), do: "local-agent-thinking-#{turn_id}"
+  defp agent_assistant_dom_id(turn_id, segment), do: "agent-assistant-#{turn_id}-#{segment}"
+
+  defp agent_reasoning_dom_id(turn_id, segment),
+    do: "agent-thinking-#{turn_id}-#{segment}"
 
   # Stream dom_id resolver — PUBLIC so it can be captured as `&__MODULE__.../1` in
   # stream_configure (mount/3). Named captures survive dev hot-reloads, unlike
   # anonymous closures compiled into this module.
   @doc false
-  def local_agent_item_dom_id(%{dom_id: dom_id}), do: dom_id
+  def agent_item_dom_id(%{dom_id: dom_id}), do: dom_id
 
   # ── inline chat: stream item view extractors ───────────────────────
 
-  defp agent_item_data_role(%{role: :tool}), do: "local-agent-tool"
-  defp agent_item_data_role(%{role: :thinking}), do: "local-agent-thinking"
-  defp agent_item_data_role(%{role: :editor_preview}), do: "local-agent-editor-preview"
-  defp agent_item_data_role(_item), do: "local-agent-message"
+  defp agent_item_data_role(%{role: :tool}), do: "agent-tool"
+  defp agent_item_data_role(%{role: :file_activity}), do: "file-activity"
+  defp agent_item_data_role(%{role: :thinking}), do: "agent-thinking"
+  defp agent_item_data_role(%{role: :editor_preview}), do: "agent-editor-preview"
+  defp agent_item_data_role(_item), do: "agent-message"
 
   defp agent_item_role(%{role: role}), do: to_string(role)
   defp agent_item_role(_item), do: "agent"
@@ -6718,6 +8928,86 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp agent_item_title(%{title: title}) when is_binary(title), do: title
   defp agent_item_title(_item), do: "Tool"
 
+  defp agent_item_operation_kind(%{kind: kind}) when kind in [:execute, "execute"],
+    do: "shell"
+
+  defp agent_item_operation_kind(item) do
+    if shell_tool_name?(agent_item_title(item)), do: "shell", else: "tool"
+  end
+
+  defp agent_item_operation_icon(item) do
+    case agent_item_operation_kind(item) do
+      "shell" -> "hero-command-line"
+      _tool -> "hero-wrench-screwdriver"
+    end
+  end
+
+  defp agent_item_operation_label(item) do
+    case agent_item_operation_kind(item) do
+      "shell" -> "Shell"
+      _tool -> "Tool"
+    end
+  end
+
+  defp file_activity_kind(item) do
+    case item_field(item, :operation) do
+      "read_text_file" -> "read"
+      "search_text_file" -> "search"
+      "edit_text_file" -> "edit"
+      _other -> "file"
+    end
+  end
+
+  defp file_activity_label(item) do
+    case file_activity_kind(item) do
+      "read" -> "Read"
+      "search" -> "Search"
+      "edit" -> "Edit"
+      _other -> "File"
+    end
+  end
+
+  defp file_activity_icon(item) do
+    case file_activity_kind(item) do
+      "read" -> "hero-document-text"
+      "search" -> "hero-magnifying-glass"
+      "edit" -> "hero-pencil-square"
+      _other -> "hero-document"
+    end
+  end
+
+  defp file_activity_detail(item) do
+    path = item_field(item, :path)
+    query = item_field(item, :query)
+
+    reason =
+      if agent_item_status(item) == "failed" do
+        item_field(item, :reason)
+      end
+
+    [path, file_activity_query_detail(query), brief_file_activity_reason(reason)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
+    |> case do
+      "" -> "file"
+      detail -> detail
+    end
+  end
+
+  defp file_activity_query_detail(query) when is_binary(query) and query != "",
+    do: ~s(“#{query}”)
+
+  defp file_activity_query_detail(_query), do: nil
+
+  defp brief_file_activity_reason(reason) when is_binary(reason) and reason != "",
+    do: String.slice(reason, 0, 120)
+
+  defp brief_file_activity_reason(_reason), do: nil
+
+  defp shell_tool_name?(name) when is_binary(name) do
+    String.downcase(name) in ["bash", "shell", "exec_command", "functions.exec_command"]
+  end
+
   defp agent_item_body(%{body: body}) when is_binary(body), do: body
   defp agent_item_body(_item), do: ""
 
@@ -6725,6 +9015,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp agent_item_picks(_item), do: []
 
   defp agent_editor_preview_document(%{document: document}), do: document
+
+  defp agent_editor_preview_unavailable?(%{preview_unavailable: true}), do: true
+  defp agent_editor_preview_unavailable?(_item), do: false
 
   defp agent_editor_preview_state(item) do
     document = agent_editor_preview_document(item)
@@ -6768,7 +9061,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp agent_editor_preview_spec(_item), do: nil
 
   defp agent_editor_preview_canvas_id(%{canvas_id: id}) when is_binary(id), do: id
-  defp agent_editor_preview_canvas_id(_item), do: "local-agent-editor-preview"
+  defp agent_editor_preview_canvas_id(_item), do: "agent-editor-preview"
 
   defp agent_editor_preview_bytes_url(%{bytes_url: url}) when is_binary(url), do: url
   defp agent_editor_preview_bytes_url(_item), do: nil
@@ -6836,10 +9129,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp agent_item_status_label(_item), do: ""
 
   defp agent_item_class(%{role: :user}) do
-    "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5 self-end"
+    "group/message relative mt-2 flex min-w-0 w-full flex-col items-stretch gap-0.5 self-end"
   end
 
   defp agent_item_class(%{role: :tool}) do
+    "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5"
+  end
+
+  defp agent_item_class(%{role: :file_activity}) do
     "group/message relative flex min-w-0 w-full flex-col items-stretch gap-0.5"
   end
 
@@ -6868,20 +9165,20 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp agent_status_label(:failed), do: "Failed"
   defp agent_status_label(_status), do: "Idle"
 
-  defp local_agent_rail_title(%{title: title}) when is_binary(title) and title != "" do
+  defp agent_rail_title(%{title: title}) when is_binary(title) and title != "" do
     title
   end
 
-  defp local_agent_rail_title(_rail), do: default_local_agent_title()
+  defp agent_rail_title(_rail), do: default_agent_title()
 
-  defp local_agent_rail_meta(%{provider: provider, status: status}) do
+  defp agent_rail_meta(%{provider: provider, status: status}) do
     [provider_label(provider), agent_status_label(status)]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join(" / ")
   end
 
-  defp local_agent_rail_meta(%{status: status}), do: agent_status_label(status)
-  defp local_agent_rail_meta(_rail), do: agent_status_label(:idle)
+  defp agent_rail_meta(%{status: status}), do: agent_status_label(status)
+  defp agent_rail_meta(_rail), do: agent_status_label(:idle)
 
   defp provider_label(provider) when is_binary(provider) and provider != "" do
     provider
@@ -6895,59 +9192,59 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   # ── inline chat: forms / title ─────────────────────────────────────
 
-  defp local_agent_form(params \\ %{"message" => ""}) do
+  defp agent_form(params \\ %{"message" => ""}) do
     to_form(params, as: :agent)
   end
 
-  defp local_agent_title_form(title \\ default_local_agent_title()) do
-    to_form(%{"title" => local_agent_title(title)}, as: :local_agent_title)
+  defp agent_title_form(title \\ default_agent_title()) do
+    to_form(%{"title" => agent_title(title)}, as: :agent_title)
   end
 
-  defp assign_local_agent_title(socket, title) do
-    title = local_agent_title(title)
+  defp assign_agent_title(socket, title) do
+    title = agent_title(title)
 
     socket
-    |> assign(:local_agent_title, title)
-    |> assign(:local_agent_title_form, local_agent_title_form(title))
+    |> assign(:agent_title, title)
+    |> assign(:agent_title_form, agent_title_form(title))
   end
 
-  defp local_agent_title(title) when is_binary(title) do
+  defp agent_title(title) when is_binary(title) do
     title |> String.trim() |> String.slice(0, 120)
   end
 
-  defp local_agent_title(_title), do: ""
+  defp agent_title(_title), do: ""
 
-  defp default_local_agent_title, do: "New Chat"
+  defp default_agent_title, do: "New Chat"
 
   # ── inline chat: error mapping ─────────────────────────────────────
 
-  defp local_agent_error({:codex_executable_missing, candidates}) do
+  defp agent_error({:codex_executable_missing, candidates}) do
     "Codex ACP unavailable. Install one of: #{Enum.join(candidates, ", ")}."
   end
 
-  defp local_agent_error({:claude_executable_missing, candidates}) do
+  defp agent_error({:claude_executable_missing, candidates}) do
     "Claude unavailable. Install one of: #{Enum.join(candidates, ", ")}."
   end
 
-  defp local_agent_error("{:codex_executable_missing" <> _reason) do
+  defp agent_error("{:codex_executable_missing" <> _reason) do
     "Codex ACP unavailable. Install codex-acp or codex, then refresh agent chat."
   end
 
-  defp local_agent_error("{:claude_executable_missing" <> _reason) do
+  defp agent_error("{:claude_executable_missing" <> _reason) do
     "Claude unavailable. Install and authenticate Claude CLI, then refresh agent chat."
   end
 
-  defp local_agent_error("{:unsupported_provider, \"fake\"" <> _reason) do
+  defp agent_error("{:unsupported_provider, \"fake\"" <> _reason) do
     "Selected provider is disabled. Choose Codex or Claude."
   end
 
-  defp local_agent_error(:acp_unavailable) do
+  defp agent_error(:acp_unavailable) do
     "Local agent runtime unavailable. Refresh the workspace."
   end
 
   # ExMCP.ACP adapter failures arrive as inspected strings; map the common
   # provider-startup failures onto the same friendly guidance.
-  defp local_agent_error(reason) when is_binary(reason) do
+  defp agent_error(reason) when is_binary(reason) do
     cond do
       acp_codex_unavailable?(reason) ->
         "Codex ACP unavailable. Install codex, then refresh agent chat."
@@ -6960,7 +9257,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp local_agent_error(reason), do: inspect(reason)
+  defp agent_error(reason), do: inspect(reason)
 
   defp acp_codex_unavailable?(reason) do
     (String.contains?(reason, "executable_not_found") or

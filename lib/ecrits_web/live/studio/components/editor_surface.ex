@@ -10,6 +10,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   alias Ecrits.DocumentSearch
   alias Ecrits.EditorPreviewState
   alias Ecrits.EditorSurfaceState
+  alias Ecrits.ToolbarMenu
   alias EcritsWeb.Live.Studio.Components.Canvas.HwpPages
   alias EcritsWeb.Live.Studio.Components.Canvas.MarkdownEditor
   alias EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm
@@ -53,7 +54,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   attr :state, :any, required: true
   attr :hwp_pages, :any, required: true
 
-  def local_document(%{state: %EditorSurfaceState{}} = assigns) do
+  def document(%{state: %EditorSurfaceState{}} = assigns) do
     state = assigns.state
 
     assigns =
@@ -92,7 +93,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
     ~H"""
     <div
       id={@shell_id}
-      data-component="studio-local-document-surface"
+      data-component="studio-document-surface"
       data-search-state={DocumentSearch.encode(@state.document_search, @state.document)}
       phx-hook=".DocumentSearchBridge"
       phx-window-keydown="document.save.requested"
@@ -123,7 +124,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 role="group"
                 aria-label="Open documents"
                 data-role="document-tabs"
-                class="flex min-w-0 flex-1 items-stretch overflow-hidden"
+                class="flex min-w-0 flex-1 items-stretch overflow-x-auto overflow-y-hidden"
               >
                 <div
                   :for={tab <- @state.open_documents}
@@ -134,7 +135,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                   data-active={to_string(tab.id == @state.active_document_id)}
                   title={tab.path}
                   class={[
-                    "group flex min-w-0 shrink items-stretch border-r border-base-300 max-w-[15rem] text-[13px] leading-none transition-colors border-b-2",
+                    "group flex min-w-0 shrink-0 items-stretch border-r border-base-300 max-w-[15rem] text-[13px] leading-none transition-colors border-b-2",
                     if(tab.id == @state.active_document_id,
                       do: "bg-base-100 text-base-content font-medium border-b-primary",
                       else:
@@ -178,7 +179,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
 
               <div class="ml-auto inline-flex min-w-0 shrink-0 items-center justify-end gap-1.5 pl-2 pr-3">
                 <span
-                  id="local-rhwp-save-state"
+                  id="rhwp-save-state"
                   class="hidden max-w-48 truncate text-xs text-base-content/55 2xl:inline"
                   title={@state.save_state}
                 >
@@ -186,12 +187,12 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 </span>
 
                 <button
-                  id="local-document-element-picker"
+                  id="document-element-picker"
                   type="button"
                   phx-click="document.element_picker.toggle"
                   class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-transparent text-base-content/60 transition-colors hover:border-base-content/15 hover:bg-base-200 hover:text-base-content focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cs-blue)] data-[active=true]:border-[var(--cs-blue)] data-[active=true]:bg-[color-mix(in_oklab,var(--cs-blue)_12%,transparent)] data-[active=true]:text-[var(--cs-blue)]"
                   aria-label="Pick document element"
-                  aria-controls="local-editor-shell local-agent-input"
+                  aria-controls="editor-shell agent-input"
                   aria-pressed={to_string(@state.document_element_picker.enabled?)}
                   data-active={to_string(@state.document_element_picker.enabled?)}
                   data-role="document-element-picker-toggle"
@@ -201,12 +202,12 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 </button>
 
                 <button
-                  id="local-rhwp-fullscreen"
+                  id="rhwp-fullscreen"
                   type="button"
                   phx-click="workspace.editor_fullscreen.toggle"
                   class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
                   aria-label="Toggle fullscreen"
-                  aria-controls="local-editor-shell local-file-tree-panel local-agent-sidebar"
+                  aria-controls="editor-shell file-tree-panel agent-sidebar"
                   aria-pressed={to_string(@state.workspace_layout.editor_fullscreen?)}
                   data-role="editor-fullscreen-toggle"
                   title="Toggle fullscreen"
@@ -238,10 +239,10 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
             </header>
             <div
               :if={@state.document}
-              id="local-document-quick-toolbar"
+              id="document-quick-toolbar"
               phx-hook=".EditorToolbarBridge"
-              data-role="local-editor-toolbar"
-              class="flex h-9 items-center gap-0.5 overflow-x-auto border-b border-base-300 bg-base-100 px-2"
+              data-role="editor-toolbar"
+              class="flex min-h-9 flex-wrap content-center items-center gap-x-0.5 gap-y-0.5 border-b border-base-300 bg-base-100 px-2 py-1"
             >
               <button
                 type="button"
@@ -296,80 +297,61 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 :if={not markdown_format?(@state.document.format)}
                 aria-hidden="true"
                 class="mx-1 h-4 w-px shrink-0 self-center bg-base-300"
-              >
-              </span>
-              <details
+              ></span>
+              <.toolbar_menu
+                :let={popup}
                 :if={not markdown_format?(@state.document.format)}
-                id="editor-toolbar-style-menu"
-                data-toolbar-menu
-                class="relative flex shrink-0"
+                menu={toolbar_menu_spec(:style)}
               >
-                <summary
-                  aria-label="Paragraph style"
-                  title="Paragraph style"
-                  class={quick_toolbar_select_class("w-24")}
-                >
+                <:trigger>
                   <span class="min-w-0 flex-1 truncate text-left">
                     {toolbar_style_label(@state.editor_toolbar.named_style)}
                   </span>
                   <.icon name="hero-chevron-down" class="size-3 shrink-0 opacity-55" />
-                </summary>
-                <div
-                  role="menu"
-                  aria-label="Paragraph style"
-                  class={quick_toolbar_menu_class("w-48")}
+                </:trigger>
+                <button
+                  :for={{style, label, icon} <- named_styles()}
+                  type="button"
+                  role="menuitem"
+                  popovertarget={popup}
+                  popovertargetaction="hide"
+                  data-command="named-style-set"
+                  phx-click="document.toolbar.command"
+                  phx-value-command="named-style-set"
+                  phx-value-style={style}
+                  class={quick_toolbar_menu_item_class()}
                 >
-                  <button
-                    :for={{style, label, icon} <- named_styles()}
-                    type="button"
-                    role="menuitem"
-                    data-command="named-style-set"
-                    phx-click="document.toolbar.command"
-                    phx-value-command="named-style-set"
-                    phx-value-style={style}
-                    class={quick_toolbar_menu_item_class()}
-                  >
-                    <.icon name={icon} class="size-4 shrink-0" />
-                    <span class="truncate">{label}</span>
-                  </button>
-                </div>
-              </details>
-              <details
+                  <.icon name={icon} class="size-4 shrink-0" />
+                  <span class="truncate">{label}</span>
+                </button>
+              </.toolbar_menu>
+              <.toolbar_menu
+                :let={popup}
                 :if={not markdown_format?(@state.document.format)}
-                id="editor-toolbar-font-family-menu"
-                data-toolbar-menu
-                class="relative flex shrink-0"
+                menu={toolbar_menu_spec(:font_family)}
               >
-                <summary
-                  aria-label="Font family"
-                  title="Font family"
-                  class={quick_toolbar_select_class("w-28")}
-                >
+                <:trigger>
                   <span class="min-w-0 flex-1 truncate text-left">
                     {@state.editor_toolbar.font_family || "Font"}
                   </span>
                   <.icon name="hero-chevron-down" class="size-3 shrink-0 opacity-55" />
-                </summary>
-                <div
-                  role="menu"
-                  aria-label="Font family"
-                  class={quick_toolbar_menu_class("w-52")}
+                </:trigger>
+                <button
+                  :for={family <- font_families()}
+                  type="button"
+                  role="menuitem"
+                  popovertarget={popup}
+                  popovertargetaction="hide"
+                  data-command="font-family-set"
+                  phx-click="document.toolbar.command"
+                  phx-value-command="font-family-set"
+                  phx-value-family={family}
+                  class={quick_toolbar_menu_item_class()}
+                  style={"font-family: #{family}"}
                 >
-                  <button
-                    :for={family <- font_families()}
-                    type="button"
-                    role="menuitem"
-                    data-command="font-family-set"
-                    phx-click="document.toolbar.command"
-                    phx-value-command="font-family-set"
-                    phx-value-family={family}
-                    class={quick_toolbar_menu_item_class()}
-                    style={"font-family: #{family}"}
-                  >
-                    <span class="truncate">{family}</span>
-                  </button>
-                </div>
-              </details>
+                  <span class="truncate">{family}</span>
+                </button>
+              </.toolbar_menu>
               <.form
                 :if={not markdown_format?(@state.document.format)}
                 for={@editor_toolbar_form}
@@ -414,8 +396,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                     data-role="text-color-bar"
                     class="absolute bottom-1 left-1.5 right-1.5 h-[3px] rounded-sm"
                     style={"background-color: #{@state.editor_toolbar.text_color}"}
-                  >
-                  </span>
+                  ></span>
                 </label>
                 <.input
                   field={@text_color_form[:color]}
@@ -453,8 +434,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                     data-role="highlight-color-bar"
                     class="absolute bottom-1 left-1.5 right-1.5 h-[3px] rounded-sm"
                     style={"background-color: #{@state.editor_toolbar.highlight_color}"}
-                  >
-                  </span>
+                  ></span>
                 </label>
                 <.input
                   field={@highlight_color_form[:color]}
@@ -472,8 +452,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 :if={not markdown_format?(@state.document.format)}
                 aria-hidden="true"
                 class="mx-1 h-4 w-px shrink-0 self-center bg-base-300"
-              >
-              </span>
+              ></span>
               <details
                 :if={not markdown_format?(@state.document.format)}
                 data-role="align-dropdown"
@@ -565,45 +544,36 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
               >
                 <.quick_toolbar_numbering_icon />
               </button>
-              <details
+              <.toolbar_menu
+                :let={popup}
                 :if={not markdown_format?(@state.document.format)}
-                id="editor-toolbar-line-spacing-menu"
-                data-toolbar-menu
-                class="relative flex shrink-0"
+                menu={toolbar_menu_spec(:line_spacing)}
               >
-                <summary
-                  aria-label="Line spacing"
-                  title="Line spacing"
-                  class={quick_toolbar_select_class("w-[4.5rem]")}
-                >
+                <:trigger>
                   <.icon name="hero-bars-arrow-down" class="size-4 shrink-0" />
                   <span class="min-w-0 flex-1 text-center text-[11px] tabular-nums">
                     {toolbar_line_spacing_label(@state.editor_toolbar.line_spacing)}
                   </span>
                   <.icon name="hero-chevron-down" class="size-3 shrink-0 opacity-55" />
-                </summary>
-                <div
-                  role="menu"
-                  aria-label="Line spacing"
-                  class={quick_toolbar_menu_class("w-40")}
+                </:trigger>
+                <button
+                  :for={{spacing, label} <- line_spacings()}
+                  type="button"
+                  role="menuitem"
+                  popovertarget={popup}
+                  popovertargetaction="hide"
+                  data-command="line-spacing-set"
+                  phx-click="document.toolbar.command"
+                  phx-value-command="line-spacing-set"
+                  phx-value-spacing={spacing}
+                  class={quick_toolbar_menu_item_class()}
                 >
-                  <button
-                    :for={{spacing, label} <- line_spacings()}
-                    type="button"
-                    role="menuitem"
-                    data-command="line-spacing-set"
-                    phx-click="document.toolbar.command"
-                    phx-value-command="line-spacing-set"
-                    phx-value-spacing={spacing}
-                    class={quick_toolbar_menu_item_class()}
-                  >
-                    <span class="w-7 shrink-0 text-right font-mono text-[11px]">
-                      {toolbar_line_spacing_label(spacing)}
-                    </span>
-                    <span>{label}</span>
-                  </button>
-                </div>
-              </details>
+                  <span class="w-7 shrink-0 text-right font-mono text-[11px]">
+                    {toolbar_line_spacing_label(spacing)}
+                  </span>
+                  <span>{label}</span>
+                </button>
+              </.toolbar_menu>
               <button
                 :if={not markdown_format?(@state.document.format)}
                 id="editor-toolbar-indent-decrease"
@@ -636,65 +606,57 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 :if={not markdown_format?(@state.document.format)}
                 aria-hidden="true"
                 class="mx-1 h-4 w-px shrink-0 self-center bg-base-300"
-              >
-              </span>
-              <details
+              ></span>
+              <.toolbar_menu
+                :let={popup}
                 :if={not markdown_format?(@state.document.format)}
-                id="editor-toolbar-table-menu"
-                data-toolbar-menu
-                class="relative flex shrink-0"
+                menu={toolbar_menu_spec(:table)}
               >
-                <summary
-                  aria-label="Table"
-                  title="Insert or edit table"
-                  class={quick_toolbar_button_class()}
-                >
+                <:trigger>
                   <.icon name="hero-table-cells" class="size-4" />
-                </summary>
-                <div
-                  role="menu"
-                  aria-label="Table"
-                  class={quick_toolbar_menu_class("w-56")}
-                >
-                  <div class="px-2 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-base-content/45">
-                    Insert table
-                  </div>
-                  <div class="grid grid-cols-3 gap-1 px-1 pb-1.5">
-                    <button
-                      :for={{rows, cols} <- [{2, 2}, {3, 3}, {4, 4}]}
-                      type="button"
-                      role="menuitem"
-                      data-command="table-insert"
-                      phx-click="document.toolbar.command"
-                      phx-value-command="table-insert"
-                      phx-value-rows={rows}
-                      phx-value-cols={cols}
-                      class="rounded border border-base-300 px-2 py-1.5 text-[12px] text-base-content/75 transition-colors hover:border-base-content/25 hover:bg-base-200 hover:text-base-content"
-                    >
-                      {rows}×{cols}
-                    </button>
-                  </div>
-                  <div class="mx-1 border-t border-base-300 px-1 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-base-content/45">
-                    Edit current table
-                  </div>
+                </:trigger>
+                <div class="px-2 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wide text-base-content/45">
+                  Insert table
+                </div>
+                <div class="grid grid-cols-3 gap-1 px-1 pb-1.5">
                   <button
-                    :for={{command, label, icon} <- table_actions()}
+                    :for={{rows, cols} <- [{2, 2}, {3, 3}, {4, 4}]}
                     type="button"
                     role="menuitem"
-                    data-command={command}
+                    popovertarget={popup}
+                    popovertargetaction="hide"
+                    data-command="table-insert"
                     phx-click="document.toolbar.command"
-                    phx-value-command={command}
-                    disabled={not @state.editor_toolbar.table_context}
-                    class={[
-                      quick_toolbar_menu_item_class(),
-                      "disabled:pointer-events-none disabled:opacity-35"
-                    ]}
+                    phx-value-command="table-insert"
+                    phx-value-rows={rows}
+                    phx-value-cols={cols}
+                    class="rounded border border-base-300 px-2 py-1.5 text-[12px] text-base-content/75 transition-colors hover:border-base-content/25 hover:bg-base-200 hover:text-base-content"
                   >
-                    <.icon name={icon} class="size-4 shrink-0" />
-                    <span>{label}</span>
+                    {rows}×{cols}
                   </button>
                 </div>
-              </details>
+                <div class="mx-1 border-t border-base-300 px-1 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-base-content/45">
+                  Edit current table
+                </div>
+                <button
+                  :for={{command, label, icon} <- table_actions()}
+                  type="button"
+                  role="menuitem"
+                  popovertarget={popup}
+                  popovertargetaction="hide"
+                  data-command={command}
+                  phx-click="document.toolbar.command"
+                  phx-value-command={command}
+                  disabled={not @state.editor_toolbar.table_context}
+                  class={[
+                    quick_toolbar_menu_item_class(),
+                    "disabled:pointer-events-none disabled:opacity-35"
+                  ]}
+                >
+                  <.icon name={icon} class="size-4 shrink-0" />
+                  <span>{label}</span>
+                </button>
+              </.toolbar_menu>
               <label
                 :if={not markdown_format?(@state.document.format)}
                 for="editor-toolbar-image-input"
@@ -711,7 +673,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 id="editor-toolbar-image-input"
                 type="file"
                 accept="image/*"
-                data-role="local-editor-toolbar-image-input"
+                data-role="editor-toolbar-image-input"
                 class="hidden"
               />
               <%!-- Markdown PREVIEW <-> SOURCE toggle, folded in from the old
@@ -806,6 +768,171 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
           </article>
         </section>
       </div>
+      <script :type={Phoenix.LiveView.ColocatedJS} key="octet" name="upload">
+        import { Socket } from "phoenix"
+        import { joinOctetChannel, upload as octetUpload, cancel as octetCancel } from "phoenix_octet"
+
+        // General binary ingress to the owning LiveView (:octet). An upload is
+        // ONE binary frame on the "octet:<sink>" channel (phoenix_octet); the
+        // push reply acknowledges the transfer, and the promise resolves on
+        // the LiveView's "octet:ack" — pushed after the stash write, which
+        // orders the ack before any event referencing { octet_id }. Uploads
+        // run concurrently: same-channel pushes are delivered and processed
+        // in push order and acks are matched by id, so this local lane needs
+        // no client-side pacing. A deadline miss drops the stash id
+        // (confirmed via the octet:cancel reply) and rejects.
+        //
+        // The copy matters: engine exports are views over WASM memory (a
+        // SharedArrayBuffer under pthreads, growable otherwise); slice()
+        // detaches the payload from the engine heap before the async send.
+        const DEADLINE_MS = 30000
+        const pending = new Map()
+        const wired = new WeakSet()
+        let seq = 0
+        let octetSocket = null
+        let octetChannel = null
+        let octetChannelJoin = null
+
+        export default function upload(hook, bytes) {
+          const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+          return uploadOne(hook, u8.slice())
+        }
+
+        function sinkId() {
+          const el = document.querySelector("[data-octet-sink]")
+          return (el && el.getAttribute("data-octet-sink")) || null
+        }
+
+        function channel() {
+          const sink = sinkId()
+          if (!sink) return Promise.reject(new Error("octet sink not mounted"))
+          const topic = `octet:${sink}`
+          if (octetChannel && octetChannel.topic === topic && octetChannel.state === "joined") {
+            return Promise.resolve(octetChannel)
+          }
+          if (octetChannelJoin && octetChannelJoin.topic === topic) {
+            return octetChannelJoin.promise
+          }
+          if (octetChannelJoin) octetChannelJoin = null
+          if (octetChannel) {
+            leaveChannel(octetChannel)
+            octetChannel = null
+          }
+          // A cached socket that lost its connection (the tab outlives server
+          // restarts) makes every join sit out the full open deadline before
+          // proceeding — the constant ~30s first-write stalls that broke ACP
+          // turns. A fresh dial opens in milliseconds, so never reuse a
+          // disconnected socket.
+          if (octetSocket && typeof octetSocket.isConnected === "function" && !octetSocket.isConnected()) {
+            try {
+              octetSocket.disconnect()
+            } catch (_) {
+              // Already torn down; only the memo reset matters.
+            }
+            octetSocket = null
+          }
+          if (!octetSocket) {
+            octetSocket = new Socket("/octet")
+            octetSocket.connect()
+          }
+          const joining = { topic, promise: null }
+          joining.promise = Promise.resolve()
+            .then(() => joinOctetChannel(octetSocket, sink, { openTimeout: DEADLINE_MS }))
+            .then(
+              (chan) => {
+                if (octetChannelJoin !== joining) {
+                  leaveChannel(chan)
+                  throw new Error("octet sink changed while joining")
+                }
+                octetChannelJoin = null
+                octetChannel = chan
+                return chan
+              },
+              (error) => {
+                if (octetChannelJoin === joining) octetChannelJoin = null
+                throw error
+              }
+            )
+          octetChannelJoin = joining
+          return joining.promise
+        }
+
+        function leaveChannel(chan) {
+          try {
+            chan.leave()
+          } catch (_) {
+            // A disconnected or superseded channel is already unusable.
+          }
+        }
+
+        function defaultTransport(_hook, id, owned) {
+          return channel().then((chan) => octetUpload(chan, id, owned, DEADLINE_MS))
+        }
+
+        function uploadOne(hook, owned) {
+          if (!wired.has(hook)) {
+            // handleEvent registrations are per hook instance and die with it;
+            // acks carry the id, so the listener can resolve the queued owner.
+            hook.handleEvent("octet:ack", (payload) => {
+              const waiter = pending.get(payload.id)
+              if (!waiter) return
+              pending.delete(payload.id)
+              clearTimeout(waiter.timer)
+              if (payload.error) waiter.reject(new Error(`octet upload failed: ${payload.error}`))
+              else waiter.resolve({ octet_id: payload.id })
+            })
+            wired.add(hook)
+          }
+          const id = `octet-${++seq}-${Math.random().toString(36).slice(2)}`
+          return new Promise((resolve, reject) => {
+            const waiter = { resolve, reject, timer: null }
+            waiter.timer = setTimeout(() => {
+              if (pending.get(id) !== waiter) return
+              pending.delete(id)
+              // The transfer is atomic; cleanup is dropping a stashed binary
+              // whose ack never reached us. The LiveView event drops what is
+              // already stashed; the channel cancel chases an upload still in
+              // flight (same-channel ordering lands it after the delivery).
+              const stashDrop = Promise.resolve(hook.pushEvent("octet:cancel", { id }))
+              const chase = Promise.resolve(upload.cancelTransport(hook, id))
+              Promise.allSettled([stashDrop, chase]).then(([drop, chased]) => {
+                if (drop.status === "fulfilled" && chased.status === "fulfilled") {
+                  reject(new Error("octet upload timed out"))
+                } else {
+                  const cause = (drop.status === "rejected" ? drop.reason : chased.reason)
+                  reject(new Error(`octet upload timed out; cancellation unconfirmed: ${String((cause && cause.message) || cause)}`))
+                }
+              })
+            }, DEADLINE_MS)
+            pending.set(id, waiter)
+            try {
+              Promise.resolve(upload.transport(hook, id, owned)).catch((cause) => {
+                if (pending.get(id) !== waiter) return
+                pending.delete(id)
+                clearTimeout(waiter.timer)
+                reject(new Error(`octet upload transport failed: ${String((cause && cause.message) || cause)}`))
+              })
+            } catch (error) {
+              pending.delete(id)
+              clearTimeout(waiter.timer)
+              reject(error)
+            }
+          })
+        }
+
+        function defaultCancelTransport(_hook, id) {
+          return channel().then((chan) => octetCancel(chan, id))
+        }
+
+        // Injectable transport seams: production uses the phoenix_octet
+        // channel; tests substitute fakes to exercise the ack and deadline
+        // machinery alone.
+        upload.transport = defaultTransport
+        upload.cancelTransport = defaultCancelTransport
+        // Mount-time warmup only establishes the shared transport. It does not
+        // allocate an upload id, enqueue bytes, or touch the LiveView stash.
+        upload.warmup = () => channel().then(() => undefined)
+      </script>
       <script :type={Phoenix.LiveView.ColocatedHook} name=".DocumentSearchBridge">
         const editorZoomAnimations = new WeakMap()
         const editorZoomUninstallers = new WeakMap()
@@ -1124,7 +1251,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
             })
 
             this.el.addEventListener("change", async event => {
-              const input = event.target?.closest?.("[data-role='local-editor-toolbar-image-input']")
+              const input = event.target?.closest?.("[data-role='editor-toolbar-image-input']")
               const file = input?.files?.[0]
               if (!file) return
               input.value = ""
@@ -1159,11 +1286,6 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
                 natural_width_px: size.width,
                 natural_height_px: size.height
               })
-            })
-
-            this.el.addEventListener("click", event => {
-              const item = event.target?.closest?.("[data-toolbar-menu] button")
-              if (item) item.closest("details")?.removeAttribute("open")
             })
           }
         }
@@ -1333,6 +1455,80 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
   defp document_search_counter(%{total: total}) when is_integer(total),
     do: "#{total} matches"
 
+  @doc false
+  # daisyUI dropdown in its Popover API mode: the trigger's popovertarget +
+  # anchor-name pair with position-anchor on the `dropdown` popup, and daisyUI
+  # anchor-positions it. The top layer escapes the scrollable toolbar row and
+  # the chat rail; open/close, light dismiss, and Escape are browser behavior.
+  attr :menu, ToolbarMenu, required: true
+  slot :trigger, required: true
+  slot :inner_block, required: true
+
+  defp toolbar_menu(assigns) do
+    ~H"""
+    <div id={@menu.id} class="flex shrink-0">
+      <button
+        type="button"
+        popovertarget={"#{@menu.id}-popup"}
+        aria-haspopup="menu"
+        aria-label={@menu.label}
+        title={@menu.title || @menu.label}
+        class={@menu.trigger_class}
+        style={"anchor-name: --#{@menu.id}"}
+      >
+        {render_slot(@trigger)}
+      </button>
+      <div
+        id={"#{@menu.id}-popup"}
+        popover
+        role="menu"
+        aria-label={@menu.label}
+        class={@menu.menu_class}
+        style={"position-anchor: --#{@menu.id}"}
+      >
+        {render_slot(@inner_block, "#{@menu.id}-popup")}
+      </div>
+    </div>
+    """
+  end
+
+  defp toolbar_menu_spec(:style) do
+    ToolbarMenu.new(%{
+      id: "editor-toolbar-style-menu",
+      label: "Paragraph style",
+      trigger_class: quick_toolbar_select_class("w-24"),
+      menu_class: quick_toolbar_menu_class("w-48")
+    })
+  end
+
+  defp toolbar_menu_spec(:font_family) do
+    ToolbarMenu.new(%{
+      id: "editor-toolbar-font-family-menu",
+      label: "Font family",
+      trigger_class: quick_toolbar_select_class("w-28"),
+      menu_class: quick_toolbar_menu_class("w-52")
+    })
+  end
+
+  defp toolbar_menu_spec(:line_spacing) do
+    ToolbarMenu.new(%{
+      id: "editor-toolbar-line-spacing-menu",
+      label: "Line spacing",
+      trigger_class: quick_toolbar_select_class("w-[4.5rem]"),
+      menu_class: quick_toolbar_menu_class("w-40")
+    })
+  end
+
+  defp toolbar_menu_spec(:table) do
+    ToolbarMenu.new(%{
+      id: "editor-toolbar-table-menu",
+      label: "Table",
+      title: "Insert or edit table",
+      trigger_class: quick_toolbar_button_class(),
+      menu_class: quick_toolbar_menu_class("w-56")
+    })
+  end
+
   defp quick_toolbar_button_class do
     [
       "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent",
@@ -1351,18 +1547,17 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
 
   defp quick_toolbar_select_class(width) do
     [
-      "inline-flex h-7 shrink-0 cursor-pointer list-none items-center gap-1 rounded-md border border-base-300 bg-base-100 px-2",
+      "inline-flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-md border border-base-300 bg-base-100 px-2",
       "text-[12px] text-base-content/70 transition-colors duration-150",
       "hover:border-base-content/25 hover:bg-base-200 hover:text-base-content",
       "focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cs-blue)]",
-      "[&::-webkit-details-marker]:hidden",
       width
     ]
   end
 
   defp quick_toolbar_menu_class(width) do
     [
-      "absolute left-0 top-8 z-40 max-h-80 overflow-y-auto rounded-md border border-base-300 bg-base-100 p-1 shadow-lg",
+      "dropdown mt-1 max-h-80 overflow-y-auto rounded-md border border-base-300 bg-base-100 p-1 shadow-lg",
       width
     ]
   end

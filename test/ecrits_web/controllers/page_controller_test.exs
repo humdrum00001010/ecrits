@@ -7,39 +7,39 @@ defmodule EcritsWeb.WorkspaceRootTest do
     test "renders the local workspace mount screen for anonymous users", %{conn: conn} do
       {:ok, lv, _html} = live(conn, ~p"/")
 
-      assert has_element?(lv, "#local-mount-root")
-      assert has_element?(lv, "#local-mount-picker-surface[data-role='mount-picker-surface']")
+      assert has_element?(lv, "#mount-root")
+      assert has_element?(lv, "#mount-picker-surface[data-role='mount-picker-surface']")
 
       assert has_element?(
                lv,
-               "#local-native-directory-picker[data-role='native-directory-picker']"
+               "#native-directory-picker[data-role='native-directory-picker']"
              )
 
-      assert has_element?(lv, "#local-mount-choose[type='button']", "Open folder")
+      assert has_element?(lv, "#mount-choose[type='button']", "Open folder")
 
       assert has_element?(
                lv,
-               "#local-native-directory-picker #local-path-form[phx-submit='workspace.path.open']"
-             )
-
-      assert has_element?(
-               lv,
-               "#local-path-input[name='local_path[path]']"
+               "#native-directory-picker #path-form[phx-submit='workspace.path.open']"
              )
 
       assert has_element?(
                lv,
-               "#local-path-submit[type='submit'][aria-label='Open path'][title='Open this path']"
+               "#path-input[name='mount_path[path]']"
              )
 
-      assert has_element?(lv, "#local-path-submit", "Open")
-      refute has_element?(lv, "#local-manual-path-picker")
-      refute has_element?(lv, "#local-provider-picker[data-role='provider-picker']")
-      refute has_element?(lv, "#local-agent-provider-picker")
-      refute has_element?(lv, "#local-directory-picker[data-role='directory-picker']")
-      refute has_element?(lv, "#local-mount-submit")
-      refute has_element?(lv, "#local-mount-form")
-      refute has_element?(lv, "#local-mount-path")
+      assert has_element?(
+               lv,
+               "#path-submit[type='submit'][aria-label='Open path'][title='Open this path']"
+             )
+
+      assert has_element?(lv, "#path-submit", "Open")
+      refute has_element?(lv, "#manual-path-picker")
+      refute has_element?(lv, "#provider-picker[data-role='provider-picker']")
+      refute has_element?(lv, "#agent-provider-picker")
+      refute has_element?(lv, "#directory-picker[data-role='directory-picker']")
+      refute has_element?(lv, "#mount-submit")
+      refute has_element?(lv, "#mount-form")
+      refute has_element?(lv, "#mount-path")
     end
 
     test "renders the same mount screen when stale auth session data is present", %{conn: conn} do
@@ -48,39 +48,39 @@ defmodule EcritsWeb.WorkspaceRootTest do
         |> Phoenix.ConnTest.init_test_session(%{user_token: "retired-token"})
         |> live(~p"/")
 
-      assert has_element?(lv, "#local-mount-root")
-      assert has_element?(lv, "#local-mount-picker-surface[data-role='mount-picker-surface']")
+      assert has_element?(lv, "#mount-root")
+      assert has_element?(lv, "#mount-picker-surface[data-role='mount-picker-surface']")
 
       assert has_element?(
                lv,
-               "#local-native-directory-picker[data-role='native-directory-picker']"
+               "#native-directory-picker[data-role='native-directory-picker']"
              )
 
-      assert has_element?(lv, "#local-mount-choose[type='button']", "Open folder")
+      assert has_element?(lv, "#mount-choose[type='button']", "Open folder")
 
       assert has_element?(
                lv,
-               "#local-native-directory-picker #local-path-form[phx-submit='workspace.path.open']"
-             )
-
-      assert has_element?(
-               lv,
-               "#local-path-input[name='local_path[path]']"
+               "#native-directory-picker #path-form[phx-submit='workspace.path.open']"
              )
 
       assert has_element?(
                lv,
-               "#local-path-submit[type='submit'][aria-label='Open path'][title='Open this path']"
+               "#path-input[name='mount_path[path]']"
              )
 
-      assert has_element?(lv, "#local-path-submit", "Open")
-      refute has_element?(lv, "#local-manual-path-picker")
-      refute has_element?(lv, "#local-provider-picker[data-role='provider-picker']")
-      refute has_element?(lv, "#local-agent-provider-picker")
-      refute has_element?(lv, "#local-directory-picker[data-role='directory-picker']")
-      refute has_element?(lv, "#local-mount-submit")
-      refute has_element?(lv, "#local-mount-form")
-      refute has_element?(lv, "#local-mount-path")
+      assert has_element?(
+               lv,
+               "#path-submit[type='submit'][aria-label='Open path'][title='Open this path']"
+             )
+
+      assert has_element?(lv, "#path-submit", "Open")
+      refute has_element?(lv, "#manual-path-picker")
+      refute has_element?(lv, "#provider-picker[data-role='provider-picker']")
+      refute has_element?(lv, "#agent-provider-picker")
+      refute has_element?(lv, "#directory-picker[data-role='directory-picker']")
+      refute has_element?(lv, "#mount-submit")
+      refute has_element?(lv, "#mount-form")
+      refute has_element?(lv, "#mount-path")
       refute has_element?(lv, ~s(a[href="/users/log-in"]))
     end
   end

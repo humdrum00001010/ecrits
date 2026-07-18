@@ -12,7 +12,7 @@ defmodule EcritsWeb.Workspace.DirectoryPicker do
   defp impl do
     Application.get_env(
       :ecrits,
-      :local_directory_picker,
+      :directory_picker,
       EcritsWeb.Workspace.DirectoryPicker.Native
     )
   end

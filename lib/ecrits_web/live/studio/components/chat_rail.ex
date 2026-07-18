@@ -205,18 +205,15 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
               <span
                 aria-hidden="true"
                 class="size-1 rounded-full bg-current motion-safe:animate-bounce [animation-delay:-240ms]"
-              >
-              </span>
+              ></span>
               <span
                 aria-hidden="true"
                 class="size-1 rounded-full bg-current motion-safe:animate-bounce [animation-delay:-120ms]"
-              >
-              </span>
+              ></span>
               <span
                 aria-hidden="true"
                 class="size-1 rounded-full bg-current motion-safe:animate-bounce"
-              >
-              </span>
+              ></span>
             </span>
           </div>
 

@@ -33,7 +33,7 @@ defmodule EcritsWeb.Workspace.AgentProviderSetupLive do
     ~H"""
     <Layouts.app flash={@flash} variant="default" show_footer={false}>
       <div
-        id="local-agent-provider-setup"
+        id="agent-provider-setup"
         data-provider={@provider.id}
         data-status={to_string(@integration.status)}
         class="min-h-full bg-base-100 px-4 py-8 text-base-content sm:px-6"
@@ -49,7 +49,7 @@ defmodule EcritsWeb.Workspace.AgentProviderSetupLive do
               <div class="min-w-0">
                 <h1 class="truncate text-base font-semibold">{@provider.label} setup</h1>
                 <p
-                  id="local-agent-provider-current-status"
+                  id="agent-provider-current-status"
                   class="truncate text-xs text-base-content/60"
                 >
                   {provider_setup_status(@integration)}
@@ -58,7 +58,7 @@ defmodule EcritsWeb.Workspace.AgentProviderSetupLive do
             </div>
             <.link
               :if={@return_to}
-              id="local-agent-provider-return"
+              id="agent-provider-return"
               navigate={@return_to}
               class="inline-flex h-8 shrink-0 items-center gap-1 rounded border border-base-300 px-2 text-xs font-medium text-base-content/70 transition-colors hover:border-base-content/30 hover:text-base-content"
             >
@@ -71,7 +71,7 @@ defmodule EcritsWeb.Workspace.AgentProviderSetupLive do
             <div class="rounded border border-base-300 bg-base-200/35 px-3 py-2">
               <p class="text-sm font-medium">Install</p>
               <code
-                id="local-agent-provider-install-command"
+                id="agent-provider-install-command"
                 class="mt-2 block overflow-x-auto rounded bg-base-100 px-2 py-1.5 text-xs text-base-content"
               >
                 {@provider.install_command}
@@ -81,7 +81,7 @@ defmodule EcritsWeb.Workspace.AgentProviderSetupLive do
             <div class="rounded border border-base-300 bg-base-200/35 px-3 py-2">
               <p class="text-sm font-medium">Log in</p>
               <code
-                id="local-agent-provider-login-command"
+                id="agent-provider-login-command"
                 class="mt-2 block overflow-x-auto rounded bg-base-100 px-2 py-1.5 text-xs text-base-content"
               >
                 {@provider.login_command}
@@ -91,7 +91,7 @@ defmodule EcritsWeb.Workspace.AgentProviderSetupLive do
             <div class="rounded border border-base-300 bg-base-200/35 px-3 py-2">
               <p class="text-sm font-medium">Check</p>
               <code
-                id="local-agent-provider-check-command"
+                id="agent-provider-check-command"
                 class="mt-2 block overflow-x-auto rounded bg-base-100 px-2 py-1.5 text-xs text-base-content"
               >
                 {@provider.check_command}
@@ -99,7 +99,7 @@ defmodule EcritsWeb.Workspace.AgentProviderSetupLive do
             </div>
 
             <p
-              id="local-agent-provider-next-step"
+              id="agent-provider-next-step"
               class="border-t border-base-300 pt-4 text-sm leading-6 text-base-content/70"
             >
               After the command succeeds, return to the workspace and select {@provider.label} again from the provider menu.

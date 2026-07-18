@@ -1,14 +1,14 @@
 defmodule EcritsWeb.WorkspaceDirectoryPickerStub do
   @behaviour EcritsWeb.Workspace.DirectoryPicker
 
-  @valid_path "/tmp/ecrits-local-ui"
+  @valid_path "/tmp/ecrits-ui"
 
   def valid_path,
     do: Application.get_env(:ecrits, :workspace_adapter_stub_path, @valid_path)
 
   @impl true
   def choose_folder do
-    case Application.get_env(:ecrits, :local_directory_picker_stub, {:ok, valid_path()}) do
+    case Application.get_env(:ecrits, :directory_picker_stub, {:ok, valid_path()}) do
       {:await, owner, result} when is_pid(owner) ->
         send(owner, {:directory_picker_started, self()})
 

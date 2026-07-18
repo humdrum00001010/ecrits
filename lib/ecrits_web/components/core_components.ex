@@ -263,8 +263,7 @@ defmodule EcritsWeb.CoreComponents do
       data-status={status_dot_modifier(@status)}
       aria-hidden="true"
       {@rest}
-    >
-    </span>
+    ></span>
     """
   end
 
@@ -313,16 +312,16 @@ defmodule EcritsWeb.CoreComponents do
       assign(
         assigns,
         :workspace_mount_form,
-        to_form(%{"path" => assigns.workspace_mount.path}, as: :local_path)
+        to_form(%{"path" => assigns.workspace_mount.path}, as: :mount_path)
       )
 
     ~H"""
     <div
-      id="local-mount-root"
+      id="mount-root"
       class="flex min-h-[calc(100vh-60px)] items-center justify-center px-5 py-8"
     >
       <section
-        id="local-native-directory-picker"
+        id="native-directory-picker"
         data-role="native-directory-picker"
         class={workspace_mount_panel_class()}
         aria-label="Open workspace folder"
@@ -340,13 +339,13 @@ defmodule EcritsWeb.CoreComponents do
         </div>
 
         <div
-          id="local-mount-picker-surface"
+          id="mount-picker-surface"
           data-role="mount-picker-surface"
           class="grid gap-[1.35rem] p-6 pb-5"
         >
           <header>
             <h1
-              id="local-native-directory-status"
+              id="native-directory-status"
               class="m-0 text-[1.06rem] font-semibold leading-snug text-base-content"
             >
               Open a workspace folder
@@ -358,12 +357,12 @@ defmodule EcritsWeb.CoreComponents do
           </header>
 
           <div
-            id="local-mount-control-row"
+            id="mount-control-row"
             data-role="mount-control-row"
             class="m-0 flex flex-col gap-4"
           >
             <button
-              id="local-mount-choose"
+              id="mount-choose"
               type="button"
               phx-click="workspace.directory_picker.open"
               phx-disable-with="Opening picker..."
@@ -383,12 +382,12 @@ defmodule EcritsWeb.CoreComponents do
 
             <.form
               for={@workspace_mount_form}
-              id="local-path-form"
+              id="path-form"
               phx-submit="workspace.path.open"
               class="m-0"
             >
               <label
-                for="local-path-input"
+                for="path-input"
                 class="mb-1.5 block text-[0.72rem] font-medium text-base-content/70"
               >
                 or enter a path
@@ -402,7 +401,7 @@ defmodule EcritsWeb.CoreComponents do
                 </span>
                 <.input
                   field={@workspace_mount_form[:path]}
-                  id="local-path-input"
+                  id="path-input"
                   type="text"
                   autocomplete="off"
                   spellcheck="false"
@@ -412,7 +411,7 @@ defmodule EcritsWeb.CoreComponents do
                   class="h-full w-full border-0 bg-transparent px-2.5 font-mono text-[0.82rem] text-base-content outline-none placeholder:text-base-content/35 focus:outline-none focus:ring-0"
                 />
                 <button
-                  id="local-path-submit"
+                  id="path-submit"
                   type="submit"
                   aria-label="Open path"
                   title="Open this path"
@@ -427,7 +426,7 @@ defmodule EcritsWeb.CoreComponents do
 
           <p
             :if={@workspace_mount.error}
-            id="local-mount-error"
+            id="mount-error"
             role="alert"
             class="m-0 mt-1 flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-3 py-2 text-[0.82rem] leading-[1.45] text-error"
           >

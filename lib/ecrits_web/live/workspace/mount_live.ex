@@ -14,7 +14,7 @@ defmodule EcritsWeb.Workspace.MountLive do
   def mount(_params, session, socket) do
     {:ok,
      socket
-     |> assign(:local_live_session_id, local_live_session_id(session))
+     |> assign(:live_session_id, live_session_id(session))
      |> assign(:page_title, "Mount workspace")
      |> assign(:workspace_mount, WorkspaceMount.new())}
   end
@@ -32,7 +32,7 @@ defmodule EcritsWeb.Workspace.MountLive do
   end
 
   @impl true
-  def handle_event("workspace.path.open", %{"local_path" => %{"path" => path}}, socket) do
+  def handle_event("workspace.path.open", %{"mount_path" => %{"path" => path}}, socket) do
     mount_workspace(socket, path)
   end
 
@@ -67,7 +67,7 @@ defmodule EcritsWeb.Workspace.MountLive do
              root_path = Map.get(workspace, :root_path, path),
              :ok <-
                WorkspaceHandoff.put_workspace_path(
-                 socket.assigns.local_live_session_id,
+                 socket.assigns.live_session_id,
                  root_path
                ) do
           {:noreply, redirect(socket, to: ~p"/workspace")}
@@ -90,12 +90,12 @@ defmodule EcritsWeb.Workspace.MountLive do
     """
   end
 
-  defp local_live_session_id(session) when is_map(session) do
-    case session["local_live_session_id"] || session[:local_live_session_id] do
+  defp live_session_id(session) when is_map(session) do
+    case session["live_session_id"] || session[:live_session_id] do
       id when is_binary(id) and id != "" -> id
       _ -> Ecto.UUID.generate()
     end
   end
 
-  defp local_live_session_id(_session), do: Ecto.UUID.generate()
+  defp live_session_id(_session), do: Ecto.UUID.generate()
 end
