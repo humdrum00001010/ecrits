@@ -54,49 +54,216 @@ defmodule Ecrits.Fuse.DocFs do
 
   The chat rail calls this at agent turn completion. Normal valid writes still
   commit synchronously on `release`/`rename`; this hook catches linter/editor
-  workflows that left an intermediate staged buffer during the turn.
+  workflows that left an intermediate staged buffer during the turn. A buffer
+  that remains invalid here has crossed its correction boundary, so this hook
+  rejects only the exact staged generation it inspected; a newer edit is never
+  removed by the old turn's terminal worker.
   """
-  @spec flush_staged(String.t()) :: %{committed: [String.t()], pending: [{String.t(), term()}]}
-  def flush_staged(root) when is_binary(root) do
+  @spec flush_staged(String.t(), keyword()) :: %{
+          committed: [String.t()],
+          rejected: [{String.t(), term()}],
+          pending: [{String.t(), term()}]
+        }
+  def flush_staged(root, opts \\ []) when is_binary(root) and is_list(opts) do
     root = DocMount.canonical_root(root)
+    filters = Keyword.take(opts, [:agent_id, :instance_id, :turn_id])
 
     root
-    |> OpenDocs.staged()
-    |> Enum.reduce(%{committed: [], pending: []}, fn {name, bytes, _previous_reason}, acc ->
-      cond do
-        not OpenDocs.member?(root, name) ->
-          OpenDocs.unstage(root, name)
-          acc
+    |> OpenDocs.staged_with_identity()
+    |> Enum.filter(fn {_name, _bytes, _reason, identity} ->
+      staged_identity_matches?(identity, filters)
+    end)
+    |> Enum.reduce(%{committed: [], rejected: [], pending: []}, fn
+      {name, bytes, previous_reason, identity}, acc ->
+        cond do
+          not OpenDocs.member?(root, name) ->
+            settle_staged_cleanup(
+              acc,
+              root,
+              name,
+              bytes,
+              previous_reason,
+              identity,
+              filters,
+              :document_closed
+            )
 
-        not match?({:ok, _source}, OpenDocs.source_path(root, name)) ->
-          OpenDocs.unstage(root, name)
-          acc
+          not match?({:ok, _source}, OpenDocs.source_path(root, name)) ->
+            settle_staged_cleanup(
+              acc,
+              root,
+              name,
+              bytes,
+              previous_reason,
+              identity,
+              filters,
+              :source_missing
+            )
 
-        not source_supported?(root, name) ->
-          OpenDocs.unstage(root, name)
-          acc
+          not source_supported?(root, name) ->
+            settle_staged_cleanup(
+              acc,
+              root,
+              name,
+              bytes,
+              previous_reason,
+              identity,
+              filters,
+              :source_unsupported
+            )
 
-        true ->
-          {:ok, source} = OpenDocs.source_path(root, name)
+          true ->
+            {:ok, source} = OpenDocs.source_path(root, name)
+            OpenDocs.clear_write_failure(root, name)
 
-          case Projection.write_back(source, bytes, root: root) do
-            {:ok, _info} ->
-              OpenDocs.unstage(root, name)
-              refresh_committed_projection(root, name, source)
-              Map.update!(acc, :committed, &[name | &1])
+            case write_back_unless_accepted(
+                   root,
+                   source,
+                   name,
+                   bytes,
+                   Keyword.put(identity_opts(identity), :root, root)
+                 ) do
+              {:ok, %{accepted_noop: true}} ->
+                settle_staged_commit(
+                  acc,
+                  root,
+                  name,
+                  bytes,
+                  previous_reason,
+                  identity,
+                  filters,
+                  :discard,
+                  :accepted_noop
+                )
 
-            {:error, reason} ->
-              Logger.warning(
-                "[DocFs] staged write_back still pending for #{Path.join(root, name)}: #{inspect(reason)}"
-              )
+              {:ok, _info} ->
+                settlement =
+                  accepted_projection_settlement(source, bytes, identity)
 
-              if discard_staged_error?(reason), do: OpenDocs.unstage(root, name)
+                disposition =
+                  settle_staged_snapshot(
+                    root,
+                    name,
+                    bytes,
+                    previous_reason,
+                    identity,
+                    filters,
+                    settlement
+                  )
 
-              Map.update!(acc, :pending, &[{name, reason} | &1])
-          end
-      end
+                acc
+                |> Map.update!(:committed, &[name | &1])
+                |> maybe_mark_replaced_stage_pending(name, disposition, :accepted_write)
+
+              {:error, reason} ->
+                record_write_failure(root, name, reason)
+
+                if terminal_rejectable_staged_error?(reason) do
+                  case settle_staged_snapshot(
+                         root,
+                         name,
+                         bytes,
+                         previous_reason,
+                         identity,
+                         filters,
+                         :discard
+                       ) do
+                    :discarded ->
+                      broadcast_preview_rejected(root, source, name, identity || %{}, reason)
+                      Map.update!(acc, :rejected, &[{name, reason} | &1])
+
+                    :same_owner_replaced ->
+                      maybe_mark_replaced_stage_pending(
+                        acc,
+                        name,
+                        :same_owner_replaced,
+                        reason
+                      )
+
+                    :other_owner_or_gone ->
+                      broadcast_preview_rejected(root, source, name, identity || %{}, reason)
+                      Map.update!(acc, :rejected, &[{name, reason} | &1])
+                  end
+                else
+                  Logger.warning(
+                    "[DocFs] staged write_back still pending for #{Path.join(root, name)}: #{inspect(reason)}"
+                  )
+
+                  case settle_staged_snapshot(
+                         root,
+                         name,
+                         bytes,
+                         previous_reason,
+                         identity,
+                         filters,
+                         :retain
+                       ) do
+                    :retained ->
+                      Map.update!(acc, :pending, &[{name, reason} | &1])
+
+                    :same_owner_replaced ->
+                      maybe_mark_replaced_stage_pending(
+                        acc,
+                        name,
+                        :same_owner_replaced,
+                        reason
+                      )
+
+                    :other_owner_or_gone ->
+                      acc
+                  end
+                end
+            end
+        end
     end)
     |> Map.update!(:committed, &Enum.reverse/1)
+    |> Map.update!(:rejected, &Enum.reverse/1)
+    |> Map.update!(:pending, &Enum.reverse/1)
+  end
+
+  @doc """
+  Publish canonical engine projections at a fresh FSKit vnode boundary.
+
+  Successful user renames remain byte-preserving for the rest of their ACP
+  turn. At the terminal boundary this function writes each separately staged
+  canonical value to a unique mounted sibling, fsyncs and closes it, then
+  renames that fresh source vnode over the projected target. The DocFs handler
+  recognizes the registered echo and never routes it back through semantic
+  write-back or preview playback.
+  """
+  @spec flush_canonical(String.t(), keyword()) :: %{
+          published: [String.t()],
+          pending: [{String.t(), term()}]
+        }
+  def flush_canonical(root, opts \\ []) when is_binary(root) and is_list(opts) do
+    root = DocMount.canonical_root(root)
+    filters = Keyword.take(opts, [:agent_id, :instance_id, :turn_id])
+
+    # A killed terminal worker can leave its monitor DOWN queued behind this
+    # retry. Reclaim the already-dead publisher synchronously so its restored
+    # pending value participates in this very flush instead of being stranded
+    # after an apparent no-op success.
+    _reclaimed = OpenDocs.reclaim_dead_canonical_echoes(root, filters)
+
+    resolution =
+      root
+      |> OpenDocs.in_flight_canonical_entries(filters)
+      |> Enum.reduce(%{published: [], pending: []}, fn entry, acc ->
+        case resolve_in_flight_canonical(root, entry, filters, opts) do
+          :ok -> acc
+          {:error, reason} -> Map.update!(acc, :pending, &[{entry.name, reason} | &1])
+        end
+      end)
+
+    root
+    |> OpenDocs.pending_canonical_entries(filters)
+    |> Enum.reduce(resolution, fn entry, acc ->
+      case publish_pending_canonical(root, entry, opts) do
+        :ok -> Map.update!(acc, :published, &[entry.name | &1])
+        {:error, reason} -> Map.update!(acc, :pending, &[{entry.name, reason} | &1])
+      end
+    end)
+    |> Map.update!(:published, &Enum.reverse/1)
     |> Map.update!(:pending, &Enum.reverse/1)
   end
 
@@ -171,17 +338,38 @@ defmodule Ecrits.Fuse.DocFs do
   # transient (sourceless) buffer; it commits only when renamed over a projected
   # doc. VFS `create` is create+open, so no separate `open` follows.
   create "/:name" do
-    if OpenDocs.writable?(state.root) do
-      {handle, socket} = new_handle(socket, name)
-      {:reply, handle, put_buf(socket, handle_key(handle), "")}
-    else
-      {:error, :erofs, socket}
+    internal_echo? = OpenDocs.canonical_echo_temp?(state.root, name)
+
+    cond do
+      canonical_temp_name?(name) and not internal_echo? ->
+        {:error, :eio, socket}
+
+      not OpenDocs.writable?(state.root) and not internal_echo? ->
+        {:error, :erofs, socket}
+
+      true ->
+        {handle, socket} = new_handle(socket, name)
+
+        socket =
+          if internal_echo? do
+            socket
+          else
+            {_identity, socket} = ensure_edit_identity(socket, state.root, name)
+            socket
+          end
+
+        {:reply, handle, put_buf(socket, handle_key(handle), "")}
     end
   end
 
   write "/:name" do
+    internal_echo? = OpenDocs.canonical_echo_temp?(state.root, name)
+
     cond do
-      not OpenDocs.writable?(state.root) ->
+      canonical_temp_name?(name) and not internal_echo? ->
+        {:error, :eio, socket}
+
+      not OpenDocs.writable?(state.root) and not internal_echo? ->
         {:error, :erofs, socket}
 
       not target_known?(state.root, socket, name) ->
@@ -189,6 +377,15 @@ defmodule Ecrits.Fuse.DocFs do
 
       true ->
         key = event_key(event, name)
+
+        socket =
+          if internal_echo? do
+            socket
+          else
+            {_identity, socket} = ensure_edit_identity(socket, state.root, name)
+            socket
+          end
+
         {buf, socket} = ensure_buf(socket, state.root, name, key)
 
         next_buf = splice(buf, event.offset, event.data)
@@ -197,29 +394,58 @@ defmodule Ecrits.Fuse.DocFs do
           socket
           |> put_buf(key, next_buf)
           |> mark_dirty(key)
-          |> maybe_commit_live_buffer(state.root, name, key, next_buf)
-          |> maybe_preview_temp_buffer(state.root, name, next_buf)
+
+        socket =
+          if internal_echo? do
+            socket
+          else
+            socket
+            # Preview every valid primary-surface buffer before it mutates the
+            # authoritative document. A normal in-place rewrite is just as much
+            # a VFS edit as temp+rename, so withholding its rail playback would
+            # make the visible result depend on the editor's save strategy.
+            |> maybe_preview_buffer(state.root, name, next_buf)
+            |> maybe_commit_live_buffer(state.root, name, key, next_buf)
+          end
 
         {:reply, byte_size(event.data), socket}
     end
   end
 
   truncate "/:name" do
+    internal_echo? = OpenDocs.canonical_echo_temp?(state.root, name)
+
     cond do
-      not OpenDocs.writable?(state.root) ->
+      canonical_temp_name?(name) and not internal_echo? ->
+        {:error, :eio, socket}
+
+      not OpenDocs.writable?(state.root) and not internal_echo? ->
         {:error, :erofs, socket}
 
       not target_known?(state.root, socket, name) ->
         {:error, :enoent, socket}
 
       true ->
+        socket =
+          if internal_echo? do
+            socket
+          else
+            {_identity, socket} = ensure_edit_identity(socket, state.root, name)
+            socket
+          end
+
         {:noreply, truncate_buffers(socket, state.root, name, event.size)}
     end
   end
 
   chmod "/:name" do
     cond do
-      not OpenDocs.writable?(state.root) ->
+      canonical_temp_name?(name) and
+          not OpenDocs.canonical_echo_temp?(state.root, name) ->
+        {:error, :eio, socket}
+
+      not OpenDocs.writable?(state.root) and
+          not OpenDocs.canonical_echo_temp?(state.root, name) ->
         {:error, :erofs, socket}
 
       not target_known?(state.root, socket, name) ->
@@ -244,53 +470,86 @@ defmodule Ecrits.Fuse.DocFs do
   # backup) just moves the buffer.
   rename "/:name" do
     target = event |> Map.get(:target) |> to_string() |> Path.basename()
+    buf = name_buffer(socket, name) || ""
 
-    cond do
-      not OpenDocs.writable?(state.root) ->
-        {:error, :erofs, socket}
-
-      match?({:ok, _}, source_path(state.root, target)) ->
-        {:ok, target_source} = source_path(state.root, target)
-        target_name = mounted_source_name(target)
-        buf = name_buffer(socket, name) || ""
-        preview_started? = is_binary(preview_edit_id(socket, name))
-        edit_id = preview_edit_id(socket, name) || buffer_edit_id(target_name, buf)
-
+    case OpenDocs.canonical_echo(state.root, name) do
+      {:ok, %{name: echo_target}} ->
         result =
-          commit_buffer(state.root, target_source, target_name, buf,
-            edit_id: edit_id,
-            preview_continuation: preview_started?
-          )
+          if target == Projection.projected_name(echo_target) do
+            OpenDocs.complete_canonical_echo(state.root, name, echo_target, buf)
+          else
+            {:error, :wrong_target}
+          end
 
         case result do
-          {:ok, _} ->
+          :ok ->
             {:noreply, socket |> clear_name(name) |> clear_name(target)}
 
           {:error, reason} ->
-            Logger.error(
-              "[DocFs] write_back rename failed for #{Path.join(state.root, target)} via #{name}: #{inspect(reason)}"
+            Logger.warning(
+              "[DocFs] rejected stale canonical echo #{name} -> #{target}: #{inspect(reason)}"
             )
 
-            # POSIX rename failure leaves the source in place. Preserve the temp
-            # buffer so the caller can inspect/correct it and report malformed
-            # projections as EINVAL rather than an opaque I/O failure.
-            {:error, rename_errno(reason), socket}
+            OpenDocs.cancel_canonical_echo(state.root, name)
+            {:error, :eio, socket}
         end
 
-      true ->
-        buf = name_buffer(socket, name) || ""
+      :error ->
+        cond do
+          canonical_temp_name?(name) ->
+            {:error, :eio, socket}
 
-        socket =
-          socket
-          |> put_buf(path_key(target), buf)
-          |> mark_dirty(path_key(target))
-          |> clear_name(name)
+          not OpenDocs.writable?(state.root) ->
+            {:error, :erofs, reject_atomic_rename(socket, state.root, name, target, :erofs)}
 
-        {:noreply, socket}
+          match?({:ok, _}, source_path(state.root, target)) ->
+            {:ok, target_source} = source_path(state.root, target)
+            target_name = mounted_source_name(target)
+            {identity, socket} = ensure_edit_identity(socket, state.root, name, target_source)
+            preview_started? = is_integer(preview_hash(socket, name))
+
+            commit_opts =
+              identity
+              |> identity_opts()
+              |> Keyword.put(:preview_continuation, preview_started?)
+              |> Keyword.put(:atomic_rename, true)
+
+            result =
+              state.root
+              |> commit_buffer(target_source, target_name, buf, commit_opts)
+              |> final_commit_result()
+
+            case result do
+              {:ok, _} ->
+                {:noreply, socket |> clear_name(name) |> clear_name(target)}
+
+              {:error, reason} ->
+                Logger.error(
+                  "[DocFs] write_back rename failed for #{Path.join(state.root, target)} via #{name}: #{inspect(reason)}"
+                )
+
+                # POSIX rename failure preserves the visible source temp. Clear only
+                # its provisional-preview lifecycle metadata and the stale target
+                # seed so rereads expose both the temp bytes and canonical target.
+                socket = reject_atomic_rename(socket, state.root, name, target, reason)
+                {:error, write_errno(reason), socket}
+            end
+
+          true ->
+            socket =
+              socket
+              |> put_buf(path_key(target), buf)
+              |> mark_dirty(path_key(target))
+              |> move_edit_metadata(name, target)
+              |> clear_name(name)
+
+            {:noreply, socket}
+        end
     end
   end
 
   unlink "/:name" do
+    OpenDocs.cancel_canonical_echo(state.root, name)
     {:noreply, clear_name(socket, name)}
   end
 
@@ -300,7 +559,14 @@ defmodule Ecrits.Fuse.DocFs do
     case source_path(state.root, name) do
       {:ok, source} ->
         {result, socket} = commit_key(socket, source, name, key, state.root)
-        socket = socket |> clear_key(key) |> delete_handle(event)
+
+        socket =
+          case result do
+            {:error, reason} -> reject_release_preview(socket, state.root, name, reason)
+            _other -> socket
+          end
+
+        socket = socket |> clear_key(key) |> clear_preview_metadata(name) |> delete_handle(event)
 
         case result do
           {:ok, _} ->
@@ -311,7 +577,7 @@ defmodule Ecrits.Fuse.DocFs do
               "[DocFs] write_back release failed for #{Path.join(state.root, name)}: #{inspect(reason)}"
             )
 
-            {:error, :eio, socket}
+            {:error, write_errno(reason), socket}
         end
 
       {:error, _reason} ->
@@ -492,14 +758,22 @@ defmodule Ecrits.Fuse.DocFs do
 
   defp commit_key(socket, source, name, key, root) do
     source_name = mounted_source_name(name)
+    opts = vfs_edit_opts(socket, root, name, source)
 
     cond do
       dirty?(socket, key) and is_binary(buffer(socket, key)) ->
-        result = commit_buffer(root, source, source_name, buffer(socket, key))
+        result =
+          root
+          |> commit_buffer(source, source_name, buffer(socket, key), opts)
+          |> final_commit_result()
+
         {result, socket}
 
       dirty?(socket, path_key(name)) and is_binary(buffer(socket, path_key(name))) ->
-        result = commit_buffer(root, source, source_name, buffer(socket, path_key(name)))
+        result =
+          root
+          |> commit_buffer(source, source_name, buffer(socket, path_key(name)), opts)
+          |> final_commit_result()
 
         {result, socket}
 
@@ -511,7 +785,13 @@ defmodule Ecrits.Fuse.DocFs do
   defp maybe_commit_live_buffer(socket, root, name, key, buf) do
     case source_path(root, name) do
       {:ok, source} ->
-        case commit_buffer(root, source, mounted_source_name(name), buf) do
+        opts =
+          socket
+          |> edit_identity(name)
+          |> identity_opts()
+          |> Keyword.put(:preview_continuation, is_integer(preview_hash(socket, name)))
+
+        case commit_buffer(root, source, mounted_source_name(name), buf, opts) do
           {:ok, {:staged, _reason}} -> socket
           {:ok, _info} -> mark_clean(socket, key)
           {:error, _reason} -> socket
@@ -522,30 +802,58 @@ defmodule Ecrits.Fuse.DocFs do
     end
   end
 
-  # Temp+rename editors write the replacement buffer before the authoritative
-  # rename. FSKit may deliver those chunks out of order, so only attempt a
-  # semantic preview when the accumulated bytes form a complete valid
-  # projection. `Projection.preview_write_back/3` does not mutate the source; it
-  # publishes browser-side grapheme playback under an edit id that the later
-  # rename reuses.
-  defp maybe_preview_temp_buffer(socket, root, name, buf) do
-    with {:ok, target_name} <- preview_target_name(name),
-         {:ok, source} <- source_path(root, target_name),
+  # A VFS editor may save either by replacing a temp file or by rewriting the
+  # projected file in place. FSKit can deliver chunks out of order in both
+  # cases, so publish a semantic preview only once the accumulated bytes form a
+  # complete valid projection. `Projection.preview_write_back/3` never mutates
+  # the source; the subsequent direct commit or rename reuses its edit id.
+  defp maybe_preview_buffer(socket, root, name, buf) do
+    if OpenDocs.canonical_echo_temp?(root, name) do
+      socket
+    else
+      preview_buffer(socket, root, name, buf)
+    end
+  end
+
+  defp preview_buffer(socket, root, name, buf) do
+    # Pin the complete ownership tuple before projection parsing can fail. That
+    # tuple is the edit lifecycle's authority from here through release/rename;
+    # OpenDocs may legitimately change when another agent opens the document,
+    # but it must never retarget this already-started edit.
+    {identity, socket} = ensure_edit_identity(socket, root, name)
+
+    with {:ok, source} <- preview_source_path(root, name),
          hash <- :erlang.phash2(buf),
          false <- preview_hash(socket, name) == hash,
-         {edit_id, socket} <- ensure_preview_edit_id(socket, name),
          {:ok, _info} <-
-           Projection.preview_write_back(source, buf, root: root, edit_id: edit_id) do
+           Projection.preview_write_back(
+             source,
+             buf,
+             Keyword.put(identity_opts(identity), :root, root)
+           ) do
       put_preview_hash(socket, name, hash)
     else
       _reason -> socket
     end
   end
 
+  defp preview_source_path(root, name) do
+    case source_path(root, name) do
+      {:ok, source} ->
+        {:ok, source}
+
+      {:error, _reason} ->
+        with {:ok, target_name} <- preview_target_name(name),
+             {:ok, source} <- source_path(root, target_name) do
+          {:ok, source}
+        end
+    end
+  end
+
   defp preview_target_name(name) when is_binary(name) do
     case String.split(name, ".jsonl", parts: 2) do
       [base, suffix] when suffix != "" ->
-        if String.ends_with?(suffix, ".tmp"), do: {:ok, base <> ".jsonl"}, else: :error
+        if String.starts_with?(suffix, "."), do: {:ok, base <> ".jsonl"}, else: :error
 
       _ ->
         :error
@@ -554,25 +862,42 @@ defmodule Ecrits.Fuse.DocFs do
 
   defp preview_target_name(_name), do: :error
 
-  defp preview_edit_ids(socket),
-    do: Exfuse.Socket.get_assign(socket, :preview_edit_ids, %{})
+  defp edit_identities(socket),
+    do: Exfuse.Socket.get_assign(socket, :vfs_edit_identities, %{})
 
-  defp preview_edit_id(socket, name), do: Map.get(preview_edit_ids(socket), name)
+  defp edit_identity(socket, name), do: Map.get(edit_identities(socket), name)
 
-  defp ensure_preview_edit_id(socket, name) do
-    case preview_edit_id(socket, name) do
-      edit_id when is_binary(edit_id) ->
-        {edit_id, socket}
+  defp ensure_edit_identity(socket, root, name, known_source \\ nil) do
+    case Map.fetch(edit_identities(socket), name) do
+      {:ok, identity} when is_map(identity) ->
+        {identity, socket}
 
-      _ ->
-        edit_id = "vfs-edit-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+      :error ->
+        owner = edit_owner_identity(root, name, known_source)
 
-        {edit_id,
+        identity =
+          Map.merge(owner, %{
+            edit_id:
+              "vfs-edit-" <>
+                Integer.to_string(System.unique_integer([:positive, :monotonic]))
+          })
+
+        {identity,
          Exfuse.Socket.assign(
            socket,
-           :preview_edit_ids,
-           Map.put(preview_edit_ids(socket), name, edit_id)
+           :vfs_edit_identities,
+           Map.put(edit_identities(socket), name, identity)
          )}
+    end
+  end
+
+  defp edit_owner_identity(root, _name, source) when is_binary(source),
+    do: OpenDocs.owner_identity_for_source(root, source)
+
+  defp edit_owner_identity(root, name, _source) do
+    case preview_source_path(root, name) do
+      {:ok, source} -> OpenDocs.owner_identity_for_source(root, source)
+      _unresolved -> OpenDocs.owner_identity(root, mounted_source_name(name))
     end
   end
 
@@ -584,75 +909,558 @@ defmodule Ecrits.Fuse.DocFs do
 
   defp clear_preview_metadata(socket, name) do
     socket
-    |> Exfuse.Socket.assign(:preview_edit_ids, Map.delete(preview_edit_ids(socket), name))
+    |> Exfuse.Socket.assign(:vfs_edit_identities, Map.delete(edit_identities(socket), name))
     |> Exfuse.Socket.assign(:preview_hashes, Map.delete(preview_hashes(socket), name))
   end
 
-  defp buffer_edit_id(target_name, buf),
-    do: "vfs-edit-#{:erlang.phash2({target_name, buf})}"
+  defp move_edit_metadata(socket, source_name, target_name) do
+    identities = edit_identities(socket)
+    hashes = preview_hashes(socket)
 
-  defp commit_buffer(root, source, source_name, buf, opts \\ []) do
-    case Projection.write_back(source, buf, Keyword.put(opts, :root, root)) do
+    identities =
+      case Map.fetch(identities, source_name) do
+        {:ok, identity} -> identities |> Map.delete(source_name) |> Map.put(target_name, identity)
+        :error -> Map.delete(identities, source_name)
+      end
+
+    hashes =
+      case Map.fetch(hashes, source_name) do
+        {:ok, hash} -> hashes |> Map.delete(source_name) |> Map.put(target_name, hash)
+        :error -> Map.delete(hashes, source_name)
+      end
+
+    socket
+    |> Exfuse.Socket.assign(:vfs_edit_identities, identities)
+    |> Exfuse.Socket.assign(:preview_hashes, hashes)
+  end
+
+  defp vfs_edit_opts(socket, _root, name, _source),
+    do: socket |> edit_identity(name) |> identity_opts()
+
+  defp maybe_put_edit_id(opts, edit_id) when is_binary(edit_id) and edit_id != "",
+    do: Keyword.put(opts, :edit_id, edit_id)
+
+  defp maybe_put_edit_id(opts, _edit_id), do: opts
+
+  defp maybe_put_turn_id(opts, turn_id) when is_binary(turn_id) and turn_id != "",
+    do: Keyword.put(opts, :turn_id, turn_id)
+
+  defp maybe_put_turn_id(opts, _turn_id), do: opts
+
+  defp maybe_put_agent_id(opts, agent_id) when is_binary(agent_id) and agent_id != "",
+    do: Keyword.put(opts, :agent_id, agent_id)
+
+  defp maybe_put_agent_id(opts, _agent_id), do: opts
+
+  defp maybe_put_instance_id(opts, instance_id)
+       when is_binary(instance_id) and instance_id != "",
+       do: Keyword.put(opts, :instance_id, instance_id)
+
+  defp maybe_put_instance_id(opts, _instance_id), do: opts
+
+  defp reject_atomic_rename(socket, root, source_name, target_name, reason) do
+    if is_integer(preview_hash(socket, source_name)) do
+      with identity when is_map(identity) <- edit_identity(socket, source_name),
+           {:ok, source} <- source_path(root, target_name) do
+        broadcast_preview_rejected(
+          root,
+          source,
+          mounted_source_name(target_name),
+          identity,
+          reason
+        )
+      end
+    end
+
+    OpenDocs.unstage(root, mounted_source_name(target_name))
+    socket |> clear_preview_metadata(source_name) |> clear_name(target_name)
+  end
+
+  defp reject_release_preview(socket, root, name, reason) do
+    if is_integer(preview_hash(socket, name)) do
+      with identity when is_map(identity) <- edit_identity(socket, name),
+           {:ok, source} <- source_path(root, name) do
+        broadcast_preview_rejected(
+          root,
+          source,
+          mounted_source_name(name),
+          identity,
+          reason
+        )
+      end
+    end
+
+    socket
+  end
+
+  defp broadcast_preview_rejected(root, source, source_name, identity, reason) do
+    info = %{
+      path: source,
+      doc: source_name,
+      edit_id: Map.get(identity, :edit_id),
+      agent_id: Map.get(identity, :agent_id),
+      instance_id: Map.get(identity, :instance_id),
+      turn_id: Map.get(identity, :turn_id),
+      reason: inspect(reason, limit: 8, printable_limit: 240)
+    }
+
+    Phoenix.PubSub.broadcast(
+      Ecrits.PubSub,
+      "doc_vfs:" <> DocMount.canonical_root(root),
+      {:vfs_doc_edit_rejected, info}
+    )
+  rescue
+    _error -> :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
+  defp identity_opts(identity) when is_map(identity) do
+    []
+    |> maybe_put_edit_id(Map.get(identity, :edit_id))
+    |> maybe_put_agent_id(Map.get(identity, :agent_id))
+    |> maybe_put_agent_session(Map.get(identity, :agent_session))
+    |> maybe_put_instance_id(Map.get(identity, :instance_id))
+    |> maybe_put_turn_id(Map.get(identity, :turn_id))
+  end
+
+  defp identity_opts(_identity), do: []
+
+  if Mix.env() == :test do
+    @doc false
+    def __owner_identity_opts_for_test__(root, name, source) do
+      root
+      |> edit_owner_identity(name, source)
+      |> identity_opts()
+    end
+  end
+
+  defp maybe_put_agent_session(opts, agent_session) when is_pid(agent_session),
+    do: Keyword.put(opts, :agent_session, agent_session)
+
+  defp maybe_put_agent_session(opts, _agent_session), do: opts
+
+  defp commit_buffer(root, source, source_name, buf, opts) do
+    OpenDocs.clear_write_failure(root, source_name)
+
+    # A failed atomic rename leaves its source temp in place and must not make
+    # rejected bytes visible under the target. Direct rewrites still stage
+    # retryable bytes on the target so the same handle can be corrected.
+    {atomic_rename?, write_back_opts} = Keyword.pop(opts, :atomic_rename, false)
+
+    case write_back_unless_accepted(
+           root,
+           source,
+           source_name,
+           buf,
+           Keyword.put(write_back_opts, :root, root)
+         ) do
+      {:ok, %{accepted_noop: true}} = ok ->
+        OpenDocs.unstage(root, source_name)
+        ok
+
+      # Semantic no-op with byte-different content: the stale-run reconciliation
+      # in the projection diff heals commits that carry real changes, so a write
+      # applying zero changes while differing from committed bytes can only be a
+      # replay of an earlier served state (e.g. a duplicate octet delivery after
+      # terminal canonical publication). Republishing it would regress the
+      # served view, so fail closed without mutating anything.
+      {:ok, %{applied: 0}} ->
+        OpenDocs.unstage(root, source_name)
+        record_write_failure(root, source_name, :stale_projection_replay)
+        {:error, :stale_projection_replay}
+
       {:ok, _info} = ok ->
         OpenDocs.unstage(root, source_name)
-        refresh_committed_projection(root, source_name, source)
+
+        cache_accepted_projection(
+          root,
+          source_name,
+          source,
+          buf,
+          identity_from_opts(write_back_opts)
+        )
+
         ok
 
       {:error, reason} = error ->
-        if retryable_commit_error?(reason) do
-          OpenDocs.stage(root, source_name, buf, reason)
-          {:ok, {:staged, reason}}
-        else
-          error
+        cond do
+          retryable_commit_error?(reason) and atomic_rename? ->
+            error
+
+          retryable_commit_error?(reason) ->
+            OpenDocs.stage(root, source_name, buf, reason, identity_from_opts(write_back_opts))
+            {:ok, {:staged, reason}}
+
+          true ->
+            OpenDocs.unstage(root, source_name)
+            record_write_failure(root, source_name, reason)
+            error
         end
     end
   end
 
-  defp refresh_committed_projection(root, source_name, source) do
-    OpenDocs.uncache_committed(root, source_name)
+  # FSKit has no invalidation callback for replacing already-served inode bytes.
+  # Atomically keep the successful user write's exact transport bytes globally
+  # visible and stage the engine's normalized projection separately. Only the
+  # fresh mounted sibling+rename echo in `flush_canonical/2` publishes those
+  # canonical bytes to the live inode namespace.
+  defp cache_accepted_projection(root, source_name, source, bytes, identity) do
+    case accepted_projection_settlement(source, bytes, identity) do
+      {:accept_projection, ^bytes, canonical_bytes, metadata} ->
+        OpenDocs.accept_projection(root, source_name, bytes, canonical_bytes, metadata)
 
-    case Projection.project_file(source) do
-      {:ok, bytes} -> OpenDocs.cache_committed(root, source_name, bytes)
-      {:error, _reason} -> :ok
+      {:accept_projection_retry, ^bytes, metadata} ->
+        OpenDocs.accept_projection_retry(root, source_name, bytes, metadata)
     end
   end
+
+  defp accepted_projection_settlement(source, bytes, identity) do
+    metadata = Map.put(identity || %{}, :source_path, source)
+
+    case Projection.project_file(source) do
+      {:ok, canonical_bytes} ->
+        {:accept_projection, bytes, canonical_bytes, metadata}
+
+      {:error, reason} ->
+        # The semantic write already succeeded. Preserve exact transport truth
+        # even if a follow-up canonical projection cannot currently be rendered.
+        Logger.warning(
+          "[DocFs] canonical projection unavailable for #{source}: #{inspect(reason)}"
+        )
+
+        {:accept_projection_retry, bytes, metadata}
+    end
+  end
+
+  # A client may rewrite the exact bytes it just read without a semantic change.
+  # Once the engine has normalized an inserted table, diffing that accepted raw
+  # shape again is structurally ambiguous; the byte-identical cache hit is the
+  # authoritative no-op guard and prevents both a false EINVAL and duplication.
+  defp write_back_unless_accepted(root, source, source_name, bytes, opts) do
+    case OpenDocs.committed(root, source_name) do
+      {:ok, ^bytes} ->
+        {:ok, %{applied: 0, accepted_noop: true, doc: Path.basename(source)}}
+
+      _other ->
+        Projection.write_back(source, bytes, opts)
+    end
+  end
+
+  defp resolve_in_flight_canonical(root, entry, filters, opts) do
+    result = safe_resolve_in_flight_canonical(root, entry, opts)
+
+    if current_in_flight?(root, entry, filters) do
+      result
+    else
+      # A concurrent newer edit superseded this token while projection was in
+      # progress. Its own owner-scoped stage is now the only terminal concern.
+      :ok
+    end
+  end
+
+  defp safe_resolve_in_flight_canonical(root, entry, opts) do
+    project_fun = Keyword.get(opts, :project_fun, &Projection.project_file/1)
+
+    with source when is_binary(source) <- Map.get(entry, :source_path),
+         {:ok, canonical_bytes} <- project_fun.(source),
+         :ok <-
+           OpenDocs.complete_canonical_stage(
+             root,
+             entry.name,
+             entry.accepted_bytes,
+             canonical_bytes,
+             entry.generation,
+             entry
+           ) do
+      :ok
+    else
+      nil -> {:error, :canonical_projection_source_missing}
+      {:error, reason} -> {:error, {:canonical_projection_failed, reason}}
+      other -> {:error, {:canonical_projection_invalid_result, other}}
+    end
+  rescue
+    error -> {:error, {:canonical_projection_exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:canonical_projection_caught, kind, reason}}
+  end
+
+  defp current_in_flight?(root, entry, filters) do
+    root
+    |> OpenDocs.in_flight_canonical_entries(filters)
+    |> Enum.any?(fn current ->
+      current.name == entry.name and current.generation == entry.generation
+    end)
+  end
+
+  defp publish_pending_canonical(root, entry, opts) do
+    target = Projection.projected_name(entry.name)
+
+    token = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+    temp = ".ecrits-canonical-" <> token <> ".tmp"
+
+    with :ok <- OpenDocs.begin_canonical_echo(root, entry.name, temp, entry) do
+      result = safe_canonical_publication(root, temp, target, entry, opts)
+
+      case result do
+        :ok ->
+          :ok
+
+        {:error, _reason} = error ->
+          cancel_canonical_publication(root, temp, target)
+          error
+      end
+    end
+  end
+
+  defp safe_canonical_publication(root, temp, target, entry, opts) do
+    if canonical_mount_active?(root, opts) do
+      publish_canonical_through_mount(root, temp, target, entry, opts)
+    else
+      OpenDocs.promote_canonical_echo(root, temp)
+    end
+  rescue
+    error -> {:error, {:canonical_publication_exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:canonical_publication_caught, kind, reason}}
+  end
+
+  defp canonical_mount_active?(root, opts) do
+    case Keyword.fetch(opts, :mounted?) do
+      {:ok, mounted?} when is_boolean(mounted?) -> mounted?
+      {:ok, fun} when is_function(fun, 1) -> fun.(root)
+      :error -> DocMount.mounted?(root)
+    end
+  end
+
+  defp publish_canonical_through_mount(root, temp, target, entry, opts) do
+    echo_fun = Keyword.get(opts, :echo_fun, &write_mounted_canonical_echo/4)
+
+    result = echo_fun.(root, temp, target, entry.bytes)
+
+    cond do
+      result == :ok and OpenDocs.committed(root, entry.name) == {:ok, entry.bytes} ->
+        :ok
+
+      Keyword.get(opts, :remount?, false) ->
+        remount_canonical_fallback(root, temp, entry, opts, result)
+
+      true ->
+        cancel_canonical_publication(root, temp, target)
+        {:error, {:canonical_echo_failed, result}}
+    end
+  end
+
+  defp remount_canonical_fallback(root, temp, entry, opts, echo_result) do
+    remount_fun =
+      Keyword.get(opts, :remount_fun, fn root, before_mount ->
+        DocMount.refresh(root, before_mount: before_mount)
+      end)
+
+    claim_result =
+      case OpenDocs.canonical_echo(root, temp) do
+        {:ok, _entry} -> :ok
+        :error -> OpenDocs.begin_canonical_echo(root, entry.name, temp, entry)
+      end
+
+    result =
+      if claim_result == :ok do
+        remount_fun.(root, fn ->
+          OpenDocs.promote_canonical_echo(root, temp)
+        end)
+      else
+        {:error, claim_result}
+      end
+
+    if match?({:ok, :mounted}, result) and
+         OpenDocs.committed(root, entry.name) == {:ok, entry.bytes} do
+      :ok
+    else
+      OpenDocs.cancel_canonical_echo(root, temp)
+      {:error, {:canonical_echo_and_remount_failed, echo_result, result}}
+    end
+  end
+
+  defp cancel_canonical_publication(root, temp, target) do
+    OpenDocs.cancel_canonical_echo(root, temp)
+    _ = File.rm(Path.join(DocMount.mount_point(root), temp))
+
+    # The target is intentionally untouched: failed echo publication leaves the
+    # successful user rename's exact bytes as the mounted truth.
+    _ = target
+    :ok
+  end
+
+  defp write_mounted_canonical_echo(root, temp, target, bytes) do
+    mount = DocMount.mount_point(root)
+    temp_path = Path.join(mount, temp)
+    target_path = Path.join(mount, target)
+
+    with {:ok, io} <-
+           :file.open(String.to_charlist(temp_path), [:raw, :binary, :write, :exclusive]) do
+      write_result =
+        with :ok <- :file.write(io, bytes),
+             :ok <- :file.sync(io) do
+          :ok
+        end
+
+      close_result = :file.close(io)
+
+      with :ok <- write_result,
+           :ok <- close_result,
+           :ok <- File.rename(temp_path, target_path) do
+        :ok
+      end
+    end
+  end
+
+  defp identity_from_opts(opts) do
+    %{
+      edit_id: Keyword.get(opts, :edit_id),
+      agent_id: Keyword.get(opts, :agent_id),
+      agent_session: Keyword.get(opts, :agent_session),
+      instance_id: Keyword.get(opts, :instance_id),
+      turn_id: Keyword.get(opts, :turn_id)
+    }
+  end
+
+  defp staged_identity_matches?(_identity, []), do: true
+
+  defp staged_identity_matches?(identity, filters) when is_map(identity) do
+    Enum.all?(filters, fn {key, value} ->
+      not (is_binary(value) and value != "") or Map.get(identity, key) == value
+    end)
+  end
+
+  defp staged_identity_matches?(_identity, _filters), do: false
 
   defp retryable_commit_error?({:invalid_ir_json, _line}), do: true
   defp retryable_commit_error?(:structural_change), do: true
   defp retryable_commit_error?(_reason), do: false
 
-  defp rename_errno({:multiple_nested_projection_values, _count}), do: :einval
+  defp final_commit_result({:ok, {:staged, :structural_change}}),
+    do: {:error, :structural_change}
 
-  defp rename_errno(reason)
+  defp final_commit_result(result), do: result
+
+  # A projection validation error is bad input, not a failed filesystem or
+  # engine write. Keep EIO for the latter so a client can distinguish a
+  # correctable JSONL edit from a transport/runtime failure on both release and
+  # temp+rename paths.
+  defp write_errno(:stale_projection_replay), do: :einval
+  defp write_errno({:multiple_nested_projection_values, _count}), do: :einval
+  defp write_errno({:invalid_ir_json, _line}), do: :einval
+  defp write_errno({:invalid_property, _key}), do: :einval
+  defp write_errno({:invalid_property_type, _key}), do: :einval
+  defp write_errno({:read_only_property, _key}), do: :einval
+  defp write_errno({:invalid_table_payload, _reason}), do: :einval
+  defp write_errno({:invalid_picture_payload, _reason}), do: :einval
+  defp write_errno({:writeback_unroutable, _reason}), do: :einval
+  defp write_errno({:browser_writeback_rejected, _reason}), do: :einval
+  defp write_errno({:invalid_geometry, _reason}), do: :einval
+  defp write_errno({:invalid_column_def, _reason}), do: :einval
+
+  defp write_errno(reason)
        when reason in [
               :invalid_payload_node,
+              :invalid_payload_layer,
+              :missing_payload_layer,
+              :invalid_layer_record,
+              :invalid_doc_layer,
+              :invalid_section_layer,
+              :missing_section_layer,
+              :invalid_paragraph_layer,
+              :missing_paragraph_layer,
               :invalid_section_list,
               :invalid_paragraph_list,
-              :invalid_ir_jsonl
+              :invalid_ir_jsonl,
+              :structural_change,
+              :unroutable
             ],
        do: :einval
 
-  defp rename_errno(_reason), do: :eio
+  defp write_errno(_reason), do: :eio
 
-  defp discard_staged_error?({:invalid_ir_json, _line}), do: true
-  defp discard_staged_error?(_reason), do: false
+  # Only transport/engine failures are fallback evidence. Projection validation
+  # failures are user-correctable JSONL input and must never unlock `doc.edit`.
+  defp record_write_failure(root, source_name, reason) do
+    if write_errno(reason) == :eio do
+      OpenDocs.record_write_failure(root, source_name, reason)
+    end
+  end
+
+  defp terminal_rejectable_staged_error?({:invalid_ir_json, _line}), do: true
+  defp terminal_rejectable_staged_error?(:structural_change), do: true
+  defp terminal_rejectable_staged_error?(_reason), do: false
+
+  defp settle_staged_cleanup(
+         acc,
+         root,
+         name,
+         bytes,
+         reason,
+         identity,
+         filters,
+         cleanup_reason
+       ) do
+    disposition =
+      settle_staged_snapshot(root, name, bytes, reason, identity, filters, :discard)
+
+    maybe_mark_replaced_stage_pending(acc, name, disposition, cleanup_reason)
+  end
+
+  defp settle_staged_commit(
+         acc,
+         root,
+         name,
+         bytes,
+         reason,
+         identity,
+         filters,
+         settlement,
+         commit_reason
+       ) do
+    disposition =
+      settle_staged_snapshot(root, name, bytes, reason, identity, filters, settlement)
+
+    acc
+    |> Map.update!(:committed, &[name | &1])
+    |> maybe_mark_replaced_stage_pending(name, disposition, commit_reason)
+  end
+
+  defp settle_staged_snapshot(root, name, bytes, reason, identity, filters, settlement) do
+    case OpenDocs.settle_staged(root, name, bytes, reason, identity, settlement, filters) do
+      :settled -> :discarded
+      :retained -> :retained
+      :same_owner_replaced -> :same_owner_replaced
+      :other_owner_or_gone -> :other_owner_or_gone
+    end
+  end
+
+  defp maybe_mark_replaced_stage_pending(acc, name, :same_owner_replaced, reason) do
+    Map.update!(acc, :pending, &[{name, {:staged_replaced, reason}} | &1])
+  end
+
+  defp maybe_mark_replaced_stage_pending(acc, _name, _disposition, _reason), do: acc
 
   defp projected_bytes(root, name) do
     with {:ok, source} <- source_path(root, name) do
       source_name = mounted_source_name(name)
 
-      case OpenDocs.committed(root, source_name) do
-        {:ok, bytes} ->
+      case OpenDocs.staged(root, source_name) do
+        {:ok, bytes, :structural_change} ->
           {:ok, bytes}
 
         :error ->
-          case OpenDocs.staged(root, source_name) do
-            {:ok, _bytes, _reason} ->
-              OpenDocs.unstage(root, source_name)
-              Projection.project_file(source)
+          case OpenDocs.committed(root, source_name) do
+            {:ok, bytes} -> {:ok, bytes}
+            :error -> Projection.project_file(source)
+          end
 
-            :error ->
-              Projection.project_file(source)
+        {:ok, _bytes, _reason} ->
+          case OpenDocs.committed(root, source_name) do
+            {:ok, bytes} -> {:ok, bytes}
+            :error -> Projection.project_file(source)
           end
       end
     end
@@ -739,6 +1547,11 @@ defmodule Ecrits.Fuse.DocFs do
   end
 
   defp mounted_source_name(name), do: Projection.source_basename(name) || name
+
+  defp canonical_temp_name?(name) when is_binary(name),
+    do: String.starts_with?(name, ".ecrits-canonical-") and String.ends_with?(name, ".tmp")
+
+  defp canonical_temp_name?(_name), do: false
 
   defp path_escape?(name), do: String.contains?(name, "/") or String.contains?(name, "..")
 

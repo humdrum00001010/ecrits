@@ -40,7 +40,7 @@ defmodule Ecrits.WorkspaceMount.Transition do
   defp error_message({:native_picker_unavailable, message}) when is_binary(message),
     do: message
 
-  defp error_message({:local_substrate_unavailable, message}) when is_binary(message),
+  defp error_message({:substrate_unavailable, message}) when is_binary(message),
     do: message
 
   defp error_message(message) when is_binary(message), do: message

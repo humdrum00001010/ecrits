@@ -14,9 +14,10 @@ defmodule Ecrits.Fuse.DocMount do
 
   Mount mechanics live in `exfuse`: per-point exclusive servers, dead-mount
   healing, busy retry, serving verification with rollback, and idempotent
-  force-unmount. This module only decides WHEN to (re)mount — `Exfuse.serving?/1`
-  is the health gate (a mount left by a beam crash lingers in the kernel table
-  but EIOs fast, so `ensure/1` remounts it instead of reporting `:already`).
+  force-unmount. This module only decides WHEN to (re)mount. Reuse requires both
+  a serving OS mount and a matching mount owned by this BEAM in `Exfuse.list/0`:
+  FSKit can leave an old mount serving cached data after its owning BEAM exits,
+  and that orphan must be detached and remounted instead of reported `:already`.
 
   Gated by `enabled?/0`: the `:doc_vfs` config flag (default ON) and a usable
   native backend. The backend is determined by the OS alone — macOS mounts
@@ -108,9 +109,36 @@ defmodule Ecrits.Fuse.DocMount do
   @spec settings_url() :: String.t()
   def settings_url, do: @fskit_settings_url
 
-  @doc "Whether the workspace's mount point is mounted and serving requests."
+  @doc "Whether this runtime owns the workspace mount and it is serving requests."
   @spec mounted?(String.t()) :: boolean()
-  def mounted?(root), do: root |> mount_point() |> Exfuse.serving?()
+  def mounted?(root) do
+    point = mount_point(root)
+
+    case mounts_at(point) do
+      [] -> false
+      mounts -> reusable_mount?(point, mounts, Exfuse.serving?(point))
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  @doc false
+  @spec reusable_mount?(String.t(), list(), boolean()) :: boolean()
+  def reusable_mount?(point, mounts, serving?)
+      when is_binary(point) and is_list(mounts) and is_boolean(serving?) do
+    point = Path.expand(point)
+
+    serving? and
+      Enum.any?(mounts, fn
+        {mount, %{mount_point: owned_point}} when is_pid(mount) and is_binary(owned_point) ->
+          Process.alive?(mount) and Path.expand(owned_point) == point
+
+        _other ->
+          false
+      end)
+  end
 
   @doc """
   Idempotently mount the doc VFS for a workspace root.
@@ -143,8 +171,8 @@ defmodule Ecrits.Fuse.DocMount do
   end
 
   @doc "Remount the workspace doc VFS so FSKit sees a changed open-document set."
-  @spec refresh(String.t()) :: :disabled | {:ok, :mounted} | {:error, term()}
-  def refresh(root) do
+  @spec refresh(String.t(), keyword()) :: :disabled | {:ok, :mounted} | {:error, term()}
+  def refresh(root, opts \\ []) when is_list(opts) do
     root = canonical_root(root)
 
     with_mount_lock(fn ->
@@ -153,6 +181,7 @@ defmodule Ecrits.Fuse.DocMount do
 
       if status.enabled? do
         :ok = unmount_point(mount_point(root))
+        :ok = run_before_mount(Keyword.get(opts, :before_mount))
         do_mount(root, status.backend)
       else
         :disabled
@@ -167,6 +196,9 @@ defmodule Ecrits.Fuse.DocMount do
       Logger.error("[DocMount] refresh crashed for #{inspect(root)}: #{inspect({kind, reason})}")
       {:error, {kind, reason}}
   end
+
+  defp run_before_mount(nil), do: :ok
+  defp run_before_mount(fun) when is_function(fun, 0), do: fun.()
 
   @doc """
   Unmount the workspace's doc VFS. Treats absent/unmounted as success. Never
@@ -244,12 +276,16 @@ defmodule Ecrits.Fuse.DocMount do
   end
 
   defp unmount_point(point) do
-    point
-    |> mounts_at()
-    |> Enum.each(fn {mount, %{fs: fs}} ->
-      :ok = Exfuse.unmount(mount)
-      Exfuse.stop_fs(fs)
-    end)
+    filesystems =
+      point
+      |> mounts_at()
+      |> Enum.map(fn {_mount, %{fs: fs}} -> fs end)
+      |> Enum.uniq()
+
+    # The path form also detaches a dead FSKit/FUSE mount whose VM is gone and
+    # therefore cannot appear in `Exfuse.list/0`.
+    :ok = Exfuse.unmount(point)
+    Enum.each(filesystems, &Exfuse.stop_fs/1)
 
     :ok
   end

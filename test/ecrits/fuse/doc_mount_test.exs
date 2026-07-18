@@ -80,6 +80,15 @@ defmodule Ecrits.Fuse.DocMountTest do
     end
   end
 
+  test "a serving OS mount is reusable only when this runtime owns it" do
+    point = Path.join(System.tmp_dir!(), "ecrits-doc-mount-owned")
+    owned_mounts = [{self(), %{fs: self(), mount_point: point}}]
+
+    refute DocMount.reusable_mount?(point, [], true)
+    refute DocMount.reusable_mount?(point, owned_mounts, false)
+    assert DocMount.reusable_mount?(point, owned_mounts, true)
+  end
+
   test "teardown invalidates a same-path projection after the native document is restored" do
     root =
       Path.join(
