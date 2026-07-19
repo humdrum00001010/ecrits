@@ -19,6 +19,7 @@ defmodule Ecrits.AcpAgent.CodexHome do
     root = Keyword.get(opts, :root, default_root())
     document_lane? = Keyword.get(opts, :document_lane?, false)
     workspace_root = Keyword.get(opts, :workspace_root)
+    user_home = Keyword.get(opts, :user_home, System.user_home!())
     permission_profile = permission_profile(Keyword.get(opts, :sandbox), document_lane?)
 
     with :ok <- require_auth(auth_source),
@@ -31,7 +32,8 @@ defmodule Ecrits.AcpAgent.CodexHome do
              permission_profile,
              workspace_root,
              document_lane?,
-             Keyword.get(opts, :path, System.get_env("PATH"))
+             Keyword.get(opts, :path, System.get_env("PATH")),
+             user_home
            ),
          :ok <- write_document_playbook(home, document_lane?) do
       {:ok,
@@ -164,7 +166,15 @@ defmodule Ecrits.AcpAgent.CodexHome do
     end
   end
 
-  defp write_config(home, global_home, default_profile, workspace_root, document_lane?, path) do
+  defp write_config(
+         home,
+         global_home,
+         default_profile,
+         workspace_root,
+         document_lane?,
+         path,
+         user_home
+       ) do
     # Keep ordinary shell search available. Document profiles are read-only so
     # the provider can inspect the workspace while every mutation remains
     # mediated by the ACP file handler.
@@ -183,7 +193,9 @@ defmodule Ecrits.AcpAgent.CodexHome do
         # READ a binary to run it: /usr/bin tools (jq) always worked while
         # /opt/homebrew tools (rg) failed as "No such file or directory" —
         # the field report "셸의 읽기 전용 검색이 샌드박스에서 막혔습니다".
-        tool_grants = tool_path_grants(path, home, global_home) <> system_interpreter_grants()
+        tool_grants =
+          tool_path_grants(path, home, global_home) <>
+            system_interpreter_grants() <> user_package_grants(user_home)
 
         """
 
@@ -356,6 +368,21 @@ defmodule Ecrits.AcpAgent.CodexHome do
   defp system_interpreter_grants do
     Enum.map_join(@system_interpreter_support, fn dir -> "\"#{dir}/**\" = \"read\"\n" end)
   end
+
+  # Interpreters also scan USER package trees at boot: after /Library/Ruby was
+  # granted, rubygems progressed to ~/.gem and died there the same way (EPERM
+  # aborts the glob; a missing dir is silently skipped, which is why a fake
+  # test HOME without ~/.gem masked this). These are named package
+  # directories, not a $HOME grant — secrets confinement stands.
+  @user_package_dirs ~w(.gem Library/Python)
+
+  defp user_package_grants(user_home) when is_binary(user_home) do
+    Enum.map_join(@user_package_dirs, fn dir ->
+      "\"#{toml_string(Path.join(Path.expand(user_home), dir))}/**\" = \"read\"\n"
+    end)
+  end
+
+  defp user_package_grants(_user_home), do: ""
 
   defp toml_string(value),
     do: value |> String.replace("\\", "\\\\") |> String.replace("\"", "\\\"")

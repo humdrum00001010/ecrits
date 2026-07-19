@@ -159,7 +159,8 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
                global_home: global_home,
                workspace_root: workspace_root,
                document_lane?: true,
-               path: "/opt/toolchain/bin"
+               path: "/opt/toolchain/bin",
+               user_home: "/Users/someone"
              )
 
     config = File.read!(Path.join(isolation.home, "config.toml"))
@@ -178,6 +179,8 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
            "/Library/Python/**" = "read"
            "/Library/Java/**" = "read"
            "/Library/Frameworks/**" = "read"
+           "/Users/someone/.gem/**" = "read"
+           "/Users/someone/Library/Python/**" = "read"
            "#{Path.expand(workspace_root)}" = "read"
            "#{Path.expand(workspace_root)}/**" = "read"
            "#{Path.expand(isolation.home)}/**" = "deny"
@@ -207,7 +210,8 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
                workspace_root: Path.join(root, "contract-workspace"),
                document_lane?: true,
                sandbox: "read-only",
-               path: "/opt/toolchain/bin"
+               path: "/opt/toolchain/bin",
+               user_home: "/Users/someone"
              )
 
     assert isolation.permission_profile == "ecrits_document_read_only"
@@ -224,6 +228,8 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
            "/Library/Python/**" = "read"
            "/Library/Java/**" = "read"
            "/Library/Frameworks/**" = "read"
+           "/Users/someone/.gem/**" = "read"
+           "/Users/someone/Library/Python/**" = "read"
            "#{Path.expand(Path.join(root, "contract-workspace"))}" = "read"
            "#{Path.expand(Path.join(root, "contract-workspace"))}/**" = "read"
            "#{Path.expand(isolation.home)}/**" = "deny"
@@ -256,6 +262,12 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     :ok = File.write(Path.join(host_home, ".ssh/config"), "host secret\n")
     :ok = File.write(Path.join(host_home, ".zsh_history"), "history secret\n")
 
+    # A user gem dir must EXIST for rubygems to glob it at boot: a missing
+    # ~/.gem is skipped silently (which masked the 2026-07-19 field failure on
+    # a HOME without gems), while an ungranted one aborts ruby with EPERM.
+    :ok = File.mkdir_p(Path.join(host_home, ".gem/ruby/2.6.0/specifications"))
+    :ok = File.write(Path.join(host_home, ".gem/ruby/2.6.0/specifications/.keep"), "")
+
     on_exit(fn -> File.rm_rf(root) end)
 
     assert {:ok, isolation} =
@@ -264,7 +276,8 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
                auth_source: auth_source,
                global_home: global_home,
                workspace_root: workspace_root,
-               document_lane?: true
+               document_lane?: true,
+               user_home: host_home
              )
 
     env =
