@@ -20,6 +20,32 @@ defmodule Ecrits.Fuse.DocMountTest do
     :ok
   end
 
+  # 2026-07-19 live: a KeyError crash in a rail session cascaded into the
+  # workspace coordinator, whose terminate tore the doc VFS down — supervision
+  # restarted everything except the mount, and the agent's next shell read hit
+  # ENOENT. The mount follows the WORKSPACE lifetime: only a graceful stop
+  # tears it down.
+  test "a crashing workspace session keeps the mount; a graceful stop tears it down" do
+    Application.put_env(:ecrits, :doc_vfs, enabled: true, mounting: :virtual)
+
+    root =
+      Path.join(System.tmp_dir!(), "doc_mount_crash_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    assert {:ok, :mounted} = DocMount.ensure(root)
+    assert DocMount.mounted?(root)
+
+    state = %{path: DocMount.canonical_root(root), agents: %{}, fs_watcher_pid: nil}
+
+    _ = Ecrits.Workspace.Session.terminate({:key_error_crash, :boom}, state)
+    assert DocMount.mounted?(root)
+
+    _ = Ecrits.Workspace.Session.terminate(:shutdown, state)
+    refute DocMount.mounted?(root)
+  end
+
   test "backend is determined by the OS alone" do
     Application.put_env(:ecrits, :doc_vfs, enabled: true)
     System.delete_env("EXFUSE_BACKEND")

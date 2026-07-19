@@ -1616,19 +1616,30 @@ defmodule Ecrits.Workspace.Session do
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
     _ = stop_file_watcher(state)
-    # Tear down the document VFS mount when the workspace session truly ends
-    # (best-effort; no-op if it was never mounted / already gone).
-    _ = if is_binary(state.path), do: Ecrits.Fuse.DocMount.teardown(state.path)
 
-    state
-    |> Map.get(:agents, %{})
-    |> Map.keys()
-    |> Enum.each(&AcpAgent.close/1)
+    # Mount and agents follow the WORKSPACE lifetime, not this process's: a
+    # crash-restart of the coordinator is not the workspace ending. Tearing
+    # the mount down on a crash left the agent's mounted projection ENOENT
+    # after supervision brought everything else back (2026-07-19 live), and
+    # closing the agents would churn sessions the revive path then rebuilds.
+    if graceful_stop?(reason) do
+      _ = if is_binary(state.path), do: Ecrits.Fuse.DocMount.teardown(state.path)
+
+      state
+      |> Map.get(:agents, %{})
+      |> Map.keys()
+      |> Enum.each(&AcpAgent.close/1)
+    end
 
     :ok
   end
+
+  defp graceful_stop?(:normal), do: true
+  defp graceful_stop?(:shutdown), do: true
+  defp graceful_stop?({:shutdown, _reason}), do: true
+  defp graceful_stop?(_reason), do: false
 
   # Backfill the Phase 3 maps onto a state that predates them (a Session GenServer
   # hot-reloaded across the upgrade), so the live process never crashes on a
