@@ -2287,11 +2287,14 @@ defmodule Ecrits.AcpAgent.Session do
   end
 
   defp recap_dialog(%Agent.Dialog{} = dialog) do
+    # Tool lines get a larger budget than prose: a truncated shell command or
+    # op payload cannot be retried, and "run that command again" across a
+    # thread change is the recap's whole reason to exist.
     tool_lines =
       dialog.items
       |> Enum.filter(&(is_map(&1) and is_binary(Map.get(&1, :name))))
       |> Enum.map(fn item ->
-        "  [tool #{item.name}] #{recap_trim(Map.get(item, :input))}\n"
+        "  [tool #{recap_trim(item.name, 1_500)}] #{recap_trim(Map.get(item, :input), 1_500)}\n"
       end)
 
     [
@@ -2301,11 +2304,13 @@ defmodule Ecrits.AcpAgent.Session do
     ]
   end
 
-  defp recap_trim(value) when is_binary(value) do
-    if String.length(value) > 400, do: String.slice(value, 0, 400) <> "…", else: value
+  defp recap_trim(value, limit \\ 400)
+
+  defp recap_trim(value, limit) when is_binary(value) do
+    if String.length(value) > limit, do: String.slice(value, 0, limit) <> "…", else: value
   end
 
-  defp recap_trim(_value), do: ""
+  defp recap_trim(_value, _limit), do: ""
 
   defp record_transcript_turn(state, current) do
     # The transcript bubble shows the typed text regardless of input modality
