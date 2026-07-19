@@ -1974,30 +1974,6 @@ defmodule Ecrits.AcpAgent.Session do
     persist_durable_state(%{mark_thread_change(state, id) | provider_session_id: id})
   end
 
-  # A DIFFERENT provider session id than the remembered one means the old
-  # thread was not resumed: every transcript row so far is invisible to the
-  # new thread. Record how far the gap reaches so the next prompt seeds it.
-  # (If THIS turn already carried a recap, the completed-turn transition
-  # clears the gap again — the rows reached the new thread via the recap.)
-  defp mark_thread_change(state, id) do
-    prior = state.provider_session_id
-    rows = length(state.transcript)
-
-    if is_binary(prior) and prior != "" and prior != id and rows > 0 do
-      %{state | thread_covers_from: max(state.thread_covers_from, rows)}
-    else
-      state
-    end
-  end
-
-  defp clear_seeded_thread_gap(state, current) do
-    if Map.get(current, :recap_covered, 0) > 0 do
-      %{state | thread_covers_from: 0}
-    else
-      state
-    end
-  end
-
   defp handle_turn_event(
          state,
          turn_id,
@@ -2226,6 +2202,30 @@ defmodule Ecrits.AcpAgent.Session do
   # Append a finished turn to the display-only transcript (newest-prepended;
   # `transcript/1` reverses to oldest-first). Skips an empty turn (no user text
   # and no agent text) so a no-op turn never leaves a blank pair on repaint.
+  # A DIFFERENT provider session id than the remembered one means the old
+  # thread was not resumed: every transcript row so far is invisible to the
+  # new thread. Record how far the gap reaches so the next prompt seeds it.
+  # (If THIS turn already carried a recap, the completed-turn transition
+  # clears the gap again — the rows reached the new thread via the recap.)
+  defp mark_thread_change(state, id) do
+    prior = state.provider_session_id
+    rows = length(state.transcript)
+
+    if is_binary(prior) and prior != "" and prior != id and rows > 0 do
+      %{state | thread_covers_from: max(state.thread_covers_from, rows)}
+    else
+      state
+    end
+  end
+
+  defp clear_seeded_thread_gap(state, current) do
+    if Map.get(current, :recap_covered, 0) > 0 do
+      %{state | thread_covers_from: 0}
+    else
+      state
+    end
+  end
+
   # Seed a thread gap: rows before `thread_covers_from` exist only in the
   # durable transcript — the provider thread never saw them. Prepend a bounded
   # recap once, ahead of the user's message, so references like "retry that
