@@ -63,7 +63,14 @@ defmodule Ecrits.Doc.ProjectionLineEncodingTest do
       # fail closed as a parse error — never a partial apply.
       [sample | _] = group_lines
       broken_line = String.slice(sample, 0, div(String.length(sample), 2)) <> "\n"
-      broken = String.replace(bytes, sample, broken_line <> String.slice(sample, div(String.length(sample), 2)..-1//1))
+
+      broken =
+        String.replace(
+          bytes,
+          sample,
+          broken_line <> String.slice(sample, div(String.length(sample), 2)..-1//1)
+        )
+
       assert {:error, {:invalid_ir_json, _fragment}} = Projection.write_back(path, broken)
     end
   end

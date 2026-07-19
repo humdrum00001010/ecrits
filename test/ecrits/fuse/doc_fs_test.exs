@@ -1012,7 +1012,10 @@ defmodule Ecrits.Fuse.DocFsTest do
                  socket
                )
 
-      assert {:ok, ^new_bytes, :structural_change} = OpenDocs.staged(root, "doc.hwpx")
+      assert {:ok, ^new_bytes, {:structural_change, detail}} =
+               OpenDocs.staged(root, "doc.hwpx")
+
+      assert is_binary(detail) and detail != ""
 
       assert {:reply, ^new_bytes, _socket} =
                DocFs.handle_event(

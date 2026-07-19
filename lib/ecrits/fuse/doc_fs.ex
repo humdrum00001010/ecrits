@@ -1340,12 +1340,18 @@ defmodule Ecrits.Fuse.DocFs do
 
   defp staged_identity_matches?(_identity, _filters), do: false
 
-  defp retryable_commit_error?({:invalid_ir_json, _line}), do: true
-  defp retryable_commit_error?(:structural_change), do: true
-  defp retryable_commit_error?(_reason), do: false
+  # The differ now names its structural offender ({:structural_change, detail}
+  # from the ehwp pin); the bare atom remains for legacy/office-arm producers.
+  defp structural_change?(:structural_change), do: true
+  defp structural_change?({:structural_change, _detail}), do: true
+  defp structural_change?(_reason), do: false
 
-  defp final_commit_result({:ok, {:staged, :structural_change}}),
-    do: {:error, :structural_change}
+  defp retryable_commit_error?({:invalid_ir_json, _line}), do: true
+  defp retryable_commit_error?(reason), do: structural_change?(reason)
+
+  defp final_commit_result({:ok, {:staged, reason}} = result) do
+    if structural_change?(reason), do: {:error, reason}, else: result
+  end
 
   defp final_commit_result(result), do: result
 
@@ -1354,6 +1360,7 @@ defmodule Ecrits.Fuse.DocFs do
   # correctable JSONL edit from a transport/runtime failure on both release and
   # temp+rename paths.
   defp write_errno(:stale_projection_replay), do: :einval
+  defp write_errno({:structural_change, _detail}), do: :einval
   defp write_errno({:multiple_nested_projection_values, _count}), do: :einval
   defp write_errno({:invalid_ir_json, _line}), do: :einval
   defp write_errno({:invalid_property, _key}), do: :einval
@@ -1397,6 +1404,7 @@ defmodule Ecrits.Fuse.DocFs do
 
   defp terminal_rejectable_staged_error?({:invalid_ir_json, _line}), do: true
   defp terminal_rejectable_staged_error?(:structural_change), do: true
+  defp terminal_rejectable_staged_error?({:structural_change, _detail}), do: true
   defp terminal_rejectable_staged_error?(_reason), do: false
 
   defp settle_staged_cleanup(
@@ -1454,7 +1462,8 @@ defmodule Ecrits.Fuse.DocFs do
       source_name = mounted_source_name(name)
 
       case OpenDocs.staged(root, source_name) do
-        {:ok, bytes, :structural_change} ->
+        {:ok, bytes, reason} when reason == :structural_change or
+                                    (is_tuple(reason) and elem(reason, 0) == :structural_change) ->
           {:ok, bytes}
 
         :error ->

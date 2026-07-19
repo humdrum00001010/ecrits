@@ -458,10 +458,16 @@ defmodule Ecrits.AcpAgent.WorkspaceFileHandler do
 
   defp format_error({:invalid_jsonl, line_number}), do: "invalid JSONL at line #{line_number}"
 
+  # The detailed structural rejection is the #452 payoff: the ACP write reply
+  # tells the agent WHAT was structural instead of a bare EINVAL-shaped atom.
+  defp format_error({:structural_change, detail}) when is_binary(detail),
+    do: "structural_change: #{detail} — reread the mounted file and restage from the fresh read"
+
   defp format_error(:projection_reopen_required),
     do:
       "this turn has not opened the document projection yet — call doc.open_doc " <>
         "{path: \"current\"} once, then retry this file operation"
+
   defp format_error(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp format_error(reason), do: inspect(reason)
 end

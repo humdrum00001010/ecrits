@@ -106,7 +106,10 @@ defmodule Ecrits.Doc.ProjectionStaleCharEchoTest do
       # The client patches its PRE-commit base: committing it would revert
       # commit 1, so the write must fail closed.
       stale = doc0 |> insert_table_after(anchor_text, table) |> encode()
-      assert {:error, :structural_change} = Projection.write_back(path, stale)
+      assert {:error, {:structural_change, detail}} = Projection.write_back(path, stale)
+      # The detail names the concrete offender (which node/what mismatched);
+      # the tuple tag itself carries the "structural" classification.
+      assert is_binary(detail) and detail != ""
 
       # The recovery the surface prescribes: reread, restage the same change.
       {:ok, current} = Projection.project_file(path)

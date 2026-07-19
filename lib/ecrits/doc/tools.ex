@@ -1124,7 +1124,8 @@ defmodule Ecrits.Doc.Tools do
       "unsupported_structural_change" => %{"committed" => false, "errno" => "EINVAL"},
       "on_einval" => %{
         "likely_cause" => "staged_bytes_built_from_a_read_older_than_the_last_commit",
-        "recover" => "reread_the_mounted_file_now_and_restage_the_same_change_from_that_fresh_read"
+        "recover" =>
+          "reread_the_mounted_file_now_and_restage_the_same_change_from_that_fresh_read"
       }
     }
   end
