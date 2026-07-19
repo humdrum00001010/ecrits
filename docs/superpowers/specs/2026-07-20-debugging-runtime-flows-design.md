@@ -30,7 +30,7 @@ The functional regression test must be derived directly from the flow rows: reco
 ## Files
 
 - `SKILL.md`: portable workflow, mode boundary, table contracts, and completion criteria.
-- `references/beam-tidewave.md`: `dbg`, Tidewave `project_eval`, process tracing, reductions, heaps, binaries, garbage collection, and LiveView debugging.
+- `references/beam-tidewave.md`: Tidewave `project_eval`, `:dbg`, reductions, heaps, binaries, garbage collection, and LiveView debugging.
 
 Install at `~/.codex/skills/debugging-runtime-flows`.
 

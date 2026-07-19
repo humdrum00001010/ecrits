@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the portable workflow in one `SKILL.md` and load a separate BEAM/Tidewave reference only for Elixir runtimes. The workflow maintains a mutable layered abstraction plus function-level flow and strategy tables, then turns functional traces into regression tests or runs documented performance loops.
 
-**Tech Stack:** Agent Skills Markdown, Codex global skills, Python skill scaffolder/validator, fresh-context Codex subagents, Elixir `dbg/1`, Erlang `:dbg`, OTP tracing, and Tidewave runtime tools.
+**Tech Stack:** Agent Skills Markdown, Codex global skills, Python skill scaffolder/validator, fresh-context Codex subagents, Erlang `:dbg`, OTP tracing, and Tidewave runtime tools.
 
 ## Global Constraints
 
@@ -199,9 +199,9 @@ Use installed runtime documentation for exact signatures. Prefer scoped probes; 
 
 ## Probe order
 
-1. Drive the real call through Tidewave `project_eval` and place `dbg/1` at the boundary under investigation. `dbg/1` returns the original value while exposing arguments or pipeline values.
-2. Name the observed layers and functions in the portable tables.
-3. Use `:dbg` for the narrowest process, call, message, GC, or timing trace that can confirm the next hypothesis.
+1. Drive the real call through Tidewave `project_eval`.
+2. Use `:dbg` for the narrowest process, call, message, GC, or timing trace that can confirm the next hypothesis.
+3. Name the observed layers and functions in the portable tables.
 4. Remove temporary instrumentation and destroy `:dbg` sessions after capture.
 
 ## LiveView processes
@@ -261,7 +261,7 @@ try do
     end)
     |> Enum.take_while(&(&1 != :done))
 
-  dbg(events)
+  events
 after
   :dbg.session_destroy(session)
 end
@@ -313,7 +313,6 @@ info = Process.info(pid, [
   :reductions,
   :binary
 ])
-dbg(info)
 %{process: info, vm: :erlang.memory()}
 ```
 
