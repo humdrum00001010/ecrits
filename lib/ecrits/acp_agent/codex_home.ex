@@ -314,6 +314,11 @@ defmodule Ecrits.AcpAgent.CodexHome do
        an `EINVAL` means your base predates the last commit, so reread and
        restage. One corrected retry is normal, silent corruption is impossible.
 
+    If ANY read or write of the mounted file fails with ENOENT (no such
+    file), the projection is simply not registered this turn: call
+    `doc.open_doc {path: "current"}` once, then retry the same command
+    unchanged.
+
     ### Example: change one field
 
     A search for `계약명` hits line 14. Read line 14, replace only the target

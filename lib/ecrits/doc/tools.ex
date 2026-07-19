@@ -1126,6 +1126,10 @@ defmodule Ecrits.Doc.Tools do
         "likely_cause" => "staged_bytes_built_from_a_read_older_than_the_last_commit",
         "recover" =>
           "reread_the_mounted_file_now_and_restage_the_same_change_from_that_fresh_read"
+      },
+      "on_enoent" => %{
+        "likely_cause" => "projection_not_registered_this_turn_or_mount_was_recycled",
+        "recover" => "call_doc.open_doc_path_current_once_then_retry_the_same_command_unchanged"
       }
     }
   end
@@ -4025,10 +4029,31 @@ defmodule Ecrits.Doc.Tools do
       end)
 
     case result do
-      {:ok, abs} -> {:ok, abs}
-      {:error, reason} -> {:error, reason}
-      nil -> {:error, {:invalid_params, "path is required"}}
+      {:ok, abs} ->
+        {:ok, abs}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      nil when path in ["active", "current"] ->
+        {:error,
+         {:invalid_params,
+          "no document is bound to this conversation yet — retry doc.open_doc in a " <>
+            "moment (the binding syncs with the open editor tab), or pass the " <>
+            "document's workspace-relative path explicitly"}}
+
+      nil ->
+        {:error, {:invalid_params, "path is required"}}
     end
+  end
+
+  # "current"/"active" are KEYWORDS, never filenames: resolving them as
+  # literal paths produced "unsupported document type: " when no document was
+  # bound (2026-07-19 live, a revived session before its binding synced) —
+  # an error with no path forward. Keywords resolve only through the bound
+  # document, and their absence gets an actionable message.
+  defp vfs_document_path_candidates(path, ctx) when path in ["active", "current"] do
+    active_document_path_candidates(ctx, path)
   end
 
   defp vfs_document_path_candidates(path, ctx) do

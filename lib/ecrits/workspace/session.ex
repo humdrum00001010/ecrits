@@ -1073,7 +1073,7 @@ defmodule Ecrits.Workspace.Session do
             # event, not a user-facing error: revive the agent in place from
             # durable state — provider thread resume restores its cross-turn
             # memory — and retry this send once.
-            case revive_dead_foreground_agent(state, live_view_pid) do
+            case revive_dead_foreground_agent(state, live_view_pid, opts) do
               {:ok, state} ->
                 {:reply, send_turn_to_agent(agent_id, input, opts), state}
 
@@ -2589,7 +2589,7 @@ defmodule Ecrits.Workspace.Session do
   # with resume support, the remembered provider session) so the revived agent
   # continues the same conversation, driven by the rail's remembered attach
   # settings; per-send adapter opts arrive with the retried send.
-  defp revive_dead_foreground_agent(state, live_view_pid) do
+  defp revive_dead_foreground_agent(state, live_view_pid, send_opts) do
     with live_view_key when is_binary(live_view_key) <-
            Map.get(state.foreground_live_views, live_view_pid),
          rail_key when is_binary(rail_key) <- Map.get(state.active_foregrounds, live_view_key) do
@@ -2606,6 +2606,15 @@ defmodule Ecrits.Workspace.Session do
               _missing -> []
             end
         end
+
+      # The remembered settings are attach-time state; the DOCUMENT binding
+      # usually arrived later. The retried send carries the current binding —
+      # without it a revived session resolved doc.open_doc {path:"current"}
+      # against nothing and answered "unsupported document type: ".
+      settings =
+        settings
+        |> maybe_put_setting(:document_path, Keyword.get(send_opts, :document_path))
+        |> maybe_put_setting(:pool_document_id, Keyword.get(send_opts, :pool_document_id))
 
       case start_foreground_agent(state, settings, rail_key, live_view_key) do
         {:ok, state, %{id: agent_id, rail_key: rail_key, live_session_id: live_session_id}} ->
@@ -2626,6 +2635,10 @@ defmodule Ecrits.Workspace.Session do
       _ -> {:error, :no_agent}
     end
   end
+
+  defp maybe_put_setting(settings, _key, nil), do: settings
+  defp maybe_put_setting(settings, _key, ""), do: settings
+  defp maybe_put_setting(settings, key, value), do: Keyword.put(settings, key, value)
 
   # The last attach settings for a rail (provider, adapter opts, model): what a
   # mid-conversation revive must reuse when the agent process is gone and can
