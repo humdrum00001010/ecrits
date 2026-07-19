@@ -15,25 +15,30 @@ Before tracing, form a layered abstraction of ordered, named layers. Each named 
 
 ## Records
 
-Maintain three concise tables:
+Maintain three synchronized records:
 
-1. A layered abstraction containing each layer's name, the agent's current understanding, proposed responsibility and boundaries, expected data/control/lifecycle semantics, evidence, status, and change history.
-2. A complete layered-flow table that is the canonical source for a later test set. Record every observed function-level call and return while referencing the named source and destination layers. Include scenario and flow IDs, order, exact caller and callee functions, source and destination layer names, trigger and preconditions, boundary, full reproducible inputs and arguments, sync/async behavior, execution identity, timestamps and latency, memory before/after/delta, result, messages and state changes, side effects, **where this get freed?**, expected invariant, actual outcome, evidence source, and pass/fail status. Redact secrets without removing the structure needed to reproduce the flow.
-3. A layer-strategy log. Record every attempted probe at function level, including the exact function or call boundary, while referring to its named layer or layer boundary. Include the expected signal, observed result, why it failed, and how the next attempt should improve that layer's investigation.
+1. **Layered abstraction paragraphs.** Give every layer a name, then explain the agent's current understanding of its responsibility, boundaries, and expected data, control, and lifecycle semantics in a short paragraph. State the supporting evidence and whether the hypothesis was confirmed, refuted, or revised. Preserve revisions in the paragraph rather than assigning layer IDs.
+2. **Layered flow.** Render the flow as an ordered `Layer {function observations} -> Layer {function observations}` chain, never as a table. Aggregate each layer's observed function calls and returns inside its segment while preserving their order. Capture the complete reproducible arguments, sync/async behavior and execution identity, timing and latency, memory before/after/delta, returns, messages, state changes, effects, lifecycle evidence, expected invariant, actual outcome, evidence source, and status. At a lifecycle boundary, ask **where this get freed?** and incorporate the evidence-backed answer into the relevant function observation; the question is not a field. Redact secrets without removing fixture structure.
+3. **Strategy table.** Accumulate every experiment and hypothesis in one table:
+
+   | Layer/function | Experiment | Hypothesis | Observation | Conclusion/next |
+   |---|---|---|---|---|
+
+   Include baselines and successful, failed, distorting, and rejected experiments. Keep observations at function level while referencing the current layer. Explain why an attempt failed and how the next experiment improves it in `Conclusion/next`.
 
 Layers organize the logs semantically; they never replace function-level detail.
 
-Update the layered abstraction as evidence arrives. The layered-flow table and layer-strategy log must always reflect the agent's current abstraction. When a layer is renamed, split, merged, or reinterpreted, update the layer references and boundary classifications in every existing row while preserving its function-level evidence; record the reclassification in the abstraction's change history. Every finding and derived test must also reference the current layer names.
+Update the abstraction paragraphs as evidence arrives. The layered flow and strategy table must always reflect the current abstraction. When a layer is renamed, split, merged, or reinterpreted, rewrite its paragraph, reaggregate the flow, and update every strategy reference while preserving the original function-level evidence. Every finding and derived test must use the current layer names.
 
-The functional regression test must be derived directly from the flow rows: recorded inputs become fixtures, while results, ordering, effects, lifecycle, and invariants become assertions.
+The functional regression test must be derived directly from the layered flow: recorded inputs become fixtures, while results, ordering, effects, lifecycle, and invariants become assertions.
 
 ## Files
 
-- `SKILL.md`: portable workflow, mode boundary, table contracts, and completion criteria.
+- `SKILL.md`: portable workflow, mode boundary, record contracts, and completion criteria.
 - `references/beam-tidewave.md`: Tidewave `project_eval`, `:dbg`, reductions, heaps, binaries, garbage collection, and LiveView debugging.
 
 Install at `~/.codex/skills/debugging-runtime-flows`.
 
 ## Validation
 
-Run matched unguided and guided scenarios for each mode. The guided functional run must trace a flow, emit all three tables, use the exact lifecycle question, and extract a regression test. The guided performance run must keep every optimization attempt in a documented measurement loop.
+Run matched unguided and guided scenarios for each mode. The guided functional run must produce abstraction paragraphs, an arrow-aggregated layered flow, the strategy table, use the exact lifecycle question as a prompt rather than a field, and extract a regression test. The guided performance run must keep every optimization experiment in the strategy table, ask the two exact optimization questions before each conclusion, and never use those questions as fields.
