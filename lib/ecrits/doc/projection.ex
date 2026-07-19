@@ -1385,6 +1385,10 @@ defmodule Ecrits.Doc.Projection do
       do: remap_persisted_highlights(highlights, changes)
 
     @doc false
+    def __highlights_for_changes_for_test__(changes, applied),
+      do: highlights_for_changes(changes, applied)
+
+    @doc false
     def __browser_preview_steps_for_test__(groups, changes, applied),
       do: browser_preview_steps(groups, changes, applied)
 
@@ -2415,6 +2419,11 @@ defmodule Ecrits.Doc.Projection do
 
   defp highlights_for_change_entries([]), do: []
 
+  defp highlights_for_change_entry(
+         {{:text, %{"op" => "insert_paragraph"} = op, marker}, applied}
+       ),
+       do: inserted_paragraph_highlights(op, marker, applied)
+
   defp highlights_for_change_entry({{:text, op, marker}, _applied}),
     do: [text_highlight(op, marker)]
 
@@ -2476,6 +2485,51 @@ defmodule Ecrits.Doc.Projection do
     }
     |> Map.merge(text_highlight_range(op, marker))
   end
+
+  defp inserted_paragraph_highlights(op, marker, applied) do
+    text = Map.get(op, "text", marker)
+    section = op |> Map.get("ref", %{}) |> normalize_ir_value() |> Map.get("section", 0)
+
+    with paragraph when is_integer(paragraph) <- applied_paragraph(applied),
+         true <- is_integer(section),
+         true <- is_binary(text) do
+      text
+      |> String.split("\n", trim: false)
+      |> Enum.with_index()
+      |> Enum.reject(fn {line, _index} -> line == "" end)
+      |> Enum.map(fn {line, index} ->
+        %{
+          "kind" => "text",
+          "op" => "insert_paragraph",
+          "ref" => %{"section" => section, "paragraph" => paragraph + index, "offset" => 0},
+          "offset" => 0,
+          "length" => String.length(line),
+          "text" => line
+        }
+      end)
+      |> case do
+        [] -> [text_highlight(op, marker)]
+        highlights -> highlights
+      end
+    else
+      _ -> [text_highlight(op, marker)]
+    end
+  end
+
+  defp applied_paragraph(applied) when is_map(applied) do
+    native = Map.get(applied, :native) || Map.get(applied, "native")
+
+    candidate =
+      case native do
+        [first | _rest] when is_map(first) -> first
+        _other -> applied
+      end
+
+    Map.get(candidate, "paragraph") || Map.get(candidate, :paragraph) ||
+      Map.get(candidate, "paraIdx") || Map.get(candidate, :paraIdx)
+  end
+
+  defp applied_paragraph(_applied), do: nil
 
   defp remap_persisted_highlights(highlights, changes) do
     insertions = positional_insertions(changes)

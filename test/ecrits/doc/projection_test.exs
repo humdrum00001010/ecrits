@@ -293,6 +293,44 @@ defmodule Ecrits.Doc.ProjectionTest do
              } = Projection.__text_highlight_for_test__(op, "성과물")
     end
 
+    test "inserted paragraph highlights use the applied body paragraphs, not the stale cell anchor" do
+      stale_anchor = %{
+        "section" => 0,
+        "paragraph" => 17,
+        "offset" => 4,
+        "cell" => %{
+          "parentParaIndex" => 17,
+          "controlIndex" => 0,
+          "cellIndex" => 22,
+          "cellParaIndex" => 0
+        }
+      }
+
+      text = "Sonnet 18\nShall I compare thee to a summer's day?"
+
+      changes = [
+        {:text, %{"op" => "insert_paragraph", "ref" => stale_anchor, "text" => text}, text}
+      ]
+
+      applied = [%{"inserted" => String.length(text), "paragraph" => 17, "ref" => stale_anchor}]
+
+      assert [heading, first_line] =
+               Projection.__highlights_for_changes_for_test__(changes, applied)
+
+      assert heading == %{
+               "kind" => "text",
+               "op" => "insert_paragraph",
+               "ref" => %{"section" => 0, "paragraph" => 17, "offset" => 0},
+               "offset" => 0,
+               "length" => 9,
+               "text" => "Sonnet 18"
+             }
+
+      assert first_line["ref"] == %{"section" => 0, "paragraph" => 18, "offset" => 0}
+      assert first_line["length"] == 39
+      refute Map.has_key?(first_line["ref"], "cell")
+    end
+
     test "persisted highlights follow paragraphs shifted by structural inserts" do
       table_ref = %{"section" => 0, "paragraph" => 16}
       picture_ref = %{"section" => 0, "paragraph" => 75}

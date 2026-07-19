@@ -3029,6 +3029,8 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             const rawRef = highlight && (highlight.ref || highlight.op && highlight.op.ref);
             const ref = this.parseRef(rawRef);
             if (!ref || !this.doc) return [];
+            const insertedBodyHighlight = this.legacyInsertedParagraphBodyHighlight(highlight, ref);
+            if (insertedBodyHighlight) return this.rectsForSavedEditHighlight(insertedBodyHighlight);
             const nativeRects = this.nativeSavedEditHighlightRects(highlight);
             if (nativeRects.length > 0) return nativeRects;
             const controlRect = this.savedEditControlHighlightRect(rawRef, highlight);
@@ -3078,6 +3080,21 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             if (cursorRect) return [{ ...cursorRect, savedHighlightAuthority: "cursor" }];
             const estimatedRect = this.fallbackSavedEditElementRect(ref);
             return estimatedRect ? [{ ...estimatedRect, savedHighlightAuthority: "element-estimate" }] : [];
+          },
+          legacyInsertedParagraphBodyHighlight(highlight, ref) {
+            const op = String(highlight && (highlight.op || highlight.kind) || "");
+            const text = highlight && typeof highlight.text === "string" ? highlight.text : "";
+            if (op !== "insert_paragraph" || !ref || !ref.cell || !text.includes("\n")) return null;
+            if (!Number.isInteger(ref.section) || !Number.isInteger(ref.paragraph)) return null;
+            const line = text.split(/\r?\n/).find((part) => part.length > 0);
+            if (!line) return null;
+            return {
+              ...highlight,
+              ref: { section: ref.section, paragraph: ref.paragraph, offset: 0 },
+              offset: 0,
+              length: Array.from(line).length,
+              text: line
+            };
           },
           nativeSavedEditHighlightRects(highlight) {
             if (!this.doc || typeof this.doc.getSavedEditHighlightRects !== "function") return [];
