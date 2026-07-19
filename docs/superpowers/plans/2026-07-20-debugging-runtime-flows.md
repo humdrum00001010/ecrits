@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the portable workflow in one `SKILL.md` and load a separate BEAM/Tidewave reference only for Elixir runtimes. The workflow maintains a mutable layered abstraction plus function-level flow and strategy tables, then turns functional traces into regression tests or runs documented performance loops.
 
-**Tech Stack:** Agent Skills Markdown, Codex global skills, Python skill scaffolder/validator, fresh-context Codex subagents, Elixir/OTP and Tidewave runtime tools.
+**Tech Stack:** Agent Skills Markdown, Codex global skills, Python skill scaffolder/validator, fresh-context Codex subagents, Elixir `dbg/1`, Erlang `:dbg`, OTP tracing, and Tidewave runtime tools.
 
 ## Global Constraints
 
@@ -201,8 +201,8 @@ Use installed runtime documentation for exact signatures. Prefer scoped probes; 
 
 1. Drive the real call through Tidewave `project_eval` and place `dbg/1` at the boundary under investigation. `dbg/1` returns the original value while exposing arguments or pipeline values.
 2. Name the observed layers and functions in the portable tables.
-3. Add the narrowest process, call, message, GC, timing, or memory probe that can confirm the next hypothesis.
-4. Remove temporary instrumentation and destroy trace sessions after capture.
+3. Use `:dbg` for the narrowest process, call, message, GC, or timing trace that can confirm the next hypothesis.
+4. Remove temporary instrumentation and destroy `:dbg` sessions after capture.
 
 ## LiveView processes
 
@@ -210,7 +210,7 @@ Use `Phoenix.LiveView.Debug.list_liveviews/0` to locate connected LiveViews, `so
 
 ## Function and lifecycle tracing
 
-On OTP 27+, prefer dynamic `:trace` sessions over legacy `:erlang.trace/3`; destroying the session removes its settings.
+Use `:dbg` as the primary function/process trace interface. On OTP 27+, isolate it with `:dbg.session_create/1` and `:dbg.session/2`. A process tracer handler receives raw events suitable for the layered tables. Use direct `:trace` only when a required trace capability cannot be expressed through `:dbg`.
 
 ```elixir
 parent = self()
@@ -221,24 +221,33 @@ target = spawn(fn ->
   end
 end)
 
-session = :trace.session_create(:runtime_flow_example, self(), [])
+session = :dbg.session_create(:runtime_flow_example)
+
+handler = fn event, receiver ->
+  send(receiver, {:dbg_event, event})
+  receiver
+end
 
 try do
-  1 = :trace.process(session, target, true, [
-    :call,
-    :send,
-    :receive,
-    :procs,
-    :garbage_collection,
-    :monotonic_timestamp
-  ])
+  :dbg.session(session, fn ->
+    {:ok, _} = :dbg.tracer(:process, {handler, parent})
 
-  1 = :trace.function(
-    session,
-    {Enum, :reverse, 1},
-    [{:_, [], [{:return_trace}]}],
-    []
-  )
+    {:ok, _} =
+      :dbg.p(target, [
+        :call,
+        :send,
+        :receive,
+        :procs,
+        :garbage_collection,
+        :monotonic_timestamp
+      ])
+
+    {:ok, _} =
+      :dbg.tp(
+        {Enum, :reverse, 1},
+        [{:_, [], [{:return_trace}]}]
+      )
+  end)
 
   send(target, {:go, parent})
 
@@ -254,11 +263,11 @@ try do
 
   dbg(events)
 after
-  :trace.session_destroy(session)
+  :dbg.session_destroy(session)
 end
 ```
 
-Adapt the example only after it works: replace `target` and `{Enum, :reverse, 1}` with one real PID and MFA. Add `:set_on_spawn` only when the hypothesis requires child processes. Call traces provide arguments; `return_trace` provides returns; send/receive and process events establish async ordering and lifecycle; GC events show heap collection.
+Adapt the example only after it works: replace `target` and `{Enum, :reverse, 1}` with one real PID and MFA. Add `:set_on_spawn` only when the hypothesis requires child processes. `:dbg` call traces provide arguments; `return_trace` provides returns; send/receive and process events establish async ordering and lifecycle; GC events show heap collection.
 
 ## Memory snapshots
 
@@ -288,7 +297,7 @@ Answer `where this get freed?` with observed BEAM semantics: process-heap data a
 
 Run the reference example unchanged through Tidewave `project_eval`.
 
-Expected evidence: one `:call` event with `[[1, 2, 3]]`, one `:return_from` event with `[3, 2, 1]`, a normal process `:exit`, and successful `:trace.session_destroy/1` cleanup.
+Expected evidence: one `:call` event with `[[1, 2, 3]]`, one `:return_from` event with `[3, 2, 1]`, a normal process `:exit`, and successful `:dbg.session_destroy/1` cleanup.
 
 - [ ] **Step 3: Verify memory fields in the installed runtime**
 
