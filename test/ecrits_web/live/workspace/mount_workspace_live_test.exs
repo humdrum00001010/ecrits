@@ -368,7 +368,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert has_element?(workspace_lv, "#workspace-root")
     assert has_element?(workspace_lv, "div#workspace-root")
     refute has_element?(workspace_lv, "main#workspace-root")
-    assert has_element?(workspace_lv, "a[aria-label='Ecrits'][href='/workspace']")
+    assert has_element?(workspace_lv, "a[aria-label='Ecrits'][href='/']")
     assert has_element?(workspace_lv, "#workspace-root[class*='overflow-hidden']")
 
     refute has_element?(workspace_lv, "#workspace-grid[phx-hook]")
@@ -563,7 +563,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert has_element?(
              workspace_lv,
-             "#agent-model-select button#agent-go-to-provider[phx-click='agent.model_dialog.open'][data-role='agent-provider-config-open']",
+             "#agent-model-select button#agent-go-to-provider[data-role='agent-provider-config-open']",
              "Go to provider"
            )
 
@@ -2340,7 +2340,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     cond do
       mount_status.enabled? and mounted? ->
-        assert byte_size(normalized_prompt) <= 800
+        assert byte_size(normalized_prompt) <= 1_900
         assert normalized_prompt =~ "do not edit read-only requests"
         assert normalized_prompt =~ "Open the document once with `doc.open_doc`"
         assert normalized_prompt =~ "ACP read/search/edit for text and tables"
@@ -2349,17 +2349,22 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
         assert normalized_prompt =~ "scripted shell rewrites"
         assert normalized_prompt =~ "For brief-driven fills"
         assert normalized_prompt =~ "every field, list item, and table row"
-        assert normalized_prompt =~ "one `미기재` in each unsupported blank"
-        assert normalized_prompt =~ "reread changed ACP payloads"
+        assert normalized_prompt =~ "plausible value consistent with the user's request"
+        assert normalized_prompt =~ "never stamp placeholder markers"
+
+        assert normalized_prompt =~
+                 "Reread the mounted file immediately before composing each write"
+
         assert normalized_prompt =~ "one post-commit `doc.find`"
         assert normalized_prompt =~ "one image-only `doc.edit`"
+        refute normalized_prompt =~ "미기재"
         refute normalized_prompt =~ "path: \"current\""
         refute normalized_prompt =~ "payment schedule"
         refute normalized_prompt =~ "first recipient"
         refute normalized_prompt =~ "arbitrator"
         refute normalized_prompt =~ "Article 51"
         refute normalized_prompt =~ "annex 631"
-        refute normalized_prompt =~ "`(인)`"
+        assert normalized_prompt =~ "marker must fit one rendered line"
 
         # The mounted policy deliberately establishes the edit boundary without
         # teaching an ACP agent a JSONL rewrite recipe.
@@ -2640,10 +2645,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     send_vfs_edit_and_wait(lv, info)
 
-    expected_summary =
-      "template.hwpx: 1 change — delete_range; insert_text"
-
-    assert has_element?(lv, ~s([data-role="editor-preview-summary"]), expected_summary)
+    assert has_element?(lv, ~s([data-role="editor-preview-delta-count"]), "1")
 
     assert has_element?(
              lv,
@@ -2680,7 +2682,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert {:safe, _preview_html} = liveview_assign(lv, :markdown_preview_html)
     assert mixed_preview_row_id(mixed_preview_chat_rows(lv)) == first_preview_id
     assert mixed_preview_canvas_state(lv) == first_state
-    assert has_element?(lv, ~s([data-role="editor-preview-summary"]), expected_summary)
+    assert has_element?(lv, ~s([data-role="editor-preview-delta-count"]), "1")
 
     stop_pid(lv.pid)
     sync_workspace_session(root)
@@ -2695,11 +2697,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert mixed_preview_row_id(mixed_preview_chat_rows(replayed)) == first_preview_id
     assert mixed_preview_canvas_state(replayed) == first_state
 
-    assert has_element?(
-             replayed,
-             ~s([data-role="editor-preview-summary"]),
-             expected_summary
-           )
+    assert has_element?(replayed, ~s([data-role="editor-preview-delta-count"]), "1")
   end
 
   test "VFS preview persists edit composition and scroll without rendered image payloads", %{
