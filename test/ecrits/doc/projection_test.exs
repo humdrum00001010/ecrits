@@ -1532,7 +1532,8 @@ defmodule Ecrits.Doc.ProjectionTest do
         # against the engine-expanded table. Replaying it directly must fail
         # without duplicating anything; DocFs handles this exact-byte replay as
         # a transport no-op before it reaches Projection again.
-        assert {:error, :structural_change} = Projection.write_back(path, new_bytes)
+        assert {:error, {:structural_change, detail}} = Projection.write_back(path, new_bytes)
+        assert is_binary(detail) and detail != ""
         assert {:ok, ^after_bytes} = Projection.project_file(path)
       end
     end
