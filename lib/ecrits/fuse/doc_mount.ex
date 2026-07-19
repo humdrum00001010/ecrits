@@ -114,9 +114,15 @@ defmodule Ecrits.Fuse.DocMount do
   def mounted?(root) do
     point = mount_point(root)
 
-    case mounts_at(point) do
-      [] -> false
-      mounts -> reusable_mount?(point, mounts, Exfuse.serving?(point))
+    cond do
+      MapSet.member?(virtual_mounts(), canonical_root(root)) ->
+        true
+
+      true ->
+        case mounts_at(point) do
+          [] -> false
+          mounts -> reusable_mount?(point, mounts, Exfuse.serving?(point))
+        end
     end
   rescue
     _ -> false
@@ -156,6 +162,7 @@ defmodule Ecrits.Fuse.DocMount do
 
       cond do
         not status.enabled? -> :disabled
+        virtual_mounting?() -> put_virtual_mount(root)
         mounted?(root) -> {:ok, :already}
         true -> do_mount(root, status.backend)
       end
@@ -179,12 +186,18 @@ defmodule Ecrits.Fuse.DocMount do
       status = status()
       _ = remove_legacy_mount(root)
 
-      if status.enabled? do
-        :ok = unmount_point(mount_point(root))
-        :ok = run_before_mount(Keyword.get(opts, :before_mount))
-        do_mount(root, status.backend)
-      else
-        :disabled
+      cond do
+        not status.enabled? ->
+          :disabled
+
+        virtual_mounting?() ->
+          _ = put_virtual_mount(root)
+          {:ok, :mounted}
+
+        true ->
+          :ok = unmount_point(mount_point(root))
+          :ok = run_before_mount(Keyword.get(opts, :before_mount))
+          do_mount(root, status.backend)
       end
     end)
   rescue
@@ -211,6 +224,7 @@ defmodule Ecrits.Fuse.DocMount do
     point = mount_point(root)
 
     with_mount_lock(fn ->
+      delete_virtual_mount(root)
       :ok = unmount_point(point)
       :ok = close_pooled_documents(root)
       :ok = Ecrits.Fuse.OpenDocs.close_root(root)
@@ -343,6 +357,42 @@ defmodule Ecrits.Fuse.DocMount do
     :ecrits
     |> Application.get_env(:doc_vfs, [])
     |> Keyword.get(:enabled, true) != false
+  end
+
+  # `mounting: :virtual` keeps the whole doc-VFS policy surface enabled while
+  # substituting kernel mounts with an in-BEAM registry. Policy-level suites
+  # need this because a test BEAM cannot bind the FSKit appex while the
+  # machine's dev server owns it — a real mount attempt would spend exfuse's
+  # serving-verification window and then fail as :mount_not_serving.
+  defp virtual_mounting? do
+    :ecrits
+    |> Application.get_env(:doc_vfs, [])
+    |> Keyword.get(:mounting, :real) == :virtual
+  end
+
+  @virtual_mounts_key {__MODULE__, :virtual_mounts}
+
+  defp virtual_mounts, do: :persistent_term.get(@virtual_mounts_key, MapSet.new())
+
+  defp put_virtual_mount(root) do
+    mounts = virtual_mounts()
+
+    if MapSet.member?(mounts, root) do
+      {:ok, :already}
+    else
+      :persistent_term.put(@virtual_mounts_key, MapSet.put(mounts, root))
+      {:ok, :mounted}
+    end
+  end
+
+  defp delete_virtual_mount(root) do
+    mounts = virtual_mounts()
+
+    if MapSet.member?(mounts, root) do
+      :persistent_term.put(@virtual_mounts_key, MapSet.delete(mounts, root))
+    end
+
+    :ok
   end
 
   # The backend is determined by the OS alone: macOS mounts through FSKit,

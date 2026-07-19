@@ -18,7 +18,11 @@ defmodule Ecrits.Doc.MCPServerVFSFallbackTest do
     previous_vfs = Application.get_env(:ecrits, :doc_vfs)
     previous_runtime = Application.get_env(:ehwp, :runtime)
     previous_file_runtime_ref = Application.get_env(:ecrits, :file_ehwp_runtime_ref)
-    Application.put_env(:ecrits, :doc_vfs, enabled: true)
+    # Virtual mounting: this suite exercises the tool policy sequence, not
+    # mount mechanics — and a test BEAM cannot serve real FSKit mounts while
+    # the machine's dev server owns the appex (doc.open_doc would stall in
+    # exfuse's serving-verification window and outlive the fake 5s turn).
+    Application.put_env(:ecrits, :doc_vfs, enabled: true, mounting: :virtual)
     Application.put_env(:ehwp, :runtime, FileEhwpRuntime)
     Application.delete_env(:ecrits, :file_ehwp_runtime_ref)
 
