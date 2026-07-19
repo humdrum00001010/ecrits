@@ -723,7 +723,8 @@ defmodule Ecrits.Doc.Tools do
 
       refresh_mount? =
         Ecrits.Fuse.DocMount.mounted?(root) and
-          not Ecrits.Fuse.OpenDocs.member?(root, name)
+          (not Ecrits.Fuse.OpenDocs.member?(root, name) or
+             stale_temp_reservation?(root, name))
 
       Ecrits.Fuse.OpenDocs.open(root, name,
         agent_id: Map.get(ctx, :agent_id),
@@ -1130,8 +1131,48 @@ defmodule Ecrits.Doc.Tools do
       "on_enoent" => %{
         "likely_cause" => "projection_not_registered_this_turn_or_mount_was_recycled",
         "recover" => "call_doc.open_doc_path_current_once_then_retry_the_same_command_unchanged"
+      },
+      "on_projection_temp_exists" => %{
+        "likely_cause" => "temp_reservation_left_by_an_interrupted_writer",
+        "recover" =>
+          "call_doc.open_doc_path_current_once_it_clears_the_reservation_then_retry_the_same_write_unchanged"
       }
     }
+  end
+
+  # The #453 wedge signature: a writer killed between its O_EXCL create and
+  # cleanup leaves the FSKit appex holding a phantom item for the temp name —
+  # lstat says ENOENT while exclusive creates keep failing EEXIST, bricking
+  # every later commit until the mount is replaced. Probe order matters: an
+  # EXISTING temp file means a writer is in flight (never refresh under it);
+  # only the ENOENT-then-EEXIST contradiction triggers the heal. A healthy
+  # probe file is removed immediately.
+  defp stale_temp_reservation?(root, name) do
+    temp =
+      Ecrits.Fuse.DocMount.mount_point(root)
+      |> Path.join(Ecrits.Doc.Projection.projected_name(name) <> ".tmp")
+      |> String.to_charlist()
+
+    case :prim_file.read_file_info(temp) do
+      {:error, :enoent} ->
+        case :prim_file.open(temp, [:write, :exclusive]) do
+          {:ok, fd} ->
+            :prim_file.close(fd)
+            _ = :prim_file.delete(temp)
+            false
+
+          {:error, :eexist} ->
+            true
+
+          {:error, _reason} ->
+            false
+        end
+
+      _exists_or_error ->
+        false
+    end
+  catch
+    _, _ -> false
   end
 
   defp cache_open_projection(root, name, abs, mounted_at, nil) when is_binary(mounted_at) do
