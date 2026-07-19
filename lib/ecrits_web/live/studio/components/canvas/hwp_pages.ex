@@ -3588,6 +3588,60 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               return { w: 794, h: 1123 };
             }
           },
+          // Board #463 stage 1: agent commits draw lively. Same ordering and
+          // failure semantics as applyAgentEditBatch, but ops apply in chunks
+          // with a repaint + one animation frame between chunks, so the canvas
+          // visibly sweeps through the change set instead of jumping once.
+          // Frame-yield pacing bounds the added ACK latency to ~24 frames
+          // (~400ms) regardless of op count; hidden documents and tiny
+          // batches skip pacing entirely.
+          async applyAgentEditBatchPaced({ ops }, options = {}) {
+            const list = Array.isArray(ops) ? ops : [];
+            if (list.length <= 2 || this.visible.size === 0) {
+              return this.applyAgentEditBatch({ ops }, options);
+            }
+            this.pushHwpUndoCheckpoint("agent-edit-batch");
+            const tagged = list.map((op, idx) => ({ op, idx, shift: this.opShiftsBodyIndices(op) }));
+            const stable = tagged.filter((t) => !t.shift);
+            const shifting = tagged.filter((t) => t.shift).sort((a, b) => {
+              const ra = this.parseRef(a.op && a.op.ref) || { section: 0, paragraph: 0 };
+              const rb = this.parseRef(b.op && b.op.ref) || { section: 0, paragraph: 0 };
+              if ((rb.section || 0) !== (ra.section || 0)) return (rb.section || 0) - (ra.section || 0);
+              return (rb.paragraph || 0) - (ra.paragraph || 0);
+            });
+            const ordered = stable.concat(shifting);
+            const results = new Array(list.length);
+            let applied = 0;
+            let failed = 0;
+            const chunkSize = Math.max(2, Math.ceil(ordered.length / 24));
+            for (let start = 0; start < ordered.length; start += chunkSize) {
+              for (const { op, idx } of ordered.slice(start, start + chunkSize)) {
+                const refStr = op && op.ref != null ? typeof op.ref === "string" ? op.ref : JSON.stringify(op.ref) : null;
+                let r;
+                try {
+                  r = this.applyOneOp(op);
+                } catch (error) {
+                  r = { error: String(error && error.message || error) };
+                }
+                if (r && r.ok) {
+                  applied++;
+                  results[idx] = Object.assign({ ref: refStr, ok: true }, r.extra || {});
+                } else {
+                  failed++;
+                  results[idx] = { ref: refStr, error: r && r.error || "unknown_error" };
+                }
+              }
+              if (start + chunkSize < ordered.length) {
+                this.renderVisiblePages();
+                await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+              }
+            }
+            this.finishAgentEdit({}, options);
+            return {
+              ok: true,
+              result: { ok: true, applied, failed, results }
+            };
+          },
           renderVisiblePages() {
             for (const idx of this.visible) this.renderPage(idx);
             if (this.visible.size === 0) {
@@ -6742,7 +6796,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 phase: "exporting"
               };
               this.pendingVfsWrites.set(id, transaction);
-              const editReply = Array.isArray(ops) && ops.length > 0 ? this.applyAgentEditBatch({ ops }, { scheduleSnapshot: false }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
+              const editReply = Array.isArray(ops) && ops.length > 0 ? await this.applyAgentEditBatchPaced({ ops }, { scheduleSnapshot: false }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
               if (!editReply || !editReply.ok || !editReply.result || Number(editReply.result.failed || 0) > 0) {
                 throw new Error(this.vfsBatchError("edit", editReply));
               }
