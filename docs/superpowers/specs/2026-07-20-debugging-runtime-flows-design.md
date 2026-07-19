@@ -11,17 +11,17 @@ Choose one session mode and keep it isolated:
 - **Functional:** trace the real flow; verify values, lifecycle, and async/sync semantics; then preserve the finding as a standalone regression test.
 - **Performance:** begin from a correct flow and repeat baseline, hypothesis, change, and remeasurement. Record every iteration and revert regressions.
 
-Before tracing, model the flow as ordered layers. Record each proposed layer, responsibility, and boundary as the agent's hypothesis rather than an established fact. Give every hypothesis a stable layer ID and revision. Runtime evidence must update its status to confirmed, refuted, or revised without erasing prior revisions.
+Before tracing, model the flow as ordered, named layers. Each named layer is the agent's current semantic understanding of a responsibility and its boundaries, not a system identifier or established fact. Runtime evidence must update that understanding and record whether it was confirmed, refuted, or revised.
 
 ## Records
 
 Maintain three concise tables:
 
-1. A layer-hypothesis ledger containing stable layer ID, revision, proposed responsibility and boundaries, expected data/control/lifecycle semantics, evidence, status, and replacement revision when revised.
-2. A complete layered-flow table that is the canonical source for a later test set. State every hop as behavior within one layer or a transfer across two layer boundaries. Record scenario and flow IDs, order, source and destination layer IDs and revisions, trigger and preconditions, boundary, full reproducible inputs and arguments, sync/async behavior, execution identity, timestamps and latency, memory before/after/delta, result, messages and state changes, side effects, lifecycle/free point, expected invariant, actual outcome, evidence source, and pass/fail status. Redact secrets without removing the structure needed to reproduce the flow.
-3. A layer-strategy log. Scope every attempted probe to a named layer or layer boundary and record its layer revisions, expected signal, observed result, why it failed, and how the next attempt should improve that layer's investigation.
+1. A named-layer model containing each layer's name, the agent's current understanding, proposed responsibility and boundaries, expected data/control/lifecycle semantics, evidence, status, and change history.
+2. A complete layered-flow table that is the canonical source for a later test set. State every hop as behavior within one named layer or a transfer across two named layer boundaries. Record scenario and flow IDs, order, source and destination layer names, trigger and preconditions, boundary, full reproducible inputs and arguments, sync/async behavior, execution identity, timestamps and latency, memory before/after/delta, result, messages and state changes, side effects, lifecycle/free point, expected invariant, actual outcome, evidence source, and pass/fail status. Redact secrets without removing the structure needed to reproduce the flow.
+3. A layer-strategy log. Scope every attempted probe to a named layer or named layer boundary and record the expected signal, observed result, why it failed, and how the next attempt should improve that layer's investigation.
 
-Update the layer-hypothesis ledger as evidence arrives. Every flow row, strategy entry, finding, and derived test must reference the applicable layer ID and revision.
+Update the named-layer model as evidence arrives. Every flow row, strategy entry, finding, and derived test must reference the applicable layer names.
 
 The lifecycle/free-point field answers: **where this get freed?**
 
