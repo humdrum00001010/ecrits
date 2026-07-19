@@ -16,6 +16,7 @@ defmodule Ecrits.DocumentCanvasState do
     field :document_path, :string
     field :document_format, :string
     field :bytes_url, :string
+    field :preview_final_bytes_url, :string
     field :page_count, :integer, default: 0
     field :scroll_top, :integer, default: 0
     field :scroll_left, :integer, default: 0
@@ -69,6 +70,7 @@ defmodule Ecrits.DocumentCanvasState do
       localDocumentId: state.document_id,
       localDocumentFormat: state.document_format,
       bytesUrl: state.bytes_url,
+      previewFinalBytesUrl: state.preview_final_bytes_url,
       editorMirror: state.mirror?,
       previewTurnId: state.preview_turn_id,
       previewText: state.preview_text,
@@ -88,6 +90,7 @@ defmodule Ecrits.DocumentCanvasState do
       :document_path,
       :document_format,
       :bytes_url,
+      :preview_final_bytes_url,
       :page_count,
       :scroll_top,
       :scroll_left,
@@ -106,6 +109,7 @@ defmodule Ecrits.DocumentCanvasState do
     |> validate_length(:document_path, max: 4_096)
     |> validate_length(:document_format, max: 20)
     |> validate_length(:bytes_url, max: 8_192)
+    |> validate_length(:preview_final_bytes_url, max: 8_192)
     |> validate_length(:preview_turn_id, max: 500)
     |> validate_number(:page_count, greater_than_or_equal_to: 0)
     |> validate_number(:scroll_top, greater_than_or_equal_to: 0)

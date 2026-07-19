@@ -3410,21 +3410,36 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
       preview_unavailable? = committed_preview? and not is_map(preview_snapshot)
 
+      preview_steps = vfs_preview_steps(info)
+      preview_base_url = item_field(info, :preview_base_url)
+
+      snapshot_bytes_url =
+        if is_map(preview_snapshot) do
+          preview_snapshot_bytes_url(
+            workspace_path,
+            relative_path,
+            document,
+            preview_snapshot
+          )
+        end
+
+      committed_playback? =
+        committed_preview? and preview_steps != [] and is_binary(preview_base_url) and
+          preview_base_url != "" and is_binary(snapshot_bytes_url)
+
       bytes_url =
         cond do
           preview_unavailable? ->
             nil
 
-          is_map(preview_snapshot) ->
-            preview_snapshot_bytes_url(
-              workspace_path,
-              relative_path,
-              document,
-              preview_snapshot
-            )
+          committed_playback? ->
+            preview_base_url
+
+          is_binary(snapshot_bytes_url) ->
+            snapshot_bytes_url
 
           true ->
-            item_field(info, :preview_base_url) ||
+            preview_base_url ||
               workspace_path
               |> document_bytes_url(relative_path)
               |> cache_bust_url()
@@ -3440,13 +3455,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         canvas_id:
           "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-#{if(committed_preview?, do: "committed", else: "live")}-canvas",
         bytes_url: bytes_url,
+        final_bytes_url: if(committed_playback?, do: snapshot_bytes_url, else: nil),
         text: "",
         delta_count: vfs_edit_change_count(info, 1),
         highlights: highlights,
         preview_steps:
-          if(is_map(preview_snapshot) or preview_unavailable?,
+          if((is_map(preview_snapshot) and not committed_playback?) or preview_unavailable?,
             do: [],
-            else: vfs_preview_steps(info)
+            else: preview_steps
           ),
         scroll: session_document_viewport(socket, relative_path),
         marker: info[:marker] || "",
@@ -8460,6 +8476,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       document_spec: state.document_spec,
       canvas_id: state.canvas_id,
       bytes_url: state.bytes_url,
+      final_bytes_url: Map.get(state, :final_bytes_url),
       body: state.text,
       delta_count: state.delta_count,
       highlights: Map.get(state, :highlights, []),
@@ -9049,6 +9066,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         document_path: document_path,
         document_format: document.format,
         bytes_url: agent_editor_preview_bytes_url(item),
+        preview_final_bytes_url: agent_editor_preview_final_bytes_url(item),
         mirror?: true,
         preview_turn_id: Map.get(item, :turn_id),
         preview_text: preview_text,
@@ -9080,6 +9098,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp agent_editor_preview_bytes_url(%{bytes_url: url}) when is_binary(url), do: url
   defp agent_editor_preview_bytes_url(_item), do: nil
+
+  defp agent_editor_preview_final_bytes_url(%{final_bytes_url: url}) when is_binary(url),
+    do: url
+
+  defp agent_editor_preview_final_bytes_url(_item), do: nil
 
   defp agent_editor_preview_status(%{status: status}) when is_atom(status), do: status
   defp agent_editor_preview_status(_item), do: :running

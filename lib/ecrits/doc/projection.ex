@@ -66,6 +66,7 @@ defmodule Ecrits.Doc.Projection do
   alias Ecrits.Document.{ByteSpool, PreviewSnapshot}
   alias Ecrits.FS
   alias Ecrits.Fuse.{DocMount, OpenDocs}
+  alias Ecrits.MarkdownEditorState.Text, as: BrowserText
   alias Ecrits.Workspace.Session
   alias Libreofficex.LokBackend.Ir, as: OfficeIr
 
@@ -1897,7 +1898,7 @@ defmodule Ecrits.Doc.Projection do
   defp browser_preview_steps(groups, changes, applied) do
     applied_by_change = Enum.zip(changes, applied)
 
-    Enum.map(groups, fn group ->
+    Enum.flat_map(groups, fn group ->
       group_applied =
         Enum.map(group, fn change ->
           Enum.find_value(applied_by_change, %{}, fn
@@ -1906,12 +1907,82 @@ defmodule Ecrits.Doc.Projection do
           end)
         end)
 
+      case group do
+        [{:text, %{"op" => "insert_paragraph"} = op, marker}] ->
+          inserted_paragraph_preview_steps(op, marker)
+
+        _other ->
+          [
+            %{
+              "ops" => browser_ops(group),
+              "sets" => browser_sets(group),
+              "highlights" => highlights_for_changes(group, group_applied)
+            }
+          ]
+      end
+    end)
+  end
+
+  defp inserted_paragraph_preview_steps(op, marker) do
+    changes = inserted_paragraph_preview_changes(op, marker)
+    chunk_size = max(1, ceil(length(changes) / 120))
+
+    changes
+    |> Enum.chunk_every(chunk_size)
+    |> Enum.map(fn chunk ->
       %{
-        "ops" => browser_ops(group),
-        "sets" => browser_sets(group),
-        "highlights" => highlights_for_changes(group, group_applied)
+        "ops" => browser_ops(chunk),
+        "sets" => [],
+        "highlights" => highlights_for_changes(chunk, List.duplicate(%{}, length(chunk)))
       }
     end)
+  end
+
+  defp inserted_paragraph_preview_changes(op, marker) do
+    text = Map.get(op, "text", marker)
+    ref = op |> Map.get("ref", %{}) |> normalize_ir_value()
+    section = Map.get(ref, "section", 0)
+    paragraph = Map.get(ref, "paragraph")
+
+    if is_binary(text) and is_integer(section) and is_integer(paragraph) do
+      text
+      |> String.split(~r/\r\n|\n|\r/, trim: false)
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {line, line_index} ->
+        body_ref = %{"section" => section, "paragraph" => paragraph + line_index, "offset" => 0}
+
+        line
+        |> preview_text_tokens()
+        |> case do
+          [] ->
+            [{:text, op |> Map.put("ref", body_ref) |> Map.put("text", ""), ""}]
+
+          [first | rest] ->
+            first_change =
+              {:text, op |> Map.put("ref", body_ref) |> Map.put("text", first), first}
+
+            {rest_changes, _offset} =
+              Enum.map_reduce(rest, BrowserText.utf16_length(first), fn token, offset ->
+                token_ref = Map.put(body_ref, "offset", offset)
+
+                change =
+                  {:text, %{"op" => "insert_text", "ref" => token_ref, "text" => token}, token}
+
+                {change, offset + BrowserText.utf16_length(token)}
+              end)
+
+            [first_change | rest_changes]
+        end
+      end)
+    else
+      [{:text, op, marker}]
+    end
+  end
+
+  defp preview_text_tokens(text) do
+    ~r/\S+\s*|\s+/u
+    |> Regex.scan(text)
+    |> Enum.map(&hd/1)
   end
 
   defp browser_applied_results(changes, result) do
@@ -2646,7 +2717,7 @@ defmodule Ecrits.Doc.Projection do
   end
 
   defp text_highlight_range(%{"op" => op, "ref" => ref} = edit, marker)
-       when op in ["insert_text", "set_char", "set_cell"] do
+       when op in ["insert_text", "insert_paragraph", "set_char", "set_cell"] do
     text = Map.get(edit, "text", marker)
 
     if is_binary(text) do

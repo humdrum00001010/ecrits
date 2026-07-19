@@ -148,6 +148,71 @@ defmodule Ecrits.Doc.ProjectionTest do
              ]
     end
 
+    test "browser paragraph preview expands multiline text into paced token steps" do
+      stale_cell_ref = %{
+        "section" => 0,
+        "paragraph" => 17,
+        "offset" => 4,
+        "cell" => %{
+          "parentParaIndex" => 17,
+          "controlIndex" => 0,
+          "cellIndex" => 22,
+          "cellParaIndex" => 0
+        }
+      }
+
+      text = "Sonnet 😀 now\nShall I compare"
+
+      change =
+        {:text, %{"op" => "insert_paragraph", "ref" => stale_cell_ref, "text" => text}, text}
+
+      steps =
+        Projection.__browser_preview_steps_for_test__(
+          [[change]],
+          [change],
+          [%{"paragraph" => 17, "inserted" => String.length(text)}]
+        )
+
+      assert length(steps) == 6
+
+      assert [
+               %{
+                 "op" => "insert_paragraph",
+                 "ref" => %{"section" => 0, "paragraph" => 17, "offset" => 0},
+                 "text" => "Sonnet "
+               },
+               %{
+                 "op" => "insert_text",
+                 "ref" => %{"section" => 0, "paragraph" => 17, "offset" => 7},
+                 "text" => "😀 "
+               },
+               %{
+                 "op" => "insert_text",
+                 "ref" => %{"section" => 0, "paragraph" => 17, "offset" => 10},
+                 "text" => "now"
+               },
+               %{
+                 "op" => "insert_paragraph",
+                 "ref" => %{"section" => 0, "paragraph" => 18, "offset" => 0},
+                 "text" => "Shall "
+               },
+               %{
+                 "op" => "insert_text",
+                 "ref" => %{"section" => 0, "paragraph" => 18, "offset" => 6},
+                 "text" => "I "
+               },
+               %{
+                 "op" => "insert_text",
+                 "ref" => %{"section" => 0, "paragraph" => 18, "offset" => 8},
+                 "text" => "compare"
+               }
+             ] = Enum.flat_map(steps, & &1["ops"])
+
+      assert Enum.all?(steps, fn %{"highlights" => [highlight]} ->
+               highlight["length"] == String.length(highlight["text"])
+             end)
+    end
+
     test "replacement preview keeps both raw ops and one final ranged highlight" do
       ref = %{"section" => 0, "paragraph" => 11, "offset" => 0}
       replacement = " ◇ 계약명  : 프리뷰 중복 추적"

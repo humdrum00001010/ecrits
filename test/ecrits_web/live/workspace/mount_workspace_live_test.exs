@@ -3135,10 +3135,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     committed_state =
       canvas_state(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
 
-    assert committed_state["bytesUrl"] =~ "/document-bytes?"
-    assert committed_state["bytesUrl"] =~ "snapshot=#{final_sha256}"
-    refute committed_state["bytesUrl"] == immutable_url
-    assert Jason.decode!(committed_state["previewSteps"]) == []
+    assert committed_state["bytesUrl"] == immutable_url
+    assert committed_state["previewFinalBytesUrl"] =~ "/document-bytes?"
+    assert committed_state["previewFinalBytesUrl"] =~ "snapshot=#{final_sha256}"
+    assert Jason.decode!(committed_state["previewSteps"]) == preview_steps
     assert has_element?(lv, ~s([data-role="editor-preview"] [id$="-committed-canvas"]))
     refute has_element?(lv, ~s([data-role="editor-preview"] [id$="-live-canvas"]))
   end
