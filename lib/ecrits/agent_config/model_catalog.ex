@@ -2,7 +2,8 @@ defmodule Ecrits.AgentConfig.ModelCatalog do
   @moduledoc false
 
   @models [
-    %{id: "gpt-5.5", provider: "codex", label: "GPT-5.5", description: "Frontier Codex model"},
+    %{id: "gpt-5.6", provider: "codex", label: "GPT-5.6", description: "Frontier Codex model"},
+    %{id: "gpt-5.5", provider: "codex", label: "GPT-5.5", description: "Previous frontier"},
     %{id: "gpt-5.4", provider: "codex", label: "GPT-5.4", description: "Balanced Codex model"},
     %{
       id: "gpt-5.4-mini",
