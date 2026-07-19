@@ -1148,10 +1148,16 @@ defmodule Ecrits.Doc.Tools do
   # only the ENOENT-then-EEXIST contradiction triggers the heal. A healthy
   # probe file is removed immediately.
   defp stale_temp_reservation?(root, name) do
-    temp =
-      Ecrits.Fuse.DocMount.mount_point(root)
-      |> Path.join(Ecrits.Doc.Projection.projected_name(name) <> ".tmp")
-      |> String.to_charlist()
+    Ecrits.Fuse.DocMount.mount_point(root)
+    |> Path.join(Ecrits.Doc.Projection.projected_name(name) <> ".tmp")
+    |> probe_stale_temp()
+  end
+
+  @doc false
+  def __probe_stale_temp_for_test__(temp_path), do: probe_stale_temp(temp_path)
+
+  defp probe_stale_temp(temp_path) do
+    temp = String.to_charlist(temp_path)
 
     case :prim_file.read_file_info(temp) do
       {:error, :enoent} ->

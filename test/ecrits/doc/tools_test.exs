@@ -1931,6 +1931,38 @@ defmodule Ecrits.Doc.ToolsTest do
     end
   end
 
+  # 2026-07-19 live wedge (#453): a writer killed mid-commit left the FSKit
+  # appex holding a phantom item for the .jsonl.tmp name — lstat ENOENT while
+  # exclusive creates fail EEXIST — and every later write bounced with
+  # projection_temp_exists. doc.open_doc heals it by probing for exactly that
+  # contradiction. The stale branch itself needs the appex to reproduce (the
+  # live incident validated it: teardown+ensure cleared, O_EXCL then
+  # succeeded); these pin the probe's SAFETY properties on a real filesystem.
+  describe "stale temp reservation probe" do
+    test "a healthy directory probes false and leaves no residue" do
+      dir = Path.join(System.tmp_dir!(), "temp-probe-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      temp = Path.join(dir, "doc.hwp.jsonl.tmp")
+
+      refute Tools.__probe_stale_temp_for_test__(temp)
+      refute File.exists?(temp)
+    end
+
+    test "an existing temp means an in-flight writer and is never disturbed" do
+      dir = Path.join(System.tmp_dir!(), "temp-probe-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      temp = Path.join(dir, "doc.hwp.jsonl.tmp")
+      File.write!(temp, "in-flight staged bytes")
+
+      refute Tools.__probe_stale_temp_for_test__(temp)
+      assert File.read!(temp) == "in-flight staged bytes"
+    end
+  end
+
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)
 end
