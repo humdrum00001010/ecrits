@@ -2778,6 +2778,11 @@ defmodule Ecrits.Workspace.Session do
 
       case AcpAgent.start_session(nil, opts) do
         {:ok, %{id: ^agent_id}} ->
+          # A SUCCESSFUL restart is a genuinely new conversation: reset the
+          # durable agent state so the store's non-shrinking transcript merge
+          # cannot resurrect the old rows into it. Reset only on success — a
+          # failed replacement must keep the durable rail intact for retry.
+          _ = WorkspaceHandoff.reset_agent_state(state.path, agent_id)
           pid = AcpAgent.whereis(agent_id)
           _ = AcpAgent.reconcile_workspace(agent_id, state.path)
 

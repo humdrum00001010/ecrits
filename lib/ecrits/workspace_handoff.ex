@@ -74,6 +74,19 @@ defmodule Ecrits.WorkspaceHandoff do
   def put_agent_state_async(_workspace_path, _agent_id, _agent_state),
     do: {:error, :invalid_agent_state}
 
+  @doc """
+  Drop the durable agent state for a rail: the explicit path to a genuinely
+  new conversation. Without it the non-shrinking transcript merge would
+  resurrect the old conversation into a restarted agent.
+  """
+  @spec reset_agent_state(String.t(), String.t()) :: :ok | {:error, term()}
+  def reset_agent_state(workspace_path, agent_id)
+      when is_binary(workspace_path) and is_binary(agent_id) and agent_id != "" do
+    call({:reset_agent_state, Path.expand(workspace_path), agent_id})
+  end
+
+  def reset_agent_state(_workspace_path, _agent_id), do: {:error, :invalid_agent_state}
+
   @doc false
   @spec delete_chat_rail(String.t(), String.t()) :: :ok | {:error, term()}
   def delete_chat_rail(workspace_path, rail_key)
@@ -131,6 +144,9 @@ defmodule Ecrits.WorkspaceHandoff do
 
     case normalize_chat_rail_state(rail_state) do
       {:ok, normalized} ->
+        normalized =
+          merge_rail_agent_states(Map.get(state.chat_rails, workspace_path), normalized)
+
         persist_reply(state, %{
           state
           | chat_rails: Map.put(state.chat_rails, workspace_path, normalized)
@@ -138,6 +154,31 @@ defmodule Ecrits.WorkspaceHandoff do
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:reset_agent_state, workspace_path, agent_id}, _from, state) do
+    state = ensure_runtime_state(state)
+
+    case Map.fetch(state.chat_rails, workspace_path) do
+      {:ok, rail_state} ->
+        foregrounds =
+          Map.new(rail_state.foregrounds, fn
+            {rail_key, %{agent_id: ^agent_id} = meta} ->
+              {rail_key, Map.delete(meta, :agent_state)}
+
+            entry ->
+              entry
+          end)
+
+        persist_reply(state, %{
+          state
+          | chat_rails:
+              Map.put(state.chat_rails, workspace_path, %{rail_state | foregrounds: foregrounds})
+        })
+
+      :error ->
+        {:reply, :ok, state}
     end
   end
 
@@ -224,6 +265,9 @@ defmodule Ecrits.WorkspaceHandoff do
            end) do
         {rail_key, meta} ->
           with :ok <- accept_agent_instance(meta, normalized_agent) do
+            normalized_agent =
+              merge_stored_agent_state(Map.get(meta, :agent_state), normalized_agent)
+
             foregrounds =
               Map.put(
                 rail_state.foregrounds,
@@ -255,6 +299,59 @@ defmodule Ecrits.WorkspaceHandoff do
        do: {:error, :stale_agent_instance}
 
   defp accept_agent_instance(_meta, _agent_state), do: :ok
+
+  # A conversation's durable transcript must never SHRINK through a write: a
+  # freshly revived instance snapshots only the rows it has seen, and
+  # last-writer-wins silently erased the conversation history here (2026-07-19
+  # field: the agent could not find its own earlier shell command). Rows merge
+  # by turn id — the incoming snapshot wins per turn, stored rows missing from
+  # it are kept in place. An intentional new conversation resets explicitly
+  # via reset_agent_state.
+  defp merge_rail_agent_states(nil, incoming), do: incoming
+
+  defp merge_rail_agent_states(%{foregrounds: stored_fgs}, %{foregrounds: fgs} = incoming) do
+    merged =
+      Map.new(fgs, fn {rail_key, meta} ->
+        with %{agent_id: agent_id, agent_state: %{} = stored_agent} <-
+               Map.get(stored_fgs, rail_key),
+             %{agent_id: ^agent_id, agent_state: %{} = incoming_agent} <- meta do
+          {rail_key,
+           Map.put(meta, :agent_state, merge_stored_agent_state(stored_agent, incoming_agent))}
+        else
+          _mismatch -> {rail_key, meta}
+        end
+      end)
+
+    %{incoming | foregrounds: merged}
+  end
+
+  defp merge_rail_agent_states(_stored, incoming), do: incoming
+
+  defp merge_stored_agent_state(%{transcript: stored} = _stored_agent, %{} = incoming_agent)
+       when is_list(stored) do
+    Map.put(
+      incoming_agent,
+      :transcript,
+      merge_transcripts(stored, Map.get(incoming_agent, :transcript) || [])
+    )
+  end
+
+  defp merge_stored_agent_state(_stored_agent, incoming_agent), do: incoming_agent
+
+  defp merge_transcripts(stored, incoming) do
+    incoming_by_id = Map.new(incoming, &{dialog_turn_id(&1), &1})
+    stored_ids = MapSet.new(stored, &dialog_turn_id/1)
+
+    updated = Enum.map(stored, fn row -> Map.get(incoming_by_id, dialog_turn_id(row), row) end)
+    appended = Enum.reject(incoming, &MapSet.member?(stored_ids, dialog_turn_id(&1)))
+
+    updated ++ appended
+  end
+
+  defp dialog_turn_id(row) when is_map(row),
+    do: Map.get(row, :turn_id) || Map.get(row, "turn_id") || row
+
+  defp dialog_turn_id(row), do: row
 
   defp load_store(path) do
     empty = %{store_path: path, workspace_paths: %{}, chat_rails: %{}}
@@ -468,6 +565,12 @@ defmodule Ecrits.WorkspaceHandoff do
     transcript = field(value, :transcript) || []
     adapter_opts = field(value, :adapter_opts) || %{}
 
+    thread_covers_from =
+      case field(value, :thread_covers_from) do
+        count when is_integer(count) and count >= 0 -> count
+        _missing -> 0
+      end
+
     with true <- is_binary(id) and id != "",
          true <- is_nil(instance_id) or is_binary(instance_id),
          true <- is_nil(provider_session_id) or is_binary(provider_session_id),
@@ -480,6 +583,7 @@ defmodule Ecrits.WorkspaceHandoff do
          id: id,
          instance_id: instance_id,
          provider_session_id: provider_session_id,
+         thread_covers_from: thread_covers_from,
          title: title,
          title_user_edited?: title_user_edited?,
          transcript: dialogs,

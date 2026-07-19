@@ -166,6 +166,103 @@ defmodule Ecrits.Workspace.DurableChatRailStoreTest do
     refute final_json =~ second_ws.agent_id
   end
 
+  # 2026-07-19 field bug (#464): a freshly revived instance snapshotted only
+  # the rows it had seen and last-writer-wins erased the conversation history
+  # ("he can't find the ruby shell cmd"). Durable transcripts must never
+  # shrink through EITHER write path; an intentional new conversation resets
+  # explicitly.
+  test "durable transcripts merge instead of shrinking, and reset is explicit" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "ecrits-durable-merge-#{System.unique_integer([:positive])}"
+      )
+
+    workspace = Path.join(root, "workspace")
+    store_path = Path.join(root, "handoff.json")
+    File.mkdir_p!(workspace)
+    previous_store = Application.fetch_env(:ecrits, :workspace_handoff_store_path)
+    switch_handoff_store(store_path)
+
+    on_exit(fn ->
+      restore_handoff_store(previous_store)
+      File.rm_rf(root)
+    end)
+
+    dialog = fn turn_id, user ->
+      %{"turn_id" => turn_id, "user" => user, "agent" => "ok", "items" => []}
+    end
+
+    agent_state = fn instance, transcript ->
+      %{
+        id: "agent-merge",
+        instance_id: instance,
+        provider_session_id: "thread-1",
+        title: "merge test",
+        title_user_edited?: false,
+        transcript: transcript,
+        adapter_opts: %{}
+      }
+    end
+
+    rail_state = fn meta ->
+      %{
+        foregrounds: %{"rail-merge" => meta},
+        active_foregrounds: %{},
+        foreground_order: ["rail-merge"]
+      }
+    end
+
+    meta = fn agent ->
+      %{agent_id: "agent-merge", provider: "codex", owner_session_id: "s1", agent_state: agent}
+    end
+
+    row_user = fn row ->
+      cond do
+        is_struct(row) -> row.user
+        is_map(row) -> Map.get(row, "user") || Map.get(row, :user)
+      end
+    end
+
+    full =
+      agent_state.("i1", [dialog.("t1", "one"), dialog.("t2", "two"), dialog.("t3", "three")])
+
+    assert :ok = WorkspaceHandoff.put_chat_rail_state(workspace, rail_state.(meta.(full)))
+
+    # Same-instance snapshot with one (updated) row: rows t1/t2 survive.
+    assert :ok =
+             WorkspaceHandoff.put_agent_state(
+               workspace,
+               "agent-merge",
+               agent_state.("i1", [dialog.("t3", "three-updated")])
+             )
+
+    assert {:ok, stored} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
+    transcript = get_in(stored, [:foregrounds, "rail-merge", :agent_state, :transcript])
+    assert Enum.map(transcript, row_user) == ["one", "two", "three-updated"]
+
+    # Wholesale rail write from a NEW instance carrying one new row: nothing
+    # shrinks, the new instance binds, the new row appends.
+    successor = agent_state.("i2", [dialog.("t4", "four")])
+    assert :ok = WorkspaceHandoff.put_chat_rail_state(workspace, rail_state.(meta.(successor)))
+
+    assert {:ok, stored} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
+    transcript = get_in(stored, [:foregrounds, "rail-merge", :agent_state, :transcript])
+    assert Enum.map(transcript, row_user) == ["one", "two", "three-updated", "four"]
+    assert get_in(stored, [:foregrounds, "rail-merge", :agent_state, :instance_id]) == "i2"
+
+    # Explicit reset: the old conversation must NOT resurrect into the next write.
+    assert :ok = WorkspaceHandoff.reset_agent_state(workspace, "agent-merge")
+    assert {:ok, stored} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
+    assert get_in(stored, [:foregrounds, "rail-merge", :agent_state]) == nil
+
+    fresh = agent_state.("i3", [dialog.("t5", "fresh conversation")])
+    assert :ok = WorkspaceHandoff.put_chat_rail_state(workspace, rail_state.(meta.(fresh)))
+    assert {:ok, stored} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
+    transcript = get_in(stored, [:foregrounds, "rail-merge", :agent_state, :transcript])
+    assert Enum.map(transcript, row_user) == ["fresh conversation"]
+  end
+
   @tag :edit_failure
   test "failed provider replacement preserves the durable rail for a later retry" do
     root =
