@@ -2562,11 +2562,15 @@ defmodule Ecrits.Workspace.Session do
 
   # A session that died a moment ago can still be registered for a beat;
   # calling it then exits :noproc instead of returning :not_found. Both mean
-  # the same thing here: the process is gone, revive it.
+  # the same thing here: the process is gone, revive it. Any OTHER exit (the
+  # agent crashing mid-call — observed live when a hot-reloaded state map
+  # lacked a new key) must not take this workspace coordinator down with it;
+  # it degrades to a rail error while supervision restarts the agent.
   defp send_turn_to_agent(agent_id, input, opts) do
     AcpAgent.send_turn(nil, agent_id, input, opts)
   catch
     :exit, {:noproc, _call} -> {:error, :not_found}
+    :exit, reason -> {:error, {:agent_send_failed, reason}}
   end
 
   # Restart the active rail's agent under its own id after its process died.

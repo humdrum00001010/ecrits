@@ -2207,12 +2207,15 @@ defmodule Ecrits.AcpAgent.Session do
   # new thread. Record how far the gap reaches so the next prompt seeds it.
   # (If THIS turn already carried a recap, the completed-turn transition
   # clears the gap again — the rows reached the new thread via the recap.)
+  # `thread_covers_from` reads/writes go through Map.get/Map.put: a Session
+  # hot-reloaded across the upgrade still carries a state map WITHOUT the key,
+  # and dot access crashed the live session mid-send (2026-07-19 :dbg trace).
   defp mark_thread_change(state, id) do
     prior = state.provider_session_id
     rows = length(state.transcript)
 
     if is_binary(prior) and prior != "" and prior != id and rows > 0 do
-      %{state | thread_covers_from: max(state.thread_covers_from, rows)}
+      Map.put(state, :thread_covers_from, max(thread_covers_from(state), rows))
     else
       state
     end
@@ -2220,11 +2223,13 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp clear_seeded_thread_gap(state, current) do
     if Map.get(current, :recap_covered, 0) > 0 do
-      %{state | thread_covers_from: 0}
+      Map.put(state, :thread_covers_from, 0)
     else
       state
     end
   end
+
+  defp thread_covers_from(state), do: Map.get(state, :thread_covers_from, 0)
 
   # Seed a thread gap: rows before `thread_covers_from` exist only in the
   # durable transcript — the provider thread never saw them. Prepend a bounded
@@ -2235,10 +2240,11 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp maybe_prepend_thread_recap(state, input) when is_binary(input) do
     rows = length(state.transcript)
+    gap = thread_covers_from(state)
 
     covered =
       cond do
-        state.thread_covers_from > 0 -> min(state.thread_covers_from, rows)
+        gap > 0 -> min(gap, rows)
         no_resumable_thread?(state) and rows > 0 -> rows
         true -> 0
       end

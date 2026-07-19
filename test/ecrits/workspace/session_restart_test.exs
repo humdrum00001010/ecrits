@@ -201,6 +201,21 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert :sys.get_state(session_pid).foreground_transitions == %{}
   end
 
+  # 2026-07-19 live crash: a Session hot-reloaded across the thread-recap
+  # upgrade still carried a state map WITHOUT :thread_covers_from — dot access
+  # crashed the send and the exit cascaded into the workspace coordinator.
+  # New state fields must tolerate pre-upgrade state maps.
+  test "a send survives a session whose state predates the thread-gap field", %{ws: ws} do
+    agent_id = ws.agent_id
+    Session.subscribe_agent(agent_id)
+
+    pid = AcpAgent.whereis(agent_id)
+    :sys.replace_state(pid, &Map.delete(&1, :thread_covers_from))
+
+    assert {:ok, %{id: turn_id}} = Session.send_turn(ws, "hot-upgraded state")
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+  end
+
   # 2026-07-19 field bug (#464): when a resume lands on a DIFFERENT provider
   # thread, every earlier transcript row is invisible to the agent ("he can't
   # find the ruby shell cmd"). The session must record the gap and seed a
