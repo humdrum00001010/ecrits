@@ -8,7 +8,7 @@ Create a global, language-agnostic skill for debugger-led runtime investigation,
 
 Choose one session mode and keep it isolated:
 
-- **Functional:** trace the real flow; verify values, lifecycle, and async/sync semantics; then preserve the finding as a standalone regression test.
+- **Functional:** trace the real flow; verify values, lifecycle, and async/sync semantics; then preserve the finding as a standalone regression test. Treat every lifecycle bug as a semantic correctness bug.
 - **Performance:** begin from a correct flow and repeat baseline, hypothesis, change, and remeasurement. For every candidate, ask **do we need these args?** and **can user sense this optimization?** Record the answers with every iteration and revert regressions.
 
 Before tracing, form a layered abstraction of ordered, named layers. Each named layer is the agent's current semantic understanding of a responsibility and its boundaries, not a system identifier or established fact. Runtime evidence must update that abstraction and record whether it was confirmed, refuted, or revised.
