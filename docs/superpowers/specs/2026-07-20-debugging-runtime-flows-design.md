@@ -36,4 +36,4 @@ Install at `~/.codex/skills/debugging-runtime-flows`.
 
 ## Validation
 
-Run matched unguided and guided scenarios for each mode. The guided functional run must trace a flow, emit both tables, use the exact lifecycle question, and extract a regression test. The guided performance run must keep every optimization attempt in a documented measurement loop.
+Run matched unguided and guided scenarios for each mode. The guided functional run must trace a flow, emit all three tables, use the exact lifecycle question, and extract a regression test. The guided performance run must keep every optimization attempt in a documented measurement loop.
