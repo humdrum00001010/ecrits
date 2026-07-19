@@ -238,6 +238,12 @@ defmodule Ecrits.Workspace.SessionRestartTest do
       end)
 
     assert {:ok, %{id: revived_turn}} = result
+
+    # The revive rebinds attached LiveViews: the revived agent runs a NEW
+    # instance and LVs fence events per instance, so without this message the
+    # rail would drop every event of the revived turn as stale.
+    assert_receive {:workspace_foreground_rebound, %{agent_id: ^agent_id}}, 2_000
+
     assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^revived_turn}}, 2_000
 
     new_pid = AcpAgent.whereis(agent_id)

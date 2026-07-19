@@ -2593,8 +2593,19 @@ defmodule Ecrits.Workspace.Session do
         end
 
       case start_foreground_agent(state, settings, rail_key, live_view_key) do
-        {:ok, state, _foreground} -> {:ok, state}
-        {:error, reason} -> {:error, reason}
+        {:ok, state, %{id: agent_id, rail_key: rail_key, live_session_id: live_session_id}} ->
+          # The revived agent runs under a NEW instance id, and attached
+          # LiveViews fence events per instance (#422) — without a rebind
+          # every event of the revived turn is dropped as stale and the rail
+          # sticks on an empty running bubble (field: "the agent isn't
+          # responding"). The rebind makes the LV re-snapshot and adopt the
+          # new instance before the retried send streams.
+          ws = ws(state.path, live_session_id, rail_key, agent_id)
+          state = notify_foreground_rebind(state, live_view_key, ws)
+          {:ok, state}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     else
       _ -> {:error, :no_agent}
