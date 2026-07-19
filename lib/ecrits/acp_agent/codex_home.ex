@@ -32,7 +32,8 @@ defmodule Ecrits.AcpAgent.CodexHome do
              workspace_root,
              document_lane?,
              Keyword.get(opts, :path, System.get_env("PATH"))
-           ) do
+           ),
+         :ok <- write_document_playbook(home, document_lane?) do
       {:ok,
        %{
          home: home,
@@ -236,6 +237,59 @@ defmodule Ecrits.AcpAgent.CodexHome do
         _ = File.rm_rf(home)
         {:error, {:codex_config_write_failed, reason}}
     end
+  end
+
+  # A standing AGENTS.md in the isolated Codex home, so document-lane
+  # familiarity is a habit rather than something re-derived every turn: the
+  # preamble carries the RULES, this carries the worked shape of a good turn.
+  # Measured motive (2026-07-19): a single-field edit spent ~0.2s in ecrits
+  # and ~97s in model deliberation, most of it re-learning the surface and
+  # defensively re-verifying strings the CAS write already guards.
+  defp write_document_playbook(_home, false), do: :ok
+
+  defp write_document_playbook(home, true) do
+    playbook = """
+    # Editing the mounted document projection
+
+    The open document is served as ONE `.jsonl` file: a single JSON value laid
+    out one paragraph group per line. Line N is paragraph group N's whole
+    payload array. Raw newlines are reserved record separators; newlines inside
+    text stay escaped as `\\n`.
+
+    ## The shape of a good edit turn
+
+    1. `doc.open_doc {path: "current"}` once — it returns the mounted path.
+    2. Locate with line-based search on the mounted file (it is workspace-
+       scoped and read-only): the matching LINE is your edit target.
+    3. Read that exact line, build the replacement line from what you just
+       read (never from memory of an earlier search display — space runs in
+       forms are width-exact), keep the trailing comma.
+    4. Write the whole file once with your line(s) replaced. Do not pre-verify
+       counts or re-check your own strings first: the write is compare-and-swap
+       and fails closed — a `stale_projection` reply means reread and rewrite,
+       an `EINVAL` means your base predates the last commit, so reread and
+       restage. One corrected retry is normal, silent corruption is impossible.
+
+    ### Example: change one field
+
+    A search for `계약명` hits line 14. Read line 14, replace only the target
+    text inside it, write the file with line 14 swapped. That is the entire
+    edit — one read, one write.
+
+    ## Inserts
+
+    New content is exactly one payload node appended INSIDE an existing line's
+    payload array: a `{"type":"table","cells":[[...]],"header":true}` node or a
+    picture. New lines (new paragraph groups) are structural and rejected.
+
+    ## The one native fallback
+
+    Only an explicitly requested picture uses `doc.find` (one post-commit
+    marker lookup; pass `occurrence` 1-based when the exact paragraph text
+    repeats) then `doc.edit` with the returned ref verbatim.
+    """
+
+    File.write(Path.join(home, "AGENTS.md"), playbook)
   end
 
   defp random_suffix do

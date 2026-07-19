@@ -40,6 +40,7 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     refute config =~ "shell_tool = false"
     assert config =~ "[permissions.ecrits_workspace]"
     assert config =~ "extends = \":workspace\""
+    refute File.exists?(Path.join(isolation.home, "AGENTS.md"))
     assert config =~ ~s(\"#{Path.expand(global_home)}\" = \"deny\")
     assert {"CODEX_HOME", isolation.home} in isolation.env
     assert {"PATH", agent_path} = Enum.find(isolation.env, &(elem(&1, 0) == "PATH"))
@@ -180,6 +181,14 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
 
     refute config =~
              ~s([permissions.ecrits_document_workspace]\nextends = ":read-only")
+
+    # Standing familiarity: the isolated home carries the document playbook so
+    # the model does not re-derive the surface's shape every turn.
+    playbook = File.read!(Path.join(isolation.home, "AGENTS.md"))
+    assert playbook =~ "one paragraph group per line"
+    assert playbook =~ "compare-and-swap"
+    assert playbook =~ "one read, one write"
+    assert playbook =~ "occurrence"
   end
 
   test "read-only document mode selects its document-specific profile", %{
