@@ -4,7 +4,8 @@ defmodule Ecrits.AcpAgent.CodexHome do
   @type isolation :: %{
           home: String.t(),
           env: [{String.t(), String.t() | false}],
-          permission_profile: String.t()
+          permission_profile: String.t(),
+          ephemeral?: boolean()
         }
 
   @read_only_profile "ecrits_read_only"
@@ -20,10 +21,11 @@ defmodule Ecrits.AcpAgent.CodexHome do
     document_lane? = Keyword.get(opts, :document_lane?, false)
     workspace_root = Keyword.get(opts, :workspace_root)
     user_home = Keyword.get(opts, :user_home, System.user_home!())
+    conversation_id = Keyword.get(opts, :conversation_id)
     permission_profile = permission_profile(Keyword.get(opts, :sandbox), document_lane?)
 
     with :ok <- require_auth(auth_source),
-         {:ok, home} <- make_home(root),
+         {:ok, home} <- make_home(root, conversation_id),
          :ok <- copy_auth(auth_source, home),
          :ok <-
            write_config(
@@ -45,18 +47,24 @@ defmodule Ecrits.AcpAgent.CodexHome do
              Keyword.get(opts, :path, System.get_env("PATH")),
              Keyword.get(opts, :node, System.get_env("NODE"))
            ),
-         permission_profile: permission_profile
+         permission_profile: permission_profile,
+         ephemeral?: not conversation_home?(conversation_id)
        }}
     end
   end
 
   @spec adapter_opts(isolation()) :: keyword()
   def adapter_opts(%{} = isolation) do
+    # Conversation-keyed homes MUST survive adapter teardown: codex stores its
+    # thread rollouts under CODEX_HOME, and deleting them on session stop is
+    # what silently broke thread/resume — the revived agent lost all memory
+    # while the rail still displayed the transcript. They live under the tmp
+    # root, so the OS reclaims them eventually.
     [
       env: isolation.env,
       use_permission_profile: true,
       expected_permission_profile: isolation.permission_profile,
-      on_terminate: fn -> cleanup(isolation) end
+      on_terminate: fn -> if Map.get(isolation, :ephemeral?, true), do: cleanup(isolation) end
     ]
   end
 
@@ -127,11 +135,35 @@ defmodule Ecrits.AcpAgent.CodexHome do
     |> Enum.uniq()
   end
 
-  defp make_home(root) do
+  # A conversation-keyed home is DETERMINISTIC and reusable: the same rail
+  # conversation always resolves to the same CODEX_HOME, so a session restart
+  # finds the provider's thread rollouts and thread/resume restores cross-turn
+  # memory. auth/config/playbook are rewritten on every prepare, which also
+  # means profile fixes reach existing conversations without losing memory.
+  defp make_home(root, conversation_id) do
     with :ok <- File.mkdir_p(root),
          :ok <- File.chmod(root, 0o700) do
-      create_home(root, 0)
+      if conversation_home?(conversation_id) do
+        home = Path.join(root, "codex-conv-" <> conversation_slug(conversation_id))
+
+        with :ok <- File.mkdir_p(home),
+             :ok <- File.chmod(home, 0o700) do
+          {:ok, home}
+        end
+      else
+        create_home(root, 0)
+      end
     end
+  end
+
+  defp conversation_home?(conversation_id),
+    do: is_binary(conversation_id) and conversation_id != ""
+
+  defp conversation_slug(conversation_id) do
+    :sha256
+    |> :crypto.hash(conversation_id)
+    |> binary_part(0, 12)
+    |> Base.url_encode64(padding: false)
   end
 
   defp create_home(_root, attempt) when attempt == 8, do: {:error, :codex_home_creation_failed}

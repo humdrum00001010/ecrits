@@ -57,6 +57,54 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     refute File.exists?(isolation.home)
   end
 
+  # Codex persists thread rollouts inside CODEX_HOME. A conversation-keyed
+  # home therefore has to be deterministic AND survive adapter teardown —
+  # per-session random homes were exactly why thread/resume silently lost the
+  # agent's memory after a session restart (2026-07-19 "session's gone").
+  test "a conversation-keyed home is stable across prepares and survives teardown", %{
+    root: root,
+    auth_source: auth_source
+  } do
+    opts = [
+      root: Path.join(root, "homes"),
+      auth_source: auth_source,
+      workspace_root: Path.join(root, "ws"),
+      document_lane?: true,
+      path: "/opt/toolchain/bin",
+      user_home: "/Users/someone",
+      conversation_id: "rail-conv-1"
+    ]
+
+    assert {:ok, first} = CodexHome.prepare(opts)
+    refute first.ephemeral?
+
+    # Simulate a surviving thread rollout, then a session restart re-preparing
+    # the same conversation: same home, rollout intact, config rewritten.
+    rollout = Path.join(first.home, "sessions/rollout-1.jsonl")
+    :ok = File.mkdir_p(Path.dirname(rollout))
+    :ok = File.write(rollout, "thread history")
+
+    assert {:ok, second} = CodexHome.prepare(opts)
+    assert second.home == first.home
+    assert File.read!(rollout) == "thread history"
+    assert File.read!(Path.join(second.home, "config.toml")) =~ "/Library/Ruby/**"
+
+    # Adapter teardown must NOT delete a conversation home...
+    on_terminate = CodexHome.adapter_opts(second)[:on_terminate]
+    _ = on_terminate.()
+    assert File.exists?(rollout)
+
+    # ...while a different conversation gets its own home and an ephemeral
+    # prepare still cleans up on teardown.
+    assert {:ok, other} = CodexHome.prepare(Keyword.put(opts, :conversation_id, "rail-conv-2"))
+    refute other.home == first.home
+
+    assert {:ok, ephemeral} = CodexHome.prepare(Keyword.delete(opts, :conversation_id))
+    assert ephemeral.ephemeral?
+    _ = CodexHome.adapter_opts(ephemeral)[:on_terminate].()
+    refute File.exists?(ephemeral.home)
+  end
+
   test "removes the Bun node compatibility shim from ACP PATH", %{
     root: root,
     auth_source: auth_source

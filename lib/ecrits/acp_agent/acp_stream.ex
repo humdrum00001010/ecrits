@@ -1152,12 +1152,19 @@ defmodule Ecrits.AcpAgent.AcpStream do
            CodexHome.prepare(
              sandbox: Keyword.get(opts, :sandbox),
              document_lane?: document_lane?(turn, opts),
-             workspace_root: turn[:workspace_root]
+             workspace_root: turn[:workspace_root],
+             # Key the isolated home by conversation so a restarted session
+             # reuses it: codex stores thread rollouts inside CODEX_HOME, and
+             # thread/resume only restores memory when they outlive the
+             # session process.
+             conversation_id: get_in(turn, [:expected_identity, :agent_id])
            ) do
       {:ok,
        %{
          adapter_opts: CodexHome.adapter_opts(isolation),
-         cleanup: fn -> CodexHome.cleanup(isolation) end
+         cleanup: fn ->
+           if Map.get(isolation, :ephemeral?, true), do: CodexHome.cleanup(isolation)
+         end
        }}
     end
   end
