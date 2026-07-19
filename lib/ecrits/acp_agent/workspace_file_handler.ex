@@ -22,6 +22,7 @@ defmodule Ecrits.AcpAgent.WorkspaceFileHandler do
        expected_identity: Keyword.get(opts, :expected_identity),
        session_pid: Keyword.get(opts, :session_pid),
        read_only?: Keyword.get(opts, :read_only?, false),
+       ask?: Keyword.get(opts, :ask?, false),
        session_id: nil
      }}
   end
@@ -131,6 +132,10 @@ defmodule Ecrits.AcpAgent.WorkspaceFileHandler do
     end
   end
 
+  # Ask mode is not Read only: the write is refusable but the refusal must
+  # carry the path forward — the agent relays the approval request to the user
+  # in chat, which IS the round-trip until a dedicated approval UI exists.
+  defp writable(%{read_only?: true, ask?: true}), do: {:error, :approval_required_ask_mode}
   defp writable(%{read_only?: true}), do: {:error, :read_only}
   defp writable(_state), do: :ok
 
@@ -462,6 +467,12 @@ defmodule Ecrits.AcpAgent.WorkspaceFileHandler do
   # tells the agent WHAT was structural instead of a bare EINVAL-shaped atom.
   defp format_error({:structural_change, detail}) when is_binary(detail),
     do: "structural_change: #{detail} — reread the mounted file and restage from the fresh read"
+
+  defp format_error(:approval_required_ask_mode),
+    do:
+      "the rail is in Ask mode: this write needs the user's approval — relay the " <>
+        "exact change you want to make and ask them to approve it in chat or switch " <>
+        "the rail to Full workspace, then retry"
 
   defp format_error(:projection_reopen_required),
     do:

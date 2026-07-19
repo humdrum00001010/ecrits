@@ -1169,6 +1169,15 @@ defmodule Ecrits.AcpAgent.AcpStream do
        when adapter in [Codex, CodexAdapter] do
     read_only? = not acp_write_authorized?(opts)
 
+    # Ask mode is write-capable in intent but gated per-op: the handler needs
+    # to distinguish it from Read only so a refused write can tell the agent
+    # to request the user's approval in chat rather than presenting a silent
+    # read-only wall (board #459 — Ask lanes used to auto-reject with no path
+    # forward).
+    ask? =
+      read_only? and Keyword.get(opts, :sandbox) == "workspace-write" and
+        Keyword.get(opts, :approval_policy) in [:on_write, "on_write"]
+
     client_opts
     |> Keyword.put(:handler, WorkspaceFileHandler)
     |> Keyword.put(
@@ -1177,7 +1186,8 @@ defmodule Ecrits.AcpAgent.AcpStream do
       document_path: turn[:document_path],
       session_pid: turn[:session_pid],
       expected_identity: turn[:expected_identity],
-      read_only?: read_only?
+      read_only?: read_only?,
+      ask?: ask?
     )
     # These describe the handler's protocol surface, not the current user's
     # authority. WorkspaceFileHandler remains the source of truth for explicit

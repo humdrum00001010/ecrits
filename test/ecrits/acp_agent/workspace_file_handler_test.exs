@@ -423,6 +423,34 @@ defmodule Ecrits.AcpAgent.WorkspaceFileHandlerTest do
   # rejected regardless of rail mode, so a Full-workspace agent reported
   # "승인이 거절되어" and degraded to sandbox-only fallbacks. The mode toggle is
   # the user's standing answer: Full workspace grants, Read only refuses.
+  test "an Ask-mode write explains the approval path instead of a read-only wall", context do
+    # Board #459: Ask is write-capable in intent but per-op gated. The refusal
+    # must carry the round-trip — the agent relays the request in chat —
+    # rather than presenting as a silent read-only rail.
+    ask = handler_state(context, read_only?: true, ask?: true)
+
+    assert {:error, message, ^ask} =
+             WorkspaceFileHandler.handle_file_write(
+               "session-1",
+               context.projection,
+               ~s({"text":"ask write"}\n),
+               ask
+             )
+
+    assert message =~ "Ask mode"
+    assert message =~ "approve it in chat"
+
+    read_only = handler_state(context, read_only?: true)
+
+    assert {:error, "read_only", ^read_only} =
+             WorkspaceFileHandler.handle_file_write(
+               "session-1",
+               context.projection,
+               ~s({"text":"ro write"}\n),
+               read_only
+             )
+  end
+
   test "grants permission requests on a full-workspace rail, single-use first", context do
     state = handler_state(context)
 
