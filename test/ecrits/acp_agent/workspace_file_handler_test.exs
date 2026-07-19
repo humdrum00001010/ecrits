@@ -323,6 +323,28 @@ defmodule Ecrits.AcpAgent.WorkspaceFileHandlerTest do
                state
              )
 
+    # Same agent, new turn that has not re-opened yet: actionable instruction,
+    # not a vague owner error (2026-07-19 field report — the agent had to
+    # guess at "다시 연결" instead of being told to call doc.open_doc).
+    OpenDocs.open(context.root, context.mount_name,
+      source_path: context.source,
+      agent_id: "agent-1",
+      instance_id: "instance-1",
+      turn_id: "turn-2"
+    )
+
+    assert {:error, reopen_message, ^state} =
+             WorkspaceFileHandler.handle_file_write(
+               "session-1",
+               context.projection,
+               ~s({"text":"pre-open write"}\n),
+               write_opts(context.projection),
+               state
+             )
+
+    assert reopen_message =~ "call doc.open_doc"
+
+    # A genuinely foreign owner stays a hard refusal.
     OpenDocs.open(context.root, context.mount_name,
       source_path: context.source,
       agent_id: "agent-2",

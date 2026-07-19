@@ -432,16 +432,21 @@ defmodule Ecrits.AcpAgent.WorkspaceFileHandler do
 
   defp access_context(_state), do: {:error, :missing_edit_identity}
 
+  # Ownership is a compare-and-swap guard, but its two failure modes need
+  # different words: the SAME agent whose new turn merely has not re-opened
+  # yet gets an actionable instruction (2026-07-19 field report — the vague
+  # "owner changed" made the agent guess at reconnection), while a genuinely
+  # foreign owner stays a hard refusal.
   defp owner_matches(context, owner) do
-    keys = [:agent_id, :instance_id, :turn_id]
+    same? = fn key ->
+      expected = Map.get(context, key)
+      is_binary(expected) and expected != "" and Map.get(owner, key) == expected
+    end
 
-    if Enum.all?(keys, fn key ->
-         expected = Map.get(context, key)
-         is_binary(expected) and expected != "" and Map.get(owner, key) == expected
-       end) do
-      :ok
-    else
-      {:error, :projection_owner_changed}
+    cond do
+      Enum.all?([:agent_id, :instance_id, :turn_id], same?) -> :ok
+      Enum.all?([:agent_id, :instance_id], same?) -> {:error, :projection_reopen_required}
+      true -> {:error, :projection_owner_changed}
     end
   end
 
@@ -452,6 +457,11 @@ defmodule Ecrits.AcpAgent.WorkspaceFileHandler do
   end
 
   defp format_error({:invalid_jsonl, line_number}), do: "invalid JSONL at line #{line_number}"
+
+  defp format_error(:projection_reopen_required),
+    do:
+      "this turn has not opened the document projection yet — call doc.open_doc " <>
+        "{path: \"current\"} once, then retry this file operation"
   defp format_error(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp format_error(reason), do: inspect(reason)
 end
