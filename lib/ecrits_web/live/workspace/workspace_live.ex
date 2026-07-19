@@ -2747,7 +2747,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                       phx-click="agent.turn.cancel"
                       data-role="chat-stop"
                       data-action="stop"
-                      class="inline-flex size-6 items-center justify-center rounded bg-base-content text-base-100 transition-colors hover:bg-base-content/80"
+                      class="inline-flex size-6 items-center justify-center rounded bg-[color-mix(in_oklab,var(--cs-blue)_18%,transparent)] text-[var(--cs-blue)] transition-colors hover:bg-[color-mix(in_oklab,var(--cs-blue)_28%,transparent)]"
                       aria-label="Stop agent turn"
                     >
                       <.icon name="hero-stop" class="size-3.5" />
@@ -2761,7 +2761,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                       data-action="send"
                       data-armed="false"
                       disabled={@agent_status in [:offline, :starting]}
-                      class="inline-flex size-6 items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content data-[armed=true]:bg-base-content data-[armed=true]:text-base-100 data-[armed=true]:hover:bg-base-content/80 data-[armed=true]:hover:text-base-100 disabled:cursor-not-allowed disabled:opacity-35"
+                      class="inline-flex size-6 items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content data-[armed=true]:bg-[color-mix(in_oklab,var(--cs-blue)_18%,transparent)] data-[armed=true]:text-[var(--cs-blue)] data-[armed=true]:hover:bg-[color-mix(in_oklab,var(--cs-blue)_28%,transparent)] data-[armed=true]:hover:text-[var(--cs-blue)] disabled:cursor-not-allowed disabled:opacity-35"
                       aria-label="Send"
                     >
                       <.icon name="hero-paper-airplane" class="size-3.5" />
