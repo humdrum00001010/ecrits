@@ -23,7 +23,7 @@ Maintain three concise tables:
 
 Layers organize the logs semantically; they never replace function-level detail.
 
-Update the layered abstraction as evidence arrives. Every flow row, strategy entry, finding, and derived test must reference the applicable layer names.
+Update the layered abstraction as evidence arrives. The layered-flow table and layer-strategy log must always reflect the agent's current abstraction. When a layer is renamed, split, merged, or reinterpreted, update the layer references and boundary classifications in every existing row while preserving its function-level evidence; record the reclassification in the abstraction's change history. Every finding and derived test must also reference the current layer names.
 
 The lifecycle/free-point field answers: **where this get freed?**
 
