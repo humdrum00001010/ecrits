@@ -1066,7 +1066,24 @@ defmodule Ecrits.Workspace.Session do
            not is_nil(agent_crash_barrier_key(state, agent_id)) do
         {:reply, {:error, :foreground_transition_in_progress}, state}
       else
-        {:reply, AcpAgent.send_turn(nil, agent_id, input, opts), state}
+        case send_turn_to_agent(agent_id, input, opts) do
+          {:error, :not_found} ->
+            # The rail's Session process is gone (deliberate stop, crash, or
+            # sweep) while its durable transcript remains. That is a lifecycle
+            # event, not a user-facing error: revive the agent in place from
+            # durable state — provider thread resume restores its cross-turn
+            # memory — and retry this send once.
+            case revive_dead_foreground_agent(state, live_view_pid) do
+              {:ok, state} ->
+                {:reply, send_turn_to_agent(agent_id, input, opts), state}
+
+              {:error, reason} ->
+                {:reply, {:error, reason}, state}
+            end
+
+          reply ->
+            {:reply, reply, state}
+        end
       end
     else
       _ -> {:reply, {:error, :no_agent}, state}
@@ -2490,6 +2507,7 @@ defmodule Ecrits.Workspace.Session do
                 state
                 |> activate_foreground(live_view_key, rail_key)
                 |> remember_foreground_order(rail_key)
+                |> remember_foreground_settings(rail_key, settings)
 
               {:ok, state, Map.merge(fg, %{rail_key: rail_key, live_session_id: live_session_id})}
             end
@@ -2527,6 +2545,7 @@ defmodule Ecrits.Workspace.Session do
             agent_id,
             bound_provider
           )
+          |> remember_foreground_settings(rail_key, settings)
           |> Map.update!(:agents, &Map.put(&1, agent_id, %{role: :foreground, pid: pid}))
 
         if provider_switch?(bound_provider, requested_provider) do
@@ -2541,14 +2560,91 @@ defmodule Ecrits.Workspace.Session do
     end
   end
 
-  defp maybe_put_durable_restore(opts, state, rail_key, agent_id) do
+  # A session that died a moment ago can still be registered for a beat;
+  # calling it then exits :noproc instead of returning :not_found. Both mean
+  # the same thing here: the process is gone, revive it.
+  defp send_turn_to_agent(agent_id, input, opts) do
+    AcpAgent.send_turn(nil, agent_id, input, opts)
+  catch
+    :exit, {:noproc, _call} -> {:error, :not_found}
+  end
+
+  # Restart the active rail's agent under its own id after its process died.
+  # start_foreground_agent reuses the durable transcript (and, for providers
+  # with resume support, the remembered provider session) so the revived agent
+  # continues the same conversation, driven by the rail's remembered attach
+  # settings; per-send adapter opts arrive with the retried send.
+  defp revive_dead_foreground_agent(state, live_view_pid) do
+    with live_view_key when is_binary(live_view_key) <-
+           Map.get(state.foreground_live_views, live_view_pid),
+         rail_key when is_binary(rail_key) <- Map.get(state.active_foregrounds, live_view_key) do
+      record = Map.get(state.foregrounds, rail_key) || %{}
+
+      settings =
+        case Map.get(record, :settings) do
+          settings when is_list(settings) ->
+            settings
+
+          _unknown ->
+            case Map.get(record, :provider) do
+              provider when is_binary(provider) -> [provider: provider]
+              _missing -> []
+            end
+        end
+
+      case start_foreground_agent(state, settings, rail_key, live_view_key) do
+        {:ok, state, _foreground} -> {:ok, state}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      _ -> {:error, :no_agent}
+    end
+  end
+
+  # The last attach settings for a rail (provider, adapter opts, model): what a
+  # mid-conversation revive must reuse when the agent process is gone and can
+  # no longer be asked.
+  defp remember_foreground_settings(state, rail_key, settings) when is_list(settings) do
     case Map.get(state.foregrounds, rail_key) do
-      %{agent_id: ^agent_id, agent_state: agent_state} when is_map(agent_state) ->
+      %{} = record ->
+        %{state | foregrounds: Map.put(state.foregrounds, rail_key, Map.put(record, :settings, settings))}
+
+      _missing ->
+        state
+    end
+  end
+
+  defp remember_foreground_settings(state, _rail_key, _settings), do: state
+
+  defp maybe_put_durable_restore(opts, state, rail_key, agent_id) do
+    # The agent persists every durable change straight to the handoff store;
+    # the in-memory record copy refreshes only at persist_chat_rail_state, so
+    # for a restart/revive the store is the authoritative (fresher) source.
+    handoff_state = handoff_agent_state(state.path, rail_key, agent_id)
+
+    case {handoff_state, Map.get(state.foregrounds, rail_key)} do
+      {agent_state, _record} when is_map(agent_state) ->
+        Keyword.put(opts, :durable_restore, agent_state)
+
+      {_missing, %{agent_id: ^agent_id, agent_state: agent_state}} when is_map(agent_state) ->
         Keyword.put(opts, :durable_restore, agent_state)
 
       _missing ->
         opts
     end
+  end
+
+  defp handoff_agent_state(path, rail_key, agent_id) do
+    with {:ok, rail_state} <- WorkspaceHandoff.fetch_chat_rail_state(path),
+         %{agent_id: ^agent_id, agent_state: agent_state} <-
+           Map.get(Map.get(rail_state, :foregrounds, %{}), rail_key),
+         true <- is_map(agent_state) do
+      agent_state
+    else
+      _ -> nil
+    end
+  catch
+    :exit, _reason -> nil
   end
 
   # A provider SWITCH only when both the bound and requested providers are known
@@ -3207,7 +3303,13 @@ defmodule Ecrits.Workspace.Session do
         end
       end)
 
-    rail_state = state |> Map.take(@chat_rail_state_keys) |> Map.put(:foregrounds, foregrounds)
+    # Attach settings hold runtime terms (adapter opts can carry pids or test
+    # fakes) — they stay in live state for revives but never enter the handoff
+    # store; a reload re-remembers them at the next attach.
+    persistable =
+      Map.new(foregrounds, fn {rail_key, meta} -> {rail_key, Map.delete(meta, :settings)} end)
+
+    rail_state = state |> Map.take(@chat_rail_state_keys) |> Map.put(:foregrounds, persistable)
     _ = WorkspaceHandoff.put_chat_rail_state(state.path, rail_state)
     %{state | foregrounds: foregrounds}
   end
@@ -3291,6 +3393,14 @@ defmodule Ecrits.Workspace.Session do
       normalized =
         case Map.get(meta, :agent_state) do
           agent_state when is_map(agent_state) -> Map.put(normalized, :agent_state, agent_state)
+          _missing -> normalized
+        end
+
+      # The rail's remembered attach settings feed a mid-conversation revive;
+      # normalization must not scrub them from live state.
+      normalized =
+        case Map.get(meta, :settings) do
+          settings when is_list(settings) -> Map.put(normalized, :settings, settings)
           _missing -> normalized
         end
 

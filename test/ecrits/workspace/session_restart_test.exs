@@ -201,6 +201,55 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert :sys.get_state(session_pid).foreground_transitions == %{}
   end
 
+  # 2026-07-19 field bug ("session's gone"): a dead rail Session whose durable
+  # transcript remains used to surface {:error, :not_found} as a rail error
+  # banner on the next send. A dead process is a lifecycle event — the send
+  # must revive the agent in place, on the rail's remembered attach settings,
+  # and run the turn on the restored conversation.
+  test "a send after the session process died revives the agent on the same conversation",
+       %{ws: ws} do
+    agent_id = ws.agent_id
+    Session.subscribe_agent(agent_id)
+
+    {:ok, %{id: turn_id}} = AcpAgent.send_turn(nil, agent_id, "before the death")
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+    rows_before = length(AcpAgent.agent_snapshot(agent_id).transcript)
+    assert rows_before > 0
+
+    old_pid = AcpAgent.whereis(agent_id)
+    ref = Process.monitor(old_pid)
+    :ok = GenServer.stop(old_pid, :normal)
+    assert_receive {:DOWN, ^ref, :process, ^old_pid, _reason}, 2_000
+
+    # The death may briefly overlap the finished turn's crash-recovery window;
+    # :foreground_transition_in_progress is the transient the composer absorbs
+    # by keeping the message. The send after that window must revive, never
+    # surface :not_found.
+    result =
+      Enum.reduce_while(1..40, {:error, :foreground_transition_in_progress}, fn _i, _acc ->
+        case Session.send_turn(ws, "after the revive") do
+          {:error, :foreground_transition_in_progress} = busy ->
+            Process.sleep(50)
+            {:cont, busy}
+
+          other ->
+            {:halt, other}
+        end
+      end)
+
+    assert {:ok, %{id: revived_turn}} = result
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^revived_turn}}, 2_000
+
+    new_pid = AcpAgent.whereis(agent_id)
+    assert is_pid(new_pid)
+    refute new_pid == old_pid
+
+    # Same conversation, not a fresh one: the durable transcript carried over
+    # and the revived turn appended to it.
+    transcript = AcpAgent.agent_snapshot(agent_id).transcript
+    assert length(transcript) > rows_before
+  end
+
   test "graceful cancel reaches the provider worker before the brutal-kill timeout", %{
     path: root
   } do
