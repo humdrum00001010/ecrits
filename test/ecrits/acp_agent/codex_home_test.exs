@@ -157,7 +157,8 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
                auth_source: auth_source,
                global_home: global_home,
                workspace_root: workspace_root,
-               document_lane?: true
+               document_lane?: true,
+               path: "/opt/toolchain/bin"
              )
 
     config = File.read!(Path.join(isolation.home, "config.toml"))
@@ -170,7 +171,9 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     assert config =~ """
            [permissions.ecrits_document_workspace.filesystem]
            ":minimal" = "read"
+           "/opt/toolchain/**" = "read"
            "#{Path.expand(workspace_root)}" = "read"
+           "#{Path.expand(workspace_root)}/**" = "read"
            "#{Path.expand(isolation.home)}/**" = "deny"
            "#{Path.expand(global_home)}/**" = "deny"
            """
@@ -189,7 +192,8 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
                auth_source: auth_source,
                workspace_root: Path.join(root, "contract-workspace"),
                document_lane?: true,
-               sandbox: "read-only"
+               sandbox: "read-only",
+               path: "/opt/toolchain/bin"
              )
 
     assert isolation.permission_profile == "ecrits_document_read_only"
@@ -200,7 +204,9 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     assert config =~ """
            [permissions.ecrits_document_read_only.filesystem]
            ":minimal" = "read"
+           "/opt/toolchain/**" = "read"
            "#{Path.expand(Path.join(root, "contract-workspace"))}" = "read"
+           "#{Path.expand(Path.join(root, "contract-workspace"))}/**" = "read"
            "#{Path.expand(isolation.home)}/**" = "deny"
            """
 

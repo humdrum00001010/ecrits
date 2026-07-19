@@ -30,7 +30,8 @@ defmodule Ecrits.AcpAgent.CodexHome do
              global_home,
              permission_profile,
              workspace_root,
-             document_lane?
+             document_lane?,
+             Keyword.get(opts, :path, System.get_env("PATH"))
            ) do
       {:ok,
        %{
@@ -162,7 +163,7 @@ defmodule Ecrits.AcpAgent.CodexHome do
     end
   end
 
-  defp write_config(home, global_home, default_profile, workspace_root, document_lane?) do
+  defp write_config(home, global_home, default_profile, workspace_root, document_lane?, path) do
     # Keep ordinary shell search available. Document profiles are read-only so
     # the provider can inspect the workspace while every mutation remains
     # mediated by the ACP file handler.
@@ -174,17 +175,28 @@ defmodule Ecrits.AcpAgent.CodexHome do
         expanded_global_home = global_home |> Path.expand() |> toml_string()
         expanded_workspace_root = workspace_root |> Path.expand() |> toml_string()
 
+        # Confinement is deliberate: document-lane reads stay within the
+        # workspace subtree (the live sandbox proof below requires outside
+        # reads to FAIL). The explicit /** glob spells out subtree semantics.
+        # Tool directories from PATH get read grants because execvp needs to
+        # READ a binary to run it: /usr/bin tools (jq) always worked while
+        # /opt/homebrew tools (rg) failed as "No such file or directory" —
+        # the field report "셸의 읽기 전용 검색이 샌드박스에서 막혔습니다".
+        tool_grants = tool_path_grants(path, home, global_home)
+
         """
 
         [permissions.#{@document_read_only_profile}.filesystem]
         \":minimal\" = \"read\"
-        \"#{expanded_workspace_root}\" = \"read\"
+        #{tool_grants}\"#{expanded_workspace_root}\" = \"read\"
+        \"#{expanded_workspace_root}/**\" = \"read\"
         \"#{expanded_home}/**\" = \"deny\"
         \"#{expanded_global_home}/**\" = \"deny\"
 
         [permissions.#{@document_workspace_profile}.filesystem]
         \":minimal\" = \"read\"
-        \"#{expanded_workspace_root}\" = \"read\"
+        #{tool_grants}\"#{expanded_workspace_root}\" = \"read\"
+        \"#{expanded_workspace_root}/**\" = \"read\"
         \"#{expanded_home}/**\" = \"deny\"
         \"#{expanded_global_home}/**\" = \"deny\"
         """
@@ -241,6 +253,37 @@ defmodule Ecrits.AcpAgent.CodexHome do
     do: @read_only_profile
 
   defp permission_profile(_sandbox, false), do: @workspace_profile
+
+  # Read grants for the PATH toolchains, so shell search binaries outside
+  # :minimal (homebrew, mise shims) can run in the document sandbox. A binary
+  # needs more than its bin dir — dyld loads shared libraries from the
+  # toolchain prefix (rg failed on /opt/homebrew/opt/pcre2/lib even after its
+  # bin dir was granted) — so each <prefix>/bin|sbin entry grants the whole
+  # read-only <prefix>/** subtree. Home-rooted entries stay excluded: secrets
+  # confinement wins over tool convenience.
+  defp tool_path_grants(path, home, global_home) do
+    denied_roots = [Path.expand(home), Path.expand(global_home), System.user_home!()]
+
+    (path || "")
+    |> String.split(":", trim: true)
+    |> Enum.map(&Path.expand/1)
+    |> Enum.map(&toolchain_prefix/1)
+    |> Enum.uniq()
+    |> Enum.reject(fn dir ->
+      Enum.any?(denied_roots, fn root ->
+        dir == root or String.starts_with?(dir, root <> "/")
+      end)
+    end)
+    |> Enum.map_join(fn dir -> "\"#{toml_string(dir)}/**\" = \"read\"\n" end)
+  end
+
+  defp toolchain_prefix(dir) do
+    if Path.basename(dir) in ["bin", "sbin"] and Path.dirname(dir) != "/" do
+      Path.dirname(dir)
+    else
+      dir
+    end
+  end
 
   defp toml_string(value),
     do: value |> String.replace("\\", "\\\\") |> String.replace("\"", "\\\"")
