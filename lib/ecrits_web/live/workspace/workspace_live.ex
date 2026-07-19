@@ -2820,8 +2820,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                           :for={model <- agent_models_for_provider(@agent.provider.key)}
                           id={"agent-inline-model-#{model.id}"}
                           type="button"
-                          phx-click="agent.model.select"
-                          phx-value-model={model.id}
+                          phx-click={
+                            JS.remove_attribute("open", to: "#agent-model-select")
+                            |> JS.push("agent.model.select", value: %{model: model.id})
+                          }
                           data-role="agent-model-option"
                           data-model={model.id}
                           data-provider={model.provider}
@@ -2859,7 +2861,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                         <button
                           id="agent-go-to-provider"
                           type="button"
-                          phx-click="agent.model_dialog.open"
+                          phx-click={
+                            JS.remove_attribute("open", to: "#agent-model-select")
+                            |> JS.push("agent.model_dialog.open")
+                          }
                           data-role="agent-provider-config-open"
                           class="flex h-8 w-full items-center justify-between gap-2 px-2 text-left text-base-content/70 transition-colors hover:bg-base-200/70 hover:text-base-content"
                         >
@@ -2900,8 +2905,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                         :for={effort <- agent_reasoning_efforts(@agent.provider.key)}
                         id={"agent-inline-reasoning-#{effort}"}
                         type="button"
-                        phx-click="agent.reasoning.select"
-                        phx-value-reasoning={effort}
+                        phx-click={
+                          JS.remove_attribute("open", to: "#agent-reasoning-select")
+                          |> JS.push("agent.reasoning.select", value: %{reasoning: effort})
+                        }
                         data-role="provider-reasoning-option"
                         data-value={effort}
                         data-selected={to_string(@agent.reasoning_effort == effort)}
@@ -2942,8 +2949,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                         :for={access <- agent_access_controls()}
                         id={"agent-inline-access-#{access.id}"}
                         type="button"
-                        phx-click="agent.access.select"
-                        phx-value-access={access.id}
+                        phx-click={
+                          JS.remove_attribute("open", to: "#agent-access-select")
+                          |> JS.push("agent.access.select", value: %{access: access.id})
+                        }
                         data-role="agent-access-option"
                         data-access={access.id}
                         data-selected={to_string(@agent.access.id == access.id)}

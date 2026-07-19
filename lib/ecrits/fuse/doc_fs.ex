@@ -1143,7 +1143,13 @@ defmodule Ecrits.Fuse.DocFs do
         {:ok, %{applied: 0, accepted_noop: true, doc: Path.basename(source)}}
 
       _other ->
-        Projection.write_back(source, bytes, opts)
+        # `:root` is what write_back's broadcast_edit keys the chat-rail
+        # preview publication on — without it every VFS edit commits silently
+        # and no {:vfs_doc_edited, info} (and thus no persisted edit preview)
+        # ever reaches a rail. Field regression 2026-07-19: the opts contract
+        # drifted in a write-path restructure and previews vanished for weeks
+        # of turns.
+        Projection.write_back(source, bytes, Keyword.put(opts, :root, root))
     end
   end
 

@@ -2162,6 +2162,11 @@ defmodule Ecrits.Fuse.DocFsTest do
       OpenDocs.open(root, "doc.hwpx")
       OpenDocs.set_writable(root, true)
 
+      # Every committed VFS edit must publish its chat-rail preview event —
+      # 2026-07-19 field regression: the write path stopped passing :root and
+      # broadcast_edit silently skipped, so edits committed with no preview.
+      Phoenix.PubSub.subscribe(Ecrits.PubSub, "doc_vfs:" <> root)
+
       {:ok, bytes} = Projection.project_file(path)
       new_bytes = replace_first_cell_text(bytes, "DOCFS_STAGED_FLUSH_OK")
       OpenDocs.stage(root, "doc.hwpx", new_bytes, :structural_change)
@@ -2170,6 +2175,10 @@ defmodule Ecrits.Fuse.DocFsTest do
       assert OpenDocs.staged(root, "doc.hwpx") == :error
       assert {:ok, after_bytes} = Projection.project_file(path)
       assert after_bytes =~ "DOCFS_STAGED_FLUSH_OK"
+
+      assert_receive {:vfs_doc_edited, %{doc: "doc.hwpx", path: ^path} = info}, 5_000
+      assert is_binary(info.edit_id) or is_nil(info.edit_id)
+      assert info.applied >= 1
     end
   end
 
