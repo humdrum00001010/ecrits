@@ -2759,8 +2759,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                       type="submit"
                       data-role="chat-send"
                       data-action="send"
+                      data-armed="false"
                       disabled={@agent_status in [:offline, :starting]}
-                      class="inline-flex size-6 items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content disabled:cursor-not-allowed disabled:opacity-35"
+                      class="inline-flex size-6 items-center justify-center rounded text-base-content/45 transition-colors hover:text-base-content data-[armed=true]:bg-base-content data-[armed=true]:text-base-100 data-[armed=true]:hover:bg-base-content/80 data-[armed=true]:hover:text-base-100 disabled:cursor-not-allowed disabled:opacity-35"
                       aria-label="Send"
                     >
                       <.icon name="hero-paper-airplane" class="size-3.5" />
@@ -3082,13 +3083,16 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                   this.el.addEventListener("keydown", event => this.handleDomEvent(event))
                   this.el.addEventListener("input", event => this.handleDomEvent(event))
                   this.resizeInput()
+                  this.syncSendArmed()
                 },
                 updated() {
                   this.resizeInput()
+                  this.syncSendArmed()
                 },
                 handleDomEvent(event) {
                   if (event.type === "input") {
                     this.resizeInput()
+                    this.syncSendArmed()
                     return
                   }
 
@@ -3107,6 +3111,15 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                   if (!input || input.tagName !== "TEXTAREA") return
                   input.style.height = "auto"
                   input.style.height = `${Math.min(input.scrollHeight, 160)}px`
+                },
+                // Typed content arms the Send button (solid ink) without a
+                // server round-trip per keystroke; the styles ride the
+                // data-armed attribute on the button.
+                syncSendArmed() {
+                  const input = this.el.querySelector('[data-role="chat-textarea"]')
+                  const send = this.el.querySelector('[data-role="chat-send"]')
+                  if (!input || !send) return
+                  send.dataset.armed = input.value.trim() === "" ? "false" : "true"
                 }
               }
             </script>
