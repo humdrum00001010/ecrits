@@ -201,6 +201,79 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert :sys.get_state(session_pid).foreground_transitions == %{}
   end
 
+  # 2026-07-19 field bug (#464): when a resume lands on a DIFFERENT provider
+  # thread, every earlier transcript row is invisible to the agent ("he can't
+  # find the ruby shell cmd"). The session must record the gap and seed a
+  # one-time bounded recap of the uncovered rows into the next prompt.
+  test "a thread change seeds a one-time recap of rows the new thread never saw", %{path: root} do
+    path = Path.join(root, "thread-recap")
+    File.mkdir_p!(path)
+
+    settings = [
+      live_session_id: "thread-recap",
+      chat_rail_id: "recap-tab",
+      provider: "codex",
+      adapter_opts: [
+        exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+        report_prompts: true,
+        test_pid: self(),
+        # The provider answers the resume with a DIFFERENT thread id (rollout
+        # lost/partially recovered) — the recap trigger.
+        resume_session_id: "recovered-on-another-thread",
+        script: [{:text_delta, "reply"}]
+      ],
+      workspace_root: path
+    ]
+
+    {:ok, ws} = Session.attach(path, settings)
+    assert_receive {:workspace_foreground_rebound, ^ws}, 1_000
+    agent_id = ws.agent_id
+    Session.subscribe_agent(agent_id)
+
+    {:ok, %{id: t1}} = Session.send_turn(ws, "우측 상단 셸 명령을 실행해줘")
+    assert_receive {:fake_acp_prompt, _sid, p1}, 2_000
+    refute p1 =~ "<conversation-recap>"
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^t1}}, 2_000
+
+    old_pid = AcpAgent.whereis(agent_id)
+    ref = Process.monitor(old_pid)
+    :ok = GenServer.stop(old_pid, :normal)
+    assert_receive {:DOWN, ^ref, :process, ^old_pid, _reason}, 2_000
+
+    # Turn 2 revives and resumes onto the OTHER thread: the gap is recorded
+    # mid-turn, so this prompt is still clean...
+    assert {:ok, %{id: t2}} = send_when_ready(ws, "그 다음 작업")
+    assert_receive {:fake_acp_prompt, _sid, p2}, 2_000
+    refute p2 =~ "<conversation-recap>"
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^t2}}, 2_000
+
+    # ...and turn 3 carries the one-time recap, including the uncovered row.
+    assert {:ok, %{id: t3}} = send_when_ready(ws, "그 명령 다시 실행해줘")
+    assert_receive {:fake_acp_prompt, _sid, p3}, 2_000
+    assert p3 =~ "<conversation-recap>"
+    assert p3 =~ "우측 상단 셸 명령"
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^t3}}, 2_000
+
+    # Seeded once: the next prompt is clean again.
+    assert {:ok, %{id: t4}} = send_when_ready(ws, "마지막 확인")
+    assert_receive {:fake_acp_prompt, _sid, p4}, 2_000
+    refute p4 =~ "<conversation-recap>"
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^t4}}, 2_000
+  end
+
+  defp send_when_ready(ws, input) do
+    Enum.reduce_while(1..40, {:error, :foreground_transition_in_progress}, fn _i, _acc ->
+      case Session.send_turn(ws, input) do
+        {:error, :foreground_transition_in_progress} = busy ->
+          Process.sleep(50)
+          {:cont, busy}
+
+        other ->
+          {:halt, other}
+      end
+    end)
+  end
+
   # 2026-07-19 field bug ("session's gone"): a dead rail Session whose durable
   # transcript remains used to surface {:error, :not_found} as a rail error
   # banner on the next send. A dead process is a lifecycle event — the send

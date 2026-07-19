@@ -292,6 +292,11 @@ defmodule Ecrits.AcpAgent.Session do
        # turns 2+ so the conversation keeps cross-turn memory. `nil` until the
        # first turn establishes it.
        provider_session_id: Map.get(restored, :provider_session_id),
+       # Chronological transcript rows the CURRENT provider thread has never
+       # seen (it was created mid-conversation or the old thread was lost).
+       # While > 0 the next prompt carries a one-time bounded recap of those
+       # rows so cross-turn references keep working after a thread change.
+       thread_covers_from: Map.get(restored, :thread_covers_from) || 0,
        acp_client: nil,
        acp_client_key: nil,
        acp_client_ref: nil,
@@ -1023,6 +1028,7 @@ defmodule Ecrits.AcpAgent.Session do
           case outcome do
             :completed ->
               state
+              |> clear_seeded_thread_gap(current)
               |> record_transcript_turn(current)
               |> emit(%{type: :turn_completed, turn_id: turn_id, text: current.text})
 
@@ -1397,6 +1403,7 @@ defmodule Ecrits.AcpAgent.Session do
          workspace_registration_mode
        ) do
     display_input = display_input || input
+    {input, recap_covered} = maybe_prepend_thread_recap(state, input)
     parent = self()
 
     state =
@@ -1457,6 +1464,7 @@ defmodule Ecrits.AcpAgent.Session do
           items: [],
           input: display_input,
           provider_input: input,
+          recap_covered: recap_covered,
           picks: picks,
           context: turn_context(state, [])
         }
@@ -1953,7 +1961,7 @@ defmodule Ecrits.AcpAgent.Session do
     ref = Process.monitor(client)
 
     persist_durable_state(%{
-      state
+      mark_thread_change(state, id)
       | acp_client: client,
         acp_client_key: client_key,
         acp_client_ref: ref,
@@ -1963,7 +1971,31 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp handle_turn_event(state, _turn_id, %{type: :provider_session, provider_session_id: id})
        when is_binary(id) and id != "" do
-    persist_durable_state(%{state | provider_session_id: id})
+    persist_durable_state(%{mark_thread_change(state, id) | provider_session_id: id})
+  end
+
+  # A DIFFERENT provider session id than the remembered one means the old
+  # thread was not resumed: every transcript row so far is invisible to the
+  # new thread. Record how far the gap reaches so the next prompt seeds it.
+  # (If THIS turn already carried a recap, the completed-turn transition
+  # clears the gap again — the rows reached the new thread via the recap.)
+  defp mark_thread_change(state, id) do
+    prior = state.provider_session_id
+    rows = length(state.transcript)
+
+    if is_binary(prior) and prior != "" and prior != id and rows > 0 do
+      %{state | thread_covers_from: max(state.thread_covers_from, rows)}
+    else
+      state
+    end
+  end
+
+  defp clear_seeded_thread_gap(state, current) do
+    if Map.get(current, :recap_covered, 0) > 0 do
+      %{state | thread_covers_from: 0}
+    else
+      state
+    end
   end
 
   defp handle_turn_event(
@@ -2194,6 +2226,81 @@ defmodule Ecrits.AcpAgent.Session do
   # Append a finished turn to the display-only transcript (newest-prepended;
   # `transcript/1` reverses to oldest-first). Skips an empty turn (no user text
   # and no agent text) so a no-op turn never leaves a blank pair on repaint.
+  # Seed a thread gap: rows before `thread_covers_from` exist only in the
+  # durable transcript — the provider thread never saw them. Prepend a bounded
+  # recap once, ahead of the user's message, so references like "retry that
+  # command" survive a thread change. Fires when a gap is recorded OR when
+  # there is no resumable thread at all but restored rows exist.
+  @thread_recap_budget 4_000
+
+  defp maybe_prepend_thread_recap(state, input) when is_binary(input) do
+    rows = length(state.transcript)
+
+    covered =
+      cond do
+        state.thread_covers_from > 0 -> min(state.thread_covers_from, rows)
+        no_resumable_thread?(state) and rows > 0 -> rows
+        true -> 0
+      end
+
+    if covered > 0 do
+      chronological = state.transcript |> Enum.reverse() |> Enum.take(covered)
+      {thread_recap(chronological) <> input, covered}
+    else
+      {input, 0}
+    end
+  end
+
+  defp maybe_prepend_thread_recap(_state, input), do: {input, 0}
+
+  defp no_resumable_thread?(state),
+    do: not (is_binary(state.provider_session_id) and state.provider_session_id != "")
+
+  defp thread_recap(dialogs) do
+    {lines, omitted} =
+      dialogs
+      |> Enum.reverse()
+      |> Enum.reduce({[], 0}, fn dialog, {acc, omitted} ->
+        line = recap_dialog(dialog)
+
+        if IO.iodata_length([line | acc]) > @thread_recap_budget and acc != [] do
+          {acc, omitted + 1}
+        else
+          {[line | acc], omitted}
+        end
+      end)
+
+    omitted_note = if omitted > 0, do: "(#{omitted} earlier turns omitted)\n", else: ""
+
+    """
+    <conversation-recap>
+    Earlier turns of THIS conversation. The current session thread started mid-conversation and has not seen them. Treat them as history that already happened — do not re-execute anything from the recap.
+    #{omitted_note}#{IO.iodata_to_binary(lines)}</conversation-recap>
+
+    """
+  end
+
+  defp recap_dialog(%Agent.Dialog{} = dialog) do
+    tool_lines =
+      dialog.items
+      |> Enum.filter(&(is_map(&1) and is_binary(Map.get(&1, :name))))
+      |> Enum.map(fn item ->
+        "  [tool #{item.name}] #{recap_trim(Map.get(item, :input))}\n"
+      end)
+
+    [
+      "[user] #{recap_trim(dialog.user)}\n",
+      tool_lines,
+      "[agent] #{recap_trim(dialog.agent)}\n"
+    ]
+  end
+
+  defp recap_trim(value) when is_binary(value) do
+    if String.length(value) > 400, do: String.slice(value, 0, 400) <> "…", else: value
+  end
+
+  defp recap_trim(_value), do: ""
+
   defp record_transcript_turn(state, current) do
     # The transcript bubble shows the typed text regardless of input modality
     # (string sugar OR a multi-modal block list), so derive the display text.
@@ -2838,6 +2945,7 @@ defmodule Ecrits.AcpAgent.Session do
       id: state.id,
       instance_id: state.instance_id,
       provider_session_id: Map.get(state, :provider_session_id),
+      thread_covers_from: Map.get(state, :thread_covers_from, 0),
       title: Map.get(state, :title),
       title_user_edited?: Map.get(state, :title_user_edited?, false),
       transcript:
@@ -2894,6 +3002,7 @@ defmodule Ecrits.AcpAgent.Session do
       %{
         id: id,
         provider_session_id: durable_string(restore_field(restore, :provider_session_id)),
+        thread_covers_from: durable_count(restore_field(restore, :thread_covers_from)),
         title: durable_string(restore_field(restore, :title)),
         title_user_edited?: restore_field(restore, :title_user_edited?) == true,
         transcript: restore_field(restore, :transcript) || [],
@@ -2933,6 +3042,9 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp durable_string(value) when is_binary(value), do: value
   defp durable_string(_value), do: nil
+
+  defp durable_count(value) when is_integer(value) and value >= 0, do: value
+  defp durable_count(_value), do: 0
 
   defp durable_scalar(value) when is_atom(value), do: Atom.to_string(value)
 

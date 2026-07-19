@@ -55,7 +55,12 @@ defmodule EcritsWeb.FakeAcpAdapter do
 
   def translate_outbound(%{"method" => method, "params" => params}, state)
       when method in ["session/load", "session/resume"] do
-    session_id = params["sessionId"] || state.session_id
+    # `resume_session_id` lets a test model a provider that answers a resume
+    # with a DIFFERENT thread id (rollout lost or partially recovered) — the
+    # trigger for the session's thread-gap recap.
+    session_id =
+      Keyword.get(state.opts, :resume_session_id) || params["sessionId"] || state.session_id
+
     report_session(state, :load, session_id)
     {:ok, {:session_id, session_id}, %{state | session_id: session_id}}
   end
