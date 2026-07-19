@@ -173,6 +173,11 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
            [permissions.ecrits_document_workspace.filesystem]
            ":minimal" = "read"
            "/opt/toolchain/**" = "read"
+           "/Library/Ruby/**" = "read"
+           "/Library/Perl/**" = "read"
+           "/Library/Python/**" = "read"
+           "/Library/Java/**" = "read"
+           "/Library/Frameworks/**" = "read"
            "#{Path.expand(workspace_root)}" = "read"
            "#{Path.expand(workspace_root)}/**" = "read"
            "#{Path.expand(isolation.home)}/**" = "deny"
@@ -214,6 +219,11 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
            [permissions.ecrits_document_read_only.filesystem]
            ":minimal" = "read"
            "/opt/toolchain/**" = "read"
+           "/Library/Ruby/**" = "read"
+           "/Library/Perl/**" = "read"
+           "/Library/Python/**" = "read"
+           "/Library/Java/**" = "read"
+           "/Library/Frameworks/**" = "read"
            "#{Path.expand(Path.join(root, "contract-workspace"))}" = "read"
            "#{Path.expand(Path.join(root, "contract-workspace"))}/**" = "read"
            "#{Path.expand(isolation.home)}/**" = "deny"
@@ -268,6 +278,19 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
                "-n",
                "계약금액",
                "contract.jsonl"
+             ])
+
+    assert output =~ "계약금액"
+
+    # 2026-07-19 field report: system Ruby booted but rubygems died on EPERM
+    # globbing /Library/Ruby/Gems at startup, killing a read-only one-liner
+    # before it touched its input. The exact failing shape must work.
+    assert {output, 0} =
+             sandbox_cmd(codex, isolation, workspace_root, env, [
+               "/usr/bin/ruby",
+               "-rjson",
+               "-e",
+               "puts JSON.parse(File.read(\"contract.jsonl\"))[\"text\"]"
              ])
 
     assert output =~ "계약금액"

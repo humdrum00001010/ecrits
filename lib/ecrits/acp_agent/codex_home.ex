@@ -183,7 +183,7 @@ defmodule Ecrits.AcpAgent.CodexHome do
         # READ a binary to run it: /usr/bin tools (jq) always worked while
         # /opt/homebrew tools (rg) failed as "No such file or directory" —
         # the field report "셸의 읽기 전용 검색이 샌드박스에서 막혔습니다".
-        tool_grants = tool_path_grants(path, home, global_home)
+        tool_grants = tool_path_grants(path, home, global_home) <> system_interpreter_grants()
 
         """
 
@@ -337,6 +337,24 @@ defmodule Ecrits.AcpAgent.CodexHome do
     else
       dir
     end
+  end
+
+  # macOS system interpreters execute from /usr/bin or /System frameworks, but
+  # their package trees live under /Library/<language>: rubygems globs
+  # /Library/Ruby/Gems/*/specifications at interpreter BOOT, so without this
+  # grant `ruby -e ...` dies on EPERM before reading any input (2026-07-19
+  # field report). Grants stay per-language — never /Library/** wholesale,
+  # which would expose /Library/Keychains and application state.
+  @system_interpreter_support ~w(
+    /Library/Ruby
+    /Library/Perl
+    /Library/Python
+    /Library/Java
+    /Library/Frameworks
+  )
+
+  defp system_interpreter_grants do
+    Enum.map_join(@system_interpreter_support, fn dir -> "\"#{dir}/**\" = \"read\"\n" end)
   end
 
   defp toml_string(value),
