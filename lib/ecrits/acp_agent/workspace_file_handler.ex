@@ -466,13 +466,13 @@ defmodule Ecrits.AcpAgent.WorkspaceFileHandler do
   # The detailed structural rejection is the #452 payoff: the ACP write reply
   # tells the agent WHAT was structural instead of a bare EINVAL-shaped atom.
   # The paragraph pointer matters: agents read "structural" as "impossible"
-  # when adding paragraphs is a supported native op (2026-07-19 field:
+  # when a new paragraph is an ordinary mounted-file write (2026-07-19 field:
   # "문서에 새 문단을 구조적으로 추가할 수는 없어서").
   defp format_error({:structural_change, detail}) when is_binary(detail),
     do:
       "structural_change: #{detail} — reread the mounted file and restage from " <>
-        "the fresh read; to ADD a new paragraph, use doc.find for the anchor " <>
-        "then doc.edit {op: \"insert_paragraph\", ref, text} instead"
+        "the fresh read; to ADD a new paragraph, write a new LINE at the right " <>
+        "position holding exactly one node: [{\"type\":\"paragraph\",\"text\":\"...\"}]"
 
   defp format_error(:approval_required_ask_mode),
     do:

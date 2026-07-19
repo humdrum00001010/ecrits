@@ -1566,6 +1566,75 @@ defmodule Ecrits.Doc.ProjectionTest do
       end
     end
 
+    # 2026-07-19: new paragraphs are an ordinary mounted-file write — a new
+    # line holding exactly one ref-less paragraph node — not a doc.edit
+    # fallback ("문서에 새 문단을 구조적으로 추가할 수는 없어서" field bug).
+    test "routes an authored new-paragraph line to native paragraph insertion", %{ehwp: ehwp} do
+      if not ehwp do
+        IO.puts(
+          "\n[skip] ehwp NIF unavailable; skipping Projection write_back HWPX paragraph line e2e"
+        )
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_insert_paragraph_line", ".hwpx")
+        on_exit(fn -> cleanup_tmp(path) end)
+
+        {:ok, bytes} = Projection.project_file(path)
+        {_lines, doc} = decode_projection(bytes)
+
+        # A clean BODY anchor: the first group holding only paragraph/char
+        # nodes with a non-empty ref-less paragraph. (The document's opening
+        # group carries section_def/column_def furniture, which the insertion
+        # anchor policy rightly refuses to anchor after.)
+        {section_index, paragraph_index} =
+          doc
+          |> Enum.with_index()
+          |> Enum.find_value(fn {section, section_index} ->
+            section
+            |> Enum.with_index()
+            |> Enum.find_value(fn {group, group_index} ->
+              clean? = Enum.all?(group, &(&1["type"] in ["paragraph", "char"]))
+
+              body? =
+                Enum.any?(
+                  group,
+                  &(&1["type"] == "paragraph" and is_binary(&1["text"]) and &1["text"] != "" and
+                      not Map.has_key?(&1, "ref"))
+                )
+
+              if clean? and body?, do: {section_index, group_index}
+            end)
+          end)
+
+        marker = "JSONL_NEW_PARAGRAPH_LINE"
+
+        new_bytes =
+          doc
+          |> List.update_at(section_index, fn section ->
+            List.insert_at(section, paragraph_index + 1, [
+              %{"type" => "paragraph", "text" => marker}
+            ])
+          end)
+          |> encode_projection()
+          |> String.replace(":0.0", ":0")
+
+        assert {:ok, %{applied: 1}} = Projection.write_back(path, new_bytes)
+        assert {:ok, after_bytes} = Projection.project_file(path)
+        assert after_bytes =~ marker
+
+        # The applied paragraph now projects WITH char runs; replaying the
+        # same authored bytes must reconcile to nothing, not duplicate the
+        # paragraph.
+        assert {:ok, %{applied: 0}} = Projection.write_back(path, new_bytes)
+        assert {:ok, replay_bytes} = Projection.project_file(path)
+
+        occurrences = fn projected ->
+          projected |> String.split(marker) |> length() |> Kernel.-(1)
+        end
+
+        assert occurrences.(replay_bytes) == occurrences.(after_bytes)
+      end
+    end
+
     test "agent JSONL picture insertion is rejected before preview or mutation", %{ehwp: ehwp} do
       if not ehwp do
         IO.puts("\n[skip] ehwp NIF unavailable; skipping agent JSONL picture boundary e2e")

@@ -1021,6 +1021,20 @@ defmodule Ecrits.Doc.Tools do
       "preserve" => ["payload_type", "unknown_fields", "nested_order"],
       "payloads" => %{
         "text" => %{"edit" => true},
+        "paragraph" => %{
+          "insert" => %{
+            "mode" => "new_line_with_single_node",
+            "placement" => "new_jsonl_line_at_the_target_position_between_existing_lines",
+            "required" => ["type", "text"],
+            "node" => %{
+              "type" => "paragraph",
+              "text" => "nonempty_string",
+              "style" => "optional"
+            },
+            "forbidden" => ["ref", "accompanying_char_nodes"],
+            "engine" => "derives_char_runs_and_anchors_after_the_preceding_line"
+          }
+        },
         "table" => %{
           "insert" => %{
             "required" => ["type", "cells"],
@@ -1056,24 +1070,6 @@ defmodule Ecrits.Doc.Tools do
         }
       },
       "native_fallbacks" => %{
-        "insert_paragraph" => %{
-          "tool" => "doc.edit",
-          "reason" => "new_paragraph_groups_are_unrepresentable_in_the_positional_diff",
-          "capability" =>
-            "NEW paragraphs ARE supported — not through the mounted file, but as a native op",
-          "resolve_ref" => %{
-            "tool" => "doc.find",
-            "pattern" => "exact_text_of_the_paragraph_to_insert_after",
-            "use" => "match_ref_verbatim"
-          },
-          "op" => %{
-            "op" => "insert_paragraph",
-            "ref" => "json_string_from_doc.find_match",
-            "text" => "the_new_paragraph_text",
-            "style" => "optional"
-          },
-          "placement" => "inserts_after_the_ref_paragraph"
-        },
         "insert_picture" => %{
           "tool" => "doc.edit",
           "reason" => "unrepresentable",

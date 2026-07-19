@@ -245,6 +245,14 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     assert playbook =~ "compare-and-swap"
     assert playbook =~ "one read, one write"
     assert playbook =~ "occurrence"
+
+    # New paragraphs are an ordinary mounted-file write (a new line holding one
+    # bare paragraph node) — the playbook must teach that shape and must not
+    # route paragraphs through the doc.edit fallback (2026-07-19 direction:
+    # "inserting para is done simply with ACP not mcp tools").
+    assert playbook =~ ~s([{"type":"paragraph","text":"..."}])
+    assert playbook =~ "Never tell the user a"
+    refute playbook =~ ~s(doc.edit {op: "insert_paragraph")
   end
 
   test "read-only document mode selects its document-specific profile", %{

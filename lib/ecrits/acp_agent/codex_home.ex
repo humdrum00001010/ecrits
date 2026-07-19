@@ -327,21 +327,19 @@ defmodule Ecrits.AcpAgent.CodexHome do
 
     ## Inserts
 
-    Content added INSIDE an existing line is one payload node appended to that
-    line's payload array: a `{"type":"table","cells":[[...]],"header":true}`
-    node or a picture. New LINES (new paragraph groups) cannot be committed
-    through the mounted file — but NEW PARAGRAPHS ARE STILL SUPPORTED: they go
-    through the native op instead (below). Never tell the user a new paragraph
-    is impossible.
+    Everything inserts through the mounted file. INSIDE an existing line:
+    append one payload node to that line's payload array, e.g.
+    `{"type":"table","cells":[[...]],"header":true}`. A NEW PARAGRAPH: add a
+    new LINE at the right position holding exactly one ref-less node —
+    `[{"type":"paragraph","text":"..."}]` — nothing else on the line, no
+    "ref", no char nodes (the engine derives those). Never tell the user a
+    new paragraph is impossible.
 
-    ## The native fallbacks
+    ## The one native fallback
 
-    Two operations use `doc.find` (one lookup; pass `occurrence` 1-based when
-    the exact paragraph text repeats) then `doc.edit` with the returned ref
-    verbatim:
-    - a NEW PARAGRAPH: find the paragraph to insert after, then
-      `doc.edit {op: "insert_paragraph", ref: <match ref>, text: "..."}`
-    - an explicitly requested picture (post-commit marker lookup).
+    Only an explicitly requested picture uses `doc.find` (one post-commit
+    marker lookup; pass `occurrence` 1-based when the exact paragraph text
+    repeats) then `doc.edit` with the returned ref verbatim.
     """
 
     File.write(Path.join(home, "AGENTS.md"), playbook)

@@ -1767,6 +1767,13 @@ defmodule Ecrits.Doc.ToolsTest do
                "preserve" => ["payload_type", "unknown_fields", "nested_order"],
                "payloads" => %{
                  "text" => %{"edit" => true},
+                 "paragraph" => %{
+                   "insert" => %{
+                     "mode" => "new_line_with_single_node",
+                     "required" => ["type", "text"],
+                     "forbidden" => ["ref", "accompanying_char_nodes"]
+                   }
+                 },
                  "table" => %{
                    "insert" => %{
                      "required" => ["type", "cells"],

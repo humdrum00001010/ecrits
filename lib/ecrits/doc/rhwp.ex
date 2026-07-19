@@ -1097,6 +1097,21 @@ defmodule Ecrits.Doc.Rhwp do
     end
   end
 
+  # The VFS write-back diff emits anchor refs as maps (the same shape
+  # insert_table/insert_picture changes carry); doc.edit sends JSON strings.
+  # Falling to :end here silently teleported diffed paragraph inserts to the
+  # document tail. A cell-paragraph anchor decodes to its HOST body paragraph
+  # (body_paras carries no cell sub-paragraphs), landing after the table.
+  defp decode_concrete_ref(%{} = ref) do
+    para = Map.get(ref, "paragraph") || Map.get(ref, :paragraph)
+
+    if is_integer(para) do
+      {Map.get(ref, "section") || Map.get(ref, :section) || 0, para}
+    else
+      :end
+    end
+  end
+
   defp decode_concrete_ref(_), do: :end
 
   @doc """
