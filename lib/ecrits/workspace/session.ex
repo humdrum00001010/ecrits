@@ -2607,14 +2607,16 @@ defmodule Ecrits.Workspace.Session do
   defp remember_foreground_settings(state, rail_key, settings) when is_list(settings) do
     case Map.get(state.foregrounds, rail_key) do
       %{} = record ->
-        %{state | foregrounds: Map.put(state.foregrounds, rail_key, Map.put(record, :settings, settings))}
+        %{
+          state
+          | foregrounds:
+              Map.put(state.foregrounds, rail_key, Map.put(record, :settings, settings))
+        }
 
       _missing ->
         state
     end
   end
-
-  defp remember_foreground_settings(state, _rail_key, _settings), do: state
 
   defp maybe_put_durable_restore(opts, state, rail_key, agent_id) do
     # The agent persists every durable change straight to the handoff store;
