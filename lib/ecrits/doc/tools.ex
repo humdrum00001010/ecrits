@@ -1056,6 +1056,24 @@ defmodule Ecrits.Doc.Tools do
         }
       },
       "native_fallbacks" => %{
+        "insert_paragraph" => %{
+          "tool" => "doc.edit",
+          "reason" => "new_paragraph_groups_are_unrepresentable_in_the_positional_diff",
+          "capability" =>
+            "NEW paragraphs ARE supported — not through the mounted file, but as a native op",
+          "resolve_ref" => %{
+            "tool" => "doc.find",
+            "pattern" => "exact_text_of_the_paragraph_to_insert_after",
+            "use" => "match_ref_verbatim"
+          },
+          "op" => %{
+            "op" => "insert_paragraph",
+            "ref" => "json_string_from_doc.find_match",
+            "text" => "the_new_paragraph_text",
+            "style" => "optional"
+          },
+          "placement" => "inserts_after_the_ref_paragraph"
+        },
         "insert_picture" => %{
           "tool" => "doc.edit",
           "reason" => "unrepresentable",
