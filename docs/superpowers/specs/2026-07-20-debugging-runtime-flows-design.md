@@ -15,8 +15,6 @@ At lifecycle boundaries, ask exactly:
 
 > where this get freed?
 
-Do not expand this into additional lifecycle questions.
-
 ## Records
 
 Maintain two concise tables:
