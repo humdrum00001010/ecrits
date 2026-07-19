@@ -352,7 +352,14 @@ defmodule EcritsWeb.Live.Studio.Components.ChatRail do
     |> markdown_html_string()
     |> EcritsWeb.Markdown.repair_chat_prose_boundaries()
     |> put_markdown_paragraph_role(paragraph_role)
+    |> make_pre_focusable()
     |> Phoenix.HTML.raw()
+  end
+
+  # Code blocks overflow-scroll horizontally; a scrollable region without a
+  # tabindex is unreachable by keyboard (axe: scrollable-region-focusable).
+  defp make_pre_focusable(html) when is_binary(html) do
+    String.replace(html, ~r/<pre\b(?![^>]*\btabindex=)/, ~s(<pre tabindex="0"))
   end
 
   defp markdown_html_string({:safe, _iodata} = safe), do: Phoenix.HTML.safe_to_string(safe)

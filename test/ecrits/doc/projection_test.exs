@@ -240,6 +240,34 @@ defmodule Ecrits.Doc.ProjectionTest do
       assert length == String.length(marker)
     end
 
+    # 2026-07-19 field feedback ("highlight only changes not a whole para"):
+    # a whole-paragraph rewrite arrives as delete_range + insert_text whose
+    # insert carries the ENTIRE new text; the collapsed pair highlight must
+    # narrow to the range that differs from the deleted old text.
+    test "a delete+insert replacement pair highlights only the changed span" do
+      old = "◇ 화학업종 관련 제조위탁명  : ecrits"
+      new = "◇ 화학업종 관련 제조위탁명 (test)  : ecrits"
+
+      insert = %{
+        "op" => "insert_text",
+        "ref" => %{"section" => 0, "paragraph" => 11, "offset" => 0},
+        "text" => new
+      }
+
+      assert %{
+               "kind" => "text",
+               "offset" => offset,
+               "length" => length,
+               "text" => changed
+             } = Projection.__replacement_pair_highlight_for_test__(insert, new, old)
+
+      assert changed =~ "(test)"
+      refute changed =~ "화학업종"
+      assert offset == String.length("◇ 화학업종 관련 제조위탁명 ")
+      assert length == String.length(changed)
+      assert length < String.length(new)
+    end
+
     test "set_cell highlights the new cell text" do
       ref = %{
         "section" => 0,

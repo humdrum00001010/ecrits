@@ -1377,6 +1377,10 @@ defmodule Ecrits.Doc.Projection do
     def __text_highlight_for_test__(op, marker), do: text_highlight(op, marker)
 
     @doc false
+    def __replacement_pair_highlight_for_test__(insert, marker, old_marker),
+      do: replacement_pair_highlight(insert, marker, old_marker)
+
+    @doc false
     def __remap_persisted_highlights_for_test__(highlights, changes),
       do: remap_persisted_highlights(highlights, changes)
 
@@ -2392,11 +2396,14 @@ defmodule Ecrits.Doc.Projection do
   # the inserted replacement. Dropping the delete highlight here prevents the
   # mirror from painting the same semantic location twice.
   defp highlights_for_change_entries([
-         {{:text, _delete, _old_marker} = delete_change, _delete_applied} = delete_entry,
+         {{:text, _delete, old_marker} = delete_change, _delete_applied} = delete_entry,
          {{:text, insert, marker} = insert_change, _insert_applied} = insert_entry | rest
        ]) do
     if text_replacement_pair?(delete_change, insert_change) do
-      [text_highlight(insert, marker) | highlights_for_change_entries(rest)]
+      [
+        replacement_pair_highlight(insert, marker, old_marker)
+        | highlights_for_change_entries(rest)
+      ]
     else
       highlights_for_change_entry(delete_entry) ++
         highlights_for_change_entries([insert_entry | rest])
@@ -2547,6 +2554,28 @@ defmodule Ecrits.Doc.Projection do
   end
 
   defp remap_cell_parent_paragraph(ref, _insertions, _section), do: ref
+
+  # A whole-paragraph rewrite arrives as a delete_range + insert_text pair
+  # whose insert carries the ENTIRE new text — highlighting it verbatim boxed
+  # the whole paragraph (user: "highlight only changes not a whole para").
+  # The dropped delete's marker is the OLD text, so narrow the highlight to
+  # the range that actually differs.
+  defp replacement_pair_highlight(insert, marker, old_marker) do
+    highlight = text_highlight(insert, marker)
+    new_text = Map.get(insert, "text", marker)
+
+    if is_binary(old_marker) and is_binary(new_text) and old_marker != new_text do
+      {relative_offset, length, text} = replacement_changed_range(old_marker, new_text)
+
+      Map.merge(highlight, %{
+        "offset" => ref_offset(insert["ref"]) + relative_offset,
+        "length" => length,
+        "text" => text
+      })
+    else
+      highlight
+    end
+  end
 
   defp text_highlight_range(
          %{"op" => "replace_text", "ref" => ref, "query" => query, "replacement" => replacement},

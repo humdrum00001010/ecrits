@@ -23,6 +23,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   alias Ecrits.WorkspaceHandoff
   alias Ecrits.Workspace.Session, as: WorkspaceSession
   alias Ecrits.Workspace.Session.Document, as: SessionDocument
+  alias EcritsWeb.Brand
   alias EcritsWeb.Components.WorkspaceFileTree
   alias Ecrits.DocumentElementPicker
   alias Ecrits.DocumentSearch
@@ -1729,21 +1730,13 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :doc_vfs_backend, DocMount.backend())
-
     ~H"""
-    <Layouts.app
-      flash={@flash}
-      variant="split"
-      fuse_mode={@fuse_mode}
-      doc_vfs_backend={@doc_vfs_backend}
-      brand_href={~p"/workspace"}
-    >
+    <Layouts.app flash={@flash} variant="split">
       <div
         id="workspace-root"
         phx-hook=".ChatRailTabIdentity"
         data-octet-sink={@octet_sink_id}
-        class="h-[calc(100dvh-60px)] min-h-0 min-w-[1024px] overflow-hidden bg-[var(--cs-bg)] text-[var(--cs-ink)]"
+        class="h-dvh min-h-0 min-w-[1024px] overflow-hidden bg-[var(--cs-bg)] text-[var(--cs-ink)]"
       >
         <script :type={Phoenix.LiveView.ColocatedHook} name=".ChatRailTabIdentity">
           const chatRailTabStorageKey = "ecrits:chat-rail-tab-id"
@@ -2005,7 +1998,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                 class="cursor-pointer border-b border-base-300 bg-base-100 transition-colors hover:bg-base-200/60"
               >
                 <div class="flex h-11 items-center justify-between gap-2 px-3">
-                  <div class="min-w-0">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <.link
+                      navigate={~p"/"}
+                      aria-label="Ecrits"
+                      class="flex-none text-base-content/70 transition-colors hover:text-base-content"
+                    >
+                      <Brand.mark size="sm" />
+                    </.link>
                     <h1 class="truncate text-sm font-semibold text-base-content">
                       {workspace_title(@workspace)}
                     </h1>
@@ -2228,7 +2228,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                     @agent_rail_drawer_open? &&
                       "bg-base-100 text-base-content",
                     not @agent_rail_drawer_open? &&
-                      "text-base-content/55 hover:bg-base-100 hover:text-base-content"
+                      "text-base-content/70 hover:bg-base-100 hover:text-base-content"
                   ]}
                 >
                   <.icon name="hero-chat-bubble-left-right" class="size-4" />
@@ -2385,7 +2385,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                         >
                           {file_activity_detail(item)}
                         </span>
-                        <span class="ml-auto shrink-0 text-[11px] text-base-content/45">
+                        <span class="ml-auto shrink-0 text-[11px] text-base-content/70">
                           {agent_item_status_label(item)}
                         </span>
                       </div>
@@ -2450,13 +2450,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
                       </div>
                     <% "editor_preview" -> %>
                       <div data-role="editor-preview-card" class="min-w-0 w-full px-3 py-1.5">
-                        <div
-                          :if={agent_editor_preview_summary(item) != ""}
-                          data-role="editor-preview-summary"
-                          class="mb-1 truncate font-mono text-[11px] leading-relaxed text-base-content/55"
-                        >
-                          {agent_editor_preview_summary(item)}
-                        </div>
                         <%= if agent_editor_preview_unavailable?(item) do %>
                           <div
                             data-role="editor-preview-unavailable"
@@ -9080,9 +9073,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp agent_editor_preview_text(%{body: body}) when is_binary(body), do: body
   defp agent_editor_preview_text(_item), do: ""
-
-  defp agent_editor_preview_summary(%{summary: summary}) when is_binary(summary), do: summary
-  defp agent_editor_preview_summary(_item), do: ""
 
   defp agent_editor_preview_delta_count(%{delta_count: count}) when is_integer(count), do: count
   defp agent_editor_preview_delta_count(_item), do: 0
