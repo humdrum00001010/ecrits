@@ -88,10 +88,14 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     previous_workspace_adapter_stub_path =
       Application.get_env(:ecrits, :workspace_adapter_stub_path)
 
+    # The OS pid keeps fixture paths unique ACROSS beam runs: the monotonic
+    # counter restarts at 1 each run, so without it the first test collides
+    # with a crashed previous run's still-mounted fixture (rm_rf! cannot
+    # remove a live .ecrits mountpoint).
     workspace_path =
       Path.join(
         System.tmp_dir!(),
-        "ecrits-ui-#{System.unique_integer([:positive, :monotonic])}"
+        "ecrits-ui-#{System.pid()}-#{System.unique_integer([:positive, :monotonic])}"
       )
 
     Application.put_env(:ecrits, :workspace_adapter_stub_path, workspace_path)
@@ -547,13 +551,13 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert has_element?(
              workspace_lv,
              "#agent-model-select [data-role='agent-model-option-label'][class*='whitespace-normal']",
-             "GPT-5.3 Codex Spark"
+             "GPT-5.3-Codex-Spark"
            )
 
     assert has_element?(
              workspace_lv,
              "#agent-model-select button#agent-inline-model-gpt-5\\.3-codex-spark[data-role='agent-model-option'][data-provider='codex']",
-             "GPT-5.3 Codex Spark"
+             "GPT-5.3-Codex-Spark"
            )
 
     refute has_element?(
@@ -850,6 +854,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert text =~ "reasoning=xhigh"
     assert text =~ "sandbox=workspace-write"
     assert text =~ "permission=dontAsk"
+    assert text =~ "access=full-workspace"
 
     sync_liveview(lv)
 
@@ -2340,34 +2345,65 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     cond do
       mount_status.enabled? and mounted? ->
-        assert byte_size(normalized_prompt) <= 1_900
-        assert normalized_prompt =~ "do not edit read-only requests"
-        assert normalized_prompt =~ "Open the document once with `doc.open_doc`"
-        assert normalized_prompt =~ "ACP read/search/edit for text and tables"
-        assert normalized_prompt =~ "shell search stays read-only"
-        assert normalized_prompt =~ "Keep every document mutation in ACP"
-        assert normalized_prompt =~ "scripted shell rewrites"
-        assert normalized_prompt =~ "For brief-driven fills"
-        assert normalized_prompt =~ "every field, list item, and table row"
-        assert normalized_prompt =~ "plausible value consistent with the user's request"
-        assert normalized_prompt =~ "never stamp placeholder markers"
+        assert byte_size(normalized_prompt) <= 7_000
+        refute normalized_prompt =~ "Do not invent a global placeholder regex audit"
 
         assert normalized_prompt =~
-                 "Reread the mounted file immediately before composing each write"
+                 "Before committing, require `unmapped_source_facts == []` and require `unresolved_fields == []`, mechanically diff pristine → candidate"
 
-        assert normalized_prompt =~ "one post-commit `doc.find`"
-        assert normalized_prompt =~ "one image-only `doc.edit`"
-        refute normalized_prompt =~ "미기재"
+        assert normalized_prompt =~ "Every destination-less prose item is a planned MAP insertion"
+        assert normalized_prompt =~ "Every source fact from source-data sections"
+        assert normalized_prompt =~ "require `unmapped_source_facts == []`"
+
+        refute normalized_prompt =~
+                 "blank dates, empty parentheses, unlabeled empty cells, account fields"
+
+        assert normalized_prompt =~ "Do not edit read-only requests"
+        assert normalized_prompt =~ "Call `doc.open_doc` once"
+        assert normalized_prompt =~ "use the returned mount path"
+        assert normalized_prompt =~ "Use native file/search/edit/shell tools"
+        assert normalized_prompt =~ "Python/Ruby writes are allowed"
+        assert normalized_prompt =~ "one fresh full read"
+
+        assert normalized_prompt =~
+                 "Direct file edits and workspace-local helper scripts are both valid"
+
+        assert normalized_prompt =~
+                 "If the write returns EINVAL, treat the candidate as rejected, not as proof of a stale read"
+
+        assert normalized_prompt =~
+                 "Remove every changed pristine-blank paragraph outside a proven table-cell value block"
+
+        refute normalized_prompt =~ "retry the same change once from that fresh state"
+        assert normalized_prompt =~ "valid JSONL that contains the intended changes"
+        refute normalized_prompt =~ "doc.preflight"
+        refute normalized_prompt =~ "preflight_contract"
+        refute normalized_prompt =~ "mandatory code order"
+        refute normalized_prompt =~ "exact sibling `.tmp`"
+        assert normalized_prompt =~ "Blank means `text.strip()` is empty"
+        assert normalized_prompt =~ "not a fixed label-keyword regex"
+        assert normalized_prompt =~ "Any paragraph before the first `cell` is structural"
+        assert normalized_prompt =~ "attach exactly one new `table` payload"
+
+        assert normalized_prompt =~
+                 "a successful table-inserting rename is the final projection write for the turn"
+
+        assert normalized_prompt =~ "Use `doc.edit` only after the durable projection commit"
+
+        assert normalized_prompt =~ "Then verify read-only and never rewrite the projection"
+
+        refute normalized_prompt =~ "read_text_file"
+        refute normalized_prompt =~ "search_text_file"
+        refute normalized_prompt =~ "edit_text_file"
         refute normalized_prompt =~ "path: \"current\""
         refute normalized_prompt =~ "payment schedule"
         refute normalized_prompt =~ "first recipient"
         refute normalized_prompt =~ "arbitrator"
-        refute normalized_prompt =~ "Article 51"
         refute normalized_prompt =~ "annex 631"
         assert normalized_prompt =~ "marker must fit one rendered line"
 
-        # The mounted policy deliberately establishes the edit boundary without
-        # teaching an ACP agent a JSONL rewrite recipe.
+        # The mounted policy establishes a bounded native-edit boundary without
+        # teaching the provider to rewrite the whole projection.
         refute prompt =~ "create the temp file"
         refute prompt =~ "`mktemp`"
         refute prompt =~ ~s({"type":"table")
@@ -2439,7 +2475,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       "documentPath" => "template.hwpx"
     })
 
-    assert has_element?(lv, ~s(#fuse-mode-toggle[aria-pressed="false"]))
+    # The toggle no longer has UI; the event remains the programmatic switch.
+    assert liveview_assign(lv, :fuse_mode) == false
 
     Application.put_env(:ecrits, :doc_vfs, enabled: true)
 
@@ -2451,9 +2488,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
         IO.puts("\n[skip] doc VFS mount failed; skipping manual VFS subscription check")
 
       true ->
-        lv
-        |> element("#fuse-mode-toggle")
-        |> render_click()
+        render_click(lv, "workspace.document_vfs.toggle", %{})
 
         sync_liveview(lv)
         assert Ecrits.Fuse.DocMount.mounted?(root)
@@ -2829,24 +2864,28 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
           %{
             type: :tool_call_started,
             id: "mixed-picture-edit",
-            name: "doc.edit",
+            name: "mcp.doc.doc.edit",
             arguments: %{
-              "document" => pool_document_id,
-              "op" => %{
-                "op" => "insert_picture",
-                "ref" => Jason.encode!(picture_ref),
-                "src" => picture_path
-              },
-              "fallback" => %{
-                "attempted" => "vfs",
-                "reason" => "unrepresentable"
+              "server" => "doc",
+              "tool" => "doc.edit",
+              "arguments" => %{
+                "document" => pool_document_id,
+                "op" => %{
+                  "op" => "insert_picture",
+                  "ref" => Jason.encode!(picture_ref),
+                  "src" => picture_path
+                },
+                "fallback" => %{
+                  "attempted" => "vfs",
+                  "reason" => "unrepresentable"
+                }
               }
             }
           },
           %{
             type: :tool_call_completed,
             id: "mixed-picture-edit",
-            name: "doc.edit",
+            name: "mcp.doc.doc.edit",
             result: %{
               "ok" => true,
               "applied" => 1,
@@ -2952,6 +2991,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert before_native.applied == 1
     assert before_native.ops == vfs_ops
     before_state = mixed_preview_canvas_state(lv)
+    before_canvas_id = liveview_assign(lv, :agent_vfs_preview_item).canvas_id
     before_rows = mixed_preview_chat_rows(lv)
     before_preview_id = mixed_preview_row_id(before_rows)
     assert mixed_preview_row_index(before_rows, before_preview_id) != nil
@@ -2973,12 +3013,53 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
+    assert has_element?(
+             lv,
+             ~s(#agent-tool-mixed-picture-edit [data-role="operation-block"][data-operation-kind="tool"])
+           )
+
+    assert has_element?(lv, "#agent-tool-mixed-picture-edit-toggle", "Tool:")
+    assert has_element?(lv, "#agent-tool-mixed-picture-edit-toggle", "doc.edit")
+    refute has_element?(lv, "#agent-tool-mixed-picture-edit-toggle", "mcp.doc.doc.edit")
+    refute has_element?(lv, "#agent-tool-mixed-picture-edit-toggle", "Shell:")
+
+    [before_save] = mixed_preview_descriptors(session_id, turn_id)
+    assert before_save.preview_snapshot == before_native.preview_snapshot
+
+    native_bytes =
+      root
+      |> Path.join("template.hwpx")
+      |> File.read!()
+      |> rezip_hwpx("native-picture-commit")
+
+    File.write!(Path.join(root, "template.hwpx"), native_bytes)
+    native_sha256 = Document.sha256(native_bytes)
+    {:ok, document_args} = Document.open_args(root, "template.hwpx")
+    saved_document = Document.build(document_args, native_bytes)
+
+    send(
+      lv.pid,
+      {:document_saved, saved_document,
+       %{
+         "saved" => true,
+         "sha256" => native_sha256,
+         "byte_size" => byte_size(native_bytes)
+       }}
+    )
+
+    sync_liveview(lv)
+
     [composed] = mixed_preview_descriptors(session_id, turn_id)
+    refreshed_preview = liveview_assign(lv, :agent_vfs_preview_item)
 
     assert composed.edit_id == before_native.edit_id
-    assert composed.preview_identity == before_native.preview_identity
-    assert composed.preview_snapshot == before_native.preview_snapshot
+    refute composed.preview_identity == before_native.preview_identity
+    refute composed.preview_snapshot == before_native.preview_snapshot
+    assert composed.preview_snapshot.sha256 == native_sha256
+    assert composed.preview_identity.snapshot_id == native_sha256
     assert composed.applied == 2
+    refute refreshed_preview.canvas_id == before_canvas_id
+    assert String.ends_with?(refreshed_preview.canvas_id, "-committed-canvas")
 
     assert composed.ops ==
              vfs_ops ++
@@ -2990,21 +3071,21 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
                  }
                ]
 
-    assert composed.highlights ==
-             vfs_highlights ++
-               [
-                 %{
-                   "kind" => "picture",
-                   "op" => "insert_picture",
-                   "ref" => %{
-                     "section" => 0,
-                     "paragraph" => 0,
-                     "control" => 1,
-                     "type" => "picture"
-                   },
-                   "text" => "signature.png"
-                 }
-               ]
+    assert composed.highlights == [
+             Enum.at(vfs_highlights, 1),
+             Enum.at(vfs_highlights, 0),
+             %{
+               "kind" => "picture",
+               "op" => "insert_picture",
+               "ref" => %{
+                 "section" => 0,
+                 "paragraph" => 0,
+                 "control" => 1,
+                 "type" => "picture"
+               },
+               "text" => "signature.png"
+             }
+           ]
 
     composed_state = mixed_preview_canvas_state(lv)
     composed_rows = mixed_preview_chat_rows(lv)
@@ -3015,7 +3096,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert_preview_state(lv, %{"deltaCount" => 2})
     assert Jason.decode!(composed_state["previewHighlights"]) == composed.highlights
-    assert composed_state["bytesUrl"] == before_state["bytesUrl"]
+    refute composed_state["bytesUrl"] == before_state["bytesUrl"]
+    assert composed_state["bytesUrl"] =~ "snapshot=#{native_sha256}"
     refute has_element?(lv, "#agent-error")
 
     open_document(lv, "drafts/service.hwpx")
@@ -3037,12 +3119,16 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert mixed_preview_chat_rows(replayed_lv) == composed_rows
     assert [replayed_descriptor] = mixed_preview_descriptors(session_id, turn_id)
     assert replayed_descriptor == composed
+    assert has_element?(replayed_lv, "#agent-tool-mixed-picture-edit-toggle", "Tool:")
+    assert has_element?(replayed_lv, "#agent-tool-mixed-picture-edit-toggle", "doc.edit")
+    refute has_element?(replayed_lv, "#agent-tool-mixed-picture-edit-toggle", "mcp.doc.doc.edit")
     refute has_element?(replayed_lv, "#agent-error")
   end
 
-  test "committed VFS continuation replaces the racing live preview with durable final bytes", %{
-    conn: conn
-  } do
+  test "committed VFS continuation immediately renders durable bytes without synthetic playback",
+       %{
+         conn: conn
+       } do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
     session_id = subscribe_agent(lv)
@@ -3099,11 +3185,20 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    live_state =
+    assert_preview_state(lv, %{
+      "documentPath" => "template.hwpx",
+      "revisionCount" => 1,
+      "status" => "running"
+    })
+
+    candidate_state =
       canvas_state(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
 
-    assert String.starts_with?(live_state["bytesUrl"], "/document-bytes?")
-    assert has_element?(lv, ~s([data-role="editor-preview"] [id$="-live-canvas"]))
+    assert Jason.decode!(candidate_state["previewSteps"]) == []
+
+    refute Enum.any?(AcpAgent.agent_snapshot(session_id).transcript, fn turn ->
+             Enum.any?(Map.get(turn, :items, []), &(Map.get(&1, :role) == :edit_preview))
+           end)
 
     immutable_url = "blob:http://localhost/immutable-pre-edit-snapshot"
 
@@ -3133,10 +3228,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     committed_state =
       canvas_state(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
 
-    assert committed_state["bytesUrl"] == immutable_url
-    assert committed_state["previewFinalBytesUrl"] =~ "/document-bytes?"
-    assert committed_state["previewFinalBytesUrl"] =~ "snapshot=#{final_sha256}"
-    assert Jason.decode!(committed_state["previewSteps"]) == preview_steps
+    assert committed_state["bytesUrl"] =~ "/document-bytes?"
+    assert committed_state["bytesUrl"] =~ "snapshot=#{final_sha256}"
+    assert committed_state["previewFinalBytesUrl"] == nil
+    assert Jason.decode!(committed_state["previewSteps"]) == []
     assert has_element?(lv, ~s([data-role="editor-preview"] [id$="-committed-canvas"]))
     refute has_element?(lv, ~s([data-role="editor-preview"] [id$="-live-canvas"]))
   end
@@ -3214,6 +3309,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert before["documentPath"] == relative_path
     assert before["localDocumentId"] == document_id
+    assert before["previewSnapshotPinned"] == true
     assert Jason.decode!(before["previewHighlights"]) == highlights
 
     before_uri = URI.parse(before["bytesUrl"])
@@ -3249,6 +3345,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       "localDocumentId",
       "documentPath",
       "bytesUrl",
+      "previewSnapshotPinned",
       "previewHighlights",
       "previewSteps"
     ]
@@ -3825,7 +3922,11 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    assert_preview_state(lv, %{"documentPath" => "template.hwpx", "deltaCount" => 2})
+    assert_preview_state(lv, %{
+      "documentPath" => "template.hwpx",
+      "revisionCount" => 1,
+      "deltaCount" => 1
+    })
 
     assert has_element?(
              lv,
@@ -3910,12 +4011,14 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute has_element?(lv, ~s([data-role="doc-edit-card"]))
   end
 
-  test "one VFS write streams semantic edit ranges through one stable preview", %{conn: conn} do
+  test "candidate replacement appears once and persists only at commit", %{conn: conn} do
     root = WorkspaceAdapterStub.valid_path()
     {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
     session_id = subscribe_agent(lv)
     edit_id = "streamed-vfs-edit"
     turn_id = "streamed-vfs-preview-turn"
+    first_revision = Document.sha256("streamed-vfs-first")
+    final_revision = Document.sha256("streamed-vfs-final")
     seed_known_vfs_turn(session_id, turn_id)
 
     send(
@@ -3928,6 +4031,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          edit_id: edit_id,
+         phase: :candidate,
+         revision: first_revision,
          progress_index: 0,
          progress_total: 2,
          preview_only: true,
@@ -3941,23 +4046,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    assert_preview_state(lv, %{
-      "documentPath" => "template.hwpx",
-      "deltaCount" => 2,
-      "status" => "running"
-    })
-
-    assert has_element?(
-             lv,
-             ~s([data-role="editor-preview"] [data-role="editor-preview-delta-count"]),
-             "2"
-           )
-
-    refute has_element?(
-             lv,
-             ~s([data-role="editor-preview"] [data-role="editor-preview-delta-count"]),
-             "0"
-           )
+    assert_preview_state(lv, %{"revisionCount" => 1, "status" => "running"})
 
     refute Enum.any?(AcpAgent.agent_snapshot(session_id).transcript, fn turn ->
              Enum.any?(Map.get(turn, :items, []), &(Map.get(&1, :role) == :edit_preview))
@@ -3973,6 +4062,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          edit_id: edit_id,
+         phase: :candidate,
+         revision: final_revision,
          progress_index: 1,
          progress_total: 2,
          applied: 2,
@@ -3991,16 +4082,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    assert_preview_state(lv, %{
-      "documentPath" => "template.hwpx",
-      "deltaCount" => 1,
-      "status" => "running"
-    })
-
-    assert has_element?(
-             lv,
-             ~s([data-role="editor-preview"][id^="agent-editor-preview-#{turn_id}-"])
-           )
+    assert_preview_state(lv, %{"revisionCount" => 1, "status" => "running"})
 
     refute Enum.any?(AcpAgent.agent_snapshot(session_id).transcript, fn turn ->
              Enum.any?(Map.get(turn, :items, []), &(Map.get(&1, :role) == :edit_preview))
@@ -4016,11 +4098,20 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          edit_id: edit_id,
+         phase: :committed,
+         revision: final_revision,
          progress_index: 2,
          progress_total: 2,
          applied: 4,
          marker: "STREAMED_TOKEN_TWO",
          highlights: [
+           %{
+             "kind" => "text",
+             "op" => "insert_text",
+             "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+             "length" => 18,
+             "text" => "STREAMED_TOKEN_ONE"
+           },
            %{
              "kind" => "text",
              "op" => "insert_text",
@@ -4036,14 +4127,26 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert_preview_state(lv, %{
       "documentPath" => "template.hwpx",
-      "deltaCount" => 2,
+      "revisionCount" => 1,
+      "deltaCount" => 1,
       "status" => "sent"
     })
+
+    highlights =
+      lv
+      |> canvas_state(~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+      |> Map.fetch!("previewHighlights")
+      |> Jason.decode!()
+
+    assert Enum.map(highlights, & &1["text"]) == [
+             "STREAMED_TOKEN_ONE",
+             "STREAMED_TOKEN_TWO"
+           ]
 
     assert has_element?(
              lv,
              ~s([data-role="editor-preview"] [data-role="editor-preview-delta-count"]),
-             "2"
+             "1"
            )
 
     preview_ids =
@@ -4063,6 +4166,160 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     assert Enum.count(transcript_items, &(Map.get(&1, :role) == :edit_preview)) == 1
     assert Enum.find(transcript_items, &(Map.get(&1, :role) == :edit_preview)).applied == 2
+  end
+
+  test "a late snapshot from an older turn cannot replace a newer turn preview", %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    path = Path.join(root, "template.hwpx")
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    session_id = subscribe_agent(lv)
+    instance_id = agent_instance_id(session_id)
+    older_turn = "older-preview-turn"
+    newer_turn = "newer-preview-turn"
+    document_id = Document.id_for(root, "template.hwpx")
+    older_revision = Document.sha256("older-preview-revision")
+    newer_revision = Document.sha256("newer-preview-revision")
+    seed_known_vfs_turn(session_id, older_turn)
+    seed_known_vfs_turn(session_id, newer_turn)
+
+    event = fn turn_id, edit_id, revision, text, paragraph ->
+      %{
+        agent_id: session_id,
+        instance_id: instance_id,
+        turn_id: turn_id,
+        document_id: document_id,
+        path: path,
+        doc: "template.hwpx",
+        edit_id: edit_id,
+        phase: :committed,
+        revision: revision,
+        applied: 1,
+        highlights: [
+          %{
+            "kind" => "text",
+            "op" => "insert_text",
+            "ref" => %{"section" => 0, "paragraph" => paragraph, "offset" => 0},
+            "text" => text
+          }
+        ]
+      }
+    end
+
+    send(lv.pid, {:vfs_doc_edited, event.(older_turn, "older-edit", older_revision, "OLDER", 0)})
+    sync_liveview(lv)
+
+    send(lv.pid, {:vfs_doc_edited, event.(newer_turn, "newer-edit", newer_revision, "NEWER", 1)})
+    sync_liveview(lv)
+
+    assert %{edit_id: "newer-edit", turn_id: ^newer_turn} =
+             liveview_assign(lv, :agent_vfs_preview_item)
+
+    {:ok, older_snapshot} = PreviewSnapshot.put(document_id, File.read!(path))
+
+    send(
+      lv.pid,
+      {:vfs_doc_edited,
+       event.(older_turn, "older-edit", older_revision, "OLDER", 0)
+       |> Map.put(:phase, :snapshot_ready)
+       |> Map.put(:preview_snapshot, older_snapshot)}
+    )
+
+    sync_liveview(lv)
+
+    assert %{edit_id: "newer-edit", turn_id: ^newer_turn} =
+             liveview_assign(lv, :agent_vfs_preview_item)
+
+    state = canvas_state(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+    assert state["previewEditId"] == "newer-edit"
+    assert state["previewRevision"] == newer_revision
+  end
+
+  test "one provider turn accumulates highlights across VFS edit ids and resets at turn or document boundaries",
+       %{conn: conn} do
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    session_id = subscribe_agent(lv)
+    turn_id = "multi-write-preview-turn"
+    next_turn_id = "next-preview-turn"
+    seed_known_vfs_turn(session_id, turn_id)
+    seed_known_vfs_turn(session_id, next_turn_id)
+
+    send_preview = fn turn_id, edit_id, document_path, text, paragraph ->
+      send_vfs_edit_and_wait(lv, %{
+        agent_id: session_id,
+        instance_id: agent_instance_id(session_id),
+        turn_id: turn_id,
+        path: Path.join(root, document_path),
+        doc: Path.basename(document_path),
+        edit_id: edit_id,
+        applied: 1,
+        marker: text,
+        highlights: [
+          %{
+            "kind" => "text",
+            "op" => "insert_text",
+            "ref" => %{"section" => 0, "paragraph" => paragraph, "offset" => 0},
+            "length" => String.length(text),
+            "text" => text
+          }
+        ]
+      })
+
+      sync_liveview(lv)
+    end
+
+    send_preview.(turn_id, "provider-write-one", "template.hwpx", "TURN_WRITE_ONE", 0)
+
+    first_canvas =
+      canvas_state(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+
+    assert first_canvas["previewEditId"] == "provider-write-one"
+    assert first_canvas["previewDeltaCount"] == 1
+    assert Jason.decode!(first_canvas["previewSteps"]) == []
+
+    assert first_canvas
+           |> Map.fetch!("previewHighlights")
+           |> Jason.decode!()
+           |> Enum.map(& &1["text"]) == ["TURN_WRITE_ONE"]
+
+    send_preview.(turn_id, "provider-write-two", "template.hwpx", "TURN_WRITE_TWO", 1)
+
+    canvas =
+      canvas_state(lv, ~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+
+    assert canvas["previewEditId"] == "provider-write-two"
+    assert canvas["previewDeltaCount"] == 2
+    assert Jason.decode!(canvas["previewSteps"]) == []
+
+    highlights = canvas |> Map.fetch!("previewHighlights") |> Jason.decode!()
+
+    assert Enum.map(highlights, & &1["text"]) == ["TURN_WRITE_ONE", "TURN_WRITE_TWO"]
+
+    send_preview.(next_turn_id, "next-turn-write", "template.hwpx", "NEXT_TURN_ONLY", 2)
+
+    next_turn_highlights =
+      lv
+      |> canvas_state(~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+      |> Map.fetch!("previewHighlights")
+      |> Jason.decode!()
+
+    assert Enum.map(next_turn_highlights, & &1["text"]) == ["NEXT_TURN_ONLY"]
+
+    send_preview.(
+      next_turn_id,
+      "other-document-write",
+      "drafts/service.hwpx",
+      "OTHER_DOC_ONLY",
+      0
+    )
+
+    other_document_highlights =
+      lv
+      |> canvas_state(~s([data-role="editor-preview"] [data-component="canvas-hwp-pages"]))
+      |> Map.fetch!("previewHighlights")
+      |> Jason.decode!()
+
+    assert Enum.map(other_document_highlights, & &1["text"]) == ["OTHER_DOC_ONLY"]
   end
 
   test "VFS property writes are pushed to the open HWP browser editor", %{conn: conn} do
@@ -5109,7 +5366,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     on_exit(fn -> stop_workspace_session(root) end)
   end
 
-  test "a sibling joining after deltas and a tool start converges on the same in-flight turn", %{
+  test "a sibling joining after an ACP delta does not create a diff canvas", %{
     conn: conn
   } do
     use_test_agent_adapter!(
@@ -5197,10 +5454,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
       assert has_element?(live, ~s([data-message-role="thinking"]), "check result")
       assert has_element?(live, ~s([data-message-role="agent"]), "after start")
 
-      assert %{text: "표 셀을 수정하는 중", delta_count: 1} =
-               liveview_assign(live, :agent_editor_preview)
-
-      assert has_element?(live, ~s([data-role="editor-preview"]))
+      assert liveview_assign(live, :agent_editor_preview) == nil
+      refute has_element?(live, ~s([data-role="editor-preview"]))
 
       assert has_element?(
                live,
@@ -5244,7 +5499,6 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
              "agent",
              "tool",
              "thinking",
-             "editor_preview",
              "agent",
              "agent"
            ]
@@ -5264,7 +5518,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     on_exit(fn -> stop_workspace_session(root) end)
   end
 
-  test "a sibling joining while a delta precedes its snapshot applies that delta once", %{
+  test "a sibling joining while an ACP delta precedes its snapshot still has no diff canvas", %{
     conn: conn
   } do
     use_test_agent_adapter!(adapter_opts: [test_pid: self(), wait_for: :release_cursor_race_turn])
@@ -5352,14 +5606,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert liveview_assign(live_b, :agent_instance_id) == instance_id
 
     for live <- [live_a, live_b] do
-      assert %{
-               turn_id: ^turn_id,
-               text: "한 번만 보이는 편집",
-               delta_count: 1,
-               edit_id: "cursor-race-edit"
-             } = liveview_assign(live, :agent_editor_preview)
-
-      assert has_element?(live, ~s([data-role="editor-preview"]))
+      assert liveview_assign(live, :agent_editor_preview) == nil
+      refute has_element?(live, ~s([data-role="editor-preview"]))
     end
 
     snapshot = AcpAgent.agent_snapshot(session_id)
@@ -5583,7 +5831,90 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     on_exit(fn -> stop_workspace_session(root) end)
   end
 
-  test "a rejected atomic VFS edit restores the prior stable chat-rail preview", %{
+  test "a candidate revision routes only to its owning active rail and stays non-durable", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "candidate-preview-owner", root)
+
+    {:ok, owning_lv, _html} = open_workspace(conn, root)
+    {:ok, neighboring_lv, _html} = open_workspace(conn, root)
+
+    owning_agent_id = subscribe_agent(owning_lv)
+    neighboring_agent_id = subscribe_agent(neighboring_lv)
+    turn_id = "candidate-owner-turn"
+    edit_id = "candidate-owner-edit"
+    revision = Document.sha256("candidate projection bytes")
+    document_id = Document.id_for(root, "template.hwpx")
+
+    seed_known_vfs_turn(owning_agent_id, turn_id)
+
+    event =
+      {:vfs_doc_edited,
+       %{
+         phase: :candidate,
+         preview_only: true,
+         agent_id: owning_agent_id,
+         instance_id: agent_instance_id(owning_agent_id),
+         turn_id: turn_id,
+         edit_id: edit_id,
+         document_id: document_id,
+         path: Path.join(root, "template.hwpx"),
+         doc: "template.hwpx",
+         revision: revision,
+         ops: [
+           %{
+             "op" => "insert_text",
+             "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+             "text" => "candidate"
+           }
+         ],
+         sets: [],
+         highlights: [
+           %{
+             "kind" => "text",
+             "op" => "insert_text",
+             "ref" => %{"section" => 0, "paragraph" => 0, "offset" => 0},
+             "text" => "candidate"
+           }
+         ],
+         preview_snapshot: nil,
+         preview_snapshot_error: nil
+       }}
+
+    send(owning_lv.pid, event)
+    send(neighboring_lv.pid, event)
+    sync_liveview(owning_lv)
+    sync_liveview(neighboring_lv)
+
+    assert_preview_state(owning_lv, %{
+      "documentPath" => "template.hwpx",
+      "revisionCount" => 1,
+      "status" => "running"
+    })
+
+    refute has_element?(neighboring_lv, ~s([data-role="editor-preview"]))
+
+    assert_push_event(
+      owning_lv,
+      "document.preview.revision_received",
+      %{edit_id: ^edit_id, revision: ^revision, phase: :candidate},
+      1_000
+    )
+
+    refute_push_event(
+      neighboring_lv,
+      "document.preview.revision_received",
+      %{edit_id: ^edit_id},
+      100
+    )
+
+    assert [%{items: owning_items}] = AcpAgent.agent_snapshot(owning_agent_id).transcript
+    refute Enum.any?(owning_items, &(Map.get(&1, :role) == :edit_preview))
+    assert AcpAgent.agent_snapshot(neighboring_agent_id).transcript == []
+  end
+
+  test "an exact rejected candidate restores the prior committed preview", %{
     conn: conn
   } do
     use_test_agent_adapter!(
@@ -5601,6 +5932,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     instance_id = agent_instance_id(session_id)
     stable_edit_id = "stable-vfs-edit"
     edit_id = "rejected-vfs-edit"
+    stable_revision = Document.sha256("stable-vfs-revision")
+    rejected_revision = Document.sha256("rejected-vfs-revision")
 
     lv
     |> form("#agent-form", agent: %{message: "기존 미리보기를 만들어 줘"})
@@ -5627,6 +5960,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
          instance_id: instance_id,
          turn_id: stable_turn_id,
          edit_id: stable_edit_id,
+         phase: :committed,
+         revision: stable_revision,
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          applied: 1,
@@ -5661,6 +5996,8 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
          instance_id: instance_id,
          turn_id: rejected_turn_id,
          edit_id: edit_id,
+         phase: :candidate,
+         revision: rejected_revision,
          path: Path.join(root, "template.hwpx"),
          doc: "template.hwpx",
          applied: 1,
@@ -5673,7 +6010,10 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
     assert has_element?(lv, ~s([data-role="editor-preview"]))
-    assert %{edit_id: ^edit_id} = liveview_assign(lv, :agent_vfs_preview_item)
+
+    assert %{edit_id: ^edit_id, provisional: true} =
+             liveview_assign(lv, :agent_vfs_preview_item)
+
     assert liveview_assign(lv, :agent_vfs_preview_rollback_item) == stable_preview
 
     lv
@@ -5683,14 +6023,18 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     open_document(lv, "drafts/service.hwpx")
     sync_liveview(lv)
 
-    assert %{edit_id: ^edit_id} = liveview_assign(lv, :agent_vfs_preview_item)
+    assert %{edit_id: ^edit_id, provisional: true} =
+             liveview_assign(lv, :agent_vfs_preview_item)
+
     assert liveview_assign(lv, :agent_vfs_preview_rollback_item) == stable_preview
     refute has_element?(lv, "#agent-error")
 
     send(
       lv.pid,
-      {:vfs_doc_edit_rejected,
+      {:vfs_doc_edited,
        %{
+         phase: :rejected,
+         revision: rejected_revision,
          agent_id: session_id,
          instance_id: instance_id,
          turn_id: "stale-other-turn",
@@ -5702,13 +6046,18 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     )
 
     sync_liveview(lv)
-    assert %{edit_id: ^edit_id} = liveview_assign(lv, :agent_vfs_preview_item)
+
+    assert %{edit_id: ^edit_id, provisional: true} =
+             liveview_assign(lv, :agent_vfs_preview_item)
+
     assert liveview_assign(lv, :agent_vfs_preview_rollback_item) == stable_preview
 
     send(
       lv.pid,
-      {:vfs_doc_edit_rejected,
+      {:vfs_doc_edited,
        %{
+         phase: :rejected,
+         revision: rejected_revision,
          agent_id: session_id,
          instance_id: instance_id,
          turn_id: rejected_turn_id,
@@ -6310,6 +6659,52 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert has_element?(lv2, "#agent-tool-shell-order-toggle", "Shell:")
   end
 
+  test "legacy persisted MCP envelopes replay with a canonical tool name and tool label", %{
+    conn: conn
+  } do
+    root = WorkspaceAdapterStub.valid_path()
+    conn = init_workspace_session(conn, "legacy-mcp-tool-name", root)
+    tab_id = "legacy-mcp-tool-name-tab"
+    {:ok, lv, _html} = open_workspace(conn, chat_rail_tab_id: tab_id)
+    session_id = subscribe_agent(lv)
+    turn_id = "legacy-mcp-tool-turn"
+    seed_known_vfs_turn(session_id, turn_id)
+
+    :ok =
+      AcpAgent.append_transcript_item(session_id, %{
+        role: :tool,
+        status: :completed,
+        turn_id: turn_id,
+        tool_call_id: "legacy-mcp-edit",
+        name: "mcp.doc.doc.edit",
+        kind: "execute",
+        input:
+          Jason.encode!(%{
+            "server" => "doc",
+            "tool" => "doc.edit",
+            "arguments" => %{"document" => "legacy-document"}
+          }),
+        output: Jason.encode!(%{"ok" => true})
+      })
+
+    stop_pid(lv.pid)
+    sync_workspace_session(root)
+
+    {:ok, replayed, _html} = open_workspace(conn, chat_rail_tab_id: tab_id)
+    sync_liveview(replayed)
+    assert subscribe_agent(replayed) == session_id
+
+    assert has_element?(
+             replayed,
+             ~s(#agent-tool-legacy-mcp-edit [data-role="operation-block"][data-operation-kind="tool"])
+           )
+
+    assert has_element?(replayed, "#agent-tool-legacy-mcp-edit-toggle", "Tool:")
+    assert has_element?(replayed, "#agent-tool-legacy-mcp-edit-toggle", "doc.edit")
+    refute has_element?(replayed, "#agent-tool-legacy-mcp-edit-toggle", "mcp.doc.doc.edit")
+    refute has_element?(replayed, "#agent-tool-legacy-mcp-edit-toggle", "Shell:")
+  end
+
   # The visible chat rows (user/tool/agent) in DOM order, as {role, id-prefix}
   # pairs — empty thinking/placeholder rows are excluded.
   defp chat_stream_rows(lv) do
@@ -6904,54 +7299,39 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     refute has_element?(lv, ~s([phx-hook="DirectR2Upload"]))
   end
 
-  test "ACP file operations render as persistent file activity, never tool cards", %{conn: conn} do
+  test "provider-native file operations render as tool cards while legacy rows still hydrate",
+       %{conn: conn} do
     use_test_agent_adapter!(
       adapter_opts: [
         script: [
           %{
-            type: :file_operation_started,
+            type: :tool_call_started,
             id: "acp-file-read",
-            operation: "read_text_file",
+            name: "Read",
             kind: "read",
-            path: "/workspace/.ecrits/document.jsonl"
+            arguments: %{"path" => "/workspace/.ecrits/document.jsonl"}
           },
           %{
-            type: :file_operation_completed,
+            type: :tool_call_completed,
             id: "acp-file-read",
-            operation: "read_text_file",
-            kind: "read",
-            path: "/workspace/.ecrits/document.jsonl"
+            name: "Read",
+            result: %{"content" => "contract"}
           },
           %{
-            type: :file_operation_started,
+            type: :tool_call_started,
             id: "acp-file-search",
-            operation: "search_text_file",
+            name: "Grep",
             kind: "read",
-            path: "/workspace/.ecrits/document.jsonl",
-            query: "수급사업자"
+            arguments: %{
+              "path" => "/workspace/.ecrits/document.jsonl",
+              "pattern" => "수급사업자"
+            }
           },
           %{
-            type: :file_operation_failed,
+            type: :tool_call_failed,
             id: "acp-file-search",
-            operation: "search_text_file",
-            kind: "read",
-            path: "/workspace/.ecrits/document.jsonl",
-            query: "수급사업자",
+            name: "Grep",
             reason: "no matches"
-          },
-          %{
-            type: :file_operation_started,
-            id: "acp-file-edit",
-            operation: "edit_text_file",
-            kind: "edit",
-            path: "/workspace/.ecrits/document.jsonl"
-          },
-          %{
-            type: :file_operation_completed,
-            id: "acp-file-edit",
-            operation: "edit_text_file",
-            kind: "edit",
-            path: "/workspace/.ecrits/document.jsonl"
           },
           %{
             type: :tool_call_completed,
@@ -6980,44 +7360,35 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     assert_receive {:agent_event, %{type: :turn_completed, session_id: ^session_id}}, 1_000
     sync_liveview(lv)
 
-    for {id, label, status} <- [
-          {"acp-file-read", "Read", "completed"},
-          {"acp-file-search", "Search", "failed"},
-          {"acp-file-edit", "Edit", "completed"}
+    for {id, status} <- [
+          {"acp-file-read", "completed"},
+          {"acp-file-search", "failed"}
         ] do
-      refute has_element?(lv, "#agent-tool-#{id}")
+      row = "#agent-tool-#{id}[data-role='agent-tool'][data-message-status='#{status}']"
 
-      row =
-        "#agent-file-#{id}[data-role='file-activity'][data-message-role='file_activity'][data-message-status='#{status}']"
-
-      assert has_element?(lv, row, label)
-      assert has_element?(lv, row, "/workspace/.ecrits/document.jsonl")
-      refute has_element?(lv, row, "Tool:")
+      assert has_element?(lv, row)
+      refute has_element?(lv, "#agent-file-#{id}")
     end
 
-    assert has_element?(lv, "#agent-file-acp-file-search", "수급사업자")
-    assert has_element?(lv, "#agent-file-acp-file-search", "no matches")
+    assert has_element?(lv, "#agent-tool-acp-file-search", "no matches")
     assert has_element?(lv, "#agent-tool-doc-open", "doc.open_doc")
 
     assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
 
-    assert Enum.count(items, &(Map.get(&1, :role) == :file_activity)) == 3
+    assert Enum.count(items, &(Map.get(&1, :role) == :tool)) == 3
 
-    assert Enum.all?(Enum.filter(items, &(Map.get(&1, :role) == :file_activity)), fn item ->
-             Map.get(item, :operation) in [
-               "read_text_file",
-               "search_text_file",
-               "edit_text_file"
-             ]
-           end)
+    assert Enum.all?(
+             ["Read", "Grep"],
+             &Enum.any?(items, fn item -> Map.get(item, :name) == &1 end)
+           )
 
     assert Enum.any?(items, &(Map.get(&1, :name) == "doc.open_doc"))
 
     open_document(lv, "drafts/service.hwpx")
 
-    for id <- ["acp-file-read", "acp-file-search", "acp-file-edit"] do
-      assert has_element?(lv, "#agent-file-#{id}[data-role='file-activity']")
-      refute has_element?(lv, "#agent-tool-#{id}")
+    for id <- ["acp-file-read", "acp-file-search"] do
+      assert has_element?(lv, "#agent-tool-#{id}[data-role='agent-tool']")
+      refute has_element?(lv, "#agent-file-#{id}")
     end
 
     agent_pid = AcpAgent.whereis(session_id)
@@ -7048,13 +7419,12 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
     sync_liveview(lv2)
     assert subscribe_agent(lv2) == session_id
 
-    for id <- ["acp-file-read", "acp-file-search", "acp-file-edit"] do
-      assert has_element?(lv2, "#agent-file-#{id}[data-role='file-activity']")
-      refute has_element?(lv2, "#agent-tool-#{id}")
-      refute has_element?(lv2, "#agent-file-#{id}", "Tool:")
+    for id <- ["acp-file-read", "acp-file-search"] do
+      assert has_element?(lv2, "#agent-tool-#{id}[data-role='agent-tool']")
+      refute has_element?(lv2, "#agent-file-#{id}")
     end
 
-    assert has_element?(lv2, "#agent-file-acp-file-search", "no matches")
+    assert has_element?(lv2, "#agent-tool-acp-file-search", "no matches")
 
     assert has_element?(
              lv2,
@@ -7664,7 +8034,7 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
            )
   end
 
-  test "ACP edit updates render a document preview without a generic tool row", %{conn: conn} do
+  test "proposed ACP file-change snapshots never mutate the document canvas", %{conn: conn} do
     root = WorkspaceAdapterStub.valid_path()
 
     use_test_agent_adapter!(
@@ -7696,36 +8066,94 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
 
     sync_liveview(lv)
 
-    assert_preview_state(lv, %{"documentPath" => "template.hwpx", "deltaCount" => 1})
+    refute has_element?(lv, ~s([data-role="editor-preview"]))
+    refute_push_event(lv, "document.preview.delta_received", %{edit_id: "acp-edit-1"}, 100)
+    refute_push_event(lv, "document.preview.revision_received", %{edit_id: "acp-edit-1"}, 100)
     refute has_element?(lv, "#agent-tool-acp-edit-1")
     refute has_element?(lv, "#agent-tool-anonymous-before-edit")
     refute has_element?(lv, "#agent-tool-anonymous-after-edit")
 
-    rows =
-      lv
-      |> render()
-      |> LazyHTML.from_fragment()
-      |> LazyHTML.query(~s(#agent-thread > [data-chat-role="chat-message"]))
-      |> Enum.map(fn node ->
-        {
-          node |> LazyHTML.attribute("data-message-role") |> List.first(),
-          node |> LazyHTML.attribute("id") |> List.first()
-        }
-      end)
-      |> Enum.reject(fn {role, _id} -> role == "thinking" end)
-
-    assert [
-             {"user", _user_id},
-             {"agent", before_id},
-             {"editor_preview", _preview_id},
-             {"agent", after_id}
-           ] = rows
-
-    assert before_id =~ "-0"
-    assert after_id =~ "-1"
+    html = render(lv)
+    assert html =~ "before edit"
+    assert html =~ "after edit"
 
     assert [%{items: items}] = AcpAgent.agent_snapshot(session_id).transcript
     refute Enum.any?(items, &(Map.get(&1, :role) == :tool))
+    refute Enum.any?(items, &(Map.get(&1, :role) == :edit_preview))
+  end
+
+  test "a proposed diff creates no canvas before the genuine VFS commit", %{
+    conn: conn
+  } do
+    use_test_agent_adapter!(
+      adapter_opts: [test_pid: self(), wait_for: :release_committed_preview_turn]
+    )
+
+    root = WorkspaceAdapterStub.valid_path()
+    {:ok, lv, _html} = open_workspace(conn, root, document: "template.hwpx")
+    session_id = subscribe_agent(lv)
+
+    lv
+    |> form("#agent-form", agent: %{message: "edit the projected document"})
+    |> render_submit()
+
+    assert_receive {:agent_event,
+                    %{type: :turn_started, session_id: ^session_id, turn_id: turn_id}},
+                   1_000
+
+    assert_receive {:agent_adapter_waiting, stream_pid}, 1_000
+    agent_pid = AcpAgent.whereis(session_id)
+
+    send(
+      agent_pid,
+      {:turn_event, turn_id,
+       %{
+         type: :edit_delta,
+         edit_id: "projection-delta",
+         path: Path.join(root, ".ecrits/template.hwpx.jsonl"),
+         delta: "raw projection bytes"
+       }}
+    )
+
+    _ = :sys.get_state(agent_pid)
+    sync_liveview(lv)
+    refute has_element?(lv, ~s([data-role="editor-preview"]))
+    refute_push_event(lv, "document.preview.delta_received", %{edit_id: "projection-delta"}, 100)
+
+    send_vfs_edit_and_wait(lv, %{
+      path: Path.join(root, "template.hwpx"),
+      doc: "template.hwpx",
+      agent_id: session_id,
+      instance_id: agent_instance_id(session_id),
+      turn_id: turn_id,
+      edit_id: "committed-projection-edit",
+      applied: 2,
+      progress_index: 1,
+      progress_total: 1,
+      highlights: []
+    })
+
+    assert %{delta_count: 1, status: :sent} =
+             liveview_assign(lv, :agent_vfs_preview_item)
+
+    assert_preview_state(lv, %{"deltaCount" => 1})
+    assert has_element?(lv, ~s([data-role="editor-preview"] [id$="-committed-canvas"]))
+
+    send(stream_pid, :release_committed_preview_turn)
+
+    assert_receive {:agent_event,
+                    %{type: :turn_completed, session_id: ^session_id, turn_id: ^turn_id}},
+                   1_000
+
+    sync_liveview(lv)
+
+    assert_preview_state(lv, %{"deltaCount" => 1})
+    assert has_element?(lv, ~s([data-role="editor-preview"] [id$="-committed-canvas"]))
+
+    refute has_element?(
+             lv,
+             ~s|[data-role="editor-preview"] [id$="-canvas"]:not([id$="-committed-canvas"])|
+           )
   end
 
   test "waiting indicator shows on the empty placeholder and drops once prose lands",

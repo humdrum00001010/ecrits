@@ -2,26 +2,35 @@ defmodule Ecrits.AgentConfig.ModelCatalog do
   @moduledoc false
 
   @models [
-    %{id: "gpt-5.6", provider: "codex", label: "GPT-5.6", description: "Frontier Codex model"},
-    %{id: "gpt-5.5", provider: "codex", label: "GPT-5.5", description: "Previous frontier"},
-    %{id: "gpt-5.4", provider: "codex", label: "GPT-5.4", description: "Balanced Codex model"},
     %{
-      id: "gpt-5.4-mini",
+      id: "gpt-5.6-sol",
       provider: "codex",
-      label: "GPT-5.4 mini",
-      description: "Lower token spend"
+      label: "GPT-5.6-Sol",
+      description: "Latest frontier agentic coding model"
     },
     %{
-      id: "gpt-5.3-codex",
+      id: "gpt-5.6-terra",
       provider: "codex",
-      label: "GPT-5.3 Codex",
-      description: "Coding-specialized"
+      label: "GPT-5.6-Terra",
+      description: "Balanced agentic coding model for everyday work"
+    },
+    %{
+      id: "gpt-5.6-luna",
+      provider: "codex",
+      label: "GPT-5.6-Luna",
+      description: "Fast and affordable agentic coding model"
+    },
+    %{
+      id: "gpt-5.5",
+      provider: "codex",
+      label: "GPT-5.5",
+      description: "Frontier model for complex coding, research, and real-world work"
     },
     %{
       id: "gpt-5.3-codex-spark",
       provider: "codex",
-      label: "GPT-5.3 Codex Spark",
-      description: "Fast coding model"
+      label: "GPT-5.3-Codex-Spark",
+      description: "Ultra-fast coding model"
     },
     %{
       id: "default",
@@ -29,20 +38,13 @@ defmodule Ecrits.AgentConfig.ModelCatalog do
       label: "Default",
       description: "Recommended — latest Claude"
     },
-    %{id: "opus", provider: "claude", label: "Opus", description: "Most capable — latest Opus"},
     %{
       id: "sonnet",
       provider: "claude",
       label: "Sonnet",
       description: "Balanced speed and capability"
     },
-    %{id: "haiku", provider: "claude", label: "Haiku", description: "Fastest, lowest cost"},
-    %{
-      id: "opusplan",
-      provider: "claude",
-      label: "Opus Plan",
-      description: "Opus plans, Sonnet executes"
-    }
+    %{id: "opus", provider: "claude", label: "Opus", description: "Most capable — latest Opus"}
   ]
 
   def all, do: @models

@@ -397,9 +397,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
         // — collapsing a switch burst to a single import and guaranteeing the one LOK
         // engine never runs two loadFromBytes at once. Returns "loaded"/"cached"/
         // "superseded".
-        function serializeEngineLoad(url, assetVersion, format, run) {
+        function serializeEngineLoad(url, assetVersion, format, run, force = false) {
           const link = engineLoadChain.then(async () => {
-            if (cachedDocumentMatches(url, assetVersion, format)) return "cached"
+            if (!force && cachedDocumentMatches(url, assetVersion, format)) return "cached"
             if (latestRequestedUrl !== url) return "superseded"
             await run()
             if (cachedDocumentMatches(url, assetVersion, format)) return "loaded"
@@ -991,6 +991,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             this.previewPatchCount = Number(this.el.dataset.previewDeltaCount || "0") || 0
             this.previewPatchPendingPayload = null
             this.previewPatchInFlight = null
+            this.previewRevisionQueue = []
+            this.previewRevisionProcessing = false
+            this.previewRevisionRecords = new Map()
             this.previewSavedHighlights = []
             this.previewSavedHighlight = null
             this.previewPageFilter = null
@@ -1024,12 +1027,15 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             this.handleEvent("document.save.command", (payload) => {
               if (!this.mirror && this.eventMatchesDocument(payload)) this.saveLocalDocument(payload)
             })
-            this.handleEvent("document.preview.delta_received", (payload) => {
-              if (this.eventMatchesDocument(payload)) this.handlePreviewDelta(payload)
+            this.handleEvent("document.preview.revision_received", (payload) => {
+              if (this.mirror && !this.pinnedPreviewSnapshot() && this.eventMatchesDocument(payload)) {
+                this.queuePreviewRevision(payload)
+              }
             })
 
             if (this.mirror) {
-              this.patchPreviewToMountedDoc(this.el.dataset.previewText || "")
+              const legacyPreviewText = this.el.dataset.previewText || ""
+              if (legacyPreviewText) this.patchPreviewToMountedDoc(legacyPreviewText)
               this.renderSavedEditHighlights()
             }
             if (bytesUrl) this.deferLoadDocument({ url: bytesUrl, document_id: this.documentId })
@@ -1160,10 +1166,14 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             }
 
             if (this.mirror) {
-              this.patchPreviewToMountedDoc(this.el.dataset.previewText || "", {
-                delta_count: Number(this.el.dataset.previewDeltaCount || "0")
-              })
+              const legacyPreviewText = this.el.dataset.previewText || ""
+              if (legacyPreviewText) {
+                this.patchPreviewToMountedDoc(legacyPreviewText, {
+                  delta_count: Number(this.el.dataset.previewDeltaCount || "0")
+                })
+              }
               this.renderSavedEditHighlights()
+              this.drainPreviewRevisionQueue()
             }
           },
 
@@ -1197,6 +1207,101 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             const id = payload.document_id || payload.documentId
             if (this.mirror) return !!id && !!this.documentId && String(id) === String(this.documentId)
             return !id || !this.documentId || String(id) === String(this.documentId)
+          },
+
+          pinnedPreviewSnapshot() {
+            return this.el?.dataset?.previewSnapshotPinned === "true"
+          },
+
+          previewRevisionKey(payload = {}) {
+            const editId = String(payload.edit_id || payload.editId || "")
+            const revision = String(payload.revision || "")
+            return editId && revision ? `${editId}:${revision}` : null
+          },
+
+          queuePreviewRevision(payload = {}) {
+            if (!this.mirror || this.pinnedPreviewSnapshot()) return false
+            if (!this.previewRevisionKey(payload)) return false
+            this.previewRevisionQueue.push(payload)
+            this.drainPreviewRevisionQueue()
+            return true
+          },
+
+          async drainPreviewRevisionQueue() {
+            if (this.previewRevisionProcessing || !this.loaded || !this.api || !this.handle) return
+            this.previewRevisionProcessing = true
+            try {
+              while (this.previewRevisionQueue.length > 0 && this.loaded && this.api && this.handle) {
+                const payload = this.previewRevisionQueue.shift()
+                await this.applyPreviewRevision(payload)
+              }
+            } finally {
+              this.previewRevisionProcessing = false
+            }
+          },
+
+          async applyPreviewRevision(payload = {}) {
+            const key = this.previewRevisionKey(payload)
+            if (!key) return
+            const editId = String(payload.edit_id || payload.editId || "")
+            const revision = String(payload.revision || "")
+            const phase = String(payload.phase || "")
+            const current = this.previewRevisionRecords.get(editId)
+
+            if (phase === "rejected") {
+              if (!current || current.phase !== "candidate" || current.revision !== revision) return
+              this.previewRevisionRecords.delete(editId)
+              await this.reloadPreviewRevisionBase()
+              this.updatePreviewRevisionHighlights(payload)
+              return
+            }
+
+            if (phase === "committed") {
+              if (current && current.revision === revision) {
+                current.phase = "committed"
+                this.previewRevisionRecords.set(editId, current)
+              } else if (!current) {
+                // Canonical committed bytes already contain this revision.
+                this.previewRevisionRecords.set(editId, { key, revision, phase: "committed" })
+              }
+              this.updatePreviewRevisionHighlights(payload)
+              return
+            }
+
+            if (phase !== "candidate") return
+            if (current && current.revision === revision) {
+              this.updatePreviewRevisionHighlights(payload)
+              return
+            }
+            if (current && current.phase === "candidate") await this.reloadPreviewRevisionBase()
+
+            const ops = Array.isArray(payload.ops) ? payload.ops : []
+            const sets = Array.isArray(payload.sets) ? payload.sets : []
+            const editReply = ops.length > 0
+              ? await this.officeApplyEditBatch({ ops, resync: true, finish: false })
+              : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } }
+            const setReply = sets.length > 0
+              ? await this.officeApplySetBatch({ sets, resync: true, finish: false })
+              : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } }
+            this.finishAgentEdit({}, { dirty: false })
+            this.previewRevisionRecords.set(editId, { key, revision, phase: "candidate" })
+            this.el.dataset.previewRevisionKey = key
+            this.el.dataset.previewRevisionEditFailed = String(Number(editReply?.result?.failed || 0))
+            this.el.dataset.previewRevisionSetFailed = String(Number(setReply?.result?.failed || 0))
+            this.updatePreviewRevisionHighlights(payload)
+          },
+
+          async reloadPreviewRevisionBase() {
+            const url = this.el.dataset.bytesUrl || this.loadedUrl
+            if (url) await this.loadDocument({ url, asset_version: this.officeAssetVersion, force: true })
+          },
+
+          updatePreviewRevisionHighlights(payload = {}) {
+            const highlights = Array.isArray(payload.highlights) ? payload.highlights : []
+            this.el.dataset.previewHighlights = JSON.stringify(highlights)
+            this.previewSavedHighlights = highlights
+            this.previewPageFilter = this.previewPageIndexesForSavedHighlights()
+            this.renderSavedEditHighlights()
           },
 
           scrollPositionKey(url = null) {
@@ -1666,11 +1771,11 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             }
           },
 
-          async loadDocument({ url, asset_version }) {
+          async loadDocument({ url, asset_version, force = false }) {
             if (!this.officeHookActive()) return
             if (!url) return
             this.officeAssetVersion = asset_version || this.el.dataset.officeAssetVersion || this.officeAssetVersion || ""
-            if (this.loadedUrl === url && this.parts.length) return
+            if (this.loadedUrl === url && this.parts.length && !force) return
             if (this.loadedUrl && this.loadedUrl !== url) this.rememberScrollPosition(this.loadedUrl)
             // Record the most-recent load intent SYNCHRONOUSLY: the global serializer
             // uses it to drop superseded imports when the user switches tabs faster than
@@ -1682,9 +1787,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             // the in-progress import and crashing. Chain on the previous load and skip
             // a duplicate URL that is already loading.
             if (this._loadInFlight) {
-              if (this._loadingUrl === url) return this._loadInFlight
+              if (this._loadingUrl === url && !force) return this._loadInFlight
               try { await this._loadInFlight } catch (_) {}
-              if (this.loadedUrl === url && this.parts.length) return
+              if (this.loadedUrl === url && this.parts.length && !force) return
             }
             this._loadingUrl = url
             this.loaded = false
@@ -1698,7 +1803,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
               }
               // Fast path: the module cache already holds this exact doc (e.g. re-select
               // the current tab) — attach its view without touching the engine.
-              if (this.attachCachedDocument(url)) return
+              if (!force && this.attachCachedDocument(url)) return
 
               this.setStatus(
                 runtimeReadyFor(this.officeAssetVersion)
@@ -1732,7 +1837,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
                 this.parts = this.queryParts()
                 console.log("[office-wasm] parts/geometry:", this.parts, "pageRects:", this.pageRects)
                 this.rememberActiveDocument(url)
-              })
+              }, force)
               if (!this.officeHookActive()) return
 
               // After the (possibly long) serialized import the module cache holds `url`
@@ -1778,6 +1883,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             } finally {
               this._loadInFlight = null
               this._loadingUrl = null
+              this.drainPreviewRevisionQueue()
             }
           },
 
@@ -1810,9 +1916,12 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             this.restoreScrollPosition(url)
             this.renderVisiblePages()
             if (this.mirror) {
-              this.patchPreviewToMountedDoc(this.previewPatchTarget || this.el.dataset.previewText || "", {
-                delta_count: Number(this.el.dataset.previewDeltaCount || "0")
-              })
+              const legacyPreviewText = this.previewPatchTarget || this.el.dataset.previewText || ""
+              if (legacyPreviewText) {
+                this.patchPreviewToMountedDoc(legacyPreviewText, {
+                  delta_count: Number(this.el.dataset.previewDeltaCount || "0")
+                })
+              }
               this.renderSavedEditHighlights()
             }
             return true
@@ -6301,7 +6410,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
           // Batch doc.edit (ops:[…]). Apply every op via uno_apply with ONE re-render
           // at the end. Best-effort: a bad op does NOT abort the rest; the
           // result carries a per-op `results` array, mirroring the HWP batch shape.
-          async officeApplyEditBatch({ ops, resync }) {
+          async officeApplyEditBatch({ ops, resync, finish = true }) {
             const list = Array.isArray(ops) ? ops : []
             if (list.length === 0) return { error: "edit batch requires a non-empty 'ops' array" }
             const results = []
@@ -6328,7 +6437,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             const replayed = !resync
               ? journalOps.filter((journalOp) => this.recordOfficeEditJournal(journalOp)).length
               : 0
-            this.finishAgentEdit({}, { dirty: !resync, replayable: !resync && applied > 0 && replayed === applied })
+            if (finish) {
+              this.finishAgentEdit({}, { dirty: !resync, replayable: !resync && applied > 0 && replayed === applied })
+            }
             return { ok: true, result: { ok: true, applied, failed, results } }
           },
 
@@ -6447,7 +6558,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
           },
 
           // Batch doc.set (sets:[{ref,props}, …]). Apply every set with ONE finish.
-          async officeApplySetBatch({ sets, resync }) {
+          async officeApplySetBatch({ sets, resync, finish = true }) {
             const list = Array.isArray(sets) ? sets : []
             if (list.length === 0) return { error: "set batch requires a non-empty 'sets' array" }
             const results = []
@@ -6474,7 +6585,9 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
             const replayed = !resync
               ? journalSets.filter((entry) => this.recordOfficeSetJournal(entry.ref, entry.props)).length
               : 0
-            this.finishAgentEdit({}, { dirty: !resync, replayable: !resync && applied > 0 && replayed === applied })
+            if (finish) {
+              this.finishAgentEdit({}, { dirty: !resync, replayable: !resync && applied > 0 && replayed === applied })
+            }
             return { ok: true, result: { ok: true, applied, failed, results } }
           },
 

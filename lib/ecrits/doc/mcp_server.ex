@@ -148,21 +148,34 @@ defmodule Ecrits.Doc.MCPServer do
     end
   end
 
-  # A pattern-level find failure (stale or repeated pattern) earns ONE
-  # corrected retry: restore the pre-attempt sequence with the retry marked
-  # used, instead of leaving the lookup consumed. Commit-evidence and
-  # malformed-call failures stay terminal.
+  # A commit-evidence failure happens before native lookup, so restore the
+  # pre-attempt sequence without spending either the lookup or the one
+  # pattern-correction retry. A stale or repeated pattern earns that ONE
+  # corrected retry. Malformed calls and downstream lookup failures stay
+  # terminal.
   defp restore_retryable_find(ctx, "doc.find", reason, sequence, key, attempted_state) do
-    if MCPToolPolicy.retryable_find_error?(reason) and
-         Map.get(sequence, :find_retry_used?) != true do
-      retry_sequence = Map.put(sequence, :find_retry_used?, true)
+    retry_sequence =
+      cond do
+        MCPToolPolicy.non_consuming_find_error?(reason) ->
+          sequence
 
-      case put_vfs_sequence(ctx, attempted_state, key, retry_sequence) do
-        {:ok, restored_state} -> restored_state
-        {:error, _reason} -> attempted_state
+        MCPToolPolicy.retryable_find_error?(reason) and
+            Map.get(sequence, :find_retry_used?) != true ->
+          Map.put(sequence, :find_retry_used?, true)
+
+        true ->
+          nil
       end
-    else
-      attempted_state
+
+    case retry_sequence do
+      %{} ->
+        case put_vfs_sequence(ctx, attempted_state, key, retry_sequence) do
+          {:ok, restored_state} -> restored_state
+          {:error, _reason} -> attempted_state
+        end
+
+      nil ->
+        attempted_state
     end
   end
 

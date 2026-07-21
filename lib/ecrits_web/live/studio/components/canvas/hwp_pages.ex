@@ -587,20 +587,22 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           const text = op.text != null ? String(op.text) : "";
           const appending = target.appendIndex != null;
           const idx = appending ? target.appendIndex : target.paragraph;
+          const insertedParagraph = appending ? idx : idx + 1;
           try {
             if (appending) {
               ctx.doc.insertParagraph(target.section, idx);
               if (text) ctx.insertTextLines({ section: target.section, paragraph: idx }, 0, text);
             } else if (text) {
-              ctx.insertTextLines({ section: target.section, paragraph: idx }, 0, text + "\n");
+              const offset = ctx.paragraphLength(target.section, idx);
+              ctx.insertTextLines({ section: target.section, paragraph: idx }, offset, "\n" + text);
             } else {
-              ctx.doc.insertParagraph(target.section, idx);
+              ctx.doc.insertParagraph(target.section, insertedParagraph);
             }
           } catch (error) {
             return { error: `insertParagraph failed: ${String(error && error.message || error)}` };
           }
-          ctx.recordOp("AgentInsertParagraph", { section: target.section, para: idx, textLen: text.length });
-          return { ok: true, extra: { paragraph: idx, inserted: text.length } };
+          ctx.recordOp("AgentInsertParagraph", { section: target.section, para: insertedParagraph, textLen: text.length });
+          return { ok: true, extra: { paragraph: insertedParagraph, inserted: text.length } };
         };
         var opDeleteParagraph = (ctx, op, ref, verb) => {
           if (!ref) return { error: "delete_paragraph requires a ref {section,paragraph}" };
@@ -1890,15 +1892,15 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           "textCursorCanvas",
           "agentOpQueue",
           "agentOpProcessing",
+          "previewRevisionQueue",
+          "previewRevisionProcessing",
+          "previewRevisionRecords",
           "vfsStageDepth",
           "vfsDeferredSnapshot",
           "pendingVfsWrites",
           "cancelledVfsWrites",
           "terminalVfsWrites",
           "vfsPreviewObjectUrls",
-          "previewPlaybackGeneration",
-          "previewPlaybackFrame",
-          "previewPlaybackSignature",
           "previewPatchText",
           "previewPatchCursor",
           "previewPatchAnchor",
@@ -2035,15 +2037,15 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             this.pickerHoverRaf = null;
             this.agentOpQueue = [];
             this.agentOpProcessing = false;
+            this.previewRevisionQueue = [];
+            this.previewRevisionProcessing = false;
+            this.previewRevisionRecords = new Map();
             this.vfsStageDepth = 0;
             this.vfsDeferredSnapshot = false;
             this.pendingVfsWrites = new Map();
             this.cancelledVfsWrites = new Map();
             this.terminalVfsWrites = new Map();
             this.vfsPreviewObjectUrls = new Map();
-            this.previewPlaybackGeneration = 0;
-            this.previewPlaybackFrame = null;
-            this.previewPlaybackSignature = null;
             this.previewPatchText = "";
             this.previewPatchCursor = null;
             this.previewPatchAnchor = null;
@@ -2108,23 +2110,15 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             this.handleEvent("document.save.command", (payload) => {
               if (!this.mirror && this.eventMatchesDocument(payload)) this.saveLocalDocument(payload);
             });
-            this.handleEvent("document.preview.delta_received", (payload) => {
-              this.previewHookEventCount += 1;
-              this.el.dataset.previewHookEventCount = String(this.previewHookEventCount);
-              if (this.eventMatchesDocument(payload)) {
-                if (this.mirror) {
-                  this.el.dataset.previewAuthorityState = "waiting";
-                  window.setTimeout(() => this.requestAuthoritativePreview(payload), 0);
-                } else {
-                  this.recordPreviewTarget(payload);
-                  this.publishAuthoritativePreview(payload);
-                }
+            this.handleEvent("document.preview.revision_received", (payload) => {
+              if (this.mirror && !this.pinnedPreviewSnapshot() && this.eventMatchesDocument(payload)) {
+                this.queuePreviewRevision(payload);
               }
             });
             this.onPreviewAuthority = (event) => {
               const payload = event && event.detail ? event.detail : {};
               if (payload.source_editor_id === this.el.id) return;
-              if (this.mirror && this.eventMatchesDocument(payload)) this.applyAuthoritativePreviewState(payload);
+              if (this.mirror && !this.pinnedPreviewSnapshot() && this.eventMatchesDocument(payload)) this.applyAuthoritativePreviewState(payload);
             };
             window.addEventListener(PREVIEW_AUTHORITY_EVENT, this.onPreviewAuthority);
             const bytesUrl = this.canvasState.bytesUrl;
@@ -2213,11 +2207,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               }
               this.authoritativePreviewObjectUrl = null;
             }
-            this.previewPlaybackGeneration += 1;
-            if (this.previewPlaybackFrame && typeof window.cancelAnimationFrame === "function") {
-              window.cancelAnimationFrame(this.previewPlaybackFrame);
-            }
-            this.previewPlaybackFrame = null;
             for (const entry of this.vfsPreviewObjectUrls.values()) {
               if (entry.timer) clearTimeout(entry.timer);
               try {
@@ -2274,20 +2263,11 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           updated() {
             this.canvasState = this.readCanvasState();
             if (this.mirror) {
-              const playbackSteps = this.previewPlaybackSteps();
-              if (playbackSteps.length > 0) {
-                if (this.doc) this.startVfsPreviewPlayback(playbackSteps);
-                return;
-              }
-              const payload = {
+              this.handleLoadedPreviewHighlights(false, {
                 document_id: this.documentId,
-                turn_id: this.canvasState.previewTurnId,
-                text: this.canvasState.previewText || "",
-                delta_count: Number(this.canvasState.previewDeltaCount || 0)
-              };
-              if (this.handleLoadedPreviewHighlights(false, payload)) return;
-              this.el.dataset.previewAuthorityState = "waiting";
-              this.requestAuthoritativePreview(payload);
+                turn_id: this.canvasState.previewTurnId
+              });
+              this.drainPreviewRevisionQueue();
               return;
             }
             this.scheduleToolbarStateSync();
@@ -2370,23 +2350,105 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           handleLoadedPreviewHighlights(authorityPreviewLoad = false, payload = {}) {
             this.previewSavedHighlights = this.parsePreviewHighlights();
             if (this.previewSavedHighlights.length === 0) return false;
-            if (this.mirror && !authorityPreviewLoad) {
-              this.el.dataset.previewAuthorityState = "waiting";
-              const requested = this.requestAuthoritativePreview({
-                ...payload,
-                authority_bytes: true,
-                preview_highlights: this.previewSavedHighlights
-              });
-              if (!requested) this.renderSavedEditHighlights();
-            } else {
-              this.renderSavedEditHighlights();
-            }
+            const pinnedSnapshot = this.pinnedPreviewSnapshot();
+            if (pinnedSnapshot) this.syncPinnedPreviewPageFilter();
+            this.renderSavedEditHighlights();
             return true;
+          },
+          pinnedPreviewSnapshot() {
+            return this.canvasState.previewSnapshotPinned === true;
           },
           eventMatchesDocument(payload = {}) {
             const id = payload.document_id || payload.documentId;
             if (this.mirror) return !!id && !!this.documentId && String(id) === String(this.documentId);
             return !id || !this.documentId || String(id) === String(this.documentId);
+          },
+          previewRevisionKey(payload = {}) {
+            const editId = String(payload.edit_id || payload.editId || "");
+            const revision = String(payload.revision || "");
+            return editId && revision ? `${editId}:${revision}` : null;
+          },
+          queuePreviewRevision(payload = {}) {
+            if (!this.mirror || this.pinnedPreviewSnapshot()) return false;
+            if (!this.previewRevisionKey(payload)) return false;
+            this.previewRevisionQueue.push(payload);
+            this.drainPreviewRevisionQueue();
+            return true;
+          },
+          async drainPreviewRevisionQueue() {
+            if (this.previewRevisionProcessing || !this.doc) return;
+            this.previewRevisionProcessing = true;
+            try {
+              while (this.previewRevisionQueue.length > 0 && this.doc) {
+                const payload = this.previewRevisionQueue.shift();
+                await this.applyPreviewRevision(payload);
+              }
+            } finally {
+              this.previewRevisionProcessing = false;
+            }
+          },
+          async applyPreviewRevision(payload = {}) {
+            const key = this.previewRevisionKey(payload);
+            if (!key) return;
+            const editId = String(payload.edit_id || payload.editId || "");
+            const revision = String(payload.revision || "");
+            const phase = String(payload.phase || "");
+            const current = this.previewRevisionRecords.get(editId);
+
+            if (phase === "rejected") {
+              if (!current || current.phase !== "candidate" || current.revision !== revision) return;
+              this.previewRevisionRecords.delete(editId);
+              await this.reloadPreviewRevisionBase();
+              this.updatePreviewRevisionHighlights(payload);
+              return;
+            }
+
+            if (phase === "committed") {
+              if (current && current.revision === revision) {
+                current.phase = "committed";
+                this.previewRevisionRecords.set(editId, current);
+              } else if (!current) {
+                // A committed-only event already points at canonical committed bytes.
+                // Record its identity without replaying its semantic ops a second time.
+                this.previewRevisionRecords.set(editId, { key, revision, phase: "committed" });
+              }
+              this.updatePreviewRevisionHighlights(payload);
+              return;
+            }
+
+            if (phase !== "candidate") return;
+            if (current && current.revision === revision) {
+              this.updatePreviewRevisionHighlights(payload);
+              return;
+            }
+            if (current && current.phase === "candidate") await this.reloadPreviewRevisionBase();
+
+            const ops = Array.isArray(payload.ops) ? payload.ops : [];
+            const sets = Array.isArray(payload.sets) ? payload.sets : [];
+            const editReply = ops.length > 0
+              ? this.applyAgentEditBatch({ ops }, { scheduleSnapshot: false, finish: false })
+              : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
+            const setReply = sets.length > 0
+              ? this.applyAgentSetBatch({ sets }, { scheduleSnapshot: false, finish: false })
+              : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
+            this.finishAgentEdit({}, { scheduleSnapshot: false });
+            this.previewRevisionRecords.set(editId, { key, revision, phase: "candidate" });
+            this.el.dataset.previewRevisionKey = key;
+            this.el.dataset.previewRevisionEditFailed = String(Number(editReply?.result?.failed || 0));
+            this.el.dataset.previewRevisionSetFailed = String(Number(setReply?.result?.failed || 0));
+            this.updatePreviewRevisionHighlights(payload);
+          },
+          async reloadPreviewRevisionBase() {
+            this.canvasState = this.readCanvasState();
+            const url = this.canvasState.bytesUrl || this.loadedUrl;
+            if (url) await this.loadDocument({ url, force: true, authority_preview: true });
+          },
+          updatePreviewRevisionHighlights(payload = {}) {
+            const highlights = Array.isArray(payload.highlights) ? payload.highlights : [];
+            this.canvasState.previewHighlights = JSON.stringify(highlights);
+            this.previewSavedHighlights = highlights;
+            this.previewPageFilter = this.previewPageIndexesForSavedHighlights();
+            this.renderSavedEditHighlights();
           },
           handlePreviewDelta(payload = {}) {
             this.ensurePreviewPatchTurn(payload);
@@ -2412,7 +2474,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             this.el.dataset.previewPatchPending = "false";
           },
           requestAuthoritativePreview(payload = {}) {
-            if (!this.mirror) return;
+            if (!this.mirror || this.pinnedPreviewSnapshot()) return false;
             this.previewAuthorityRequestCount += 1;
             this.el.dataset.previewAuthorityRequestCount = String(this.previewAuthorityRequestCount);
             let targetCount = 0;
@@ -2441,7 +2503,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             return targetHookCount > 0;
           },
           applyAuthoritativePreviewState(payload = {}) {
-            if (!this.mirror) return;
+            if (!this.mirror || this.pinnedPreviewSnapshot()) return;
             this.previewAuthorityEventCount += 1;
             this.el.dataset.previewAuthorityEventCount = String(this.previewAuthorityEventCount);
             this.el.dataset.previewAuthorityState = "received";
@@ -2749,203 +2811,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               this.paintEditHighlightRect(ctx, overlay, r, s);
             }
           },
-          previewPlaybackSteps() {
-            const raw = this.canvasState && this.canvasState.previewSteps;
-            if (!raw) return [];
-            try {
-              const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-              return Array.isArray(parsed) ? parsed : [];
-            } catch (_) {
-              return [];
-            }
-          },
-          startVfsPreviewPlayback(steps = this.previewPlaybackSteps()) {
-            if (!this.mirror || !this.doc || !Array.isArray(steps) || steps.length === 0) return;
-            const signature = `${this.canvasState.previewTurnId || ""}:${steps.length}:${JSON.stringify(steps[steps.length - 1] || {}).length}`;
-            if (this.previewPlaybackSignature === signature) return;
-            const finalHighlights = this.parsePreviewHighlights();
-            this.previewPlaybackSignature = signature;
-            this.previewPlaybackGeneration += 1;
-            const generation = this.previewPlaybackGeneration;
-            let index = 0;
-            this.el.dataset.previewPlaybackState = "running";
-            this.el.dataset.previewPlaybackTotal = String(steps.length);
-            this.el.dataset.previewPlaybackError = "";
-            const schedule = (callback) => {
-              if (typeof window.requestAnimationFrame === "function" && document.visibilityState !== "hidden") {
-                this.previewPlaybackFrame = window.requestAnimationFrame(callback);
-              } else {
-                this.previewPlaybackFrame = setTimeout(callback, 16);
-              }
-            };
-            const advance = () => {
-              if (generation !== this.previewPlaybackGeneration || !this.doc) return;
-              const step = steps[index];
-              const result = this.applyVfsPreviewStep(step, index + 1, steps.length);
-              if (result.error) {
-                this.el.dataset.previewPlaybackState = "error";
-                this.el.dataset.previewPlaybackError = result.error;
-                return;
-              }
-              index += 1;
-              if (index >= steps.length) {
-                this.previewPlaybackFrame = null;
-                this.canvasState.previewHighlights = JSON.stringify(finalHighlights);
-                const finalBytesUrl = this.canvasState.previewFinalBytesUrl;
-                if (finalBytesUrl && finalBytesUrl !== this.loadedUrl) {
-                  this.el.dataset.previewPlaybackState = "finalizing";
-                  schedule(() => {
-                    if (generation !== this.previewPlaybackGeneration || !this.doc) return;
-                    this.canvasState.previewSteps = "[]";
-                    this.canvasState.previewFinalBytesUrl = null;
-                    Promise.resolve(this.loadDocument({ url: finalBytesUrl, document_id: this.documentId, force: true, authority_preview: true })).then(() => {
-                      if (generation !== this.previewPlaybackGeneration || !this.doc) return;
-                      this.el.dataset.previewPlaybackState = "complete";
-                      this.renderSavedEditHighlights();
-                      this.refreshSavedEditHighlightsOnNextFrame(index);
-                    });
-                  });
-                } else {
-                  this.el.dataset.previewPlaybackState = "complete";
-                  this.renderSavedEditHighlights();
-                  this.refreshSavedEditHighlightsOnNextFrame(index);
-                }
-                return;
-              }
-              schedule(advance);
-            };
-            schedule(advance);
-          },
-          applyVfsPreviewStep(step = {}, index, total) {
-            const ops = Array.isArray(step.ops) ? step.ops : [];
-            const sets = Array.isArray(step.sets) ? step.sets : [];
-            const appliedOps = [];
-            for (const op of ops) {
-              let result;
-              try {
-                result = this.applyOneOp(op);
-              } catch (error) {
-                return { error: String(error && error.message || error) };
-              }
-              if (!result || result.error) return { error: result && result.error || "preview edit failed" };
-              appliedOps.push({ op, result });
-            }
-            for (const entry of sets) {
-              let result;
-              try {
-                result = this.applySetOne(entry && entry.ref, entry && entry.props);
-              } catch (error) {
-                return { error: String(error && error.message || error) };
-              }
-              if (!result || result.error) return { error: result && result.error || "preview set failed" };
-            }
-            this._elementsCache = null;
-            const materialized = this.materializeVfsPreviewModel(appliedOps);
-            if (materialized.error) return materialized;
-            const nextPageCount = this.doc.pageCount();
-            if (materialized.ok || nextPageCount !== this.pageCount) {
-              this.pageCount = nextPageCount;
-              this.buildPageStack();
-            } else {
-              this.rendered.clear();
-              this.renderVisiblePages();
-            }
-            const highlights = this.remapVfsPreviewHighlights(step.highlights, appliedOps);
-            this.canvasState.previewHighlights = JSON.stringify(highlights);
-            this.canvasState.previewDeltaCount = String(index);
-            this.el.dataset.previewPlaybackIndex = String(index);
-            const card = this.el.closest('[data-role="editor-preview-card"]');
-            const counter = card && card.querySelector('[data-role="editor-preview-delta-count"]');
-            if (counter) counter.textContent = String(index);
-            const summary = card && card.querySelector('[data-role="editor-preview-summary"]');
-            if (summary) {
-              const doc = this.canvasState.documentName || this.canvasState.documentPath || "document";
-              const verb = ops[0] && ops[0].op || sets[0] && "set" || "edit";
-              summary.textContent = `${doc}: ${index} ${index === 1 ? "token" : "tokens"} · ${index}/${total} — ${verb}`;
-            }
-            if (card) card.dataset.previewPlaybackState = index >= total ? "complete" : "running";
-            this.renderSavedEditHighlights();
-            this.refreshSavedEditHighlightsOnNextFrame(index);
-            this.el.dispatchEvent(new CustomEvent(PREVIEW_DELTA_EVENT, {
-              bubbles: true,
-              detail: {
-                document_id: this.documentId,
-                turn_id: this.canvasState.previewTurnId,
-                delta_count: index,
-                delta_total: total,
-                patch_mode: "vfs-op-playback"
-              }
-            }));
-            return { ok: true };
-          },
-          materializeVfsPreviewModel(appliedOps) {
-            const needsMaterialization = (Array.isArray(appliedOps) ? appliedOps : []).some(({ op }) => op && op.op === "insert_picture");
-            if (!needsMaterialization) return { ok: false };
-            let replacement = null;
-            try {
-              const bytes = this.exportDocumentBytes();
-              replacement = new HwpDocument(bytes);
-              try {
-                replacement.convertToEditable();
-              } catch (_) {
-              }
-              const previous = this.doc;
-              this.releaseAllPageCanvases();
-              this.doc = replacement;
-              replacement = null;
-              try {
-                previous.free();
-              } catch (_) {
-              }
-              this.clearHwpHistory();
-              this.hwpFind = null;
-              this._elementsCache = null;
-              return { ok: true };
-            } catch (error) {
-              if (replacement) {
-                try {
-                  replacement.free();
-                } catch (_) {
-                }
-              }
-              return { error: `preview picture materialization failed: ${String(error && error.message || error)}` };
-            }
-          },
-          remapVfsPreviewHighlights(highlights, appliedOps) {
-            const source = Array.isArray(highlights) ? highlights : [];
-            const pictureResults = (Array.isArray(appliedOps) ? appliedOps : []).filter(({ op, result }) => op && op.op === "insert_picture" && result && result.extra);
-            let pictureIndex = 0;
-            return source.map((highlight) => {
-              if (!highlight || highlight.op !== "insert_picture") return highlight;
-              const applied = pictureResults[pictureIndex++];
-              if (!applied) return highlight;
-              const extra = applied.result.extra || {};
-              if (!Number.isInteger(extra.paraIdx) || !Number.isInteger(extra.controlIdx)) return highlight;
-              let ref = highlight.ref;
-              if (typeof ref === "string") {
-                try {
-                  ref = JSON.parse(ref);
-                } catch (_) {
-                  ref = {};
-                }
-              }
-              ref = ref && typeof ref === "object" ? { ...ref } : {};
-              const opRef = this.parseRef(applied.op.ref) || {};
-              ref.section = Number(opRef.section ?? ref.section ?? 0);
-              ref.paragraph = extra.paraIdx;
-              ref.control = extra.controlIdx;
-              ref.type = ref.type || "picture";
-              return { ...highlight, ref };
-            });
-          },
-          refreshSavedEditHighlightsOnNextFrame(index) {
-            requestAnimationFrame(() => {
-              if (!this.el || !this.el.isConnected) return;
-              if (this.el.dataset.previewPlaybackIndex !== String(index)) return;
-              this.renderVisiblePages();
-              this.renderSavedEditHighlights();
-            });
-          },
           parsePreviewHighlights() {
             const raw = this.el && this.el.dataset ? this.canvasState.previewHighlights : "";
             if (!raw) return [];
@@ -2983,6 +2848,18 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             const pages = [...new Set(rects.map((r) => r.pageIndex).filter(Number.isInteger))];
             return pages.length > 0 ? pages : [0];
           },
+          syncPinnedPreviewPageFilter() {
+            if (!this.mirror || !this.doc || !this.pinnedPreviewSnapshot()) return;
+            const next = this.previewPageIndexesForSavedHighlights();
+            if (!Array.isArray(next) || next.length === 0) return;
+            const current = Array.isArray(this.previewPageFilter) ? this.previewPageFilter : [];
+            const same = current.length === next.length && current.every((page, index) => page === next[index]);
+            this.el.dataset.previewPinnedPageFilter = next.join(",");
+            if (same) return;
+            this.previewPageFilter = next;
+            this.buildPageStack();
+            this.renderVisiblePages();
+          },
           renderSavedEditHighlights() {
             if (!this.mirror || !this.doc) return;
             const { highlights, rects, errors } = this.savedEditHighlightRects();
@@ -3015,16 +2892,23 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             this.el.dataset.previewHighlightError = errors.slice(0, 3).join(";");
             this.el.dataset.previewHighlightAuthority = Object.keys(authorityCounts).sort().map((authority) => `${authority}:${authorityCounts[authority]}`).join(",");
             this.el.dataset.previewHighlightFallbackCount = String(fallbackCount);
-            this.frameSavedEditHighlights(rects);
             for (const page of pages) {
               if (this.rendered && !this.rendered.get(page)) this.renderPage(page);
               this.paintSavedEditHighlightsOnPage(page);
             }
+            this.frameSavedEditHighlights(rects);
           },
           frameSavedEditHighlights(rects) {
             if (!this.mirror || !Array.isArray(rects) || rects.length === 0) return;
-            const target = rects.find((r) => r.savedHighlightHasCell && Number.isInteger(r.pageIndex)) || rects.find((r) => Number.isInteger(r.pageIndex));
+            const latestHighlightIndex = rects.reduce((latest, rect) => Number.isInteger(rect.savedHighlightIndex) ? Math.max(latest, rect.savedHighlightIndex) : latest, -1);
+            const target = rects.find((r) => r.savedHighlightIndex === latestHighlightIndex && Number.isInteger(r.pageIndex)) || rects.find((r) => Number.isInteger(r.pageIndex));
             if (!target) return;
+            if (!this.rendered || !this.rendered.get(target.pageIndex)) this.renderPage(target.pageIndex);
+            if (!this.rendered || !this.rendered.get(target.pageIndex)) {
+              this.el.dataset.previewBaseFrameReady = "false";
+              return;
+            }
+            this.el.dataset.previewBaseFrameReady = "true";
             const section = this.pageSection(target.pageIndex);
             if (!section) return;
             let ratio = 1;
@@ -3507,28 +3391,23 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               this.localImagePick = null;
               this.clearHwpHistory();
               this.previewPatchHighlight = null;
-              const playbackSteps = this.previewPlaybackSteps();
-              this.previewPageFilter = playbackSteps.length > 0 ? null : this.previewPageIndexesForSavedHighlights();
+              this.previewPageFilter = this.previewPageIndexesForSavedHighlights();
               if (!this.mirror) window.__rhwpDoc = this.doc;
               this.buildPageStack();
               this.restoreScrollPosition(url);
               this.renderVisiblePages();
               const authorityPreviewLoad = authority_preview === true || authorityPreview === true;
-              if (playbackSteps.length > 0 && this.mirror) {
-                this.startVfsPreviewPlayback(playbackSteps);
-              } else {
-                const handledHighlights = this.handleLoadedPreviewHighlights(authorityPreviewLoad, {
-                  document_id: this.documentId,
-                  turn_id: this.canvasState.previewTurnId,
-                  text: this.canvasState.previewText || "",
-                  delta_count: Number(this.canvasState.previewDeltaCount || "0")
-                });
-                if (!handledHighlights && (this.previewPatchTarget || this.canvasState.previewText)) this.patchPreviewToMountedDoc(this.previewPatchTarget || this.canvasState.previewText || "", {
-                  authoritative: this.mirror,
-                  turn_id: this.previewPatchTurnId || this.canvasState.previewTurnId,
-                  delta_count: Number(this.canvasState.previewDeltaCount || "0")
-                });
-              }
+              const handledHighlights = this.handleLoadedPreviewHighlights(authorityPreviewLoad, {
+                document_id: this.documentId,
+                turn_id: this.canvasState.previewTurnId,
+                text: this.canvasState.previewText || "",
+                delta_count: Number(this.canvasState.previewDeltaCount || "0")
+              });
+              if (!handledHighlights && (this.previewPatchTarget || this.canvasState.previewText)) this.patchPreviewToMountedDoc(this.previewPatchTarget || this.canvasState.previewText || "", {
+                authoritative: this.mirror,
+                turn_id: this.previewPatchTurnId || this.canvasState.previewTurnId,
+                delta_count: Number(this.canvasState.previewDeltaCount || "0")
+              });
               this.notifyViewerState(true);
               this.scheduleToolbarStateSync();
               return true;
@@ -3546,6 +3425,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 this._loadInFlight = null;
                 this._loadingUrl = null;
               }
+              this.drainPreviewRevisionQueue();
             }
           },
           notifyViewerState(ready) {
@@ -3620,60 +3500,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
             } catch (_) {
               return { w: 794, h: 1123 };
             }
-          },
-          // Board #463 stage 1: agent commits draw lively. Same ordering and
-          // failure semantics as applyAgentEditBatch, but ops apply in chunks
-          // with a repaint + one animation frame between chunks, so the canvas
-          // visibly sweeps through the change set instead of jumping once.
-          // Frame-yield pacing bounds the added ACK latency to ~24 frames
-          // (~400ms) regardless of op count; hidden documents and tiny
-          // batches skip pacing entirely.
-          async applyAgentEditBatchPaced({ ops }, options = {}) {
-            const list = Array.isArray(ops) ? ops : [];
-            if (list.length <= 2 || this.visible.size === 0) {
-              return this.applyAgentEditBatch({ ops }, options);
-            }
-            this.pushHwpUndoCheckpoint("agent-edit-batch");
-            const tagged = list.map((op, idx) => ({ op, idx, shift: this.opShiftsBodyIndices(op) }));
-            const stable = tagged.filter((t) => !t.shift);
-            const shifting = tagged.filter((t) => t.shift).sort((a, b) => {
-              const ra = this.parseRef(a.op && a.op.ref) || { section: 0, paragraph: 0 };
-              const rb = this.parseRef(b.op && b.op.ref) || { section: 0, paragraph: 0 };
-              if ((rb.section || 0) !== (ra.section || 0)) return (rb.section || 0) - (ra.section || 0);
-              return (rb.paragraph || 0) - (ra.paragraph || 0);
-            });
-            const ordered = stable.concat(shifting);
-            const results = new Array(list.length);
-            let applied = 0;
-            let failed = 0;
-            const chunkSize = Math.max(2, Math.ceil(ordered.length / 24));
-            for (let start = 0; start < ordered.length; start += chunkSize) {
-              for (const { op, idx } of ordered.slice(start, start + chunkSize)) {
-                const refStr = op && op.ref != null ? typeof op.ref === "string" ? op.ref : JSON.stringify(op.ref) : null;
-                let r;
-                try {
-                  r = this.applyOneOp(op);
-                } catch (error) {
-                  r = { error: String(error && error.message || error) };
-                }
-                if (r && r.ok) {
-                  applied++;
-                  results[idx] = Object.assign({ ref: refStr, ok: true }, r.extra || {});
-                } else {
-                  failed++;
-                  results[idx] = { ref: refStr, error: r && r.error || "unknown_error" };
-                }
-              }
-              if (start + chunkSize < ordered.length) {
-                this.renderVisiblePages();
-                await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-              }
-            }
-            this.finishAgentEdit({}, options);
-            return {
-              ok: true,
-              result: { ok: true, applied, failed, results }
-            };
           },
           renderVisiblePages() {
             for (const idx of this.visible) this.renderPage(idx);
@@ -6796,7 +6622,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 results[idx] = { ref: refStr, error: r && r.error || "unknown_error" };
               }
             }
-            this.finishAgentEdit({}, options);
+            if (options.finish !== false) this.finishAgentEdit({}, options);
             return {
               ok: true,
               result: { ok: true, applied, failed, results }
@@ -6829,14 +6655,15 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 phase: "exporting"
               };
               this.pendingVfsWrites.set(id, transaction);
-              const editReply = Array.isArray(ops) && ops.length > 0 ? await this.applyAgentEditBatchPaced({ ops }, { scheduleSnapshot: false }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
+              const editReply = Array.isArray(ops) && ops.length > 0 ? this.applyAgentEditBatch({ ops }, { scheduleSnapshot: false, finish: false }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
               if (!editReply || !editReply.ok || !editReply.result || Number(editReply.result.failed || 0) > 0) {
                 throw new Error(this.vfsBatchError("edit", editReply));
               }
-              const setReply = Array.isArray(sets) && sets.length > 0 ? this.applyAgentSetBatch({ sets }, { scheduleSnapshot: false }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
+              const setReply = Array.isArray(sets) && sets.length > 0 ? this.applyAgentSetBatch({ sets }, { scheduleSnapshot: false, finish: false }) : { ok: true, result: { ok: true, applied: 0, failed: 0, results: [] } };
               if (!setReply || !setReply.ok || !setReply.result || Number(setReply.result.failed || 0) > 0) {
                 throw new Error(this.vfsBatchError("set", setReply));
               }
+              this.finishAgentEdit({}, { scheduleSnapshot: false });
               const saved = await this.exportForSave();
               if (this.consumeAgentVfsWriteCancellation(id) || this.pendingVfsWrites.get(id) !== transaction) {
                 throw new Error(`vfs_write cancelled: ${id}`);
@@ -7292,7 +7119,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
                 results.push({ ref: refStr, error: r && r.error || "unknown_error" });
               }
             }
-            this.finishAgentEdit({}, options);
+            if (options.finish !== false) this.finishAgentEdit({}, options);
             return {
               ok: true,
               result: { ok: true, applied, failed, results }

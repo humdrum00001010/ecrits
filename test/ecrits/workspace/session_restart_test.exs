@@ -216,6 +216,50 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
   end
 
+  test "workspace delegated send never synchronously registers back through a stale workspace root",
+       %{path: root, ws: ws} do
+    stale_path = Path.join(root, "stale-workspace-root")
+    File.mkdir_p!(stale_path)
+
+    {:ok, stale_ws} =
+      Session.attach(stale_path,
+        live_session_id: "stale-workspace-root",
+        chat_rail_id: "stale-workspace-root",
+        provider: "codex",
+        adapter_opts: [
+          exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+          script: [{:text_delta, "stale reply"}]
+        ],
+        workspace_root: stale_path
+      )
+
+    assert_receive {:workspace_foreground_rebound, ^stale_ws}, 1_000
+
+    stale_workspace_pid = Session.whereis(stale_path)
+    agent_pid = AcpAgent.whereis(ws.agent_id)
+    original_agent_state = :sys.get_state(agent_pid)
+
+    :sys.replace_state(agent_pid, &%{&1 | workspace_root: stale_path})
+    :sys.suspend(stale_workspace_pid)
+
+    started_at = System.monotonic_time(:millisecond)
+
+    result =
+      try do
+        Session.send_turn(ws, "must not deadlock")
+      catch
+        :exit, reason -> {:exit, reason}
+      end
+
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+    :sys.resume(stale_workspace_pid)
+    :sys.replace_state(agent_pid, fn _state -> original_agent_state end)
+
+    assert {:ok, %{status: :running}} = result
+    assert elapsed_ms < 1_000
+  end
+
   # 2026-07-19 field bug (#464): when a resume lands on a DIFFERENT provider
   # thread, every earlier transcript row is invisible to the agent ("he can't
   # find the ruby shell cmd"). The session must record the gap and seed a

@@ -11,21 +11,23 @@ defmodule Ecrits.AcpAgent.AcpStream do
     * creates or reuses a session, forwarding the `doc.*` MCP server(s) so the
       agent can discover and call them (`new_session(..., mcp_servers: ...)`);
     * issues the prompt and streams `session/update` notifications, mapping them
-      to `%{type: :text_delta | :reasoning_delta | :file_operation_started |
-      :file_operation_completed | :file_operation_failed | :tool_call_started |
-      :tool_call_completed | :tool_call_failed, ...}`;
+      to `%{type: :text_delta | :reasoning_delta | :file_change_snapshot |
+      :tool_call_started | :tool_call_completed | :tool_call_failed, ...}`;
     * on cleanup, cancels the in-flight turn; one-off clients are disconnected,
       while durable clients stay alive for the next turn.
+
+  A `:file_change_snapshot` is proposed ACP tool-display state, not document
+  truth. This module preserves the provider's opaque text but never applies it.
   """
 
   alias ExMCP.ACP.AdapterTransport
-  alias ExMCP.ACP.Adapters.Claude
   alias ExMCP.ACP.Adapters.Codex
   alias ExMCP.ACP.Client
+  alias Ecrits.AcpAgent.ClaudeAdapter
   alias Ecrits.AcpAgent.CodexAdapter
   alias Ecrits.AcpAgent.CodexHome
   alias Ecrits.AcpAgent.Content
-  alias Ecrits.AcpAgent.WorkspaceFileHandler
+  alias Ecrits.AcpAgent.PermissionHandler
   alias Ecrits.Prompt
   require Logger
 
@@ -46,9 +48,6 @@ defmodule Ecrits.AcpAgent.AcpStream do
   # alive. Before the first session/update, a wedged provider can otherwise leave
   # the rail spinning for the full idle window with no visible progress.
   @initial_activity_timeout 90_000
-  @mcp_startup_timeout 15_000
-  @file_operation_names ~w(read_text_file search_text_file edit_text_file)
-  @file_operation_reason_max_chars 1_000
 
   @doc """
   Returns a `Stream` of normalized chat-rail events for one turn.
@@ -81,11 +80,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
       saw_text?: false,
       tool_titles: %{},
       tool_kinds: %{},
-      file_operation_ids: MapSet.new(),
-      file_operation_started_ids: MapSet.new(),
-      file_operations: %{},
-      edit_payloads: %{},
-      edit_paths: %{}
+      edit_snapshots: %{}
     }
 
   @doc false
@@ -94,8 +89,11 @@ defmodule Ecrits.AcpAgent.AcpStream do
     |> map_update(ensure_update_state(state))
   end
 
+  # Kept only so persisted pre-migration transcript rows can still hydrate.
+  # Active provider updates are always normalized as generic ACP tool calls.
   @doc false
-  def file_operation_name?(name), do: name in @file_operation_names
+  def file_operation_name?(name),
+    do: name in ["read_text_file", "search_text_file", "edit_text_file"]
 
   @doc false
   def open_client_session(exmcp_adapter, turn, opts, event_listener \\ self()) do
@@ -114,7 +112,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
             adapter_opts: adapter_opts,
             event_listener: event_listener
           ]
-          |> file_handler_client_opts(exmcp_adapter, turn, opts, cwd)
+          |> permission_handler_client_opts(exmcp_adapter, opts, cwd)
 
         case Client.start_link(client_opts) do
           {:ok, client} ->
@@ -175,119 +173,28 @@ defmodule Ecrits.AcpAgent.AcpStream do
 
     case open_client_session(exmcp_adapter, turn, opts, event_listener) do
       {:ok, %{client: client, session_id: session_id}} ->
-        case await_configured_mcp_startup(exmcp_adapter, session_id, turn, opts) do
-          :ok ->
-            persist_client? = Keyword.get(opts, :persist_client?, false)
-            if persist_client?, do: Process.unlink(client)
+        persist_client? = Keyword.get(opts, :persist_client?, false)
+        if persist_client?, do: Process.unlink(client)
 
-            start_prompt_with_session(
-              client,
-              session_id,
-              turn,
-              opts,
-              timeout,
-              persist_client?,
-              pending_start_events(
-                client,
-                session_id,
-                persist_client?,
-                Keyword.get(opts, :acp_client_key)
-              )
-            )
-
-          {:error, reason} ->
-            _ = safe_disconnect(client)
-            raise "ex_mcp ACP MCP startup failed: #{inspect(reason)}"
-        end
+        start_prompt_with_session(
+          client,
+          session_id,
+          turn,
+          opts,
+          timeout,
+          persist_client?,
+          pending_start_events(
+            client,
+            session_id,
+            persist_client?,
+            Keyword.get(opts, :acp_client_key)
+          )
+        )
 
       {:error, reason} ->
         raise "ex_mcp ACP session open failed: #{inspect(reason)}"
     end
   end
-
-  @doc false
-  def await_mcp_startup(session_id, server_names, timeout)
-      when is_binary(session_id) and is_list(server_names) and is_integer(timeout) do
-    pending = server_names |> Enum.filter(&is_binary/1) |> MapSet.new()
-    await_mcp_startup_loop(session_id, pending, deadline(timeout))
-  end
-
-  defp await_configured_mcp_startup(CodexAdapter, session_id, turn, opts) do
-    names = mcp_server_names(Keyword.get(opts, :mcp_servers))
-
-    if document_lane?(turn, opts) and names != [] do
-      await_mcp_startup(
-        session_id,
-        names,
-        Keyword.get(opts, :mcp_startup_timeout, @mcp_startup_timeout)
-      )
-    else
-      :ok
-    end
-  end
-
-  defp await_configured_mcp_startup(_adapter, _session_id, _turn, _opts), do: :ok
-
-  defp await_mcp_startup_loop(session_id, pending, deadline) do
-    if MapSet.size(pending) == 0 do
-      :ok
-    else
-      receive do
-        {:acp_stream_activity, update} ->
-          handle_mcp_startup_update(session_id, pending, deadline, update)
-
-        {:acp_session_update, ^session_id, update} ->
-          handle_mcp_startup_update(session_id, pending, deadline, update)
-      after
-        remaining(deadline) -> {:error, {:mcp_startup_timeout, MapSet.to_list(pending)}}
-      end
-    end
-  end
-
-  defp handle_mcp_startup_update(
-         session_id,
-         pending,
-         deadline,
-         %{
-           "sessionUpdate" => "mcp_server_startup",
-           "serverName" => name,
-           "status" => "ready"
-         }
-       ) do
-    await_mcp_startup_loop(session_id, MapSet.delete(pending, name), deadline)
-  end
-
-  defp handle_mcp_startup_update(
-         session_id,
-         pending,
-         deadline,
-         %{
-           "sessionUpdate" => "mcp_server_startup",
-           "serverName" => name,
-           "status" => status
-         } = update
-       )
-       when status in ["failed", "error"] do
-    if MapSet.member?(pending, name),
-      do: {:error, {:mcp_server_unavailable, name, update["error"]}},
-      else: await_mcp_startup_loop(session_id, pending, deadline)
-  end
-
-  defp handle_mcp_startup_update(session_id, pending, deadline, _update),
-    do: await_mcp_startup_loop(session_id, pending, deadline)
-
-  defp mcp_server_names(servers) when is_list(servers) do
-    servers
-    |> Enum.map(fn
-      %{"name" => name} -> name
-      %{name: name} -> name
-      _ -> nil
-    end)
-    |> Enum.filter(&(is_binary(&1) and &1 != ""))
-    |> Enum.uniq()
-  end
-
-  defp mcp_server_names(_servers), do: []
 
   defp reusable_client(opts) do
     client = Keyword.get(opts, :client)
@@ -455,8 +362,9 @@ defmodule Ecrits.AcpAgent.AcpStream do
         # long-but-active turn (many doc.* edits) is never killed mid-stream.
         state = mark_activity(state, update)
 
-        case map_update(update, state) do
+        case map_session_update(update, state) do
           {:event, event, state} -> {[event], state}
+          {:events, events, state} -> {events, state}
           {:skip, state} -> next_event(state)
           {:error, message, state} -> fail_turn(state, message)
         end
@@ -504,8 +412,8 @@ defmodule Ecrits.AcpAgent.AcpStream do
       reason when reason in ["cancelled", "canceled"] ->
         {:halt, %{state | done?: true}}
 
-      "error" ->
-        fail_turn(state, "ex_mcp ACP turn errored: #{inspect(result)}")
+      reason when reason in ["error", "refusal", "refused"] ->
+        fail_turn(state, "ex_mcp ACP turn #{reason}: #{inspect(result)}")
 
       _ ->
         case result_text(result, state) do
@@ -596,7 +504,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
 
   # ── session/update -> normalized event ─────────────────────────────
 
-  # A `final: true` agent_message_chunk carries the WHOLE message text, not an
+  # A final `agent_message_chunk` carries the WHOLE message text, not an
   # incremental delta. The Codex adapter re-emits it after the streamed deltas
   # (`ExMCP.ACP.Adapters.Codex.handle_item_completed/2`); appending it again
   # would double the reply ("Hi there?Hi there?"). When deltas were already
@@ -605,22 +513,15 @@ defmodule Ecrits.AcpAgent.AcpStream do
   # it as the sole text. This mirrors the `saw_text?` guard on the
   # `turn/completed` result text (see `result_text/2`). The Claude adapter never
   # sets `final`, so this branch never affects it.
-  defp map_update(
-         %{"sessionUpdate" => "agent_message_chunk", "final" => true} = update,
-         %{saw_text?: saw_text?} = state
-       ) do
-    case update_text(update) do
-      text when is_binary(text) and text != "" and not saw_text? ->
+  defp map_update(%{"sessionUpdate" => "agent_message_chunk"} = update, state) do
+    case {update_text(update), final_message?(update), state.saw_text?} do
+      {text, true, false} when is_binary(text) and text != "" ->
         {:event, %{type: :text_delta, delta: text}, %{state | saw_text?: true}}
 
-      _ ->
+      {_text, true, true} ->
         {:skip, state}
-    end
-  end
 
-  defp map_update(%{"sessionUpdate" => "agent_message_chunk"} = update, state) do
-    case update_text(update) do
-      text when is_binary(text) and text != "" ->
+      {text, false, _saw_text?} when is_binary(text) and text != "" ->
         {:event, %{type: :text_delta, delta: text}, %{state | saw_text?: true}}
 
       _ ->
@@ -638,82 +539,6 @@ defmodule Ecrits.AcpAgent.AcpStream do
     end
   end
 
-  defp map_update(%{"sessionUpdate" => "file_operation"} = update, state) do
-    file_operation_id = file_operation_id(update)
-    operation = file_operation_name(update)
-
-    state = track_file_operation(state, file_operation_id, operation, update)
-
-    cond do
-      not file_operation_call?(state, file_operation_id) ->
-        {:skip, state}
-
-      file_operation_started?(state, file_operation_id) ->
-        {:skip, state}
-
-      true ->
-        state = mark_file_operation_started(state, file_operation_id)
-
-        {:event,
-         file_operation_event(
-           :file_operation_started,
-           file_operation_id,
-           :running,
-           update,
-           state
-         ), state}
-    end
-  end
-
-  defp map_update(%{"sessionUpdate" => "file_operation_update"} = update, state) do
-    file_operation_id = file_operation_id(update)
-    operation = file_operation_name(update)
-    state = track_file_operation(state, file_operation_id, operation, update)
-
-    if file_operation_call?(state, file_operation_id) do
-      case file_operation_status(update) do
-        "completed" ->
-          {:event,
-           file_operation_event(
-             :file_operation_completed,
-             file_operation_id,
-             :completed,
-             update,
-             state
-           ), state}
-
-        "failed" ->
-          {:event,
-           file_operation_event(
-             :file_operation_failed,
-             file_operation_id,
-             :failed,
-             update,
-             state
-           )
-           |> Map.put(:reason, tool_failure_reason(update)), state}
-
-        _non_terminal ->
-          if file_operation_started?(state, file_operation_id) do
-            {:skip, state}
-          else
-            state = mark_file_operation_started(state, file_operation_id)
-
-            {:event,
-             file_operation_event(
-               :file_operation_started,
-               file_operation_id,
-               :running,
-               update,
-               state
-             ), state}
-          end
-      end
-    else
-      {:skip, state}
-    end
-  end
-
   defp map_update(%{"sessionUpdate" => "tool_call"} = update, state) do
     tool_call_id = tool_call_id(update)
     name = tool_name(update)
@@ -723,40 +548,16 @@ defmodule Ecrits.AcpAgent.AcpStream do
       state
       |> put_in([:tool_kinds, tool_call_id], kind)
       |> maybe_put_tool_title(tool_call_id, name)
-      |> track_file_operation(tool_call_id, name, update)
 
     cond do
-      file_operation_call?(state, tool_call_id) ->
-        if file_operation_started?(state, tool_call_id) do
-          {:skip, state}
-        else
-          state = mark_file_operation_started(state, tool_call_id)
-
-          {:event,
-           file_operation_event(
-             :file_operation_started,
-             tool_call_id,
-             :running,
-             update,
-             state
-           ), state}
+      kind == "edit" ->
+        case map_edit_update(update, tool_call_id, state) do
+          {:skip, state} -> map_tool_call_started(update, tool_call_id, name, kind, state)
+          result -> result
         end
 
-      kind == "edit" ->
-        map_edit_update(update, tool_call_id, state)
-
-      tool_name?(name) ->
-        {:event,
-         %{
-           type: :tool_call_started,
-           tool_call_id: tool_call_id,
-           name: name,
-           kind: kind,
-           arguments: tool_arguments(update)
-         }, state}
-
       true ->
-        {:skip, state}
+        map_tool_call_started(update, tool_call_id, name, kind, state)
     end
   end
 
@@ -764,111 +565,27 @@ defmodule Ecrits.AcpAgent.AcpStream do
     tool_call_id = tool_call_id(update)
     reported_name = tool_name(update)
     cached_name = Map.get(state.tool_titles, tool_call_id)
-    name = reported_name || cached_name
+    name = cached_name || reported_name
     kind = tool_kind(update) || Map.get(state.tool_kinds, tool_call_id)
 
-    state =
-      state
-      |> put_in([:tool_kinds, tool_call_id], kind)
-      |> track_file_operation(tool_call_id, cached_name, update)
-      |> track_file_operation(tool_call_id, reported_name, update)
+    state = put_in(state.tool_kinds[tool_call_id], kind)
 
-    cond do
-      file_operation_call?(state, tool_call_id) ->
-        case file_operation_status(update) do
-          "completed" ->
-            {:event,
-             file_operation_event(
-               :file_operation_completed,
-               tool_call_id,
-               :completed,
-               update,
-               state
-             ), state}
+    edit_result =
+      if kind == "edit",
+        do: map_edit_update(update, tool_call_id, state),
+        else: {:skip, state}
 
-          "failed" ->
-            {:event,
-             file_operation_event(
-               :file_operation_failed,
-               tool_call_id,
-               :failed,
-               update,
-               state
-             )
-             |> Map.put(:reason, tool_failure_reason(update)), state}
+    case edit_result do
+      {:event, event, state} ->
+        state = maybe_put_tool_title(state, tool_call_id, name)
 
-          _non_terminal ->
-            if file_operation_started?(state, tool_call_id) do
-              {:skip, state}
-            else
-              state = mark_file_operation_started(state, tool_call_id)
-
-              {:event,
-               file_operation_event(
-                 :file_operation_started,
-                 tool_call_id,
-                 :running,
-                 update,
-                 state
-               ), state}
-            end
+        case map_tool_call_status(update, tool_call_id, name, kind, state) do
+          {:event, terminal_event, state} -> {:events, [event, terminal_event], state}
+          {:skip, state} -> {:event, event, state}
         end
 
-      kind == "edit" ->
-        map_edit_update(update, tool_call_id, state)
-
-      true ->
-        case Map.get(update, "status") do
-          "completed" when is_binary(name) and name != "" ->
-            {:event,
-             %{
-               type: :tool_call_completed,
-               tool_call_id: tool_call_id,
-               name: name,
-               kind: kind,
-               result: tool_output(update)
-             }, state}
-
-          "failed" when is_binary(name) and name != "" ->
-            {:event,
-             %{
-               type: :tool_call_failed,
-               tool_call_id: tool_call_id,
-               name: name,
-               kind: kind,
-               reason: tool_failure_reason(update)
-             }, state}
-
-          status when status not in ["completed", "failed"] ->
-            # A non-terminal update for a call we have not seen is its START: the
-            # Claude adapter's first report of a tool_use block is a
-            # `tool_call_update` (pending/in_progress) with no prior `tool_call`.
-            # Without this the call would only surface at completion — after the
-            # UI already parked the reply bubble above it — and the terminal
-            # update carries no toolName, so the row would fall back to "tool".
-            cond do
-              Map.has_key?(state.tool_titles, tool_call_id) ->
-                {:skip, state}
-
-              tool_name?(name) ->
-                state = put_in(state.tool_titles[tool_call_id], name)
-
-                {:event,
-                 %{
-                   type: :tool_call_started,
-                   tool_call_id: tool_call_id,
-                   name: name,
-                   kind: kind,
-                   arguments: tool_arguments(update)
-                 }, state}
-
-              true ->
-                {:skip, state}
-            end
-
-          _terminal_without_identity ->
-            {:skip, state}
-        end
+      {:skip, state} ->
+        map_tool_call_status(update, tool_call_id, name, kind, state)
     end
   end
 
@@ -878,34 +595,105 @@ defmodule Ecrits.AcpAgent.AcpStream do
 
   defp map_update(_update, state), do: {:skip, state}
 
+  defp map_tool_call_started(update, tool_call_id, name, kind, state) do
+    if tool_name?(name) do
+      {:event,
+       %{
+         type: :tool_call_started,
+         tool_call_id: tool_call_id,
+         name: name,
+         kind: kind,
+         arguments: tool_arguments(update)
+       }, state}
+    else
+      {:skip, state}
+    end
+  end
+
+  defp map_tool_call_status(update, tool_call_id, name, kind, state) do
+    case Map.get(update, "status") do
+      "completed" when is_binary(name) and name != "" ->
+        {:event,
+         %{
+           type: :tool_call_completed,
+           tool_call_id: tool_call_id,
+           name: name,
+           kind: kind,
+           result: tool_output(update)
+         }, state}
+
+      "failed" when is_binary(name) and name != "" ->
+        {:event,
+         %{
+           type: :tool_call_failed,
+           tool_call_id: tool_call_id,
+           name: name,
+           kind: kind,
+           reason: tool_failure_reason(update)
+         }, state}
+
+      status when status not in ["completed", "failed"] ->
+        # A non-terminal update for a call we have not seen is its START: the
+        # Claude adapter's first report of a tool_use block is a
+        # `tool_call_update` (pending/in_progress) with no prior `tool_call`.
+        # Without this the call would only surface at completion — after the
+        # UI already parked the reply bubble above it — and the terminal
+        # update carries no toolName, so the row would fall back to "tool".
+        cond do
+          Map.has_key?(state.tool_titles, tool_call_id) ->
+            {:skip, state}
+
+          tool_name?(name) ->
+            state = put_in(state.tool_titles[tool_call_id], name)
+
+            {:event,
+             %{
+               type: :tool_call_started,
+               tool_call_id: tool_call_id,
+               name: name,
+               kind: kind,
+               arguments: tool_arguments(update)
+             }, state}
+
+          true ->
+            {:skip, state}
+        end
+
+      _terminal_without_identity ->
+        {:skip, state}
+    end
+  end
+
   defp ensure_update_state(state) do
     state
     |> Map.put_new(:saw_text?, false)
     |> Map.put_new(:tool_titles, %{})
     |> Map.put_new(:tool_kinds, %{})
-    |> Map.put_new(:file_operation_ids, MapSet.new())
-    |> Map.put_new(:file_operation_started_ids, MapSet.new())
-    |> Map.put_new(:file_operations, %{})
-    |> Map.put_new(:edit_payloads, %{})
-    |> Map.put_new(:edit_paths, %{})
+    |> Map.put_new(:edit_snapshots, %{})
   end
 
   defp map_edit_update(update, tool_call_id, state) do
-    path = edit_path(update) || Map.get(state.edit_paths, tool_call_id)
-    delta = edit_delta(update)
-    state = if is_binary(path), do: put_in(state.edit_paths[tool_call_id], path), else: state
-
-    cond do
-      not (is_binary(delta) and delta != "") ->
+    case edit_changes(update) do
+      [] ->
         {:skip, state}
 
-      Map.get(state.edit_payloads, tool_call_id) == delta ->
-        {:skip, state}
+      changes ->
+        fingerprint = edit_fingerprint(changes)
 
-      true ->
-        state = put_in(state.edit_payloads[tool_call_id], delta)
+        if Map.get(state.edit_snapshots, tool_call_id) == fingerprint do
+          {:skip, state}
+        else
+          state = put_in(state.edit_snapshots[tool_call_id], fingerprint)
 
-        {:event, %{type: :edit_delta, edit_id: tool_call_id, path: path, delta: delta}, state}
+          {:event,
+           %{
+             type: :file_change_snapshot,
+             phase: :proposed,
+             edit_id: tool_call_id,
+             changes: changes,
+             fingerprint: fingerprint
+           }, state}
+        end
     end
   end
 
@@ -916,30 +704,54 @@ defmodule Ecrits.AcpAgent.AcpStream do
     end
   end
 
-  defp edit_path(update) do
-    input = edit_input(update)
+  defp edit_changes(update) do
+    content = update |> Map.get("content", []) |> List.wrap()
 
-    input["path"] ||
-      update
-      |> Map.get("content", [])
-      |> List.wrap()
-      |> Enum.find_value(fn
-        %{"type" => "diff", "path" => path} when is_binary(path) -> path
-        _ -> nil
+    changes =
+      Enum.flat_map(content, fn
+        %{"type" => "diff", "path" => path} = diff when is_binary(path) ->
+          [
+            %{
+              path: path,
+              old_text: diff["oldText"],
+              new_text: diff["newText"]
+            }
+          ]
+
+        _ ->
+          []
       end)
+
+    if Enum.any?(content, &match?(%{"type" => "diff"}, &1)),
+      do: changes,
+      else: edit_input_changes(update)
   end
 
-  defp edit_delta(update) do
+  defp edit_input_changes(update) do
     input = edit_input(update)
+    path = input["path"]
 
-    input["diff"] || input["newText"] ||
-      update
-      |> Map.get("content", [])
-      |> List.wrap()
-      |> Enum.find_value(fn
-        %{"type" => "diff"} = diff -> diff["newText"] || diff["diff"]
-        _ -> nil
-      end)
+    payload? =
+      Enum.any?(["oldText", "newText", "diff"], fn key -> Map.has_key?(input, key) end)
+
+    if is_binary(path) and payload? do
+      [
+        %{
+          path: path,
+          old_text: input["oldText"],
+          new_text: input["newText"] || input["diff"]
+        }
+      ]
+    else
+      []
+    end
+  end
+
+  defp edit_fingerprint(changes) do
+    changes
+    |> :erlang.term_to_binary([:deterministic])
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
   end
 
   defp edit_input(update) do
@@ -953,13 +765,51 @@ defmodule Ecrits.AcpAgent.AcpStream do
   defp update_text(%{"content" => text}) when is_binary(text), do: text
   defp update_text(_update), do: nil
 
+  defp final_message?(%{"final" => true}), do: true
+
+  defp final_message?(update),
+    do: get_in(update, ["_meta", "ex_mcp", "final"]) == true
+
   defp tool_call_id(update) do
     Map.get(update, "toolCallId") || Map.get(update, "id") || Ecto.UUID.generate()
   end
 
   defp tool_name(update) do
-    Map.get(update, "toolName") || Map.get(update, "title")
+    input = Map.get(update, "rawInput") || Map.get(update, "input")
+
+    normalize_tool_name(Map.get(update, "toolName") || Map.get(update, "title"), input)
   end
+
+  @doc false
+  def normalize_tool_name(reported_name, input \\ nil) do
+    canonical_mcp_tool_name(input) || normalize_reported_tool_name(reported_name)
+  end
+
+  defp canonical_mcp_tool_name(%{"server" => server, "tool" => tool})
+       when is_binary(server) and is_binary(tool) do
+    server = String.trim(server)
+    tool = String.trim(tool)
+
+    cond do
+      server == "" or tool == "" -> nil
+      String.starts_with?(tool, server <> ".") -> tool
+      true -> server <> "." <> tool
+    end
+  end
+
+  defp canonical_mcp_tool_name(_input), do: nil
+
+  defp normalize_reported_tool_name(name) when is_binary(name) do
+    case String.split(String.trim(name), ".", parts: 3) do
+      ["mcp", server, tool] when server != "" and tool != "" ->
+        if String.starts_with?(tool, server <> "."), do: tool, else: server <> "." <> tool
+
+      _other ->
+        name
+    end
+  end
+
+  defp normalize_reported_tool_name(_name), do: nil
 
   defp tool_name?(name), do: is_binary(name) and String.trim(name) != ""
 
@@ -968,93 +818,6 @@ defmodule Ecrits.AcpAgent.AcpStream do
       do: put_in(state.tool_titles[tool_call_id], name),
       else: state
   end
-
-  defp track_file_operation(state, file_operation_id, name, update) do
-    previous = Map.get(state.file_operations, file_operation_id, %{})
-    operation = Map.get(previous, :operation) || recognized_file_operation(name)
-
-    if is_binary(operation) do
-      arguments = tool_arguments(update)
-      kind = tool_kind(update)
-
-      metadata =
-        previous
-        |> Map.put(:operation, operation)
-        |> put_present(
-          :path,
-          Map.get(update, "path") || Map.get(update, :path) ||
-            argument_value(arguments, "path")
-        )
-        |> put_present(
-          :query,
-          Map.get(update, "query") || Map.get(update, :query) ||
-            argument_value(arguments, "query")
-        )
-
-      state
-      |> maybe_put_tool_title(file_operation_id, operation)
-      |> maybe_put_tool_kind(file_operation_id, kind)
-      |> update_in([:file_operation_ids], &MapSet.put(&1, file_operation_id))
-      |> put_in([:file_operations, file_operation_id], metadata)
-    else
-      state
-    end
-  end
-
-  defp recognized_file_operation(name) do
-    if file_operation_name?(name), do: name
-  end
-
-  defp maybe_put_tool_kind(state, _file_operation_id, nil), do: state
-
-  defp maybe_put_tool_kind(state, file_operation_id, kind) do
-    put_in(state.tool_kinds[file_operation_id], kind)
-  end
-
-  defp file_operation_call?(state, file_operation_id) do
-    MapSet.member?(state.file_operation_ids, file_operation_id)
-  end
-
-  defp file_operation_started?(state, file_operation_id) do
-    MapSet.member?(state.file_operation_started_ids, file_operation_id)
-  end
-
-  defp mark_file_operation_started(state, file_operation_id) do
-    update_in(state.file_operation_started_ids, &MapSet.put(&1, file_operation_id))
-  end
-
-  defp file_operation_event(type, file_operation_id, status, update, state) do
-    metadata = Map.get(state.file_operations, file_operation_id, %{})
-
-    %{
-      type: type,
-      file_operation_id: file_operation_id,
-      tool_call_id: file_operation_id,
-      operation: Map.get(metadata, :operation),
-      path: Map.get(metadata, :path),
-      query: Map.get(metadata, :query),
-      kind: tool_kind(update) || Map.get(state.tool_kinds, file_operation_id),
-      status: status
-    }
-  end
-
-  defp file_operation_id(update) do
-    Map.get(update, "fileOperationId") || tool_call_id(update)
-  end
-
-  defp file_operation_name(update) do
-    Map.get(update, "operation") || tool_name(update)
-  end
-
-  defp file_operation_status(%{"success" => false}), do: "failed"
-  defp file_operation_status(update), do: Map.get(update, "status")
-
-  defp argument_value(arguments, key) do
-    Map.get(arguments, key) || Map.get(arguments, String.to_existing_atom(key))
-  end
-
-  defp put_present(map, _key, value) when value in [nil, ""], do: map
-  defp put_present(map, key, value), do: Map.put(map, key, value)
 
   defp tool_arguments(update) do
     case Map.get(update, "rawInput") || Map.get(update, "input") do
@@ -1079,18 +842,8 @@ defmodule Ecrits.AcpAgent.AcpStream do
           extract_content_text(Map.get(update, "content")) ||
           inspect(Map.get(update, "rawOutput") || "")
     end
-    |> truncate_file_operation_reason()
+    |> to_string()
   end
-
-  defp truncate_file_operation_reason(reason) when is_binary(reason) do
-    if String.length(reason) <= @file_operation_reason_max_chars do
-      reason
-    else
-      String.slice(reason, 0, @file_operation_reason_max_chars) <> "..."
-    end
-  end
-
-  defp truncate_file_operation_reason(reason), do: inspect(reason)
 
   defp extract_content_text(content) when is_list(content) do
     content
@@ -1115,25 +868,22 @@ defmodule Ecrits.AcpAgent.AcpStream do
 
   # ── adapter_opts ────────────────────────────────────────────────────
 
+  @doc false
+  def provider_adapter_opts(adapter, cwd, opts), do: exmcp_adapter_opts(adapter, cwd, opts)
+
   defp exmcp_adapter_opts(adapter, cwd, opts) when adapter in [Codex, CodexAdapter] do
     [cwd: cwd]
     |> maybe_put(:model, Keyword.get(opts, :model))
-    |> maybe_put(:approvalPolicy, codex_approval_policy(Keyword.get(opts, :approval_policy)))
-    |> maybe_put(:sandbox, Keyword.get(opts, :sandbox))
-    # Ecrits embeds Codex inside a document workspace. It must not inherit or
-    # generate personal Codex memories, which would otherwise become hidden
-    # authoring guidance for an ACP turn.
-    |> Keyword.put(:disable_memories, true)
-    # Only Ecrits' per-agent document MCP endpoint can receive unattended
-    # write elicitation in full-workspace mode. Shell/file escalations and
-    # every other MCP server stay denied by the adapter.
-    |> Keyword.put(:auto_approve_mcp_servers, ["doc"])
-    |> maybe_put(:mcp_servers, present_list(Keyword.get(opts, :mcp_servers)))
+    |> Keyword.put(:mode_id, codex_mode(opts))
+    |> maybe_put(:reasoning_effort, Keyword.get(opts, :reasoning_effort))
   end
 
-  defp exmcp_adapter_opts(Claude, cwd, opts) do
+  defp exmcp_adapter_opts(ClaudeAdapter, cwd, opts) do
     [cwd: cwd]
     |> maybe_put(:model, Keyword.get(opts, :model))
+    # Keep provider-native reads available in every rail access tier. Mutations
+    # still arrive as ACP permission requests and are decided by PermissionHandler.
+    |> Keyword.put(:permission_mode, "default")
     |> maybe_put(
       :max_thinking_tokens,
       claude_thinking_budget(Keyword.get(opts, :reasoning_effort))
@@ -1161,7 +911,7 @@ defmodule Ecrits.AcpAgent.AcpStream do
            ) do
       {:ok,
        %{
-         adapter_opts: CodexHome.adapter_opts(isolation),
+         adapter_opts: Keyword.take(CodexHome.adapter_opts(isolation), [:env]),
          cleanup: fn ->
            if Map.get(isolation, :ephemeral?, true), do: CodexHome.cleanup(isolation)
          end
@@ -1172,60 +922,32 @@ defmodule Ecrits.AcpAgent.AcpStream do
   defp adapter_isolation(_adapter, _turn, _opts),
     do: {:ok, %{adapter_opts: [], cleanup: fn -> :ok end}}
 
-  defp file_handler_client_opts(client_opts, adapter, turn, opts, cwd)
-       when adapter in [Codex, CodexAdapter] do
-    read_only? = not acp_write_authorized?(opts)
-
-    # Ask mode is write-capable in intent but gated per-op: the handler needs
-    # to distinguish it from Read only so a refused write can tell the agent
-    # to request the user's approval in chat rather than presenting a silent
-    # read-only wall (board #459 — Ask lanes used to auto-reject with no path
-    # forward).
-    ask? =
-      read_only? and Keyword.get(opts, :sandbox) == "workspace-write" and
-        Keyword.get(opts, :approval_policy) in [:on_write, "on_write"]
-
+  @doc false
+  def permission_handler_client_opts(client_opts, adapter, opts, workspace_root)
+      when adapter in [CodexAdapter, ClaudeAdapter] do
     client_opts
-    |> Keyword.put(:handler, WorkspaceFileHandler)
+    |> Keyword.put(:handler, PermissionHandler)
     |> Keyword.put(
       :handler_opts,
-      workspace_root: turn[:workspace_root] || cwd,
-      document_path: turn[:document_path],
-      session_pid: turn[:session_pid],
-      expected_identity: turn[:expected_identity],
-      read_only?: read_only?,
-      ask?: ask?
+      access_control: access_control(opts),
+      workspace_root: workspace_root
     )
-    # These describe the handler's protocol surface, not the current user's
-    # authority. WorkspaceFileHandler remains the source of truth for explicit
-    # Full-workspace authority, active-document ownership, and conditional-write
-    # decisions. Ask mode stays read-only until it has a real approval round-trip.
-    # Keeping the dynamic tool set stable lets a Codex thread survive access/doc
-    # changes.
-    |> Keyword.put(
-      :capabilities,
-      %{"fs" => %{"readTextFile" => true, "writeTextFile" => true}}
-    )
+    |> Keyword.put(:capabilities, %{})
   end
 
-  defp file_handler_client_opts(client_opts, _adapter, _turn, _opts, _cwd), do: client_opts
+  def permission_handler_client_opts(client_opts, _adapter, _opts, _workspace_root),
+    do: client_opts
 
   defp document_lane?(turn, _opts) do
     is_binary(turn[:document_path]) and turn[:document_path] != ""
   end
 
-  # Full-workspace authority arrives in the turn opts as BOTH approval_policy
-  # "never" and permission_mode "dontAsk" (AgentConfig.Access). Accept either,
-  # so a plumbing drift that loses one field cannot silently downgrade a
-  # Full-workspace rail to a write-refusing handler (2026-07-19 take17: turn 1
-  # was denied with zero writes while the chip read Full workspace; the
-  # follow-up turn on the same rail wrote fine — see board #459). A turn
-  # carrying neither signal stays fail-closed read-only.
-  @doc false
-  def acp_write_authorized?(opts) do
-    Keyword.get(opts, :sandbox) == "workspace-write" and
-      (Keyword.get(opts, :approval_policy) in [:never, "never"] or
-         Keyword.get(opts, :permission_mode) == "dontAsk")
+  defp access_control(opts), do: Keyword.get(opts, :access_control, "read-only")
+
+  defp codex_mode(opts) do
+    if access_control(opts) == "read-only" or Keyword.get(opts, :sandbox) == "read-only",
+      do: "read-only",
+      else: "agent"
   end
 
   # Map the rail's Claude effort tier onto the thinking-token budget the Claude
@@ -1241,38 +963,43 @@ defmodule Ecrits.AcpAgent.AcpStream do
   defp claude_thinking_budget("ultracode"), do: 60_000
   defp claude_thinking_budget(_effort), do: nil
 
-  defp codex_approval_policy(nil), do: nil
-  defp codex_approval_policy(:never), do: "never"
-  defp codex_approval_policy(:on_request), do: "on-request"
-  defp codex_approval_policy(:on_write), do: "on-request"
-  defp codex_approval_policy(:always), do: "on-request"
-  defp codex_approval_policy(:on_failure), do: "on-failure"
-  # The access controls store these as snake_case STRINGS ("on_write"); codex
-  # only accepts the kebab-case vocabulary — an unknown value silently falls
-  # back to the user's own ~/.codex default policy, which is how a "read-only"
-  # rail session could end up running under whatever the CLI default was.
-  defp codex_approval_policy("on_write"), do: "on-request"
-  defp codex_approval_policy("on_request"), do: "on-request"
-  defp codex_approval_policy("always"), do: "on-request"
-  defp codex_approval_policy("on_failure"), do: "on-failure"
-  defp codex_approval_policy(other) when is_binary(other), do: other
-  defp codex_approval_policy(_other), do: nil
-
   # ── misc ────────────────────────────────────────────────────────────
 
   defp working_dir(turn, opts) do
-    cond do
-      is_binary(Keyword.get(opts, :cwd)) and File.dir?(Keyword.fetch!(opts, :cwd)) ->
-        Keyword.fetch!(opts, :cwd)
+    candidate =
+      cond do
+        is_binary(Keyword.get(opts, :cwd)) and File.dir?(Keyword.fetch!(opts, :cwd)) ->
+          Keyword.fetch!(opts, :cwd)
 
-      is_binary(turn.workspace_root) and Path.type(turn.workspace_root) == :absolute and
-          File.dir?(turn.workspace_root) ->
-        turn.workspace_root
+        is_binary(turn.workspace_root) and Path.type(turn.workspace_root) == :absolute and
+            File.dir?(turn.workspace_root) ->
+          turn.workspace_root
 
-      true ->
-        File.cwd!()
+        true ->
+          File.cwd!()
+      end
+
+    case canonical_workspace_root(candidate) do
+      {:ok, canonical} -> canonical
+      {:error, reason} -> raise "invalid ACP workspace root: #{inspect(reason)}"
     end
   end
+
+  @doc false
+  def canonical_workspace_root(path) when is_binary(path) do
+    with executable when is_binary(executable) <- System.find_executable("realpath"),
+         {canonical, 0} <- System.cmd(executable, [Path.expand(path)], stderr_to_stdout: true),
+         canonical <- String.trim(canonical),
+         true <- Path.type(canonical) == :absolute and File.dir?(canonical) do
+      {:ok, canonical}
+    else
+      nil -> {:error, :realpath_unavailable}
+      {message, status} -> {:error, {:realpath_failed, status, String.trim(message)}}
+      false -> {:error, :not_a_directory}
+    end
+  end
+
+  def canonical_workspace_root(_path), do: {:error, :invalid_path}
 
   # `Content` encodes a normalized turn; `Prompt` owns every agent-visible
   # instruction. A bare string remains the legacy `preamble <> string` shape,

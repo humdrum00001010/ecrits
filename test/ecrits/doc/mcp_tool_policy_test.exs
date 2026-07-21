@@ -12,6 +12,7 @@ defmodule Ecrits.Doc.MCPToolPolicyTest do
     names = Enum.map(tools, &(&1["namespace"] <> "." <> &1["name"]))
 
     assert names == ["doc.open_doc", "doc.find", "doc.edit"]
+    refute "doc.preflight" in names
     refute "doc.context" in names
     refute "doc.close_doc" in names
 
@@ -120,6 +121,9 @@ defmodule Ecrits.Doc.MCPToolPolicyTest do
              MCPToolPolicy.authorize_vfs_call("doc.context", %{})
 
     assert :ok = MCPToolPolicy.authorize_vfs_call("doc.find", %{})
+
+    assert {:error, %{"error" => "disabled_in_fuse_mode"}} =
+             MCPToolPolicy.authorize_vfs_call("doc.preflight", %{})
 
     assert {:error, %{"error" => "vfs_fallback_required"} = error} =
              MCPToolPolicy.authorize_vfs_call("doc.edit", %{})
@@ -430,10 +434,13 @@ defmodule Ecrits.Doc.MCPToolPolicyTest do
 
     assert stale_message =~ "reread the mounted projection"
 
-    # both pattern-level failures earn the corrected retry; commit failures do not
+    # Pattern-level failures earn one corrected retry. A commit-evidence race is
+    # retryable without consuming either the lookup or that corrected retry.
     for {:error, reason} <- [ambiguous], do: assert(MCPToolPolicy.retryable_find_error?(reason))
     assert MCPToolPolicy.retryable_find_error?(%{"error" => "find_pattern_not_committed"})
-    refute MCPToolPolicy.retryable_find_error?(%{"error" => "acp_commit_required"})
+    assert MCPToolPolicy.retryable_find_error?(%{"error" => "acp_commit_required"})
+    assert MCPToolPolicy.non_consuming_find_error?(%{"error" => "acp_commit_required"})
+    refute MCPToolPolicy.non_consuming_find_error?(%{"error" => "find_pattern_ambiguous"})
     refute MCPToolPolicy.retryable_find_error?(%{"error" => "exact_native_marker_find_required"})
 
     # once the retry is used, the same failure reads as terminal

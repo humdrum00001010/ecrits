@@ -30,6 +30,7 @@ defmodule Ecrits.EditorPreviewState do
       documentId: state.document.id,
       documentPath: state.document_path,
       deltaCount: state.canvas.preview_delta_count,
+      revisionCount: state.canvas.preview_revision_count,
       status: state.status,
       mode: "embedded-editor"
     })

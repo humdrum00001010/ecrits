@@ -15,7 +15,7 @@ defmodule Ecrits.Agent do
     role status body reason segment picks tool_call_id file_operation_id operation query id name title
     kind input output turn_id
     document_path document document_id doc applied failed composition_ops ops sets
-    delta_count highlights preview_steps scroll marker summary source path relative_path
+    delta_count revision_count revision highlights preview_steps scroll marker summary source path relative_path
     backend format ref hash version mode preview_snapshot edit_id preview_identity
     preview_unavailable preview_error composed_tool_call_ids
   )a

@@ -27,56 +27,129 @@ defmodule Ecrits.PromptTest do
     refute prompt =~ "JSONL"
   end
 
-  test "mounted VFS preamble keeps ACP mutations while allowing shell search" do
+  test "mounted VFS preamble allows direct edits or scripts without inventing a preflight tool" do
     if Ecrits.Fuse.DocMount.enabled?() do
       prompt = Prompt.acp_preamble(doc_vfs_mounted: true)
 
-      assert byte_size(prompt) <= 1900
-      assert prompt =~ "do not edit read-only requests"
-      assert prompt =~ "Open the document once with `doc.open_doc`"
-      assert prompt =~ "do not discover MCP resources"
-      assert prompt =~ "ACP read/search/edit for text and tables"
-      assert prompt =~ "shell search stays read-only"
-      assert prompt =~ "one paragraph group per line"
-      assert prompt =~ "preserving each line's trailing comma"
-      refute prompt =~ "Do not use resource discovery, shell/execute"
-      refute prompt =~ "zsh, rg"
-      assert prompt =~ "Keep every document mutation in ACP"
-      assert prompt =~ "hwp5txt, raw-HWP extraction, or scripted shell rewrites"
-      assert prompt =~ "For brief-driven fills"
-      assert prompt =~ "every field, list item, and table row"
-      assert prompt =~ "plausible value consistent with the user's request"
-      assert prompt =~ "internally consistent wherever they recur"
-      assert prompt =~ "never stamp placeholder markers"
-      refute prompt =~ "미기재"
-      assert prompt =~ "label, parentheses, and unit intact"
-      assert prompt =~ "Reread the mounted file immediately before composing each write"
-      assert prompt =~ "server may normalize between commits"
-      assert prompt =~ "one post-commit `doc.find`"
-      assert prompt =~ "one image-only `doc.edit`"
-      assert prompt =~ "exactly one payload node per insert"
-      assert prompt =~ "`table` with `cells`"
-      assert prompt =~ "Insert a new body paragraph on its own JSONL line"
-      assert prompt =~ "one ref-less `paragraph`"
-      assert prompt =~ "omit `ref` and char nodes"
-      refute prompt =~ "new heading or paragraph nodes are structural"
-      assert prompt =~ "marker must fit one rendered line"
-      assert prompt =~ "On an EINVAL rejection"
-      assert prompt =~ "restage the same change from that fresh read"
-      assert prompt =~ "pass `occurrence` (1-based, document order)"
-      refute prompt =~ "shell_tool = false"
-      refute prompt =~ "before shell"
-      refute prompt =~ "temp_path"
-      refute prompt =~ "mounted_at"
-      refute prompt =~ "first recipient"
-      refute prompt =~ "work-content"
-      refute prompt =~ "payment schedule"
-      refute prompt =~ "unresolved template"
-      refute prompt =~ "doc.context"
-      refute prompt =~ "/private/tmp"
-      refute prompt =~ "mv -f"
-      refute prompt =~ "cellPath"
-      refute prompt =~ "controlIndex"
+      ultracode_prompt =
+        Prompt.acp_preamble(
+          doc_vfs_mounted: true,
+          reasoning_effort: "ultracode"
+        )
+
+      assert byte_size(prompt) <= 7_000
+      assert byte_size(ultracode_prompt) <= 7_000
+      assert prompt =~ "Call `doc.open_doc` once and use the returned mount path"
+      assert prompt =~ "Python/Ruby writes are allowed"
+      assert prompt =~ "Direct file edits and workspace-local helper scripts are both valid"
+      assert prompt =~ "one fresh full read"
+      assert prompt =~ "SOURCE → FIELDS → MAP → transform"
+      assert prompt =~ "source-data sections only; exclude procedural instructions"
+      assert prompt =~ "never authorize a blind fill loop"
+      assert prompt =~ "MAP is the sole transform plan"
+      assert prompt =~ "transform only MAP destinations"
+      assert prompt =~ "Every source fact from source-data sections"
+      assert prompt =~ "require `unmapped_source_facts == []`"
+      assert prompt =~ "require `unresolved_fields == []`"
+      assert prompt =~ "list any fact with no destination instead of silently dropping it"
+      assert prompt =~ "Do not merely claim these lists are empty"
+      assert prompt =~ "verify the complete inventories, never a sample"
+      assert prompt =~ "Never initialize either result directly to `[]`"
+      assert prompt =~ "Keep SOURCE values as complete source literals"
+      assert prompt =~ "units or suffixes already present"
+      assert prompt =~ "Generate every mutation from MAP"
+      assert prompt =~ "preserve the pristine label, punctuation, spacing, parentheses, and units"
+      assert prompt =~ "replace only the placeholder or value span"
+      assert prompt =~ "prose facts such as jurisdiction"
+      assert prompt =~ "validate the parsed candidate bytes before the first rename"
+      assert prompt =~ "Post-commit checks are read-only"
+      assert prompt =~ "the rehearsal failed rather than reopening the projection"
+      assert prompt =~ "Freeze FIELDS from pristine before transform"
+      assert prompt =~ "stable group/node position or table cell coordinates"
+      assert prompt =~ "first complete field sequence as owner"
+      assert prompt =~ "second as subcontractor"
+
+      assert prompt =~
+               "If the write returns EINVAL, treat the candidate as rejected, not as proof of a stale read"
+
+      assert prompt =~
+               "Remove every changed pristine-blank paragraph outside a proven table-cell value block"
+
+      refute prompt =~ "retry the same change once from that fresh state"
+
+      assert prompt =~
+               "Parse and write the complete wrapper as one JSON value; never reconstruct line commas"
+
+      assert prompt =~ "Do not investigate or repair stale `previewText`"
+
+      assert prompt =~
+               "After successful `doc.edit`, run no further shell, projection, or MCP call"
+
+      refute prompt =~ "before the first numbered article"
+      refute prompt =~ "repair stale data"
+      refute prompt =~ "doc.preflight"
+      refute prompt =~ "preflight_contract"
+      refute prompt =~ "<mounted_at>.tmp"
+      refute prompt =~ "mandatory code order"
+      refute prompt =~ "write one workspace-local helper script"
+      refute {:vfs_preflight_tool_description, 0} in Prompt.__info__(:functions)
+    else
+      assert true
+    end
+  end
+
+  test "mounted VFS preamble protects table structure and native image ordering" do
+    if Ecrits.Fuse.DocMount.enabled?() do
+      prompt = Prompt.acp_preamble(doc_vfs_mounted: true)
+
+      assert prompt =~ "`char` nodes are derived runs and must not be edited or audited"
+      assert prompt =~ "Any paragraph before the first `cell` is structural"
+      assert prompt =~ "must remain byte-for-byte unchanged"
+      assert prompt =~ "Blank means `text.strip()` is empty"
+      assert prompt =~ "Classify using visible labels and local cell structure"
+      assert prompt =~ "blank or whitespace-only non-cell paragraph is layout"
+      assert prompt =~ "its own cell block or labeled row proves that exact node"
+      assert prompt =~ "zip values across every table `paragraph`"
+      assert prompt =~ "Target by `cell` coordinates and visible label"
+      assert prompt =~ "Preserve a label paragraph when its separate value paragraph"
+
+      assert prompt =~ "Match pristine nodes by insertion-adjusted stable identity"
+      assert prompt =~ "never positional-zip shifted group lists"
+
+      refute prompt =~
+               "compare each node at the same array position before and after the transform"
+
+      assert prompt =~
+               "Reject only when a matched node's own `text` changed and its new value contains a newline"
+
+      assert prompt =~ "never add or replace a `cells` matrix on an existing table payload"
+
+      assert prompt =~
+               "If a proven value cell has no paragraph, set that existing `cell` node's `text`"
+
+      assert prompt =~ "never insert a ref-less paragraph inside an existing table"
+      assert prompt =~ "EINVAL means no durable commit"
+      assert prompt =~ "stop before `doc.find` or `doc.edit`"
+      assert prompt =~ "attach exactly one new `table` payload"
+      assert prompt =~ "semantic preceding-anchor group"
+      assert prompt =~ "Compute structural anchors from pristine before inserting"
+
+      assert prompt =~
+               "a successful table-inserting rename is the final projection write for the turn"
+
+      assert prompt =~
+               "never attach a table to that new paragraph group"
+
+      assert prompt =~ "Use `doc.edit` only after the durable projection commit"
+      assert prompt =~ "stop before the image edit"
+      assert prompt =~ "Then verify read-only and never rewrite the projection"
+
+      assert prompt =~
+               "projection `previewText` and picture payloads are stale after the native edit"
+
+      refute prompt =~ "FileLane"
+      refute prompt =~ "search_text_file"
+      refute prompt =~ "edit_text_file"
     else
       assert true
     end

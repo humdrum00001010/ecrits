@@ -4,7 +4,7 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
   alias Ecrits.Doc.{Pool, Projection, ProjectionAudit, Rhwp}
 
   @work_items [
-    "웹 서비스의 접근성 진단과 우선순위 개선 목록 작성",
+    "웹 서비스 접근성 진단과 우선순위 개선 목록 작성",
     "핵심 화면 개선 가이드와 재검수 결과 보고서 작성",
     "운영 담당자용 접근성 유지관리 가이드 제공"
   ]
@@ -25,9 +25,9 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
   @hwpx_fixture Path.expand("../../fixtures/hwpx/real_contract.hwpx", __DIR__)
 
   @required_front_matter_texts [
-    {"contract_name", "◇ 계약명 : 웹 접근성 진단 및 개선 가이드 제작"},
+    {"contract_name", "◇ 계약명 : 웹 서비스 접근성 개선 용역"},
     {"contract_period", "◇ 계약기간 : 2026년 7월 20일부터 2026년 10월 31일까지"},
-    {"contract_amount", "◇ 계약 금액 : 금 88,000,000원정(￦88,000,000)(부가가치세 포함)"},
+    {"contract_amount", "◇ 계약 금액 : 금 팔천팔백만원정(￦88,000,000원)(부가가치세 포함)"},
     {"party_intro", @intro},
     {"supply_date", "◇ 원재료의 공급일 : 미기재"},
     {"supply_place", "◇ 원재료의 공급장소 : 미기재"},
@@ -71,7 +71,68 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
           ]
       end)
 
-    assert :ok = validate_projection(with_unrelated_party_annex)
+    assert {:error, issues} = validate_projection(with_unrelated_party_annex)
+    assert Enum.any?(issues, &(&1.id == "party_table"))
+  end
+
+  test "current brief requires its contract name, signing date, and five complete party tables" do
+    assert :ok = validate_projection(complete_projection())
+
+    assert ProjectionAudit.exact_paragraph_count(
+             complete_projection(),
+             "2026년 7월 20일"
+           ) == 6
+
+    wrong_name =
+      replace_text(
+        complete_projection(),
+        "◇ 계약명 : 웹 서비스 접근성 개선 용역",
+        "◇ 계약명 : 이전 계약명"
+      )
+
+    assert {:error, name_issues} = validate_projection(wrong_name)
+    assert Enum.any?(name_issues, &(&1.id == "contract_name"))
+
+    wrong_date = replace_signing_date(complete_projection(), "미기재")
+    assert {:error, date_issues} = validate_projection(wrong_date)
+    assert Enum.any?(date_issues, &(&1.id == "signing_date"))
+
+    missing_attachment_date =
+      replace_text(complete_projection(), "2026년 7월 20일", "년 월 일", occurrence: 6)
+
+    assert {:error, attachment_date_issues} = validate_projection(missing_attachment_date)
+    assert Enum.any?(attachment_date_issues, &(&1.id == "signing_date"))
+
+    omitted = drop_party_table_occurrence(complete_projection(), 5)
+    assert {:error, omitted_issues} = validate_projection(omitted)
+    assert Enum.any?(omitted_issues, &(&1.id == "party_table"))
+
+    incomplete =
+      replace_text(
+        complete_projection(),
+        "상호 또는 명칭 : 주식회사 에크리츠",
+        "상호 또는 명칭 :",
+        occurrence: 5
+      )
+
+    assert {:error, incomplete_issues} = validate_projection(incomplete)
+    assert Enum.any?(incomplete_issues, &(&1.id == "party_table"))
+  end
+
+  test "table matrices read an authored cell aggregate when the cell has no paragraph" do
+    projection = [
+      [
+        [
+          %{"type" => "table"},
+          %{"type" => "cell", "row" => 0, "col" => 0, "text" => "중재인 또는 중재기관"},
+          %{"type" => "cell", "row" => 0, "col" => 1, "text" => "미기재"}
+        ]
+      ]
+    ]
+
+    assert ProjectionAudit.table_matrices(projection) == [
+             [["중재인 또는 중재기관", "미기재"]]
+           ]
   end
 
   test "each required front-matter value is independently enforced" do
@@ -79,7 +140,9 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
       damaged = replace_text(complete_projection(), exact, exact <> " 손상")
 
       assert {:error, issues} = validate_projection(damaged)
-      assert Enum.any?(issues, &(&1.id == id)), "missing independent check for #{id}"
+      issue = Enum.find(issues, &(&1.id == id))
+      assert issue, "missing independent check for #{id}"
+      assert issue.detail.expected == exact
     end)
 
     signing_date_damaged = replace_signing_date(complete_projection(), "년 월 일")
@@ -270,7 +333,7 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
     one_amount =
       replace_text(
         complete_projection(),
-        "◇ 계약 금액 : 금 88,000,000원정(￦88,000,000)(부가가치세 포함)",
+        "◇ 계약 금액 : 금 팔천팔백만원정(￦88,000,000원)(부가가치세 포함)",
         "◇ 계약 금액 : 금 88,000,000원정(￦ )(부가가치세 포함)"
       )
 
@@ -283,7 +346,7 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
     projection =
       complete_projection()
       |> replace_text(
-        "◇ 계약 금액 : 금 88,000,000원정(￦88,000,000)(부가가치세 포함)",
+        "◇ 계약 금액 : 금 팔천팔백만원정(￦88,000,000원)(부가가치세 포함)",
         "◇ 계약 금액 : 금 88,000,000원정(￦ 88,000,000)(부가가치세 포함)"
       )
       |> replace_text(
@@ -330,7 +393,7 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
         @intro,
         "---------------(이하 ‘원사업자’)와 ------------(이하 ‘수급사업자’)는(은) 신의에 따라 성실히 계약상의 권리를 행사한다."
       )
-      |> replace_text("미기재", "년 월 일", occurrence: 3)
+      |> replace_text("2026년 7월 20일", "년 월 일", occurrence: 1)
 
     assert {:error, issues} = validate_projection(projection)
     assert Enum.any?(issues, &(&1.id == "party_intro"))
@@ -546,6 +609,121 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
              )
   end
 
+  test "semantic whitelist accepts the native empty anchor owned by the inserted schedule" do
+    native_anchor = [
+      %{
+        "type" => "paragraph",
+        "text" => "",
+        "paraShapeId" => 89,
+        "styleId" => 0,
+        "alignment" => "justify"
+      }
+    ]
+
+    completed = move_schedule_to_next_block(complete_projection(), native_anchor)
+
+    assert :ok =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine_projection(),
+               completed
+             )
+
+    native_with_trailing_anchors =
+      completed
+      |> insert_before_annex(native_anchor)
+      |> insert_before_annex(native_anchor)
+
+    assert :ok =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine_projection(),
+               native_with_trailing_anchors
+             )
+
+    unrelated_anchor = insert_before_annex(complete_projection(), native_anchor)
+
+    assert {:error, [%{reason: :unapproved_semantic_sequence}]} =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine_projection(),
+               unrelated_anchor
+             )
+  end
+
+  test "native body-end paragraphs remain ordered and immediately precede the schedule" do
+    completed = native_body_end_projection(complete_projection())
+
+    assert :ok = validate_projection(completed)
+
+    assert :ok =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine_projection(),
+               completed
+             )
+  end
+
+  test "native body-end accepts ref-less inserted paragraphs beside a styled source clause" do
+    pristine =
+      update_paragraph(
+        pristine_projection(),
+        @pristine_jurisdiction,
+        &Map.merge(&1, %{"paraShapeId" => 89, "styleId" => 0, "alignment" => "justify"})
+      )
+
+    completed =
+      complete_projection()
+      |> native_body_end_projection()
+      |> update_paragraph(
+        @jurisdiction,
+        &Map.merge(&1, %{"paraShapeId" => 89, "styleId" => 0, "alignment" => "justify"})
+      )
+
+    assert :ok =
+             ProjectionAudit.validate_standard_contract_semantic_diff(pristine, completed)
+  end
+
+  test "semantic whitelist permits the brief date in repeated attachment signature dates" do
+    assert :ok =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine_projection(),
+               complete_projection()
+             )
+  end
+
+  test "semantic whitelist permits the brief values in the direct-payment summary" do
+    pristine_summary =
+      expanded_table([
+        ["원 도 급 계약사항", "원 도 급 계 약 명(名)", "", ""],
+        ["", "최 초 계 약 금 액", "", ""],
+        ["", "계 약 기 간", "", ""],
+        ["하 도 급 계약사항", "하 도 급 계 약 명(名)", "", ""],
+        ["", "최 초 계 약 금 액", "", ""],
+        ["", "계 약 기 간", "", ""],
+        ["", "원사업자", "상호 와 대표자", ""],
+        ["", "", "주 소", ""],
+        ["", "수급사업자", "상호 와 대표자", ""],
+        ["", "", "주 소", ""]
+      ])
+
+    completed_summary =
+      expanded_table([
+        ["원 도 급 계약사항", "원 도 급 계 약 명(名)", "", "웹 서비스 접근성 개선 용역"],
+        ["", "최 초 계 약 금 액", "", "88,000,000원"],
+        ["", "계 약 기 간", "", "2026년 7월 20일부터 2026년 10월 31일까지"],
+        ["하 도 급 계약사항", "하 도 급 계 약 명(名)", "", "웹 서비스 접근성 개선 용역"],
+        ["", "최 초 계 약 금 액", "", "88,000,000원"],
+        ["", "계 약 기 간", "", "2026년 7월 20일부터 2026년 10월 31일까지"],
+        ["", "원사업자", "상호 와 대표자", "주식회사 블루버드 디자인랩 / 이서준"],
+        ["", "", "주 소", "미기재"],
+        ["", "수급사업자", "상호 와 대표자", "주식회사 에크리츠 / 김에크리츠"],
+        ["", "", "주 소", "미기재"]
+      ])
+
+    assert :ok =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               insert_before_annex(pristine_projection(), pristine_summary),
+               insert_before_annex(complete_projection(), completed_summary)
+             )
+  end
+
   test "semantic whitelist rejects invented or deleted unrelated content" do
     invented = insert_before_annex(complete_projection(), paragraph("합의되지 않은 현금 지급"))
 
@@ -600,11 +778,26 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
     assert Enum.any?(compact_issues, &(&1.reason == :unapproved_semantic_sequence))
   end
 
+  test "semantic table replacements allow engine-derived cell height reflow" do
+    pristine = put_arbitrator_value_cell_height(pristine_projection(), 282)
+    completed = put_arbitrator_value_cell_height(complete_projection(), 1_282)
+
+    assert :ok =
+             ProjectionAudit.validate_standard_contract_semantic_diff(pristine, completed)
+
+    damaged = put_arbitrator_value_cell_height(complete_projection(), 9_999)
+
+    assert {:error, issues} =
+             ProjectionAudit.validate_standard_contract_semantic_diff(pristine, damaged)
+
+    assert Enum.any?(issues, &(&1.reason == :unapproved_semantic_sequence))
+  end
+
   test "ordered semantic whitelist rejects clause and required-table relocation" do
     reordered_clauses =
       swap_blocks(
         complete_projection(),
-        &block_has_text?(&1, "◇ 계약명 : 웹 접근성 진단 및 개선 가이드 제작"),
+        &block_has_text?(&1, "◇ 계약명 : 웹 서비스 접근성 개선 용역"),
         &block_has_text?(&1, "◇ 계약기간 : 2026년 7월 20일부터 2026년 10월 31일까지")
       )
 
@@ -666,7 +859,7 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
     completed =
       complete_projection()
       |> replace_block_with_char_mirror(
-        "◇ 계약명 : 웹 접근성 진단 및 개선 가이드 제작",
+        "◇ 계약명 : 웹 서비스 접근성 개선 용역",
         "new-ref",
         1_100
       )
@@ -695,6 +888,68 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
              ProjectionAudit.validate_standard_contract_semantic_diff(pristine, shape_added)
 
     assert Enum.any?(shape_issues, &(&1.reason == :unapproved_semantic_sequence))
+  end
+
+  test "semantic whitelist requires all five party replacements and the signature after the first" do
+    assert :ok =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine_projection(),
+               complete_projection()
+             )
+
+    omitted = drop_party_table_occurrence(complete_projection(), 5)
+
+    assert {:error, omitted_issues} =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine_projection(),
+               omitted
+             )
+
+    assert Enum.any?(omitted_issues, &(&1.reason == :unapproved_semantic_sequence))
+
+    wrong_occurrence = complete_projection(signature_occurrence: 2)
+
+    assert {:error, signature_issues} =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine_projection(),
+               wrong_occurrence
+             )
+
+    assert Enum.any?(signature_issues, &(&1.reason == :unapproved_semantic_sequence))
+
+    extra_mutation =
+      replace_text(
+        complete_projection(),
+        "상호 또는 명칭 : 주식회사 에크리츠",
+        "상호 또는 명칭 : 주식회사 에크리츠 변경",
+        occurrence: 5
+      )
+
+    assert {:error, mutation_issues} =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine_projection(),
+               extra_mutation
+             )
+
+    assert Enum.any?(mutation_issues, &(&1.reason == :unapproved_semantic_sequence))
+  end
+
+  test "preserves the source party table that has no telephone paragraph" do
+    pristine = drop_party_telephone_occurrence(pristine_projection(), 3)
+    completed = drop_party_telephone_occurrence(complete_projection(), 3)
+
+    assert :ok = validate_projection(completed)
+
+    assert :ok =
+             ProjectionAudit.validate_standard_contract_semantic_diff(pristine, completed)
+
+    assert {:error, invented_issues} =
+             ProjectionAudit.validate_standard_contract_semantic_diff(
+               pristine,
+               complete_projection()
+             )
+
+    assert Enum.any?(invented_issues, &(&1.reason == :unapproved_semantic_sequence))
   end
 
   test "rejects malformed 5x5 payment candidates regardless of header damage" do
@@ -911,6 +1166,48 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
     end
   end
 
+  test "production demo validation uses the configured native marker occurrence" do
+    if Ehwp.available?() do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection-audit-occurrence-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(root)
+      document = Path.join(root, "repeated-native-target.hwp")
+      image = Path.join(root, "signature.png")
+      extractor = Path.join(root, "hwp5proc")
+      File.write!(image, "original-image-bytes")
+      write_native_target_document(document, 5)
+
+      File.write!(extractor, """
+      #!/bin/sh
+      if [ "$1" = "ls" ]; then
+        printf 'BinData/BIN0001.png\\n'
+      elif [ "$1" = "cat" ]; then
+        printf 'original-image-bytes'
+      fi
+      """)
+
+      File.chmod!(extractor, 0o755)
+      on_exit(fn -> File.rm_rf(root) end)
+      marker_geometry = native_marker_geometry(document, occurrence: 1)
+      completed = complete_projection(signature: {:geometry, marker_geometry})
+
+      assert :ok =
+               ProjectionAudit.validate_standard_contract_demo(
+                 completed,
+                 document,
+                 image,
+                 executable: extractor,
+                 pristine_projection: pristine_projection()
+               )
+    else
+      IO.puts("\n[skip] ehwp NIF unavailable; skipping native occurrence proof")
+    end
+  end
+
   test "a pristine HWPX projection survives ACP write-back and disk reprojection" do
     if ehwp_available?(@hwpx_fixture) do
       root =
@@ -957,7 +1254,7 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
     assert ProjectionAudit.exact_paragraph_count(
              projection,
              "대표자 성명 : 김에크리츠 (인)"
-           ) == 1
+           ) == 5
 
     assert ProjectionAudit.exact_paragraph_count(projection, "김에크리츠") == 0
   end
@@ -968,15 +1265,16 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
 
   defp complete_projection(opts \\ []) do
     signature = Keyword.get(opts, :signature, :recipient)
+    signature_occurrence = Keyword.get(opts, :signature_occurrence, 1)
     schedule = Keyword.get(opts, :schedule, :expanded)
     arbitrator = Keyword.get(opts, :arbitrator, "미기재")
 
-    [
+    before_parties =
       [
         baseline_picture_block(),
-        paragraph("◇ 계약명 : 웹 접근성 진단 및 개선 가이드 제작"),
+        paragraph("◇ 계약명 : 웹 서비스 접근성 개선 용역"),
         paragraph("◇ 계약기간 : 2026년 7월 20일부터 2026년 10월 31일까지"),
-        paragraph("◇ 계약 금액 : 금 88,000,000원정(￦88,000,000)(부가가치세 포함)"),
+        paragraph("◇ 계약 금액 : 금 팔천팔백만원정(￦88,000,000원)(부가가치세 포함)"),
         payment_table(),
         paragraph("◇ 원재료의 공급일 : 미기재"),
         paragraph("◇ 원재료의 공급장소 : 미기재"),
@@ -997,17 +1295,21 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
         paragraph("하. 계약갱신 여부에 대한 최고기한 : 미기재"),
         paragraph("거. 이행거절을 위한 기성금 등의 미지급 횟수 : 미기재 회 미지급"),
         paragraph(@intro),
-        paragraph("미기재"),
-        party_table(signature),
+        paragraph("2026년 7월 20일")
+      ]
+
+    after_parties =
+      [
         arbitration_table(arbitrator),
         body_end_block(schedule),
         paragraph("【별첨】")
       ]
-    ]
+
+    [before_parties ++ completed_party_blocks(signature, signature_occurrence) ++ after_parties]
   end
 
   defp pristine_projection do
-    [
+    before_parties =
       [
         baseline_picture_block(),
         paragraph("◇ 계약명 :"),
@@ -1033,8 +1335,11 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
         paragraph("하. 계약갱신 여부에 대한 최고기한 : 년 월 일까지"),
         paragraph("거. 이행거절을 위한 기성금 등의 미지급 횟수 : 회 미지급"),
         paragraph(@pristine_intro),
-        paragraph("년 월 일"),
-        pristine_party_table(),
+        paragraph("년 월 일")
+      ]
+
+    after_parties =
+      [
         arbitration_table(""),
         [
           %{"type" => "paragraph", "text" => @pristine_jurisdiction},
@@ -1042,7 +1347,8 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
         ],
         paragraph("【별첨】")
       ]
-    ]
+
+    [before_parties ++ pristine_party_blocks() ++ after_parties]
   end
 
   defp pristine_payment_table do
@@ -1144,6 +1450,74 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
       end)
 
     List.flatten(payloads)
+  end
+
+  defp party_tables(signature, signature_occurrence) do
+    Enum.map(1..5, fn occurrence ->
+      party_table(if(occurrence == signature_occurrence, do: signature, else: :none))
+    end)
+  end
+
+  defp completed_party_blocks(signature, signature_occurrence) do
+    [first | rest] = party_tables(signature, signature_occurrence)
+    date = paragraph("2026년 7월 20일")
+
+    [
+      first,
+      date,
+      Enum.at(rest, 0),
+      date,
+      date,
+      Enum.at(rest, 1),
+      date,
+      Enum.at(rest, 2),
+      date,
+      Enum.at(rest, 3)
+    ]
+  end
+
+  defp pristine_party_blocks do
+    table = pristine_party_table()
+
+    [
+      table,
+      paragraph("20____년 ____월 ____일"),
+      table,
+      paragraph("년 월 일"),
+      paragraph("년 월 일"),
+      table,
+      paragraph("년 월 일"),
+      table,
+      paragraph("년 월 일"),
+      table
+    ]
+  end
+
+  defp drop_party_telephone_occurrence([blocks], occurrence) do
+    {blocks, _seen} =
+      Enum.map_reduce(blocks, 0, fn block, seen ->
+        texts = Enum.map(block, &Map.get(&1, "text"))
+
+        if "원사업자" in texts and "수급사업자" in texts do
+          seen = seen + 1
+
+          block =
+            if seen == occurrence do
+              Enum.reject(block, fn node ->
+                Map.get(node, "type") == "paragraph" and
+                  String.starts_with?(Map.get(node, "text", ""), "전화번호")
+              end)
+            else
+              block
+            end
+
+          {block, seen}
+        else
+          {block, seen}
+        end
+      end)
+
+    [blocks]
   end
 
   defp signature_picture({:geometry, marker}) do
@@ -1286,6 +1660,36 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
     [section]
   end
 
+  defp native_body_end_projection([section]) do
+    native_anchor = %{
+      "type" => "paragraph",
+      "text" => "",
+      "paraShapeId" => 89,
+      "styleId" => 0,
+      "alignment" => "justify"
+    }
+
+    section =
+      Enum.flat_map(section, fn block ->
+        if Enum.any?(block, &match?(%{"type" => "paragraph", "text" => @body_text}, &1)) do
+          table_index = Enum.find_index(block, &match?(%{"type" => "table"}, &1))
+          schedule_payloads = Enum.drop(block, table_index)
+
+          [
+            paragraph(@jurisdiction),
+            paragraph(Enum.at(@work_items, 0)),
+            paragraph(Enum.at(@work_items, 1)),
+            paragraph(Enum.at(@work_items, 2)),
+            [native_anchor | schedule_payloads]
+          ]
+        else
+          [block]
+        end
+      end)
+
+    [section]
+  end
+
   defp real_pristine_shape_projection do
     complete_projection(schedule: :compact)
     |> move_schedule_to_next_block(paragraph(""))
@@ -1316,6 +1720,20 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
       [actual | _rows] -> actual == headers
       _matrix -> false
     end)
+  end
+
+  defp drop_party_table_occurrence([section], wanted_occurrence) do
+    {section, _occurrence} =
+      Enum.flat_map_reduce(section, 0, fn block, occurrence ->
+        if block_has_table_headers?(block, ["원사업자", "수급사업자"]) do
+          occurrence = occurrence + 1
+          {if(occurrence == wanted_occurrence, do: [], else: [block]), occurrence}
+        else
+          {[block], occurrence}
+        end
+      end)
+
+    [section]
   end
 
   defp swap_blocks([section], first?, second?) do
@@ -1396,7 +1814,7 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
     Enum.reverse(result)
   end
 
-  defp native_marker_geometry(path) do
+  defp native_marker_geometry(path, opts \\ []) do
     target = "대표자 성명 : 김에크리츠 (인)"
     marker_offset = String.length("대표자 성명 : 김에크리츠 ")
     marker_length = String.length("(인)")
@@ -1411,10 +1829,13 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
       assert {:ok, matches_json} = Ehwp.find(handle, target, case_sensitive: true)
       assert {:ok, matches} = Jason.decode(matches_json)
 
-      assert [match] =
-               Enum.filter(matches, fn match ->
-                 match["length"] == String.length(target)
-               end)
+      exact =
+        Enum.filter(matches, fn match ->
+          match["length"] == String.length(target)
+        end)
+
+      occurrence = Keyword.get(opts, :occurrence, 1)
+      assert match = Enum.at(exact, occurrence - 1)
 
       assert %{
                "sec" => section,
@@ -1462,21 +1883,23 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
     end
   end
 
-  defp write_native_target_document(path) do
+  defp write_native_target_document(path, recipient_occurrences \\ 1) do
     {:ok, handle} = Rhwp.new()
 
     try do
+      rows =
+        Enum.map(1..recipient_occurrences, fn _occurrence ->
+          [
+            "대표자 성명 : 이서준 (인)",
+            "대표자 성명 : 김에크리츠 (인)"
+          ]
+        end)
+
       assert {:ok, _result} =
                Rhwp.edit(handle, %{
                  "op" => "insert_table",
                  "ref" => "end",
-                 "cells" => [
-                   ["원사업자", "수급사업자"],
-                   [
-                     "대표자 성명 : 이서준 (인)",
-                     "대표자 성명 : 김에크리츠 (인)"
-                   ]
-                 ]
+                 "cells" => [["원사업자", "수급사업자"] | rows]
                })
 
       assert {:ok, _result} = Rhwp.save(handle, path: path, format: :hwp)
@@ -1520,6 +1943,38 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
 
   defp paragraph(text), do: [%{"type" => "paragraph", "text" => text}]
 
+  defp update_paragraph([section], text, update) do
+    [
+      Enum.map(section, fn block ->
+        Enum.map(block, fn
+          %{"type" => "paragraph", "text" => ^text} = paragraph -> update.(paragraph)
+          payload -> payload
+        end)
+      end)
+    ]
+  end
+
+  defp put_arbitrator_value_cell_height([section], height) do
+    [
+      Enum.map(section, fn block ->
+        if Enum.any?(block, &match?(%{"type" => "paragraph", "text" => "중재인 또는 중재기관"}, &1)) do
+          Enum.map(block, fn
+            %{"type" => "table"} = table ->
+              Map.put(table, "tableHeight", 1_282)
+
+            %{"type" => "cell", "row" => 0, "col" => 1} = cell ->
+              Map.put(cell, "height", height)
+
+            payload ->
+              payload
+          end)
+        else
+          block
+        end
+      end)
+    ]
+  end
+
   defp replace_text(projection, old, new, opts \\ []) do
     target_occurrence = Keyword.get(opts, :occurrence, 1)
     {projection, _seen} = replace_text(projection, old, new, target_occurrence, 0)
@@ -1551,7 +2006,7 @@ defmodule Ecrits.Doc.ProjectionAuditTest do
         [%{"type" => "paragraph", "text" => @intro}] = block, :before_intro ->
           {block, :after_intro}
 
-        [%{"type" => "paragraph", "text" => "미기재"}], :after_intro ->
+        [%{"type" => "paragraph", "text" => _date}], :after_intro ->
           {paragraph(replacement), :done}
 
         block, state ->

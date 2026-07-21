@@ -17,11 +17,17 @@ defmodule Ecrits.DocumentCanvasState do
     field :document_format, :string
     field :bytes_url, :string
     field :preview_final_bytes_url, :string
+    field :preview_snapshot_pinned?, :boolean, default: false
     field :page_count, :integer, default: 0
     field :scroll_top, :integer, default: 0
     field :scroll_left, :integer, default: 0
     field :mirror?, :boolean, default: false
     field :preview_turn_id, :string
+    field :preview_edit_id, :string
+    field :preview_revision, :string
+    field :preview_revision_count, :integer, default: 0
+    field :preview_ops, :string, default: "[]"
+    field :preview_sets, :string, default: "[]"
     field :preview_text, :string, default: ""
     field :preview_delta_count, :integer, default: 0
     field :preview_highlights, :string, default: "[]"
@@ -71,8 +77,14 @@ defmodule Ecrits.DocumentCanvasState do
       localDocumentFormat: state.document_format,
       bytesUrl: state.bytes_url,
       previewFinalBytesUrl: state.preview_final_bytes_url,
+      previewSnapshotPinned: state.preview_snapshot_pinned?,
       editorMirror: state.mirror?,
       previewTurnId: state.preview_turn_id,
+      previewEditId: state.preview_edit_id,
+      previewRevision: state.preview_revision,
+      previewRevisionCount: state.preview_revision_count,
+      previewOps: state.preview_ops,
+      previewSets: state.preview_sets,
       previewText: state.preview_text,
       previewDeltaCount: state.preview_delta_count,
       previewHighlights: state.preview_highlights,
@@ -91,11 +103,17 @@ defmodule Ecrits.DocumentCanvasState do
       :document_format,
       :bytes_url,
       :preview_final_bytes_url,
+      :preview_snapshot_pinned?,
       :page_count,
       :scroll_top,
       :scroll_left,
       :mirror?,
       :preview_turn_id,
+      :preview_edit_id,
+      :preview_revision,
+      :preview_revision_count,
+      :preview_ops,
+      :preview_sets,
       :preview_text,
       :preview_delta_count,
       :preview_highlights,
@@ -111,10 +129,13 @@ defmodule Ecrits.DocumentCanvasState do
     |> validate_length(:bytes_url, max: 8_192)
     |> validate_length(:preview_final_bytes_url, max: 8_192)
     |> validate_length(:preview_turn_id, max: 500)
+    |> validate_length(:preview_edit_id, max: 500)
+    |> validate_length(:preview_revision, max: 500)
     |> validate_number(:page_count, greater_than_or_equal_to: 0)
     |> validate_number(:scroll_top, greater_than_or_equal_to: 0)
     |> validate_number(:scroll_left, greater_than_or_equal_to: 0)
     |> validate_number(:preview_delta_count, greater_than_or_equal_to: 0)
+    |> validate_number(:preview_revision_count, greater_than_or_equal_to: 0)
   end
 
   defp relation_params(attrs) do

@@ -33,7 +33,9 @@ defmodule Ecrits.AcpAgent.ProviderStatusTest do
   test "ACP sessions receive only the existing doc MCP server" do
     agent_id = "permission-boundary-agent"
 
-    assert [%{"name" => "doc", "url" => url}] = AcpAgent.mcp_servers(agent_id)
+    assert [%{"type" => "http", "name" => "doc", "url" => url}] =
+             AcpAgent.mcp_servers(agent_id)
+
     assert URI.parse(url).path == "/mcp/doc-tools/#{agent_id}"
   end
 
@@ -87,7 +89,39 @@ defmodule Ecrits.AcpAgent.ProviderStatusTest do
            ] = AcpAgent.integration_options()
   end
 
+  @tag :tmp_dir
+  test "provider status probes the same stable Codex CLI used by the adapter", %{tmp_dir: tmp_dir} do
+    transient_dir = Path.join([tmp_dir, "bunx-cache", "node_modules", ".bin"])
+    stable_dir = Path.join(tmp_dir, "stable-bin")
+
+    put_fake_cli!(transient_dir, "codex", """
+    echo "Session expired. Please log in again."
+    exit 0
+    """)
+
+    stable_codex =
+      put_fake_cli!(stable_dir, "codex", """
+      echo "Logged in with ChatGPT"
+      exit 0
+      """)
+
+    put_fake_cli!(stable_dir, "claude", """
+    printf '%s\n' '{"loggedIn":true}'
+    exit 0
+    """)
+
+    System.put_env("PATH", Enum.join([transient_dir, stable_dir], ":"))
+
+    assert [
+             %{id: "codex", status: :ready, detail: codex_detail},
+             %{id: "claude", status: :ready}
+           ] = AcpAgent.integration_options()
+
+    assert codex_detail == "codex at #{stable_codex}"
+  end
+
   defp put_fake_cli!(dir, name, body) do
+    File.mkdir_p!(dir)
     path = Path.join(dir, name)
     File.write!(path, ["#!/bin/sh\n", body])
     File.chmod!(path, 0o755)

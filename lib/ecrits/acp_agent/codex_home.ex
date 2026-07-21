@@ -55,17 +55,7 @@ defmodule Ecrits.AcpAgent.CodexHome do
 
   @spec adapter_opts(isolation()) :: keyword()
   def adapter_opts(%{} = isolation) do
-    # Conversation-keyed homes MUST survive adapter teardown: codex stores its
-    # thread rollouts under CODEX_HOME, and deleting them on session stop is
-    # what silently broke thread/resume — the revived agent lost all memory
-    # while the rail still displayed the transcript. They live under the tmp
-    # root, so the OS reclaims them eventually.
-    [
-      env: isolation.env,
-      use_permission_profile: true,
-      expected_permission_profile: isolation.permission_profile,
-      on_terminate: fn -> if Map.get(isolation, :ephemeral?, true), do: cleanup(isolation) end
-    ]
+    [env: isolation.env]
   end
 
   @spec cleanup(isolation()) :: :ok
@@ -102,7 +92,7 @@ defmodule Ecrits.AcpAgent.CodexHome do
         [{"CODEX_HOME", home}]
       end
 
-    if bun_node_shim?(node), do: env ++ [{"NODE", false}], else: env
+    if bun_node_shim?(node), do: env ++ [{"NODE", ""}], else: env
   end
 
   defp bun_node_shim?(path) when is_binary(path) do
@@ -207,9 +197,9 @@ defmodule Ecrits.AcpAgent.CodexHome do
          path,
          user_home
        ) do
-    # Keep ordinary shell search available. Document profiles are read-only so
-    # the provider can inspect the workspace while every mutation remains
-    # mediated by the ACP file handler.
+    # Keep native search and patch tools available. The document read-only
+    # profile stays read-only; the workspace profile writes only inside the
+    # workspace subtree and still denies personal homes.
     shell_tool = if document_lane?, do: "shell_tool = true\n", else: ""
 
     document_profiles =
@@ -240,8 +230,8 @@ defmodule Ecrits.AcpAgent.CodexHome do
 
         [permissions.#{@document_workspace_profile}.filesystem]
         \":minimal\" = \"read\"
-        #{tool_grants}\"#{expanded_workspace_root}\" = \"read\"
-        \"#{expanded_workspace_root}/**\" = \"read\"
+        #{tool_grants}\"#{expanded_workspace_root}\" = \"write\"
+        \"#{expanded_workspace_root}/**\" = \"write\"
         \"#{expanded_home}/**\" = \"deny\"
         \"#{expanded_global_home}/**\" = \"deny\"
         """
@@ -295,41 +285,50 @@ defmodule Ecrits.AcpAgent.CodexHome do
     playbook = """
     # Editing the mounted document projection
 
-    The open document is served as ONE `.jsonl` file: a single JSON value laid
-    out one paragraph group per line. Line N is paragraph group N's whole
-    payload array. Raw newlines are reserved record separators; newlines inside
-    text stay escaped as `\\n`.
+    The open document is one `.jsonl` JSON value. Keep the two opening `[` wrapper lines and two closing `]` wrapper lines. Between them keep one paragraph group per line, with a comma after every inner group line except the last. Line N is group N's whole payload array. Do not serialize the whole root as one line.
+    Raw newlines are record separators; text newlines stay escaped as `\\n`.
 
     ## The shape of a good edit turn
 
-    1. `doc.open_doc {path: "current"}` once — it returns the mounted path.
-    2. Locate with line-based search on the mounted file (it is workspace-
-       scoped and read-only): the matching LINE is your edit target.
-    3. Read that exact line, build the replacement line from what you just
-       read (never from memory of an earlier search display — space runs in
-       forms are width-exact), keep the trailing comma.
-    4. Write the whole file once with your line(s) replaced. Do not pre-verify
-       counts or re-check your own strings first: the write is compare-and-swap
-       and fails closed — a `stale_projection` reply means reread and rewrite,
-       an `EINVAL` means your base predates the last commit, so reread and
-       restage. One corrected retry is normal, silent corruption is impossible.
+    1. Call `doc.open_doc` once and use the returned mount path.
+    2. Use native search/read plus `apply_patch` or Python/Ruby. Python/Ruby
+       writes are allowed. The matching paragraph-group LINE is the edit target.
+    3. Read that exact group immediately before patching, build the replacement
+       from the fresh read (space runs in forms are width-exact), and preserve
+       the trailing comma.
+    4. For a small edit, patch the required JSONL group lines. For a scripted
+       batch, transform one fresh full read in memory, write the complete result
+       to the exact sibling `.tmp` file, close it, then atomically rename it over
+       the target once. Never truncate the mounted target in place, use an
+       external temp, or run concurrent writers: one writer and one rename per
+       batch.
+    5. After the write returns, wait for the VFS write-back to settle. Boundedly
+       retry reading until the projection is valid UTF-8 JSONL and the intended
+       groups are present. A transient decode/read failure is in-flight state:
+       wait and retry; do not repair or rewrite transient bytes. Then discard
+       every saved line number and prior match. `EINVAL` means reread canonical
+       bytes and restage once. Never delete or rename a rejected projection temp
+       file.
+    6. Verify the durable document and preview before reporting success.
 
-    If ANY read or write of the mounted file fails with ENOENT (no such
-    file), the projection is simply not registered this turn: call
-    `doc.open_doc {path: "current"}` once, then retry the same command
-    unchanged.
+    If a native read or patch of the mounted file fails with ENOENT (no such
+    file), the projection is not registered this turn: call `doc.open_doc`
+    once, use its newly returned mount path, then retry the bounded operation.
 
     ### Example: change one field
 
     A search for `계약명` hits line 14. Read line 14, replace only the target
-    text inside it, write the file with line 14 swapped. That is the entire
-    edit — one read, one write.
+    text inside it, and apply that line-sized patch. That is the entire edit.
 
     ## Inserts
 
-    Everything inserts through the mounted file. INSIDE an existing line:
-    append one payload node to that line's payload array, e.g.
-    `{"type":"table","cells":[[...]],"header":true}`. A NEW PARAGRAPH: add a
+    Everything inserts through the mounted file. For a requested table after
+    Article 51 and before the annex, append it to the Article 51 group's payload array.
+    INSIDE that existing line, append only the `table` payload, e.g.
+    `{"type":"table","cells":[[...]],"header":true}`. Never append a paragraph
+    or title payload to that existing group. Never put embedded newlines inside
+    an existing paragraph or text node; create separate ref-less paragraph groups
+    after a fresh read. A NEW PARAGRAPH: add a
     new LINE at the right position holding exactly one ref-less node —
     `[{"type":"paragraph","text":"..."}]` — nothing else on the line, no
     "ref", no char nodes (the engine derives those). Never tell the user a
@@ -337,9 +336,12 @@ defmodule Ecrits.AcpAgent.CodexHome do
 
     ## The one native fallback
 
-    Only an explicitly requested picture uses `doc.find` (one post-commit
-    marker lookup; pass `occurrence` 1-based when the exact paragraph text
-    repeats) then `doc.edit` with the returned ref verbatim.
+    Use `doc.edit` only for an IR-inexpressible native operation such as image
+    or signature insertion. For that operation, use one post-edit `doc.find`
+    marker lookup (pass `occurrence` 1-based when the exact paragraph text
+    repeats). `acp_commit_required` does not consume the marker lookup: reread
+    and repair the rejected ACP edit, verify its durable commit, then retry the
+    same exact lookup. Then use `doc.edit` with the returned ref verbatim.
     """
 
     File.write(Path.join(home, "AGENTS.md"), playbook)

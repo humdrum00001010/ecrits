@@ -826,7 +826,7 @@ defmodule Ecrits.Workspace.TurnFinalizerTest do
     assert {:ok, "[", {:invalid_ir_json, "["}} =
              OpenDocs.staged(workspace, "invalid-staged-contract.hwp")
 
-    refute_receive {:vfs_doc_edit_rejected, _info}, 20
+    refute_receive {:vfs_doc_edited, %{phase: :rejected}}, 20
 
     assert %{
              saved: [],
@@ -848,8 +848,9 @@ defmodule Ecrits.Workspace.TurnFinalizerTest do
 
     assert OpenDocs.staged(workspace, "invalid-staged-contract.hwp") == :error
 
-    assert_receive {:vfs_doc_edit_rejected,
+    assert_receive {:vfs_doc_edited,
                     %{
+                      phase: :rejected,
                       doc: "invalid-staged-contract.hwp",
                       edit_id: "invalid-stage-edit",
                       agent_id: "invalid-stage-agent",
@@ -993,8 +994,9 @@ defmodule Ecrits.Workspace.TurnFinalizerTest do
     assert [{"stale-reject.hwp", "{", {:invalid_ir_json, "{"}, ^new_identity}] =
              OpenDocs.staged_with_identity(workspace)
 
-    assert_receive {:vfs_doc_edit_rejected,
+    assert_receive {:vfs_doc_edited,
                     %{
+                      phase: :rejected,
                       doc: "stale-reject.hwp",
                       edit_id: "stale-reject-old-edit",
                       agent_id: "stale-reject-old-agent",
@@ -1002,7 +1004,7 @@ defmodule Ecrits.Workspace.TurnFinalizerTest do
                       turn_id: "stale-reject-old-turn"
                     }}
 
-    refute_receive {:vfs_doc_edit_rejected, _duplicate}, 20
+    refute_receive {:vfs_doc_edited, %{phase: :rejected}}, 20
   end
 
   test "successful settlement keeps a same-owner stage queued after exact removal pending", %{
@@ -1152,8 +1154,9 @@ defmodule Ecrits.Workspace.TurnFinalizerTest do
 
     assert new_identity.edit_id == "post-remove-reject-new-edit"
 
-    assert_receive {:vfs_doc_edit_rejected,
+    assert_receive {:vfs_doc_edited,
                     %{
+                      phase: :rejected,
                       doc: "post-remove-reject.hwp",
                       edit_id: "post-remove-reject-old-edit",
                       agent_id: "post-remove-reject-old-agent",
@@ -1161,7 +1164,7 @@ defmodule Ecrits.Workspace.TurnFinalizerTest do
                       turn_id: "post-remove-reject-old-turn"
                     }}
 
-    refute_receive {:vfs_doc_edit_rejected, _duplicate}, 20
+    refute_receive {:vfs_doc_edited, %{phase: :rejected}}, 20
   end
 
   test "Session finalizer flushes staged JSONL through Session.route without self-deadlock", %{

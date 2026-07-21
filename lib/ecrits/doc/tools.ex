@@ -1059,6 +1059,9 @@ defmodule Ecrits.Doc.Tools do
           "container" => "existing_paragraph_payload_array",
           "at" => "after_existing_anchor_payload",
           "action" => "insert_new_payload_node",
+          "commit_constraint" =>
+            "successful_table_inserting_rename_is_final_projection_write_for_turn",
+          "precommit_requirement" => "unmapped_source_facts_empty",
           "replace_container" => false,
           "insert_paragraph_arrays" => false,
           "copy_expanded_table_payloads" => false,
@@ -1138,9 +1141,14 @@ defmodule Ecrits.Doc.Tools do
       "rename" => "same_filesystem_atomic",
       "unsupported_structural_change" => %{"committed" => false, "errno" => "EINVAL"},
       "on_einval" => %{
-        "likely_cause" => "staged_bytes_built_from_a_read_older_than_the_last_commit",
+        "meaning" => "candidate_rejected_no_durable_commit",
+        "likely_causes" => [
+          "changed_pristine_blank_paragraph_outside_a_proven_table_cell",
+          "unsupported_payload_or_structure_change",
+          "stale_full_file_base"
+        ],
         "recover" =>
-          "reread_the_mounted_file_now_and_restage_the_same_change_from_that_fresh_read"
+          "reread the canonical projection, diff pristine to candidate, remove every changed pristine-blank paragraph outside a proven table-cell value block and any other structural offender, then retry one corrected candidate; never restage identical rejected bytes"
       },
       "on_enoent" => %{
         "likely_cause" => "projection_not_registered_this_turn_or_mount_was_recycled",
@@ -2120,10 +2128,12 @@ defmodule Ecrits.Doc.Tools do
   defp server_find(editor, pattern, type, args) do
     case maybe_elements(editor, type) do
       {:ok, nodes} ->
+        typed_nodes = filter_by_type(nodes, type)
+
         matches =
-          nodes
-          |> filter_by_type(type)
+          typed_nodes
           |> filter_by_pattern(pattern, find_case_sensitive?(args), find_regex?(args))
+          |> maybe_retry_native_marker_whitespace(typed_nodes, pattern, args)
           |> Enum.map(&element_to_match/1)
           |> limit_matches(find_limit(args))
 
@@ -3008,6 +3018,34 @@ defmodule Ecrits.Doc.Tools do
       hay = if case_sensitive?, do: text, else: String.downcase(text)
       String.contains?(hay, needle)
     end)
+  end
+
+  # HWP's native IR collapses layout whitespace in paragraph text while the
+  # mounted projection preserves the authored spacing. A post-commit picture
+  # lookup intentionally copies the exact projection paragraph, so retry only
+  # that marker-bearing lookup with whitespace-equivalent whole-text matching.
+  # The marker ref and offset are still derived from the native paragraph.
+  defp maybe_retry_native_marker_whitespace([], nodes, pattern, args)
+       when is_binary(pattern) do
+    marker = get(args, ["marker"])
+
+    if is_binary(marker) and marker != "" and not find_regex?(args) do
+      normalized_pattern = normalize_native_marker_text(pattern, find_case_sensitive?(args))
+
+      Enum.filter(nodes, fn node ->
+        normalize_native_marker_text(node_text(node), find_case_sensitive?(args)) ==
+          normalized_pattern
+      end)
+    else
+      []
+    end
+  end
+
+  defp maybe_retry_native_marker_whitespace(matches, _nodes, _pattern, _args), do: matches
+
+  defp normalize_native_marker_text(text, case_sensitive?) do
+    text = text |> String.replace(~r/\s+/u, " ") |> String.trim()
+    if case_sensitive?, do: text, else: String.downcase(text)
   end
 
   # Project an enumerator node into the doc.find match shape: ref/text/type plus

@@ -44,6 +44,80 @@ defmodule EcritsWeb.ColocatedHookArchitectureTest do
     refute File.exists?("assets/js/wasm_ops.ts")
   end
 
+  test "HWP edit preview renders the base page before framing saved highlights" do
+    source = File.read!(@hwp_engine_adapter)
+
+    assert source =~
+             ~r/for \(const page of pages\).*?this\.renderPage\(page\).*?this\.paintSavedEditHighlightsOnPage\(page\).*?this\.frameSavedEditHighlights\(rects\)/s
+
+    assert source =~
+             ~r/if \(!this\.rendered \|\| !this\.rendered\.get\(target\.pageIndex\)\) this\.renderPage\(target\.pageIndex\).*?previewBaseFrameReady = "true"/s
+
+    assert source =~
+             ~r/latestHighlightIndex.*?savedHighlightIndex.*?target.*?savedHighlightIndex === latestHighlightIndex/s
+  end
+
+  test "HWP edit preview paints pinned snapshot highlights without an authority round trip" do
+    source = File.read!(@hwp_engine_adapter)
+
+    assert source =~
+             ~r/handleLoadedPreviewHighlights.*?const pinnedSnapshot = this\.pinnedPreviewSnapshot\(\).*?syncPinnedPreviewPageFilter\(\).*?this\.renderSavedEditHighlights\(\)/s
+
+    assert source =~
+             ~r/pinnedPreviewSnapshot\(\).*?previewSnapshotPinned === true/s
+  end
+
+  test "HWP pinned snapshot previews ignore mutable authority events and refresh page filters" do
+    source = File.read!(@hwp_engine_adapter)
+
+    assert source =~
+             ~r/document\.preview\.revision_received.*?this\.mirror && !this\.pinnedPreviewSnapshot\(\).*?queuePreviewRevision/s
+
+    assert source =~
+             ~r/onPreviewAuthority.*?this\.mirror && !this\.pinnedPreviewSnapshot\(\).*?applyAuthoritativePreviewState/s
+
+    assert source =~
+             ~r/requestAuthoritativePreview.*?if \(!this\.mirror \|\| this\.pinnedPreviewSnapshot\(\)\) return false/s
+
+    assert source =~
+             ~r/syncPinnedPreviewPageFilter.*?previewPageIndexesForSavedHighlights.*?buildPageStack\(\).*?renderVisiblePages\(\)/s
+
+    assert source =~
+             ~r/handleLoadedPreviewHighlights.*?pinnedSnapshot.*?syncPinnedPreviewPageFilter\(\).*?renderSavedEditHighlights\(\)/s
+  end
+
+  test "HWP edit preview renders actual saved states without synthetic playback" do
+    source = File.read!(@hwp_engine_adapter)
+
+    refute source =~ "startVfsPreviewPlayback"
+    refute source =~ "applyVfsPreviewStep"
+    refute source =~ "previewPlaybackIndex"
+
+    assert source =~
+             ~r/this\.previewPageFilter = this\.previewPageIndexesForSavedHighlights\(\).*?this\.buildPageStack\(\).*?this\.renderVisiblePages\(\).*?handleLoadedPreviewHighlights/s
+  end
+
+  test "HWP applies each genuine preview revision as one direct semantic batch" do
+    source = File.read!(@hwp_engine_adapter)
+
+    refute source =~ "applyAgentEditBatchPaced"
+
+    assert source =~
+             ~r/document\.preview\.revision_received.*?queuePreviewRevision.*?applyAgentEditBatch\(\{ ops \}/s
+
+    assert source =~ ~r/previewRevisionKey.*?edit_id.*?revision/s
+  end
+
+  test "HWP insert_paragraph appends after its live anchor instead of prepending" do
+    source = File.read!(@hwp_engine_adapter)
+
+    assert source =~
+             ~r/var opInsertParagraph.*?insertedParagraph = appending \? idx : idx \+ 1.*?paragraphLength\(target\.section, idx\).*?insertTextLines\(\{ section: target\.section, paragraph: idx \}, offset, "\\n" \+ text\)/s
+
+    refute source =~
+             ~r/opInsertParagraph.*?insertTextLines\(\{ section: target\.section, paragraph: idx \}, 0, text \+ "\\n"\)/s
+  end
+
   test "OfficeWasm keeps only ephemeral browser-engine state in its colocated adapter" do
     source = File.read!(@office_engine_adapter)
 
@@ -60,6 +134,28 @@ defmodule EcritsWeb.ColocatedHookArchitectureTest do
     refute File.exists?("assets/js/wasm_office_editor.js")
     refute File.exists?("assets/js/wasm_office_ops.ts")
     refute File.exists?("assets/js/wasm_office_read.ts")
+  end
+
+  test "Office applies each genuine preview revision as one direct semantic batch" do
+    source = File.read!(@office_engine_adapter)
+
+    assert source =~
+             ~r/document\.preview\.revision_received.*?queuePreviewRevision.*?officeApplyEditBatch/s
+
+    assert source =~ ~r/previewRevisionKey.*?edit_id.*?revision/s
+  end
+
+  test "Office pinned snapshot previews ignore mutable revision events" do
+    source = File.read!(@office_engine_adapter)
+
+    assert source =~
+             ~r/document\.preview\.revision_received.*?this\.mirror && !this\.pinnedPreviewSnapshot\(\).*?queuePreviewRevision/s
+
+    assert source =~
+             ~r/pinnedPreviewSnapshot\(\).*?previewSnapshotPinned === "true"/s
+
+    assert source =~
+             ~r/queuePreviewRevision.*?!this\.mirror \|\| this\.pinnedPreviewSnapshot\(\).*?return false/s
   end
 
   test "app.js is only the Phoenix bootstrap and consumes colocated hooks" do

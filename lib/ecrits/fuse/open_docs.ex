@@ -78,7 +78,21 @@ defmodule Ecrits.Fuse.OpenDocs do
 
   def handle_call({:begin_preview_publication, root, source_path, edit_id}, _from, state) do
     token = {System.unique_integer([:positive, :monotonic]), edit_id}
-    :ets.insert(@table, {{@preview_publication_key, root, source_path}, token})
+    key = {@preview_publication_key, root, source_path}
+
+    queue =
+      case :ets.lookup(@table, key) do
+        [{^key, %{pending: pending, ready: ready}}] ->
+          %{pending: pending ++ [token], ready: ready}
+
+        [{^key, previous_token}] ->
+          %{pending: [previous_token, token], ready: %{}}
+
+        [] ->
+          %{pending: [token], ready: %{}}
+      end
+
+    :ets.insert(@table, {key, queue})
     {:reply, token, state}
   end
 
@@ -90,16 +104,34 @@ defmodule Ecrits.Fuse.OpenDocs do
     key = {@preview_publication_key, root, source_path}
 
     reply =
-      case :ets.take(@table, key) do
+      case :ets.lookup(@table, key) do
+        [{^key, %{pending: pending, ready: ready} = queue}] ->
+          cond do
+            token not in pending ->
+              :stale
+
+            Map.has_key?(ready, token) ->
+              :stale
+
+            true ->
+              queue = %{queue | ready: Map.put(ready, token, info)}
+              queue = flush_ready_preview_publications(root, queue)
+
+              if queue.pending == [] do
+                :ets.delete(@table, key)
+              else
+                :ets.insert(@table, {key, queue})
+              end
+
+              :ok
+          end
+
         [{^key, ^token}] ->
-          Phoenix.PubSub.broadcast(Ecrits.PubSub, "doc_vfs:" <> root, {:vfs_doc_edited, info})
+          :ets.delete(@table, key)
+          publish_preview(root, info)
           :ok
 
-        [{^key, newer_token}] ->
-          :ets.insert(@table, {key, newer_token})
-          :stale
-
-        [] ->
+        _other ->
           :stale
       end
 
@@ -414,6 +446,26 @@ defmodule Ecrits.Fuse.OpenDocs do
 
   def handle_info({:continue_staged_settlement, _stale_test_ref}, state) do
     {:noreply, state}
+  end
+
+  defp flush_ready_preview_publications(
+         root,
+         %{pending: [token | pending], ready: ready} = queue
+       ) do
+    case Map.pop(ready, token) do
+      {nil, _ready} ->
+        queue
+
+      {info, ready} ->
+        publish_preview(root, info)
+        flush_ready_preview_publications(root, %{pending: pending, ready: ready})
+    end
+  end
+
+  defp flush_ready_preview_publications(_root, %{pending: []} = queue), do: queue
+
+  defp publish_preview(root, info) do
+    Phoenix.PubSub.broadcast(Ecrits.PubSub, "doc_vfs:" <> root, {:vfs_doc_edited, info})
   end
 
   @doc "Register `name` as open under `root`."
@@ -970,7 +1022,7 @@ defmodule Ecrits.Fuse.OpenDocs do
     ArgumentError -> :ok
   end
 
-  @doc "Claim the latest deferred preview publication for one canonical source path."
+  @doc "Reserve the next deferred preview publication for one canonical source path."
   @spec begin_preview_publication(String.t(), String.t(), String.t() | nil) :: term()
   def begin_preview_publication(root, source_path, edit_id)
       when is_binary(root) and is_binary(source_path) do
@@ -983,17 +1035,22 @@ defmodule Ecrits.Fuse.OpenDocs do
     )
   end
 
-  @doc "Whether a deferred preview worker still owns the latest source-path publication."
+  @doc "Whether a deferred preview publication is still pending for this source path."
   @spec current_preview_publication?(String.t(), String.t(), term()) :: boolean()
   def current_preview_publication?(root, source_path, token)
       when is_binary(root) and is_binary(source_path) do
     key = {@preview_publication_key, expand(root), canonical_file_path(source_path)}
-    :ets.lookup(@table, key) == [{key, token}]
+
+    case :ets.lookup(@table, key) do
+      [{^key, %{pending: pending}}] -> token in pending
+      [{^key, ^token}] -> true
+      _other -> false
+    end
   rescue
     ArgumentError -> false
   end
 
-  @doc "Publish a deferred final preview only if no newer source-path edit superseded it."
+  @doc "Mark a deferred final preview ready and publish ready previews in save order."
   @spec publish_preview_if_current(String.t(), String.t(), term(), map()) :: :ok | :stale
   def publish_preview_if_current(root, source_path, token, info)
       when is_binary(root) and is_binary(source_path) and is_map(info) do

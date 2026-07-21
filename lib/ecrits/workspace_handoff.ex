@@ -15,9 +15,11 @@ defmodule Ecrits.WorkspaceHandoff do
 
   @name __MODULE__
   @version 1
+  @runtime_version 2
   @persisted_adapter_opt_keys ~w(
     model reasoning_effort sandbox permission_mode approval_policy access_control
   )
+  @durable_tool_text_edge_chars 16_000
 
   def start_link(opts) when is_list(opts) do
     case Keyword.get(opts, :name, @name) do
@@ -354,7 +356,12 @@ defmodule Ecrits.WorkspaceHandoff do
   defp dialog_turn_id(row), do: row
 
   defp load_store(path) do
-    empty = %{store_path: path, workspace_paths: %{}, chat_rails: %{}}
+    empty = %{
+      store_path: path,
+      workspace_paths: %{},
+      chat_rails: %{},
+      runtime_version: @runtime_version
+    }
 
     with {:ok, bytes} <- File.read(path),
          {:ok, json} <- Jason.decode(bytes),
@@ -381,7 +388,12 @@ defmodule Ecrits.WorkspaceHandoff do
   # process. Migrate both historical in-memory shapes on the first call instead
   # of letting a newly-loaded callback index fields that the old state never had.
   defp ensure_runtime_state(
-         %{store_path: store_path, workspace_paths: workspace_paths, chat_rails: chat_rails} =
+         %{
+           store_path: store_path,
+           workspace_paths: workspace_paths,
+           chat_rails: chat_rails,
+           runtime_version: @runtime_version
+         } =
            state
        )
        when is_binary(store_path) and is_map(workspace_paths) and is_map(chat_rails),
@@ -586,7 +598,7 @@ defmodule Ecrits.WorkspaceHandoff do
          thread_covers_from: thread_covers_from,
          title: title,
          title_user_edited?: title_user_edited?,
-         transcript: dialogs,
+         transcript: Enum.map(dialogs, &compact_durable_dialog/1),
          adapter_opts: normalize_adapter_opts(adapter_opts)
        }}
     else
@@ -650,9 +662,71 @@ defmodule Ecrits.WorkspaceHandoff do
       "provider_session_id" => agent_state.provider_session_id,
       "title" => agent_state.title,
       "title_user_edited?" => agent_state.title_user_edited?,
-      "transcript" => agent_state.transcript,
+      "transcript" => Enum.map(agent_state.transcript, &compact_durable_dialog/1),
       "adapter_opts" => agent_state.adapter_opts
     }
+  end
+
+  defp compact_durable_dialog(dialog) when is_map(dialog) do
+    case field(dialog, :items) do
+      items when is_list(items) ->
+        put_preserving_key(dialog, :items, Enum.map(items, &compact_durable_item/1))
+
+      _missing ->
+        dialog
+    end
+  end
+
+  defp compact_durable_dialog(dialog), do: dialog
+
+  defp compact_durable_item(item) when is_map(item) do
+    if field(item, :role) |> to_string() == "tool" do
+      input = compact_durable_tool_text(field(item, :input))
+      output = compact_durable_tool_text(field(item, :output))
+
+      item
+      |> put_preserving_key(:input, input)
+      |> put_preserving_key(:output, output)
+      |> put_preserving_key(
+        :body,
+        if(input in [nil, ""] and output in [nil, ""],
+          do: compact_durable_tool_text(field(item, :body)),
+          else: nil
+        )
+      )
+    else
+      item
+    end
+  end
+
+  defp compact_durable_item(item), do: item
+
+  defp compact_durable_tool_text(text) when is_binary(text) do
+    edge = @durable_tool_text_edge_chars
+
+    if String.length(text) <= edge * 2 do
+      text
+    else
+      head = String.slice(text, 0, edge)
+      tail = String.slice(text, -edge, edge)
+      omitted = byte_size(text) - byte_size(head) - byte_size(tail)
+
+      head <>
+        "\n\n… [#{omitted} bytes omitted from durable history] …\n\n" <>
+        tail
+    end
+  end
+
+  defp compact_durable_tool_text(value), do: value
+
+  defp put_preserving_key(map, key, value) do
+    string_key = Atom.to_string(key)
+
+    cond do
+      Map.has_key?(map, key) -> Map.put(map, key, value)
+      Map.has_key?(map, string_key) -> Map.put(map, string_key, value)
+      true -> Map.put(map, key, value)
+    end
   end
 
   defp normalize_string_map(value) when is_map(value) do

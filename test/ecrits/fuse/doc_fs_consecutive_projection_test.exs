@@ -290,13 +290,16 @@ defmodule Ecrits.Fuse.DocFsConsecutiveProjectionTest do
 
       assert_receive {:vfs_doc_edited,
                       %{
+                        phase: :candidate,
                         preview_only: true,
                         edit_id: failed_edit_id,
-                        preview_steps: preview_steps
+                        revision: failed_revision,
+                        ops: preview_ops
                       } = preview}
 
       assert is_binary(failed_edit_id)
-      assert preview_steps != []
+      assert is_binary(failed_revision)
+      assert preview_ops != []
       assert preview.highlights != []
 
       assert {:noreply, socket} =
@@ -315,12 +318,17 @@ defmodule Ecrits.Fuse.DocFsConsecutiveProjectionTest do
       assert_receive {:browser_transport, :vfs_rollback, ^failed_edit_id,
                       {:ok, %{"rolled_back" => true}}}
 
-      assert_receive {:vfs_doc_edit_rejected,
-                      %{edit_id: ^failed_edit_id, reason: rejected_reason}}
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        phase: :rejected,
+                        edit_id: ^failed_edit_id,
+                        revision: ^failed_revision,
+                        reason: rejected_reason
+                      }}
 
       assert rejected_reason =~ "browser_writeback_rejected"
       assert rejected_reason =~ "octet socket open timed out"
-      refute_receive {:vfs_doc_edited, %{edit_id: ^failed_edit_id, preview_only: false}}, 20
+      refute_receive {:vfs_doc_edited, %{edit_id: ^failed_edit_id, phase: :committed}}, 20
       refute_receive {:browser_transport, :vfs_commit, ^failed_edit_id, _reply}, 20
 
       assert browser_transport_state(viewer) == %{
@@ -377,7 +385,7 @@ defmodule Ecrits.Fuse.DocFsConsecutiveProjectionTest do
                       %{edit_id: ^successful_edit_id, browser_authority: true} = committed}
 
       refute Map.get(committed, :preview_only, false)
-      refute_receive {:vfs_doc_edit_rejected, %{edit_id: ^successful_edit_id}}, 20
+      refute_receive {:vfs_doc_edited, %{phase: :rejected, edit_id: ^successful_edit_id}}, 20
 
       assert browser_transport_state(viewer) == %{
                fail_next_write?: false,

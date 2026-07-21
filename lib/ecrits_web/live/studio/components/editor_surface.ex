@@ -98,7 +98,7 @@ defmodule EcritsWeb.Live.Studio.Components.EditorSurface do
       phx-hook=".DocumentSearchBridge"
       phx-window-keydown="document.save.requested"
       phx-key="s"
-      class="h-[calc(100vh-60px)] min-h-[calc(100vh-60px)] w-full overflow-hidden"
+      class="h-dvh min-h-dvh w-full overflow-hidden"
     >
       <div
         id="document-element-picker-bridge"

@@ -197,8 +197,9 @@ defmodule Ecrits.Workspace.TurnTerminalFinalizationTest do
 
     send(first_adapter, :release_prompt)
 
-    assert_receive {:vfs_doc_edit_rejected,
+    assert_receive {:vfs_doc_edited,
                     %{
+                      phase: :rejected,
                       doc: "queue-invalid.hwp",
                       edit_id: "invalid-edit-queue-invalid.hwp",
                       agent_id: agent_id,
@@ -258,8 +259,9 @@ defmodule Ecrits.Workspace.TurnTerminalFinalizationTest do
     assert {:pending, pending_ws} = Session.restart_foreground(path, settings)
     assert pending_ws.agent_id == ws.agent_id
 
-    assert_receive {:vfs_doc_edit_rejected,
+    assert_receive {:vfs_doc_edited,
                     %{
+                      phase: :rejected,
                       doc: "restart-invalid.hwp",
                       agent_id: agent_id,
                       instance_id: ^old_instance_id,

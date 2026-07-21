@@ -1099,7 +1099,7 @@ defmodule Ecrits.Fuse.DocFsTest do
 
       assert size == byte_size(edited)
       assert_receive {:vfs_doc_edited, %{preview_only: true} = preview}
-      refute_receive {:vfs_doc_edit_rejected, _rejected}
+      refute_receive {:vfs_doc_edited, %{phase: :rejected}}
 
       assert {:error, _errno, _socket} =
                DocFs.handle_event(
@@ -1108,10 +1108,11 @@ defmodule Ecrits.Fuse.DocFsTest do
                  socket
                )
 
-      assert_receive {:vfs_doc_edit_rejected, rejected}
+      assert_receive {:vfs_doc_edited, %{phase: :rejected} = rejected}
       assert rejected.edit_id == preview.edit_id
+      assert rejected.revision == preview.revision
       assert Map.take(rejected, [:agent_id, :instance_id, :turn_id]) == owner
-      refute_receive {:vfs_doc_edit_rejected, _duplicate}
+      refute_receive {:vfs_doc_edited, %{phase: :rejected}}, 20
     end
   end
 
@@ -1279,12 +1280,16 @@ defmodule Ecrits.Fuse.DocFsTest do
 
       assert_receive {:vfs_doc_edited, preview}
       assert preview.preview_only
+      assert preview.phase == :candidate
       assert is_binary(preview.edit_id)
-      assert is_list(preview.preview_steps)
+      assert is_binary(preview.revision)
+      refute Map.has_key?(preview, :preview_steps)
       assert Map.take(preview, [:agent_id, :instance_id, :turn_id]) == origin
 
       assert_receive {:vfs_doc_edited, committed}
       assert committed.edit_id == preview.edit_id
+      assert committed.phase == :committed
+      assert committed.revision == preview.revision
       assert Map.take(committed, [:agent_id, :instance_id, :turn_id]) == origin
       assert committed.preview_continuation
       refute Map.get(committed, :preview_only, false)
@@ -1435,8 +1440,9 @@ defmodule Ecrits.Fuse.DocFsTest do
                  socket
                )
 
-      assert_receive {:vfs_doc_edit_rejected, rejected}
+      assert_receive {:vfs_doc_edited, %{phase: :rejected} = rejected}
       assert rejected.edit_id == preview.edit_id
+      assert rejected.revision == preview.revision
       assert Map.take(rejected, [:agent_id, :instance_id, :turn_id]) == owner
 
       assert {:reply, ^edited, _socket} =
@@ -2134,8 +2140,9 @@ defmodule Ecrits.Fuse.DocFsTest do
       assert OpenDocs.staged(root, "doc.hwpx") == :error
       assert OpenDocs.write_failure(root, "doc.hwpx") == :error
 
-      assert_receive {:vfs_doc_edit_rejected,
+      assert_receive {:vfs_doc_edited,
                       %{
+                        phase: :rejected,
                         doc: "doc.hwpx",
                         edit_id: "invalid-terminal-edit",
                         agent_id: "invalid-terminal-agent",

@@ -31,6 +31,7 @@ defmodule EcritsWeb.FakeAcpAdapter do
     # is what the cross-turn-memory fix relies on.
     %{
       "loadSession" => true,
+      "promptCapabilities" => %{"image" => true},
       "sessionCapabilities" => %{"resume" => %{}}
     }
   end
@@ -43,14 +44,14 @@ defmodule EcritsWeb.FakeAcpAdapter do
   # test can assert turn 2 resumes the SAME id rather than creating a new thread.
   #
   # On `session/new` we mint a stable id and tell the bridge to use it via
-  # `{:session_id, id}`, so the id the client stores matches the one we report.
+  # `%{"sessionId" => id}`, so the id the client stores matches the one we report.
   # On `session/load` we echo back the `sessionId` the client passed (codex does
   # the same: `thread/start` with the remembered `threadId`).
   @impl true
   def translate_outbound(%{"method" => "session/new"}, state) do
     session_id = "fake-thread-" <> Integer.to_string(System.unique_integer([:positive]))
     report_session(state, :new, session_id)
-    {:ok, {:session_id, session_id}, %{state | session_id: session_id}}
+    {:reply, %{"sessionId" => session_id}, %{state | session_id: session_id}}
   end
 
   def translate_outbound(%{"method" => method, "params" => params}, state)
@@ -62,7 +63,7 @@ defmodule EcritsWeb.FakeAcpAdapter do
       Keyword.get(state.opts, :resume_session_id) || params["sessionId"] || state.session_id
 
     report_session(state, :load, session_id)
-    {:ok, {:session_id, session_id}, %{state | session_id: session_id}}
+    {:reply, %{"sessionId" => session_id}, %{state | session_id: session_id}}
   end
 
   def translate_outbound(%{"method" => "session/prompt", "id" => id, "params" => params}, state) do
@@ -292,7 +293,8 @@ defmodule EcritsWeb.FakeAcpAdapter do
       opt_line(opts, :reasoning_effort, "reasoning") <>
       opt_line(opts, :approval_policy, "approval") <>
       opt_line(opts, :sandbox, "sandbox") <>
-      opt_line(opts, :permission_mode, "permission")
+      opt_line(opts, :permission_mode, "permission") <>
+      opt_line(opts, :access_control, "access")
   end
 
   defp opt_line(opts, key, label) do

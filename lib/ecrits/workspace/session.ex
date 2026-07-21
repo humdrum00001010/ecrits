@@ -2578,6 +2578,11 @@ defmodule Ecrits.Workspace.Session do
   # lacked a new key) must not take this workspace coordinator down with it;
   # it degrades to a rail error while supervision restarts the agent.
   defp send_turn_to_agent(agent_id, input, opts) do
+    # This call runs inside the workspace coordinator. The agent must register
+    # its turn owner asynchronously: a synchronous callback into any workspace
+    # Session can deadlock this coordinator when an agent still carries a stale
+    # workspace root during a foreground rebind.
+    opts = Keyword.put(opts, :workspace_registration_mode, :async)
     AcpAgent.send_turn(nil, agent_id, input, opts)
   catch
     :exit, {:noproc, _call} -> {:error, :not_found}

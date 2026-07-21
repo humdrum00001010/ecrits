@@ -5,7 +5,7 @@ defmodule Ecrits.AcpAgent do
   Provider routing, session lifecycle, provider-availability checks, and the
   PubSub event contract all live on the ex_mcp path — there is no bespoke
   fallback or safety-net. Providers map to a concrete ex_mcp ACP agent adapter
-  (`ExMCP.ACP.Adapters.Codex` / `Claude`); a per-session
+  (`Ecrits.AcpAgent.CodexAdapter` / `ClaudeAdapter`); a per-session
   `Ecrits.AcpAgent.Session` GenServer drives `ExMCP.ACP.Client`.
 
   Each session is given the `doc.*` MCP server (served in-process over HTTP by
@@ -13,7 +13,7 @@ defmodule Ecrits.AcpAgent do
   discovers and calls `doc.list/open/read/edit/...` itself.
   """
 
-  alias ExMCP.ACP.Adapters.Claude, as: ExMCPClaude
+  alias Ecrits.AcpAgent.ClaudeAdapter
   alias Ecrits.AcpAgent.CodexAdapter
   alias Ecrits.AcpAgent.Session
   alias Ecrits.AcpAgent.SessionSupervisor
@@ -35,7 +35,7 @@ defmodule Ecrits.AcpAgent do
       label: "Claude",
       icon: "agent-provider-claude",
       favicon_src: "/images/icons/claude-favicon.ico",
-      exmcp_adapter: ExMCPClaude,
+      exmcp_adapter: ClaudeAdapter,
       executables: ["claude"],
       login_command: "claude auth login",
       install_command: "curl -fsSL https://claude.ai/install.sh | bash",
@@ -96,8 +96,8 @@ defmodule Ecrits.AcpAgent do
     end
   end
 
-  defp integration_option(%{id: id, label: label, executables: executables} = provider) do
-    case resolve_executable(executables) do
+  defp integration_option(%{id: id, label: label} = provider) do
+    case resolve_provider_executable(provider) do
       {:ok, %{command: command, path: path}} ->
         case provider_auth_status(provider, command) do
           :ready ->
@@ -105,7 +105,7 @@ defmodule Ecrits.AcpAgent do
               id: id,
               label: provider_integration_label(label),
               status: :ready,
-              detail: "#{command} at #{path}"
+              detail: "#{Path.basename(command)} at #{path}"
             }
 
           :login_required ->
@@ -126,6 +126,15 @@ defmodule Ecrits.AcpAgent do
         }
     end
   end
+
+  defp resolve_provider_executable(%{id: "codex", executables: candidates}) do
+    case CodexAdapter.resolve_codex_path() do
+      nil -> {:error, {:executable_missing, candidates}}
+      path -> {:ok, %{command: path, path: path}}
+    end
+  end
+
+  defp resolve_provider_executable(%{executables: candidates}), do: resolve_executable(candidates)
 
   defp configured_integration_options do
     case Application.get_env(:ecrits, :agent_ui, []) do
@@ -405,7 +414,7 @@ defmodule Ecrits.AcpAgent do
   def mcp_servers(agent_id) when is_binary(agent_id) and agent_id != "" do
     case doc_tools_mcp_url(agent_id) do
       nil -> []
-      url -> [%{"name" => @doc_tools_mcp_name, "url" => url}]
+      url -> [%{"type" => "http", "name" => @doc_tools_mcp_name, "url" => url}]
     end
   end
 

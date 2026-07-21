@@ -8,10 +8,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   require Logger
 
   alias Ecrits.Agent
+  alias Ecrits.AcpAgent.AcpStream
   alias Ecrits.Doc.Pool, as: DocPool
-  alias Ecrits.Doc.Projection
+  alias Ecrits.Document.EditTimeline
   alias Ecrits.Fuse.DocMount
-  alias Ecrits.Fuse.OpenDocs
   alias Ecrits.AcpAgent, as: ACP
   alias Ecrits.Document
   alias Ecrits.Document.PreviewSnapshot
@@ -50,7 +50,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # feedback; the tick re-renders the accumulated buffer through MDEx).
   @agent_text_flush_ms 120
   @agent_reasoning_flush_ms 120
-  @agent_editor_preview_max 5_000
   @acp_file_operation_names ~w(read_text_file search_text_file edit_text_file)
   @doc_browser_finalize_timeout_ms 1_000
   @doc_browser_finalize_max_attempts 3
@@ -176,6 +175,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
      |> assign(:agent_editor_preview, nil)
      |> assign(:agent_vfs_preview_item, nil)
      |> assign(:agent_vfs_preview_rollback_item, nil)
+     |> assign(:agent_edit_timelines, %{})
      |> assign(:agent_active_tools, %{})
      |> assign(:agent_active_file_operations, %{})
      |> assign(:agent_reasoning_text, "")
@@ -1183,10 +1183,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  def handle_info({:editor_preview_delta, payload}, socket) when is_map(payload) do
-    {:noreply, push_event(socket, "document.preview.delta_received", payload)}
-  end
-
   # Debounced re-render of the in-flight streaming agent message: re-renders the
   # accumulated buffer through `markdown_body`/MDEx so LiveView pushes formatted
   # HTML that replaces the raw client-side appends.
@@ -1440,13 +1436,13 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # A DIRECT edit of a mounted `.jsonl` was routed onto the document (doc VFS
   # write-back). Drop a file-viewer card in the chat rail showing where it landed.
   def handle_info({:vfs_doc_edited, info}, socket) when is_map(info) do
-    info = ensure_vfs_preview_snapshot(socket, info)
+    info = normalize_vfs_edit_lifecycle_event(socket, info)
     turn_id = vfs_doc_edit_turn_id(info)
 
     socket =
       socket
       |> maybe_route_vfs_doc_edit_preview(info, turn_id)
-      |> resync_open_editor_after_vfs_edit(info)
+      |> maybe_resync_open_editor_after_vfs_edit(info)
 
     {:noreply, socket}
   end
@@ -1483,34 +1479,147 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp maybe_route_vfs_doc_edit_preview(socket, info, turn_id) do
     if is_binary(turn_id) and turn_id != "" and
          vfs_doc_edit_preview_for_active_agent?(socket, info) do
-      socket =
-        socket
-        |> split_agent_text_before_preview()
-        |> maybe_persist_vfs_edit_preview(info, turn_id)
+      document_id = item_field(info, :document_id)
 
-      if continuing_live_vfs_preview?(socket, info, turn_id) do
-        socket
+      if is_binary(document_id) and document_id != "" do
+        key = {turn_id, document_id}
+        timelines = socket.assigns[:agent_edit_timelines] || %{}
+        timeline = Map.get_lazy(timelines, key, fn -> EditTimeline.new(turn_id, document_id) end)
+
+        case EditTimeline.apply_event(timeline, info) do
+          {:ok, timeline} ->
+            socket = assign(socket, :agent_edit_timelines, Map.put(timelines, key, timeline))
+            route_applied_edit_timeline(socket, timeline, info, turn_id)
+
+          {:stale, _timeline} ->
+            socket
+
+          {:error, _reason} ->
+            socket
+        end
       else
-        item = vfs_doc_edit_item(socket, info, turn_id)
-
         socket
-        |> replace_live_vfs_editor_preview(item)
-        |> maybe_stream_agent_item(item)
       end
     else
       socket
     end
   end
 
-  defp continuing_live_vfs_preview?(socket, info, turn_id) do
-    not vfs_edit_progress_complete?(info) and
-      item_field(info, :preview_continuation) == true and
-      is_nil(item_field(info, :preview_base_url)) and
-      is_nil(item_field(info, :preview_snapshot)) and
-      match?(
-        %{role: :editor_preview, turn_id: ^turn_id},
-        socket.assigns[:agent_vfs_preview_item]
-      )
+  defp route_applied_edit_timeline(socket, timeline, event, turn_id) do
+    current = EditTimeline.current(timeline)
+
+    cond do
+      is_nil(current) and item_field(event, :phase) == :rejected ->
+        info = Map.put(event, :revision_count, length(timeline.committed_order))
+
+        socket
+        |> maybe_push_edit_revision(event, info)
+        |> discard_rejected_vfs_preview(event)
+
+      is_nil(current) ->
+        remove_live_vfs_editor_preview(socket, turn_id, timeline.document_id)
+
+      stale_snapshot_event?(current, event) ->
+        socket
+
+      true ->
+        info = timeline_preview_info(timeline, current)
+        phase = item_field(event, :phase)
+
+        socket =
+          socket
+          |> maybe_persist_timeline_preview(info, turn_id, phase)
+
+        if snapshot_superseded_by_live_preview?(socket, event) do
+          socket
+        else
+          socket = split_agent_text_before_preview(socket)
+          item = vfs_doc_edit_item(socket, info, turn_id)
+
+          socket
+          |> replace_live_vfs_editor_preview(item)
+          |> maybe_stream_agent_item(item)
+          |> maybe_push_edit_revision(event, info)
+        end
+    end
+  end
+
+  defp stale_snapshot_event?(current, event) do
+    item_field(event, :phase) == :snapshot_ready and
+      (item_field(current, :edit_id) != item_field(event, :edit_id) or
+         item_field(current, :revision) != item_field(event, :revision))
+  end
+
+  defp timeline_preview_info(timeline, current) do
+    highlights = EditTimeline.visible_highlights(timeline)
+
+    revision_count =
+      length(timeline.committed_order) +
+        if(item_field(current, :phase) == :candidate, do: 1, else: 0)
+
+    current
+    |> Map.put(:highlights, highlights)
+    |> Map.put(:revision_count, revision_count)
+  end
+
+  defp snapshot_superseded_by_live_preview?(socket, event) do
+    if item_field(event, :phase) == :snapshot_ready do
+      case socket.assigns[:agent_vfs_preview_item] do
+        %{role: :editor_preview} = live_preview ->
+          item_field(live_preview, :turn_id) != item_field(event, :turn_id) or
+            item_field(live_preview, :document_id) != item_field(event, :document_id)
+
+        _live_preview ->
+          false
+      end
+    else
+      false
+    end
+  end
+
+  defp maybe_persist_timeline_preview(socket, info, turn_id, phase)
+       when phase in [:committed, :snapshot_ready],
+       do: maybe_persist_vfs_edit_preview(socket, info, turn_id)
+
+  defp maybe_persist_timeline_preview(socket, _info, _turn_id, _phase), do: socket
+
+  defp maybe_push_edit_revision(socket, event, info) do
+    case item_field(event, :phase) do
+      phase when phase in [:candidate, :committed, :rejected] ->
+        push_event(socket, "document.preview.revision_received", %{
+          phase: phase,
+          turn_id: item_field(event, :turn_id),
+          edit_id: item_field(event, :edit_id),
+          document_id: item_field(event, :document_id),
+          path: item_field(event, :path),
+          revision: item_field(event, :revision),
+          revision_count: item_field(info, :revision_count),
+          ops: List.wrap(item_field(event, :ops)),
+          sets: List.wrap(item_field(event, :sets)),
+          highlights: List.wrap(item_field(info, :highlights))
+        })
+
+      _phase ->
+        socket
+    end
+  end
+
+  defp remove_live_vfs_editor_preview(socket, turn_id, document_id) do
+    case socket.assigns[:agent_vfs_preview_item] do
+      %{role: :editor_preview} = item ->
+        if item_field(item, :turn_id) == turn_id and
+             item_field(item, :document_id) == document_id do
+          socket
+          |> stream_delete(:agent_items, item)
+          |> assign(:agent_vfs_preview_item, nil)
+          |> assign(:agent_vfs_preview_rollback_item, nil)
+        else
+          socket
+        end
+
+      _item ->
+        socket
+    end
   end
 
   defp discard_rejected_vfs_preview(socket, info) do
@@ -1600,6 +1709,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # resync layer, not the authoring route. (Match by PATH:
   # `hwp_stream_document_id` is the Document struct id "local-…", while the
   # write-back keys the Pool document id.)
+  defp maybe_resync_open_editor_after_vfs_edit(socket, info) do
+    if item_field(info, :phase) == :committed,
+      do: resync_open_editor_after_vfs_edit(socket, info),
+      else: socket
+  end
+
   defp resync_open_editor_after_vfs_edit(socket, %{path: edited_abs} = info)
        when is_binary(edited_abs) do
     workspace_path = socket.assigns[:workspace_path]
@@ -3297,6 +3412,80 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
+  defp normalize_vfs_edit_lifecycle_event(socket, info) do
+    explicit_phase = lifecycle_phase(item_field(info, :phase))
+
+    info =
+      if is_nil(explicit_phase) do
+        ensure_vfs_preview_snapshot(socket, info)
+      else
+        info
+      end
+
+    phase =
+      explicit_phase ||
+        if(item_field(info, :preview_only) == true, do: :candidate, else: :committed)
+
+    document_id = item_field(info, :document_id) || lifecycle_document_id(socket, info)
+    revision = item_field(info, :revision) || lifecycle_legacy_revision(info)
+    edit_id = item_field(info, :edit_id) || lifecycle_legacy_edit_id(revision)
+
+    info
+    |> Map.put(:phase, phase)
+    |> Map.put(:turn_id, item_field(info, :turn_id))
+    |> Map.put(:edit_id, edit_id)
+    |> Map.put(:document_id, document_id)
+    |> Map.put(:revision, revision)
+    |> Map.put(:legacy_lifecycle, is_nil(explicit_phase))
+    |> Map.put(:ops, List.wrap(item_field(info, :ops)))
+    |> Map.put(:sets, List.wrap(item_field(info, :sets)))
+    |> Map.put(:highlights, List.wrap(item_field(info, :highlights)))
+    |> Map.put(:preview_snapshot, item_field(info, :preview_snapshot))
+    |> Map.put(:preview_snapshot_error, item_field(info, :preview_snapshot_error))
+    |> Map.put(:agent_id, item_field(info, :agent_id))
+    |> Map.put(:instance_id, item_field(info, :instance_id))
+  end
+
+  defp lifecycle_phase(phase) when phase in [:candidate, :committed, :rejected, :snapshot_ready],
+    do: phase
+
+  defp lifecycle_phase("candidate"), do: :candidate
+  defp lifecycle_phase("committed"), do: :committed
+  defp lifecycle_phase("rejected"), do: :rejected
+  defp lifecycle_phase("snapshot_ready"), do: :snapshot_ready
+  defp lifecycle_phase(_phase), do: nil
+
+  defp lifecycle_document_id(socket, info) do
+    workspace_path = socket.assigns[:workspace_path]
+    edited_abs = item_field(info, :path)
+
+    with true <- is_binary(workspace_path) and is_binary(edited_abs),
+         {:ok, relative_path} <- vfs_preview_relative_path(workspace_path, edited_abs) do
+      Document.id_for(Path.expand(workspace_path), relative_path)
+    else
+      _other -> nil
+    end
+  end
+
+  defp lifecycle_legacy_revision(info) do
+    case item_field(info, :edit_id) do
+      edit_id when is_binary(edit_id) and edit_id != "" ->
+        Document.sha256("legacy-edit:" <> edit_id)
+
+      _edit_id ->
+        item_field(item_field(info, :preview_snapshot), :sha256) ||
+          info
+          |> Map.take([:path, :ops, :sets, :highlights, :marker])
+          |> :erlang.term_to_binary([:deterministic])
+          |> Document.sha256()
+    end
+  end
+
+  defp lifecycle_legacy_edit_id(revision) when is_binary(revision) and revision != "",
+    do: "legacy-" <> revision
+
+  defp lifecycle_legacy_edit_id(_revision), do: nil
+
   # Projection attaches this at the final committed write boundary. The fallback
   # keeps synthetic/older VFS broadcasters safe without letting a later tab
   # switch turn their chat card into a view of mutable canonical bytes.
@@ -3405,12 +3594,16 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
       document = pin_preview_document(document, preview_snapshot)
 
-      committed_preview? =
-        vfs_edit_progress_complete?(info) and item_field(info, :preview_only) != true
+      phase = item_field(info, :phase)
+      committed_preview? = phase in [:committed, :snapshot_ready]
+      snapshot_ready? = phase == :snapshot_ready
 
-      preview_unavailable? = committed_preview? and not is_map(preview_snapshot)
+      preview_unavailable? =
+        not is_map(preview_snapshot) and
+          (snapshot_ready? or
+             (item_field(info, :legacy_lifecycle) == true and
+                not is_nil(item_field(info, :preview_snapshot_error))))
 
-      preview_steps = vfs_preview_steps(info)
       preview_base_url = item_field(info, :preview_base_url)
 
       snapshot_bytes_url =
@@ -3423,17 +3616,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
           )
         end
 
-      committed_playback? =
-        committed_preview? and preview_steps != [] and is_binary(preview_base_url) and
-          preview_base_url != "" and is_binary(snapshot_bytes_url)
-
       bytes_url =
         cond do
           preview_unavailable? ->
             nil
-
-          committed_playback? ->
-            preview_base_url
 
           is_binary(snapshot_bytes_url) ->
             snapshot_bytes_url
@@ -3453,17 +3639,22 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         document_path: relative_path,
         document_spec: document_spec(document),
         canvas_id:
-          "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-#{if(committed_preview?, do: "committed", else: "live")}-canvas",
-        bytes_url: bytes_url,
-        final_bytes_url: if(committed_playback?, do: snapshot_bytes_url, else: nil),
-        text: "",
-        delta_count: vfs_edit_change_count(info, 1),
-        highlights: highlights,
-        preview_steps:
-          if((is_map(preview_snapshot) and not committed_playback?) or preview_unavailable?,
-            do: [],
-            else: preview_steps
+          vfs_preview_canvas_id(
+            turn_id,
+            document.id,
+            is_map(preview_snapshot),
+            preview_snapshot
           ),
+        bytes_url: bytes_url,
+        final_bytes_url: nil,
+        text: "",
+        delta_count: item_field(info, :revision_count) || vfs_edit_change_count(info, 1),
+        revision_count: item_field(info, :revision_count) || vfs_edit_change_count(info, 1),
+        revision: item_field(info, :revision),
+        ops: List.wrap(item_field(info, :ops)),
+        sets: List.wrap(item_field(info, :sets)),
+        highlights: highlights,
+        preview_steps: [],
         scroll: session_document_viewport(socket, relative_path),
         marker: info[:marker] || "",
         summary: vfs_edit_summary(info),
@@ -3474,9 +3665,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
             do: item_field(info, :preview_snapshot_error) || "snapshot_unavailable",
             else: nil
           ),
-        provisional:
-          item_field(info, :preview_only) == true or not vfs_edit_progress_complete?(info),
-        status: if(vfs_edit_progress_complete?(info), do: :sent, else: :running)
+        provisional: phase == :candidate,
+        status: if(committed_preview?, do: :sent, else: :running)
       }
 
       agent_editor_preview_item(state)
@@ -3601,13 +3791,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp vfs_preview_steps(info) when is_map(info) do
-    case item_field(info, :preview_steps) do
-      steps when is_list(steps) -> steps
-      _ -> []
-    end
-  end
-
   defp vfs_preview_marker(info) when is_map(info) do
     case item_field(info, :marker) ||
            vfs_preview_marker_from_highlights(vfs_preview_highlights(info)) do
@@ -3688,6 +3871,8 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       version = vfs_edit_preview_file_version(edited_abs)
       preview_ref = edit_preview_ref(highlights)
       edit_id = item_field(info, :edit_id) || turn_id
+      revision_count = item_field(info, :revision_count) || vfs_edit_change_count(info, 1)
+      applied = vfs_edit_change_count(info, revision_count)
       hash = edit_preview_hash(highlights)
 
       preview_snapshot =
@@ -3709,7 +3894,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         document_path: relative_path,
         backend: edit_preview_backend(format),
         format: format,
-        applied: vfs_edit_change_count(info, 1),
+        applied: applied,
+        revision_count: revision_count,
+        revision: item_field(info, :revision),
         ops:
           persistable_preview_payload(
             item_field(info, :composition_ops) || item_field(info, :ops)
@@ -3816,8 +4003,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         document: document,
         document_path: relative_path,
         document_spec: document_spec(document),
-        canvas_id:
-          "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-committed-canvas",
+        canvas_id: vfs_preview_canvas_id(turn_id, document_id, true, preview_snapshot),
         bytes_url:
           if(is_map(preview_snapshot),
             do:
@@ -3831,6 +4017,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
           ),
         text: "",
         delta_count: applied,
+        revision_count: item_field(item, :revision_count) || applied,
+        revision: item_field(item, :revision),
+        ops: List.wrap(item_field(item, :ops)),
+        sets: List.wrap(item_field(item, :sets)),
         highlights: vfs_preview_highlights(item),
         preview_steps: [],
         scroll: item_field(item, :scroll) || session_document_viewport(socket, relative_path),
@@ -5113,6 +5303,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     |> assign(:agent_editor_preview, nil)
     |> assign(:agent_vfs_preview_item, nil)
     |> assign(:agent_vfs_preview_rollback_item, nil)
+    |> assign(:agent_edit_timelines, %{})
     |> assign(:agent_reasoning_text, "")
     |> assign(:agent_reasoning_segment, 0)
     |> assign(:agent_reasoning_open?, false)
@@ -5291,6 +5482,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     |> assign(:agent_editor_preview, nil)
     |> assign(:agent_vfs_preview_item, nil)
     |> assign(:agent_vfs_preview_rollback_item, nil)
+    |> assign(:agent_edit_timelines, %{})
     |> assign(:agent_reasoning_text, "")
     |> assign(:agent_reasoning_segment, 0)
     |> assign(:agent_reasoning_open?, false)
@@ -6144,7 +6336,68 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         socket
       end
 
-    if status == :saved, do: mark_doc_clean(socket, id), else: socket
+    if status == :saved do
+      socket
+      |> refresh_composed_preview_after_document_save(document)
+      |> mark_doc_clean(id)
+    else
+      socket
+    end
+  end
+
+  defp refresh_composed_preview_after_document_save(socket, %Document{} = document) do
+    case socket.assigns[:agent_vfs_preview_item] do
+      %{
+        role: :editor_preview,
+        turn_id: turn_id,
+        document_id: document_id,
+        document_path: relative_path,
+        highlights: highlights
+      } = live_preview
+      when document_id == document.id and is_binary(turn_id) and is_binary(relative_path) and
+             is_list(highlights) ->
+        stale_snapshot? =
+          item_field(item_field(live_preview, :preview_snapshot), :sha256) != document.sha256
+
+        picture_composed? =
+          Enum.any?(highlights, &(item_field(&1, :kind) |> to_string() == "picture"))
+
+        if stale_snapshot? and picture_composed? do
+          refresh_persisted_composed_preview(
+            socket,
+            turn_id,
+            document_id,
+            relative_path,
+            document
+          )
+        else
+          socket
+        end
+
+      _other ->
+        socket
+    end
+  end
+
+  defp refresh_persisted_composed_preview(
+         socket,
+         turn_id,
+         document_id,
+         relative_path,
+         document
+       ) do
+    with {:ok, descriptor, index} <-
+           persisted_vfs_edit_preview(socket, turn_id, document_id, relative_path),
+         {:ok, descriptor} <-
+           refresh_composed_preview_snapshot(descriptor, document.path, document, true),
+         :ok <- maybe_persist_composed_edit_preview(socket, descriptor, true),
+         %{} = preview <- transcript_edit_preview_item(socket, turn_id, descriptor, index) do
+      socket
+      |> replace_live_vfs_editor_preview(preview)
+      |> stream_insert(:agent_items, preview)
+    else
+      _other -> socket
+    end
   end
 
   defp document_summary(%Document{} = document) do
@@ -6288,6 +6541,16 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     else
       _ -> nil
     end
+  end
+
+  defp vfs_preview_canvas_id(turn_id, document_id, true, preview_snapshot) do
+    snapshot_id = item_field(preview_snapshot, :id) || "snapshot"
+
+    "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-#{dom_token(snapshot_id)}-committed-canvas"
+  end
+
+  defp vfs_preview_canvas_id(turn_id, document_id, false, _preview_snapshot) do
+    "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-live-canvas"
   end
 
   # Office (docx/pptx/xlsx) rendering. Office documents render SOLELY through the
@@ -7124,22 +7387,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     |> schedule_agent_text_flush()
   end
 
-  defp apply_agent_event(
-         %{assigns: %{agent_turn_id: turn_id}} = socket,
-         %{type: :edit_delta, turn_id: turn_id, delta: delta} = event
-       )
-       when is_binary(delta) do
-    socket
-    |> split_agent_text_before_preview()
-    |> close_agent_reasoning_segment()
-    |> ensure_inline_editor_preview(turn_id, Map.get(event, :path))
-    |> inline_editor_preview_accumulate_delta(
-      turn_id,
-      delta,
-      Map.get(event, :path),
-      Map.get(event, :edit_id)
-    )
-  end
+  # Provider file-change snapshots are proposed tool-display state. Only a
+  # validated VFS lifecycle event may mutate an HWP/Office preview canvas.
+  defp apply_agent_event(socket, %{type: type})
+       when type in [:edit_delta, :file_change_snapshot],
+       do: socket
 
   defp apply_agent_event(
          %{assigns: %{agent_turn_id: turn_id}} = socket,
@@ -7567,13 +7819,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
           stream_transcript_item(acc, current, item, index)
         end)
 
-      socket =
-        restore_current_edit_preview(
-          socket,
-          turn_id,
-          item_field(current, :edit_preview)
-        )
-
       pending_text = snapshot_text(item_field(current, :pending_text))
       text_segment = snapshot_segment(item_field(current, :text_segment))
       pending_reasoning = snapshot_text(item_field(current, :pending_reasoning))
@@ -7599,30 +7844,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   defp replay_agent_current(socket, _current), do: socket
-
-  defp restore_current_edit_preview(socket, turn_id, preview) when is_map(preview) do
-    path = item_field(preview, :path)
-
-    case inline_editor_preview_seed(socket, turn_id, path) do
-      nil ->
-        socket
-
-      seed ->
-        state =
-          Map.merge(seed, %{
-            edit_id: item_field(preview, :edit_id),
-            text: snapshot_text(item_field(preview, :text)),
-            delta_count: snapshot_delta_count(item_field(preview, :delta_count)),
-            status: :running
-          })
-
-        socket
-        |> assign(:agent_editor_preview, state)
-        |> stream_insert(:agent_items, agent_editor_preview_item(state))
-    end
-  end
-
-  defp restore_current_edit_preview(socket, _turn_id, _preview), do: socket
 
   defp maybe_stream_current_text(socket, _turn_id, "", _segment), do: socket
 
@@ -7693,9 +7914,6 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp snapshot_segment(segment) when is_integer(segment) and segment >= 0, do: segment
   defp snapshot_segment(_segment), do: 0
-
-  defp snapshot_delta_count(count) when is_integer(count) and count >= 0, do: count
-  defp snapshot_delta_count(_count), do: 0
 
   defp transcript_items(%{items: items}) when is_list(items), do: items
   defp transcript_items(%{"items" => items}) when is_list(items), do: items
@@ -7875,75 +8093,24 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   # ── inline chat: streaming text buffer helpers ─────────────────────
 
-  defp ensure_inline_editor_preview(socket, turn_id, path) when is_binary(turn_id) do
-    case inline_editor_preview_seed(socket, turn_id, path) do
-      nil ->
-        socket
-
-      seed ->
-        state = socket.assigns[:agent_editor_preview]
-
-        if state && state.turn_id == turn_id && state.document_id == seed.document_id do
-          socket
-        else
-          state = Map.merge(seed, %{text: "", delta_count: 0, status: :running})
-
-          socket
-          |> assign(:agent_editor_preview, state)
-          |> stream_insert(:agent_items, agent_editor_preview_item(state))
-        end
-    end
-  end
-
-  defp ensure_inline_editor_preview(socket, _turn_id, _path), do: socket
-
-  defp inline_editor_preview_accumulate_delta(socket, turn_id, delta, path, edit_id)
-       when is_binary(turn_id) and is_binary(delta) do
-    socket = ensure_inline_editor_preview(socket, turn_id, path)
-
-    case socket.assigns[:agent_editor_preview] do
-      %{turn_id: ^turn_id, document_id: document_id} = state when is_binary(document_id) ->
-        text = preview_text_append(state.text, delta)
-
-        state =
-          state
-          |> Map.put(:text, text)
-          |> Map.put(:delta_count, state.delta_count + 1)
-          |> Map.put(:status, :running)
-          |> Map.put(:edit_id, edit_id || Map.get(state, :edit_id))
-
-        payload = %{
-          turn_id: turn_id,
-          document_id: document_id,
-          delta: delta,
-          text: text,
-          delta_count: state.delta_count,
-          edit_id: Map.get(state, :edit_id)
-        }
-
-        Process.send_after(self(), {:editor_preview_delta, payload}, 0)
-
-        socket
-        |> assign(:agent_editor_preview, state)
-        |> stream_insert(:agent_items, agent_editor_preview_item(state))
-        |> push_event("document.preview.delta_received", payload)
-
-      _other ->
-        socket
-    end
-  end
-
-  defp inline_editor_preview_accumulate_delta(socket, _turn_id, _delta, _path, _edit_id),
-    do: socket
-
   defp finalize_inline_editor_preview(socket, turn_id, status) when is_binary(turn_id) do
     case socket.assigns[:agent_editor_preview] do
-      %{turn_id: ^turn_id} = state ->
-        state = %{state | status: status}
+      %{turn_id: ^turn_id, document_id: document_id} = state ->
+        case socket.assigns[:agent_vfs_preview_item] do
+          %{
+            role: :editor_preview,
+            turn_id: ^turn_id,
+            document_id: ^document_id
+          } = vfs_preview ->
+            if stable_editor_preview?(vfs_preview) do
+              assign(socket, :agent_editor_preview, nil)
+            else
+              finalize_inline_editor_preview_item(socket, state, status)
+            end
 
-        socket
-        |> assign(:agent_editor_preview, nil)
-        |> stream_insert(:agent_items, agent_editor_preview_item(state))
+          _other ->
+            finalize_inline_editor_preview_item(socket, state, status)
+        end
 
       _other ->
         socket
@@ -7952,92 +8119,12 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp finalize_inline_editor_preview(socket, _turn_id, _status), do: socket
 
-  defp inline_editor_preview_seed(socket, turn_id, path) do
-    case inline_editor_preview_document(socket, path) do
-      {:ok, %{document: document, relative_path: relative_path}} ->
-        inline_editor_preview_seed(socket, turn_id, document, relative_path)
+  defp finalize_inline_editor_preview_item(socket, state, status) do
+    state = %{state | status: status}
 
-      _ ->
-        inline_editor_preview_seed_from_active_document(socket, turn_id)
-    end
-  end
-
-  defp inline_editor_preview_seed_from_active_document(socket, turn_id) do
-    document = socket.assigns[:active_document]
-    path = socket.assigns[:active_document_path]
-    document_id = active_document_id(socket)
-
-    with %{relative_path: relative_path} <- document,
-         true <- is_binary(relative_path),
-         true <- is_binary(document_id) do
-      %{
-        turn_id: turn_id,
-        document_id: document_id,
-        document: document,
-        document_path: path || relative_path,
-        document_spec: document_spec(document),
-        canvas_id: "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document_id)}-canvas",
-        bytes_url: document_bytes_url(socket.assigns.workspace_path, relative_path)
-      }
-    else
-      _other -> nil
-    end
-  end
-
-  defp inline_editor_preview_seed(socket, turn_id, document, relative_path) do
-    %{
-      turn_id: turn_id,
-      document_id: document.id,
-      document: document,
-      document_path: relative_path,
-      document_spec: document_spec(document),
-      canvas_id: "agent-editor-preview-#{dom_token(turn_id)}-#{dom_token(document.id)}-canvas",
-      bytes_url: document_bytes_url(socket.assigns.workspace_path, relative_path)
-    }
-  end
-
-  defp inline_editor_preview_document(socket, path) when is_binary(path) and path != "" do
-    with {:ok, source_path} <- inline_editor_preview_source_path(socket, path) do
-      vfs_preview_document(socket, source_path)
-    end
-  end
-
-  defp inline_editor_preview_document(_socket, _path), do: nil
-
-  defp inline_editor_preview_source_path(socket, path) do
-    workspace_path = socket.assigns[:workspace_path]
-    projected_name = path |> Path.basename() |> Projection.source_basename()
-
-    cond do
-      is_binary(workspace_path) and is_binary(projected_name) ->
-        OpenDocs.source_path(workspace_path, projected_name)
-
-      Path.type(path) == :absolute and File.regular?(path) ->
-        {:ok, path}
-
-      is_binary(workspace_path) ->
-        with {:ok, normalized} <- WorkspacePath.normalize(path),
-             {:ok, source_path} <- WorkspacePath.join(workspace_path, normalized),
-             true <- File.regular?(source_path) do
-          {:ok, source_path}
-        else
-          _ -> :error
-        end
-
-      true ->
-        :error
-    end
-  end
-
-  defp preview_text_append(text, delta) do
-    text = (text || "") <> delta
-
-    if String.length(text) <= @agent_editor_preview_max do
-      text
-    else
-      start = String.length(text) - @agent_editor_preview_max
-      "..." <> String.slice(text, start, @agent_editor_preview_max)
-    end
+    socket
+    |> assign(:agent_editor_preview, nil)
+    |> stream_insert(:agent_items, agent_editor_preview_item(state))
   end
 
   defp close_agent_text_segment(socket) do
@@ -8372,7 +8459,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     %{
       dom_id: "agent-tool-#{tool_call_id}",
       role: :tool,
-      title: name,
+      title: AcpStream.normalize_tool_name(name),
       kind: kind,
       status: status,
       body: body || ""
@@ -8479,6 +8566,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       final_bytes_url: Map.get(state, :final_bytes_url),
       body: state.text,
       delta_count: state.delta_count,
+      revision_count: Map.get(state, :revision_count, state.delta_count),
+      revision: Map.get(state, :revision),
+      ops: Map.get(state, :ops, []),
+      sets: Map.get(state, :sets, []),
       highlights: Map.get(state, :highlights, []),
       preview_steps: Map.get(state, :preview_steps, []),
       scroll: Map.get(state, :scroll, %{scroll_top: 0, scroll_left: 0}),
@@ -8497,13 +8588,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
          socket,
          turn_id,
          tool_call_id,
-         "doc.edit",
+         name,
          args,
          result
        )
        when is_binary(turn_id) and turn_id != "" and is_binary(tool_call_id) and
               tool_call_id != "" and is_map(args) do
-    with %{} = op <- doc_edit_primary_op(args),
+    with true <- doc_edit_tool_name?(name),
+         %{} = op <- doc_edit_primary_op(args),
          "insert_picture" <- item_field(op, :op),
          {:ok, path} <- resolve_edit_doc_path(socket, args),
          {:ok, %{document: document, relative_path: relative_path}} <-
@@ -8513,7 +8605,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
       {descriptor, changed?} =
         compose_picture_edit_descriptor(descriptor, tool_call_id, op, result)
 
-      with :ok <- maybe_persist_composed_edit_preview(socket, descriptor, changed?),
+      with {:ok, descriptor} <-
+             refresh_composed_preview_snapshot(descriptor, path, document, changed?),
+           :ok <- maybe_persist_composed_edit_preview(socket, descriptor, changed?),
            %{} = preview <- transcript_edit_preview_item(socket, turn_id, descriptor, index) do
         {:ok, preview}
       else
@@ -8652,6 +8746,31 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
+  defp refresh_composed_preview_snapshot(descriptor, _path, _document, false),
+    do: {:ok, descriptor}
+
+  defp refresh_composed_preview_snapshot(descriptor, path, document, true) do
+    with {:ok, bytes} <- File.read(path),
+         {:ok, snapshot} <- PreviewSnapshot.put(document.id, bytes) do
+      snapshot = strip_transient_preview_bytes(snapshot)
+
+      preview_identity = %{
+        turn_id: item_field(descriptor, :turn_id),
+        edit_id: item_field(descriptor, :edit_id),
+        document_id: item_field(descriptor, :document_id),
+        snapshot_id: item_field(snapshot, :id)
+      }
+
+      {:ok,
+       descriptor
+       |> Map.put(:preview_snapshot, snapshot)
+       |> Map.put(:preview_identity, preview_identity)
+       |> Map.put(:preview_unavailable, false)
+       |> Map.put(:preview_error, nil)
+       |> Map.put(:version, vfs_edit_preview_file_version(path))}
+    end
+  end
+
   defp maybe_persist_composed_edit_preview(_socket, _descriptor, false), do: :ok
 
   defp maybe_persist_composed_edit_preview(socket, descriptor, true) do
@@ -8731,9 +8850,10 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # Build the document-renderer preview for a completed doc.edit. nil for
   # non-edit tools or when no editable content/document can be resolved (the
   # plain tool block still renders either way).
-  defp maybe_doc_edit_preview_item(socket, tool_call_id, "doc.edit", args, result)
+  defp maybe_doc_edit_preview_item(socket, tool_call_id, name, args, result)
        when is_map(args) do
-    with op when is_map(op) <- doc_edit_primary_op(args),
+    with true <- doc_edit_tool_name?(name),
+         op when is_map(op) <- doc_edit_primary_op(args),
          marker when is_binary(marker) <- doc_edit_marker(op),
          {:ok, path} <- resolve_edit_doc_path(socket, args),
          {:ok, %{document: document, relative_path: relative_path}} <-
@@ -8769,6 +8889,11 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   end
 
   defp maybe_doc_edit_preview_item(_socket, _id, _name, _args, _result), do: nil
+
+  defp doc_edit_tool_name?(name) when is_binary(name),
+    do: name == "doc.edit" or String.ends_with?(name, ".doc.edit")
+
+  defp doc_edit_tool_name?(_name), do: false
 
   defp doc_edit_preview_highlights(op, marker) when is_map(op) do
     ref = op["ref"] || op[:ref]
@@ -8834,12 +8959,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp doc_edit_delta_count(_result), do: 1
 
   defp doc_edit_primary_op(args) do
+    args = doc_edit_arguments(args)
+
     cond do
       is_map(args["op"]) -> args["op"]
       is_list(args["ops"]) -> Enum.find(args["ops"], &is_map/1)
       true -> nil
     end
   end
+
+  defp doc_edit_arguments(%{"arguments" => arguments}) when is_map(arguments), do: arguments
+  defp doc_edit_arguments(arguments), do: arguments
 
   # The text the edit put into the document (insert_text/insert_paragraph text,
   # or replace_text/set_cell replacement) — what we locate in the projection.
@@ -8857,6 +8987,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # workspace-relative/abs path that exists, else an open Pool doc matched by id
   # or basename. :error when unresolvable (card renders without an excerpt).
   defp resolve_edit_doc_path(socket, args) do
+    args = doc_edit_arguments(args)
     root = socket.assigns[:workspace_path]
     doc = args["document"]
 
@@ -8957,14 +9088,20 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   defp editor_preview_turn?(%{turn_id: turn_id}, turn_id) when is_binary(turn_id), do: true
   defp editor_preview_turn?(_editor_preview, _turn_id), do: false
 
-  defp agent_item_title(%{title: title}) when is_binary(title), do: title
+  defp agent_item_title(%{title: title}) when is_binary(title),
+    do: AcpStream.normalize_tool_name(title)
+
   defp agent_item_title(_item), do: "Tool"
 
-  defp agent_item_operation_kind(%{kind: kind}) when kind in [:execute, "execute"],
-    do: "shell"
-
   defp agent_item_operation_kind(item) do
-    if shell_tool_name?(agent_item_title(item)), do: "shell", else: "tool"
+    title = agent_item_title(item)
+
+    cond do
+      doc_tool_name?(title) -> "tool"
+      shell_tool_name?(title) -> "shell"
+      item_field(item, :kind) in [:execute, "execute"] -> "shell"
+      true -> "tool"
+    end
   end
 
   defp agent_item_operation_icon(item) do
@@ -9040,6 +9177,9 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     String.downcase(name) in ["bash", "shell", "exec_command", "functions.exec_command"]
   end
 
+  defp doc_tool_name?(name) when is_binary(name), do: String.starts_with?(name, "doc.")
+  defp doc_tool_name?(_name), do: false
+
   defp agent_item_body(%{body: body}) when is_binary(body), do: body
   defp agent_item_body(_item), do: ""
 
@@ -9067,8 +9207,14 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
         document_format: document.format,
         bytes_url: agent_editor_preview_bytes_url(item),
         preview_final_bytes_url: agent_editor_preview_final_bytes_url(item),
+        preview_snapshot_pinned?: is_map(Map.get(item, :preview_snapshot)),
         mirror?: true,
         preview_turn_id: Map.get(item, :turn_id),
+        preview_edit_id: Map.get(item, :edit_id),
+        preview_revision: Map.get(item, :revision),
+        preview_revision_count: agent_editor_preview_revision_count(item),
+        preview_ops: Jason.encode!(agent_editor_preview_ops(item)),
+        preview_sets: Jason.encode!(agent_editor_preview_sets(item)),
         preview_text: preview_text,
         preview_delta_count: agent_editor_preview_delta_count(item),
         preview_highlights: Jason.encode!(agent_editor_preview_highlights(item)),
@@ -9112,6 +9258,17 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   defp agent_editor_preview_delta_count(%{delta_count: count}) when is_integer(count), do: count
   defp agent_editor_preview_delta_count(_item), do: 0
+
+  defp agent_editor_preview_revision_count(%{revision_count: count}) when is_integer(count),
+    do: count
+
+  defp agent_editor_preview_revision_count(item), do: agent_editor_preview_delta_count(item)
+
+  defp agent_editor_preview_ops(%{ops: ops}) when is_list(ops), do: ops
+  defp agent_editor_preview_ops(_item), do: []
+
+  defp agent_editor_preview_sets(%{sets: sets}) when is_list(sets), do: sets
+  defp agent_editor_preview_sets(_item), do: []
 
   defp agent_editor_preview_highlights(%{highlights: highlights}) when is_list(highlights),
     do: highlights

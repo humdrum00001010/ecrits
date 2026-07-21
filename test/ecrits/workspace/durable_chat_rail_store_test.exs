@@ -263,6 +263,98 @@ defmodule Ecrits.Workspace.DurableChatRailStoreTest do
     assert Enum.map(transcript, row_user) == ["fresh conversation"]
   end
 
+  test "durable tool payloads retain bounded head and tail context" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "ecrits-durable-tool-payload-#{System.unique_integer([:positive])}"
+      )
+
+    workspace = Path.join(root, "workspace")
+    store_path = Path.join(root, "handoff.json")
+    File.mkdir_p!(workspace)
+    previous_store = Application.fetch_env(:ecrits, :workspace_handoff_store_path)
+    switch_handoff_store(store_path)
+
+    on_exit(fn ->
+      restore_handoff_store(previous_store)
+      File.rm_rf(root)
+    end)
+
+    input = "input-start\n" <> String.duplicate("i", 1_000_000) <> "\ninput-end"
+    output = "output-start\n" <> String.duplicate("o", 1_000_000) <> "\noutput-end"
+
+    agent_state = %{
+      id: "agent-large-tool",
+      instance_id: "instance-large-tool",
+      provider_session_id: "thread-large-tool",
+      title: "large tool payload",
+      title_user_edited?: false,
+      transcript: [
+        %{
+          turn_id: "turn-large-tool",
+          user: "run it",
+          agent: "done",
+          items: [
+            %{
+              role: :tool,
+              tool_call_id: "tool-large",
+              name: "Bash",
+              status: :completed,
+              input: input,
+              output: output,
+              body: "Input:\n#{input}\n\nOutput:\n#{output}"
+            }
+          ]
+        }
+      ],
+      adapter_opts: %{}
+    }
+
+    rail_state = %{
+      foregrounds: %{
+        "rail-large" => %{
+          agent_id: agent_state.id,
+          provider: "codex",
+          owner_session_id: "session-large",
+          agent_state: agent_state
+        }
+      },
+      active_foregrounds: %{},
+      foreground_order: ["rail-large"]
+    }
+
+    assert :ok = WorkspaceHandoff.put_chat_rail_state(workspace, rail_state)
+
+    assert {:ok, live_state} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
+    [live_dialog] = get_in(live_state, [:foregrounds, "rail-large", :agent_state, :transcript])
+    [live_tool] = live_dialog.items
+    assert live_tool.input =~ "input-start"
+    assert live_tool.input =~ "input-end"
+    assert live_tool.input =~ "bytes omitted from durable history"
+    assert live_tool.output =~ "output-start"
+    assert live_tool.output =~ "output-end"
+    assert live_tool.output =~ "bytes omitted from durable history"
+    assert live_tool.body == nil
+
+    assert File.stat!(store_path).size < 100_000
+
+    restart_handoff_store()
+    assert {:ok, restored_state} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
+
+    [restored_dialog] =
+      get_in(restored_state, [:foregrounds, "rail-large", :agent_state, :transcript])
+
+    [restored_tool] = restored_dialog.items
+    assert restored_tool.input =~ "input-start"
+    assert restored_tool.input =~ "input-end"
+    assert restored_tool.input =~ "bytes omitted from durable history"
+    assert restored_tool.output =~ "output-start"
+    assert restored_tool.output =~ "output-end"
+    assert restored_tool.output =~ "bytes omitted from durable history"
+    assert restored_tool.body == nil
+  end
+
   @tag :edit_failure
   test "failed provider replacement preserves the durable rail for a later retry" do
     root =

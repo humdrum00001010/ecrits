@@ -488,7 +488,10 @@ defmodule Ecrits.AcpAgent.Session do
             extras =
               state
               |> turn_extras(opts)
-              |> Map.put(:workspace_registration_mode, workspace_registration_mode(state, from))
+              |> Map.put(
+                :workspace_registration_mode,
+                workspace_registration_mode(state, from, opts)
+              )
 
             start_turn(input, extras, state)
 
@@ -647,13 +650,23 @@ defmodule Ecrits.AcpAgent.Session do
   # reaches Workspace. Direct callers use the synchronous path so a caller
   # cannot kill this Session and race a replacement attach ahead of ownership
   # registration.
-  defp workspace_registration_mode(state, {caller, _tag}) when is_pid(caller) do
+  defp workspace_registration_mode(state, from),
+    do: workspace_registration_mode(state, from, [])
+
+  defp workspace_registration_mode(state, from, opts) when is_list(opts) do
+    case Keyword.get(opts, :workspace_registration_mode) do
+      mode when mode in [:sync, :async] -> mode
+      _other -> workspace_registration_mode_from_caller(state, from)
+    end
+  end
+
+  defp workspace_registration_mode_from_caller(state, {caller, _tag}) when is_pid(caller) do
     if Ecrits.Workspace.Session.whereis(state.workspace_root) == caller,
       do: :async,
       else: :sync
   end
 
-  defp workspace_registration_mode(_state, _from), do: :sync
+  defp workspace_registration_mode_from_caller(_state, _from), do: :sync
 
   @impl true
   # The durable ACP client is started with this Session as its event listener.
@@ -1775,6 +1788,15 @@ defmodule Ecrits.AcpAgent.Session do
         |> put_current_acp_update_state(acp_update_state)
         |> handle_turn_event(turn_id, event)
 
+      {:events, events, acp_update_state} ->
+        state
+        |> put_current_acp_update_state(acp_update_state)
+        |> then(fn state ->
+          Enum.reduce(events, state, fn event, state ->
+            handle_turn_event(state, turn_id, event)
+          end)
+        end)
+
       {:skip, acp_update_state} ->
         put_current_acp_update_state(state, acp_update_state)
 
@@ -2024,6 +2046,17 @@ defmodule Ecrits.AcpAgent.Session do
       edit_id: Map.get(event, :edit_id),
       path: Map.get(event, :path),
       delta: delta
+    })
+  end
+
+  defp handle_turn_event(state, turn_id, %{type: :file_change_snapshot} = event) do
+    emit(state, %{
+      type: :file_change_snapshot,
+      turn_id: turn_id,
+      phase: Map.get(event, :phase, :proposed),
+      edit_id: Map.get(event, :edit_id),
+      changes: Map.get(event, :changes, []),
+      fingerprint: Map.get(event, :fingerprint)
     })
   end
 

@@ -62,14 +62,6 @@ defmodule EcritsWeb.Layouts do
 
   slot :inner_block, required: true
 
-  attr :fuse_mode, :any,
-    default: nil,
-    doc: "workspace doc-VFS state: nil hides the doc-VFS toggle; true/false shows it"
-
-  attr :doc_vfs_backend, :atom,
-    default: nil,
-    doc: "selected document VFS backend, used only for user-facing labels"
-
   def app(assigns) do
     ~H"""
     <div class="drawer">
@@ -85,14 +77,20 @@ defmodule EcritsWeb.Layouts do
         tabindex="-1"
       />
 
-      <div class="drawer-content flex flex-col min-h-screen pt-[60px]">
-        <.top_nav
-          current_scope={@current_scope}
-          chrome={@chrome}
-          fuse_mode={@fuse_mode}
-          doc_vfs_backend={@doc_vfs_backend}
-          brand_href={@brand_href || ~p"/"}
-        />
+      <div class="drawer-content flex flex-col min-h-screen">
+        <%!-- The top navbar is gone; non-split pages keep only the brand
+              mark, pinned to the EXACT position and size where the studio's
+              file-tree-header mark renders (12px, 12px, size sm) — navigating
+              between mount and studio then reads as chrome appearing around a
+              stationary logo, never a logo that moves. --%>
+        <.link
+          :if={@variant != "split"}
+          navigate={@brand_href || ~p"/"}
+          aria-label="Ecrits"
+          class="fixed left-3 top-3 z-40 text-base-content/70 transition-colors hover:text-base-content"
+        >
+          <Brand.mark size="sm" class="flex-none" />
+        </.link>
 
         <Breadcrumbs.breadcrumbs :if={@current_scope} trail={@breadcrumbs || []} />
 
@@ -131,77 +129,6 @@ defmodule EcritsWeb.Layouts do
   defp inner_class("default"), do: "mx-auto max-w-7xl"
   defp inner_class("narrow"), do: "mx-auto w-full max-w-md"
   defp inner_class("split"), do: ""
-
-  attr :current_scope, :map, default: nil
-  attr :chrome, :string, default: "app", values: ~w(app landing)
-  attr :fuse_mode, :any, default: nil
-  attr :doc_vfs_backend, :atom, default: nil
-  attr :brand_href, :string, default: "/"
-
-  @doc """
-  Top navigation for the local workspace product.
-  """
-  def top_nav(assigns) do
-    assigns =
-      assign(
-        assigns,
-        :doc_vfs_backend_label,
-        doc_vfs_backend_label(assigns[:doc_vfs_backend])
-      )
-
-    ~H"""
-    <header class="navbar fixed top-0 left-0 right-0 z-40 h-14 min-h-[60px] flex-nowrap border-b border-base-300 bg-base-100 supports-[backdrop-filter]:backdrop-blur-md px-7 max-md:px-4">
-      <div class="navbar-start gap-6 min-w-0">
-        <.link
-          navigate={@brand_href}
-          class="link link-hover inline-flex items-center gap-2 min-w-0 text-sm font-semibold leading-none text-base-content/85 hover:text-base-content"
-          aria-label="Ecrits"
-        >
-          <Brand.mark class="flex-none" />
-          <span class="inline-flex h-[22px] items-center leading-none">Ecrits</span>
-        </.link>
-      </div>
-
-      <div :if={@fuse_mode != nil} class="ml-auto flex items-center">
-        <button
-          id="fuse-mode-toggle"
-          type="button"
-          phx-click="workspace.document_vfs.toggle"
-          aria-pressed={"#{@fuse_mode == true}"}
-          aria-label={
-            if(@fuse_mode == true,
-              do: "Disable editable text mount (#{@doc_vfs_backend_label})",
-              else: "Enable editable text mount (#{@doc_vfs_backend_label})"
-            )
-          }
-          title={"Mount this workspace's documents as editable text files (#{@doc_vfs_backend_label})"}
-          class={[
-            "relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors duration-150",
-            "focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--cs-blue)]",
-            @fuse_mode == true &&
-              "border-[color-mix(in_oklab,var(--cs-green)_42%,transparent)] bg-[color-mix(in_oklab,var(--cs-green)_12%,transparent)] text-[var(--cs-green)] hover:bg-[color-mix(in_oklab,var(--cs-green)_16%,transparent)]",
-            @fuse_mode != true &&
-              "border-transparent text-[var(--cs-muted)] hover:border-[color-mix(in_oklab,var(--cs-ink)_15%,transparent)] hover:bg-[color-mix(in_oklab,var(--cs-ink)_6%,transparent)] hover:text-[var(--cs-ink)]"
-          ]}
-        >
-          <.icon name="hero-document-text" class="size-4" />
-          <span
-            class={[
-              "absolute right-1 top-1 size-1.5 rounded-full border border-[var(--cs-bg)]",
-              @fuse_mode == true && "bg-[var(--cs-green)]",
-              @fuse_mode != true && "bg-[color-mix(in_oklab,var(--cs-ink)_24%,transparent)]"
-            ]}
-            aria-hidden="true"
-          ></span>
-        </button>
-      </div>
-    </header>
-    """
-  end
-
-  defp doc_vfs_backend_label(:fskit), do: "FSKit"
-  defp doc_vfs_backend_label(:fuse), do: "FUSE"
-  defp doc_vfs_backend_label(_backend), do: doc_vfs_backend_label(Ecrits.Fuse.DocMount.backend())
 
   attr :current_scope, :map,
     required: true,

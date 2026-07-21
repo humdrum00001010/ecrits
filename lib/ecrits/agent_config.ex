@@ -116,8 +116,7 @@ defmodule Ecrits.AgentConfig do
   end
 
   def adapter_opts(%__MODULE__{} = config, cwd) do
-    [cwd: cwd, model: adapter_model(config.model)] ++
-      Keyword.delete(session_opts(config), :access_control)
+    [cwd: cwd, model: adapter_model(config.model)] ++ session_opts(config)
   end
 
   defp adapter_model("default"), do: nil

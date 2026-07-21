@@ -382,6 +382,61 @@ defmodule Ecrits.Doc.ToolsTest do
              }
     end
 
+    test "doc.find resolves an exact projection paragraph after native whitespace normalization",
+         %{
+           pool: pool
+         } do
+      projected_text = "대표자 성명 : 김에크리츠       (인)"
+      native_text = "대표자 성명 : 김에크리츠 (인)"
+
+      {:ok, %{"document" => doc_id}} =
+        Tools.call(ctx(pool), "doc.open", %{
+          "path" => "native-whitespace-marker.hwp",
+          "open_opts" => [
+            __text__: native_text,
+            __elements__: [
+              %{
+                "type" => "paragraph",
+                "text" => native_text,
+                "ref" => %{
+                  "section" => 0,
+                  "paragraph" => 77,
+                  "offset" => 0,
+                  "cell" => %{
+                    "parentParaIndex" => 77,
+                    "controlIndex" => 0,
+                    "cellIndex" => 3,
+                    "cellParaIndex" => 3
+                  }
+                }
+              }
+            ]
+          ]
+        })
+
+      assert {:ok, %{"matches" => [match]}} =
+               Tools.call(ctx(pool), "doc.find", %{
+                 "document" => doc_id,
+                 "pattern" => projected_text,
+                 "type" => "paragraph",
+                 "marker" => "(인)",
+                 "case_sensitive" => true,
+                 "limit" => 1
+               })
+
+      assert match["text"] == native_text
+      assert match["marker_offset"] == 15
+
+      assert Jason.decode!(match["before_marker_ref"]) == %{
+               "section" => 0,
+               "paragraph" => 77,
+               "offset" => 15,
+               "cellPath" => [
+                 %{"controlIndex" => 0, "cellIndex" => 3, "cellParaIndex" => 3}
+               ]
+             }
+    end
+
     test "doc.find canonicalizes a live HWP cell ref at a Unicode marker offset", %{pool: pool} do
       text = "수급사업자 한빛 (인)"
 
@@ -1798,6 +1853,9 @@ defmodule Ecrits.Doc.ToolsTest do
                    "container" => "existing_paragraph_payload_array",
                    "at" => "after_existing_anchor_payload",
                    "action" => "insert_new_payload_node",
+                   "commit_constraint" =>
+                     "successful_table_inserting_rename_is_final_projection_write_for_turn",
+                   "precommit_requirement" => "unmapped_source_facts_empty",
                    "replace_container" => false,
                    "insert_paragraph_arrays" => false,
                    "copy_expanded_table_payloads" => false,
@@ -1858,6 +1916,20 @@ defmodule Ecrits.Doc.ToolsTest do
                  }
                }
              } = result["surface"]
+
+      assert %{
+               "meaning" => "candidate_rejected_no_durable_commit",
+               "likely_causes" => likely_causes,
+               "recover" => recover
+             } = get_in(result, ["surface", "format", "commit", "on_einval"])
+
+      assert "changed_pristine_blank_paragraph_outside_a_proven_table_cell" in likely_causes
+      assert "stale_full_file_base" in likely_causes
+
+      assert recover =~
+               "remove every changed pristine-blank paragraph outside a proven table-cell"
+
+      assert recover =~ "retry one corrected candidate"
 
       assert OpenDocs.source_path(root, "drafts%2Fnested.hwp") == {:ok, abs}
       assert OpenDocs.writable?(root)

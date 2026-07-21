@@ -8,7 +8,7 @@ defmodule Ecrits.Doc.ProjectionAudit do
   """
 
   @standard_contract_demo_work_items [
-    "웹 서비스의 접근성 진단과 우선순위 개선 목록 작성",
+    "웹 서비스 접근성 진단과 우선순위 개선 목록 작성",
     "핵심 화면 개선 가이드와 재검수 결과 보고서 작성",
     "운영 담당자용 접근성 유지관리 가이드 제공"
   ]
@@ -21,20 +21,18 @@ defmodule Ecrits.Doc.ProjectionAudit do
 
   @standard_contract_demo_requirements %{
     texts: [
-      %{id: "contract_name", exact: "◇ 계약명 : 웹 접근성 진단 및 개선 가이드 제작", count: 1},
+      %{id: "contract_name", exact: "◇ 계약명 : 웹 서비스 접근성 개선 용역", count: 1},
       %{id: "contract_period", exact: "◇ 계약기간 : 2026년 7월 20일부터 2026년 10월 31일까지", count: 1},
       %{
         id: "contract_amount",
-        exact: "◇ 계약 금액 : 금 88,000,000원정(￦88,000,000)(부가가치세 포함)",
+        exact: "◇ 계약 금액 : 금 팔천팔백만원정(￦88,000,000원)(부가가치세 포함)",
         count: 1
       },
       %{id: "party_intro", exact: @standard_contract_demo_intro, count: 1},
       %{
         id: "signing_date",
-        exact: "미기재",
-        after: @standard_contract_demo_intro,
-        before: "원사업자",
-        count: 1
+        exact: "2026년 7월 20일",
+        count: 6
       },
       %{id: "supply_date", exact: "◇ 원재료의 공급일 : 미기재", count: 1},
       %{id: "supply_place", exact: "◇ 원재료의 공급장소 : 미기재", count: 1},
@@ -103,7 +101,7 @@ defmodule Ecrits.Doc.ProjectionAudit do
         allowed_missing_coordinates: [{4, 3}, {4, 4}],
         reject_any_duplicate_candidate: true,
         duplicate_candidate_dimensions: {5, 5},
-        after: "◇ 계약 금액 : 금 88,000,000원정(￦88,000,000)(부가가치세 포함)",
+        after: "◇ 계약 금액 : 금 팔천팔백만원정(￦88,000,000원)(부가가치세 포함)",
         before: "◇ 원재료의 공급일 : 미기재",
         rows: [
           ["선급금", "30.0%", "26,400,000원", "계약 체결 후 5영업일 이내", "미기재"],
@@ -122,6 +120,7 @@ defmodule Ecrits.Doc.ProjectionAudit do
         id: "party_table",
         headers: ["원사업자", "수급사업자"],
         dimensions: {2, 2},
+        count: 5,
         rows: [
           [
             [
@@ -137,6 +136,24 @@ defmodule Ecrits.Doc.ProjectionAudit do
               "주 소 : 미기재",
               "대표자 성명 : 김에크리츠 (인)",
               "사업자(법인)번호 : 미기재"
+            ]
+          ]
+        ],
+        row_variants: [
+          [
+            [
+              [
+                "상호 또는 명칭 : 주식회사 블루버드 디자인랩",
+                "주 소 : 미기재",
+                "대표자 성명 : 이서준 (인)",
+                "사업자(법인)번호 : 미기재"
+              ],
+              [
+                "상호 또는 명칭 : 주식회사 에크리츠",
+                "주 소 : 미기재",
+                "대표자 성명 : 김에크리츠 (인)",
+                "사업자(법인)번호 : 미기재"
+              ]
             ]
           ]
         ]
@@ -172,6 +189,7 @@ defmodule Ecrits.Doc.ProjectionAudit do
       %{
         id: "recipient_signature",
         target_text: "대표자 성명 : 김에크리츠 (인)",
+        target_occurrence: 1,
         marker: "(인)",
         count: 1,
         global_picture_count: 2,
@@ -244,13 +262,19 @@ defmodule Ecrits.Doc.ProjectionAudit do
   @spec validate_standard_contract_semantic_diff(binary() | list(), binary() | list()) ::
           :ok | {:error, [issue()]}
   def validate_standard_contract_semantic_diff(pristine_projection, final_projection) do
+    validate_standard_contract_semantic_diff(pristine_projection, final_projection,
+      require_signature?: true
+    )
+  end
+
+  defp validate_standard_contract_semantic_diff(pristine_projection, final_projection, opts) do
     with {:ok, pristine_tree} <- decode_projection(pristine_projection),
          {:ok, final_tree} <- decode_projection(final_projection) do
       pristine = semantic_sequence(pristine_tree)
       final = semantic_sequence(final_tree)
 
       pristine
-      |> validate_standard_contract_sequence(final)
+      |> validate_standard_contract_sequence(final, opts)
       |> validation_result()
     else
       {:error, reason} ->
@@ -421,7 +445,7 @@ defmodule Ecrits.Doc.ProjectionAudit do
 
       cond do
         matches == [] ->
-          [%{id: id, reason: :missing_anchor}]
+          [%{id: id, reason: :missing_anchor, detail: %{expected: expected_anchor(requirement)}}]
 
         is_integer(Map.get(requirement, :count)) and
             length(matches) != Map.fetch!(requirement, :count) ->
@@ -443,6 +467,11 @@ defmodule Ecrits.Doc.ProjectionAudit do
           []
       end
     end)
+  end
+
+  defp expected_anchor(requirement) do
+    Map.get(requirement, :exact) || Map.get(requirement, :label) ||
+      Map.get(requirement, :value, "")
   end
 
   defp validate_table_requirements(tree, requirements) do
@@ -479,6 +508,8 @@ defmodule Ecrits.Doc.ProjectionAudit do
           end
         end)
 
+      expected_count = Map.get(requirement, :count, 1)
+
       cond do
         candidates == [] ->
           [%{id: id, reason: :missing_table, detail: requirement}]
@@ -496,11 +527,20 @@ defmodule Ecrits.Doc.ProjectionAudit do
             }
           ]
 
-        matching == [] ->
+        matching == [] or length(matching) < length(candidates) ->
           [%{id: id, reason: :table_content_mismatch, detail: requirement}]
 
-        length(matching) == 1 ->
+        length(matching) == expected_count ->
           []
+
+        length(matching) < expected_count ->
+          [
+            %{
+              id: id,
+              reason: :table_count_mismatch,
+              detail: %{expected: expected_count, actual: length(matching)}
+            }
+          ]
 
         true ->
           [%{id: id, reason: :duplicate_table, detail: %{count: length(matching)}}]
@@ -586,7 +626,8 @@ defmodule Ecrits.Doc.ProjectionAudit do
           article_blocks,
           schedule_blocks,
           annex_index,
-          article_line
+          article_line,
+          work_items
         )
     end)
   end
@@ -601,7 +642,7 @@ defmodule Ecrits.Doc.ProjectionAudit do
       end)
 
     case article_blocks do
-      [{block, _index}] ->
+      [{block, article_index}] ->
         matching_paragraphs =
           Enum.filter(block_paragraphs(block), fn paragraph ->
             case logical_lines(paragraph) do
@@ -612,7 +653,12 @@ defmodule Ecrits.Doc.ProjectionAudit do
 
         case matching_paragraphs do
           [paragraph] ->
-            if logical_lines(paragraph) == [article_line | work_items] and
+            inline_work_items? = logical_lines(paragraph) == [article_line | work_items]
+
+            native_work_items? =
+              native_work_items_follow_article?(blocks, article_index, work_items)
+
+            if (inline_work_items? or native_work_items?) and
                  map_size(counts) == length(work_items) and
                  Enum.all?(counts, fn {_item, count} -> count == 1 end) do
               []
@@ -621,7 +667,12 @@ defmodule Ecrits.Doc.ProjectionAudit do
                 %{
                   id: id,
                   reason: :work_item_placement_mismatch,
-                  detail: %{expected: work_items, counts: counts}
+                  detail: %{
+                    expected: work_items,
+                    counts: counts,
+                    expected_layout:
+                      "three consecutive standalone paragraph groups immediately after the article"
+                  }
                 }
               ]
             end
@@ -650,7 +701,8 @@ defmodule Ecrits.Doc.ProjectionAudit do
          article_blocks,
          schedule_blocks,
          annex_index,
-         article_line
+         article_line,
+         work_items
        ) do
     case {article_blocks, schedule_blocks, annex_index} do
       {[{article_block, article_index}], [{schedule_block, schedule_index, schedule_table_index}],
@@ -668,6 +720,11 @@ defmodule Ecrits.Doc.ProjectionAudit do
           schedule_index == article_index + 1 and
             schedule_starts_block?(schedule_block, schedule_table_index)
 
+        native_work_item_blocks? =
+          schedule_index == article_index + length(work_items) + 1 and
+            native_work_items_follow_article?(blocks, article_index, work_items) and
+            schedule_starts_block?(schedule_block, schedule_table_index)
+
         # Payload-local insertion preserves unused sibling paragraph blocks.
         # They are inert only when every payload is an empty paragraph.
         spacer_blocks =
@@ -677,7 +734,8 @@ defmodule Ecrits.Doc.ProjectionAudit do
         annex_follows_schedule? =
           annex_index > schedule_index and Enum.all?(spacer_blocks, &empty_paragraph_block?/1)
 
-        if (same_block? or next_block?) and annex_follows_schedule? do
+        if (same_block? or next_block? or native_work_item_blocks?) and
+             annex_follows_schedule? do
           []
         else
           [
@@ -689,7 +747,10 @@ defmodule Ecrits.Doc.ProjectionAudit do
                 schedule_block: schedule_index,
                 annex_block: annex_index,
                 same_block: article_block == schedule_block,
-                empty_spacers_only: annex_follows_schedule?
+                native_work_item_blocks: native_work_item_blocks?,
+                empty_spacers_only: annex_follows_schedule?,
+                expected_layout:
+                  "article group, then three standalone work-item paragraph groups, then a table-only group, then only empty spacers before the annex"
               }
             }
           ]
@@ -729,6 +790,15 @@ defmodule Ecrits.Doc.ProjectionAudit do
           end)
           |> Enum.map(&%{block: block, cell: &1})
         end)
+
+      target_contexts =
+        case Map.get(requirement, :target_occurrence) do
+          occurrence when is_integer(occurrence) and occurrence > 0 ->
+            target_contexts |> Enum.at(occurrence - 1) |> List.wrap()
+
+          _other ->
+            target_contexts
+        end
 
       case target_contexts do
         [] ->
@@ -1127,12 +1197,21 @@ defmodule Ecrits.Doc.ProjectionAudit do
   defp canonical_term(term) when is_list(term), do: Enum.map(term, &canonical_term/1)
   defp canonical_term(term), do: term
 
-  defp validate_standard_contract_sequence(pristine, final) do
-    initial = %{used: MapSet.new(), signature_pending?: false}
+  defp validate_standard_contract_sequence(pristine, final, opts) do
+    require_signature? = Keyword.fetch!(opts, :require_signature?)
+
+    initial = %{
+      used: MapSet.new(),
+      signature_pending?: false,
+      allow_signature?: require_signature?
+    }
 
     case consume_standard_contract_sequence(pristine, final, initial) do
       {:ok, state} ->
-        missing = MapSet.difference(standard_contract_expected_changes(), state.used)
+        missing =
+          require_signature?
+          |> standard_contract_expected_changes()
+          |> MapSet.difference(state.used)
 
         if MapSet.size(missing) == 0 do
           []
@@ -1163,7 +1242,8 @@ defmodule Ecrits.Doc.ProjectionAudit do
          pristine,
          [%{kind: :picture} | final],
          %{
-           signature_pending?: true
+           signature_pending?: true,
+           allow_signature?: true
          } = state
        ) do
     state =
@@ -1174,11 +1254,88 @@ defmodule Ecrits.Doc.ProjectionAudit do
     consume_standard_contract_sequence(pristine, final, state)
   end
 
-  defp consume_standard_contract_sequence(pristine, [%{kind: :table} = token | final], state) do
-    schedule = standard_contract_table_matrix("performance_payment_schedule")
+  defp consume_standard_contract_sequence(
+         [%{kind: :paragraph} = before | pristine],
+         [
+           %{kind: :paragraph} = article,
+           %{kind: :paragraph} = work_item_1,
+           %{kind: :paragraph} = work_item_2,
+           %{kind: :paragraph} = work_item_3
+           | final
+         ] = final_tokens,
+         state
+       ) do
+    work_items = [work_item_1, work_item_2, work_item_3]
 
-    if token.matrix == schedule and valid_inserted_schedule_token?(token) and
-         not MapSet.member?(state.used, "performance_payment_schedule") do
+    if native_standard_contract_body_end?(before, article, work_items, state) do
+      consume_standard_contract_sequence(
+        pristine,
+        final,
+        mark_standard_contract_change(state, "contract_body_end")
+      )
+    else
+      consume_standard_contract_pair([before | pristine], final_tokens, state)
+    end
+  end
+
+  # The native HWP table primitive owns a styled, empty anchor paragraph. When
+  # the approved schedule is inserted between the final article and the annex,
+  # that anchor precedes the table in the projected payload order. Browser
+  # authority also preserves the matching two trailing anchors created by the
+  # native table primitive. Treat only those exact bundles as the one approved
+  # schedule insertion; an empty paragraph anywhere else still falls through
+  # to the strict pairwise comparison below.
+  defp consume_standard_contract_sequence(
+         pristine,
+         [
+           %{kind: :empty_paragraph_meta} = anchor,
+           %{kind: :table} = token,
+           %{kind: :empty_paragraph_meta} = trailing_anchor_1,
+           %{kind: :empty_paragraph_meta} = trailing_anchor_2
+           | final
+         ],
+         state
+       ) do
+    native_anchor_bundle? =
+      anchor.meta == trailing_anchor_1.meta and anchor.meta == trailing_anchor_2.meta
+
+    if native_anchor_bundle? and inserted_standard_contract_schedule?(token, state) do
+      consume_standard_contract_sequence(
+        pristine,
+        final,
+        mark_standard_contract_change(state, "performance_payment_schedule")
+      )
+    else
+      consume_standard_contract_pair(
+        pristine,
+        [anchor, token, trailing_anchor_1, trailing_anchor_2 | final],
+        state
+      )
+    end
+  end
+
+  defp consume_standard_contract_sequence(
+         pristine,
+         [
+           %{kind: :empty_paragraph_meta} = anchor,
+           %{kind: :table} = token
+           | final
+         ],
+         state
+       ) do
+    if inserted_standard_contract_schedule?(token, state) do
+      consume_standard_contract_sequence(
+        pristine,
+        final,
+        mark_standard_contract_change(state, "performance_payment_schedule")
+      )
+    else
+      consume_standard_contract_pair(pristine, [anchor, token | final], state)
+    end
+  end
+
+  defp consume_standard_contract_sequence(pristine, [%{kind: :table} = token | final], state) do
+    if inserted_standard_contract_schedule?(token, state) do
       consume_standard_contract_sequence(
         pristine,
         final,
@@ -1201,7 +1358,7 @@ defmodule Ecrits.Doc.ProjectionAudit do
         state =
           state
           |> mark_standard_contract_change(id)
-          |> Map.put(:signature_pending?, id == "party_table")
+          |> Map.put(:signature_pending?, id == "party_table_1")
 
         consume_standard_contract_sequence(pristine, final, state)
 
@@ -1238,7 +1395,7 @@ defmodule Ecrits.Doc.ProjectionAudit do
          %{kind: :paragraph} = final_token,
          state
        ) do
-    standard_contract_paragraph_edit_slots()
+    (standard_contract_paragraph_edit_slots() ++ optional_standard_contract_paragraph_edit_slots())
     |> Enum.find(fn slot ->
       not MapSet.member?(state.used, slot.id) and
         paragraph_before_matches?(before.text, slot.before) and final_token.text == slot.after and
@@ -1255,9 +1412,16 @@ defmodule Ecrits.Doc.ProjectionAudit do
          %{kind: :table} = final_token,
          state
        ) do
-    standard_contract_table_edit_slots()
+    next_party_id =
+      Enum.find_value(1..5, fn occurrence ->
+        id = "party_table_#{occurrence}"
+        if MapSet.member?(state.used, id), do: nil, else: id
+      end)
+
+    (standard_contract_table_edit_slots() ++ optional_standard_contract_table_edit_slots())
     |> Enum.find(fn slot ->
       not MapSet.member?(state.used, slot.id) and
+        (not String.starts_with?(slot.id, "party_table_") or slot.id == next_party_id) and
         standard_contract_table_before_matches?(before.matrix, slot.before) and
         final_token.matrix == slot.after and
         table_replacement_structure_valid?(before, final_token)
@@ -1272,8 +1436,34 @@ defmodule Ecrits.Doc.ProjectionAudit do
 
   defp table_replacement_structure_valid?(before, final_token) do
     before.coordinate_issues == [] and final_token.coordinate_issues == [] and
-      before.table_meta == final_token.table_meta and before.cells == final_token.cells and
+      before.table_meta == final_token.table_meta and
+      table_cells_replacement_valid?(before.cells, final_token.cells, final_token.table_meta) and
       before.extras == final_token.extras
+  end
+
+  defp table_cells_replacement_valid?(before_cells, final_cells, table_meta)
+       when length(before_cells) == length(final_cells) do
+    table_height = Map.get(table_meta, "tableHeight")
+
+    before_cells
+    |> Enum.zip(final_cells)
+    |> Enum.all?(fn {before, final_cell} ->
+      before.row == final_cell.row and before.col == final_cell.col and
+        cell_meta_replacement_valid?(before.meta, final_cell.meta, table_height)
+    end)
+  end
+
+  defp table_cells_replacement_valid?(_before_cells, _final_cells, _table_meta), do: false
+
+  defp cell_meta_replacement_valid?(before, final_cell, table_height) do
+    before_height = Map.get(before, "height")
+    final_height = Map.get(final_cell, "height")
+
+    before == final_cell or
+      (Map.drop(before, ["height"]) == Map.drop(final_cell, ["height"]) and
+         is_integer(before_height) and is_integer(final_height) and
+         is_integer(table_height) and final_height == table_height and
+         final_height >= before_height)
   end
 
   defp valid_inserted_schedule_token?(token) do
@@ -1283,16 +1473,39 @@ defmodule Ecrits.Doc.ProjectionAudit do
       (token.coordinates == [] or Enum.sort(token.coordinates) == expected_coordinates)
   end
 
+  defp inserted_standard_contract_schedule?(token, state) do
+    token.matrix == standard_contract_table_matrix("performance_payment_schedule") and
+      valid_inserted_schedule_token?(token) and
+      not MapSet.member?(state.used, "performance_payment_schedule")
+  end
+
+  defp native_standard_contract_body_end?(before, article, work_items, state) do
+    slot = Enum.find(standard_contract_paragraph_edit_slots(), &(&1.id == "contract_body_end"))
+
+    not MapSet.member?(state.used, "contract_body_end") and
+      paragraph_before_matches?(before.text, slot.before) and
+      article.text == normalize(@standard_contract_demo_jurisdiction) and
+      Enum.map(work_items, & &1.text) ==
+        Enum.map(@standard_contract_demo_work_items, &normalize/1) and
+      article.meta == before.meta and
+      Enum.all?(work_items, &(&1.meta == %{} or &1.meta == before.meta))
+  end
+
   defp mark_standard_contract_change(state, id),
     do: %{state | used: MapSet.put(state.used, id)}
 
-  defp standard_contract_expected_changes do
-    paragraph_ids = Enum.map(standard_contract_paragraph_edit_slots(), & &1.id)
-    table_ids = Enum.map(standard_contract_table_edit_slots(), & &1.id)
+  defp standard_contract_expected_changes(require_signature?) do
+    paragraph_ids =
+      Enum.map(
+        standard_contract_paragraph_edit_slots() ++
+          optional_standard_contract_paragraph_edit_slots(),
+        & &1.id
+      )
 
-    MapSet.new(
-      paragraph_ids ++ table_ids ++ ["performance_payment_schedule", "recipient_signature"]
-    )
+    table_ids = Enum.map(standard_contract_table_edit_slots(), & &1.id)
+    signature_ids = if require_signature?, do: ["recipient_signature"], else: []
+
+    MapSet.new(paragraph_ids ++ table_ids ++ ["performance_payment_schedule"] ++ signature_ids)
   end
 
   defp semantic_token_summary(%{kind: :paragraph, text: text}),
@@ -1359,6 +1572,14 @@ defmodule Ecrits.Doc.ProjectionAudit do
     ]
   end
 
+  defp optional_standard_contract_paragraph_edit_slots do
+    ([%{id: "attachment_signing_date_1", before: {:exact, "20____년 ____월 ____일"}}] ++
+       Enum.map(2..5, fn occurrence ->
+         %{id: "attachment_signing_date_#{occurrence}", before: {:exact, "년 월 일"}}
+       end))
+    |> Enum.map(&Map.put(&1, :after, normalize("2026년 7월 20일")))
+  end
+
   defp paragraph_edit_slot(id, before_matcher) do
     requirement =
       Enum.find(@standard_contract_demo_requirements.texts, &(&1.id == id))
@@ -1376,14 +1597,68 @@ defmodule Ecrits.Doc.ProjectionAudit do
     do: Enum.all?(fragments, &String.contains?(text, normalize(&1)))
 
   defp standard_contract_table_edit_slots do
-    [
-      %{id: "payment_table", before: :payment_table},
-      %{id: "party_table", before: :party_table},
-      %{id: "arbitrator", before: :arbitrator}
-    ]
+    ([%{id: "payment_table", before: :payment_table}] ++
+       Enum.flat_map(1..5, fn
+         3 ->
+           [
+             %{id: "party_table_3", before: :party_table_with_phone},
+             %{
+               id: "party_table_3",
+               before: :party_table_without_phone,
+               after_id: "party_table_no_phone"
+             }
+           ]
+
+         occurrence ->
+           [%{id: "party_table_#{occurrence}", before: :party_table}]
+       end) ++
+       [%{id: "arbitrator", before: :arbitrator}])
     |> Enum.map(fn slot ->
-      Map.put(slot, :after, standard_contract_table_matrix(slot.id))
+      requirement_id =
+        Map.get(slot, :after_id) ||
+          if(slot.before in [:party_table, :party_table_with_phone],
+            do: "party_table",
+            else: slot.id
+          )
+
+      Map.put(slot, :after, standard_contract_table_matrix(requirement_id))
     end)
+  end
+
+  defp optional_standard_contract_table_edit_slots do
+    pristine = [
+      ["원 도 급 계약사항", "원 도 급 계 약 명(名)", "", ""],
+      ["", "최 초 계 약 금 액", "", ""],
+      ["", "계 약 기 간", "", ""],
+      ["하 도 급 계약사항", "하 도 급 계 약 명(名)", "", ""],
+      ["", "최 초 계 약 금 액", "", ""],
+      ["", "계 약 기 간", "", ""],
+      ["", "원사업자", "상호 와 대표자", ""],
+      ["", "", "주 소", ""],
+      ["", "수급사업자", "상호 와 대표자", ""],
+      ["", "", "주 소", ""]
+    ]
+
+    completed = [
+      ["원 도 급 계약사항", "원 도 급 계 약 명(名)", "", "웹 서비스 접근성 개선 용역"],
+      ["", "최 초 계 약 금 액", "", "88,000,000원"],
+      ["", "계 약 기 간", "", "2026년 7월 20일부터 2026년 10월 31일까지"],
+      ["하 도 급 계약사항", "하 도 급 계 약 명(名)", "", "웹 서비스 접근성 개선 용역"],
+      ["", "최 초 계 약 금 액", "", "88,000,000원"],
+      ["", "계 약 기 간", "", "2026년 7월 20일부터 2026년 10월 31일까지"],
+      ["", "원사업자", "상호 와 대표자", "주식회사 블루버드 디자인랩 / 이서준"],
+      ["", "", "주 소", "미기재"],
+      ["", "수급사업자", "상호 와 대표자", "주식회사 에크리츠 / 김에크리츠"],
+      ["", "", "주 소", "미기재"]
+    ]
+
+    [
+      %{
+        id: "direct_payment_summary",
+        before: {:matrix, canonical_matrix(pristine)},
+        after: canonical_matrix(completed)
+      }
+    ]
   end
 
   defp standard_contract_table_before_matches?([headers | _rows], :payment_table),
@@ -1392,10 +1667,44 @@ defmodule Ecrits.Doc.ProjectionAudit do
   defp standard_contract_table_before_matches?([headers | _rows], :party_table),
     do: row_matches?(headers, ["원사업자", "수급사업자"])
 
+  defp standard_contract_table_before_matches?([headers | rows], :party_table_with_phone) do
+    row_matches?(headers, ["원사업자", "수급사업자"]) and
+      Enum.any?(List.flatten(rows), &String.contains?(&1, "전화번호"))
+  end
+
+  defp standard_contract_table_before_matches?([headers | rows], :party_table_without_phone) do
+    row_matches?(headers, ["원사업자", "수급사업자"]) and
+      Enum.all?(List.flatten(rows), &(not String.contains?(&1, "전화번호")))
+  end
+
   defp standard_contract_table_before_matches?([[first | _rest] | _rows], :arbitrator),
     do: normalize(first) == "중재인 또는 중재기관"
 
+  defp standard_contract_table_before_matches?(matrix, {:matrix, expected}),
+    do: matrix == expected
+
   defp standard_contract_table_before_matches?(_matrix, _kind), do: false
+
+  defp standard_contract_table_matrix("party_table_no_phone") do
+    [
+      ["원사업자", "수급사업자"],
+      [
+        [
+          "상호 또는 명칭 : 주식회사 블루버드 디자인랩",
+          "주 소 : 미기재",
+          "대표자 성명 : 이서준 (인)",
+          "사업자(법인)번호 : 미기재"
+        ],
+        [
+          "상호 또는 명칭 : 주식회사 에크리츠",
+          "주 소 : 미기재",
+          "대표자 성명 : 김에크리츠 (인)",
+          "사업자(법인)번호 : 미기재"
+        ]
+      ]
+    ]
+    |> canonical_matrix()
+  end
 
   defp standard_contract_table_matrix(id) do
     requirement = Enum.find(@standard_contract_demo_requirements.tables, &(&1.id == id))
@@ -1636,6 +1945,19 @@ defmodule Ecrits.Doc.ProjectionAudit do
     end
   end
 
+  defp native_work_items_follow_article?(blocks, article_index, work_items) do
+    actual =
+      blocks
+      |> Enum.slice(article_index + 1, length(work_items))
+      |> Enum.map(fn block ->
+        block
+        |> block_paragraphs()
+        |> Enum.flat_map(&logical_lines/1)
+      end)
+
+    actual == Enum.map(work_items, &[&1])
+  end
+
   defp empty_paragraph_block?(block) when is_list(block) and block != [],
     do: Enum.all?(block, &empty_paragraph_payload?/1)
 
@@ -1648,8 +1970,11 @@ defmodule Ecrits.Doc.ProjectionAudit do
   defp empty_paragraph_payload?(_payload), do: false
 
   defp table_matches?(matrix, requirement) do
+    expected_rows =
+      [Map.get(requirement, :rows, []) | Map.get(requirement, :row_variants, [])]
+
     dimension_matches?(matrix, Map.get(requirement, :dimensions)) and
-      rows_match?(matrix, Map.get(requirement, :rows, []))
+      Enum.any?(expected_rows, &rows_match?(matrix, &1))
   end
 
   defp dimension_matches?(_matrix, nil), do: true
@@ -1848,9 +2173,10 @@ defmodule Ecrits.Doc.ProjectionAudit do
   defp expanded_matrix(payloads) do
     {cells, current} =
       Enum.reduce(payloads, {%{}, nil}, fn
-        %{"type" => "cell", "row" => row, "col" => col}, {cells, current}
+        %{"type" => "cell", "row" => row, "col" => col} = cell, {cells, current}
         when is_integer(row) and is_integer(col) ->
-          {flush_cell(cells, current), %{row: row, col: col, texts: []}}
+          {flush_cell(cells, current),
+           %{row: row, col: col, texts: [], aggregate: Map.get(cell, "text")}}
 
         %{"type" => "paragraph", "text" => text}, {cells, %{texts: texts} = current}
         when is_binary(text) ->
@@ -1880,11 +2206,17 @@ defmodule Ecrits.Doc.ProjectionAudit do
 
   defp flush_cell(cells, nil), do: cells
 
-  defp flush_cell(cells, %{row: row, col: col, texts: texts}) do
+  defp flush_cell(cells, %{row: row, col: col, texts: texts, aggregate: aggregate}) do
+    text =
+      case Enum.reject(texts, &(&1 == "")) do
+        [] when is_binary(aggregate) -> aggregate
+        paragraphs -> Enum.join(paragraphs, "\n")
+      end
+
     Map.put(
       cells,
       {row, col},
-      texts |> Enum.reject(&(&1 == "")) |> Enum.join("\n") |> normalize()
+      normalize(text)
     )
   end
 
@@ -1984,11 +2316,12 @@ defmodule Ecrits.Doc.ProjectionAudit do
   defp native_marker_geometry_from_handle(handle, requirement) do
     target = Map.fetch!(requirement, :target_text)
     marker = Map.fetch!(requirement, :marker)
+    occurrence = Map.get(requirement, :target_occurrence)
 
     with {:ok, marker_offset, marker_length} <- marker_span(target, marker),
          {:ok, matches_json} <- Ehwp.find(handle, target, case_sensitive: true),
          {:ok, matches} <- Jason.decode(matches_json),
-         {:ok, match} <- one_exact_native_match(matches, target),
+         {:ok, match} <- one_exact_native_match(matches, target, occurrence),
          {:ok, cursor_base} <- native_cursor_base(match),
          {:ok, start_cursor} <-
            native_cursor_rect(handle, cursor_base, match["charOffset"] + marker_offset),
@@ -2017,7 +2350,7 @@ defmodule Ecrits.Doc.ProjectionAudit do
 
   defp marker_span(_target, _marker), do: {:error, :invalid_marker}
 
-  defp one_exact_native_match(matches, target) when is_list(matches) do
+  defp one_exact_native_match(matches, target, occurrence) when is_list(matches) do
     expected_length = String.length(target)
 
     exact =
@@ -2030,14 +2363,27 @@ defmodule Ecrits.Doc.ProjectionAudit do
           false
       end)
 
-    case exact do
-      [match] -> {:ok, match}
-      [] -> {:error, :native_target_not_found}
-      matches -> {:error, {:ambiguous_native_target, length(matches)}}
+    case occurrence do
+      occurrence when is_integer(occurrence) and occurrence > 0 ->
+        case Enum.at(exact, occurrence - 1) do
+          nil -> {:error, {:native_target_occurrence_not_found, occurrence}}
+          match -> {:ok, match}
+        end
+
+      nil ->
+        case exact do
+          [match] -> {:ok, match}
+          [] -> {:error, :native_target_not_found}
+          matches -> {:error, {:ambiguous_native_target, length(matches)}}
+        end
+
+      _invalid ->
+        {:error, :invalid_native_target_occurrence}
     end
   end
 
-  defp one_exact_native_match(_matches, _target), do: {:error, :invalid_native_find_result}
+  defp one_exact_native_match(_matches, _target, _occurrence),
+    do: {:error, :invalid_native_find_result}
 
   defp native_cursor_base(%{
          "sec" => section,

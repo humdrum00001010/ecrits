@@ -1504,6 +1504,84 @@ defmodule Ecrits.AcpAgent.SessionQueueTest do
     assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
   end
 
+  test "a terminal edit update forwards its snapshot and persists the completed tool" do
+    {_id, pid} = start_blocking_session()
+
+    {:ok, %{id: turn_id, status: :running}} = Session.send_turn(pid, nil, "edit the file")
+    assert_receive {:agent_adapter_waiting, task_pid}, 2_000
+
+    send(pid, {
+      :acp_session_update,
+      "fake-session",
+      %{
+        "sessionUpdate" => "tool_call",
+        "toolCallId" => "terminal-edit",
+        "title" => "Edit File",
+        "kind" => "edit",
+        "rawInput" => %{}
+      }
+    })
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :tool_call_started,
+                      turn_id: ^turn_id,
+                      tool_call_id: "terminal-edit"
+                    }},
+                   2_000
+
+    send(pid, {
+      :acp_session_update,
+      "fake-session",
+      %{
+        "sessionUpdate" => "tool_call_update",
+        "toolCallId" => "terminal-edit",
+        "status" => "completed",
+        "content" => [
+          %{
+            "type" => "diff",
+            "path" => "contract.md",
+            "oldText" => "before",
+            "newText" => "after"
+          }
+        ],
+        "rawOutput" => %{"applied" => true}
+      }
+    })
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :file_change_snapshot,
+                      turn_id: ^turn_id,
+                      edit_id: "terminal-edit",
+                      changes: [
+                        %{path: "contract.md", old_text: "before", new_text: "after"}
+                      ]
+                    }},
+                   2_000
+
+    assert_receive {:agent_event,
+                    %{
+                      type: :tool_call_completed,
+                      turn_id: ^turn_id,
+                      tool_call_id: "terminal-edit"
+                    }},
+                   2_000
+
+    state = :sys.get_state(pid)
+    assert is_binary(state.current.acp_update_state.edit_snapshots["terminal-edit"])
+
+    send(task_pid, :go)
+    assert_receive {:agent_event, %{type: :turn_completed, turn_id: ^turn_id}}, 2_000
+
+    assert [%Dialog{items: items}] = Session.transcript(pid)
+
+    assert Enum.any?(items, fn
+             %{role: :tool, name: "Edit File", status: :completed} -> true
+             _other -> false
+           end)
+  end
+
   test "an invalid multi-modal input fails fast at the boundary" do
     {_id, pid} = start_blocking_session()
     assert {:error, {:invalid_input, :empty_input}} = Session.send_turn(pid, nil, [])

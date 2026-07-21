@@ -44,6 +44,7 @@ defmodule Ecrits.Fuse.DocFs do
   require Logger
 
   alias Ecrits.Doc.Projection
+  alias Ecrits.Document
   alias Ecrits.Fuse.DocMount
   alias Ecrits.Fuse.OpenDocs
 
@@ -169,7 +170,15 @@ defmodule Ecrits.Fuse.DocFs do
                          :discard
                        ) do
                     :discarded ->
-                      broadcast_preview_rejected(root, source, name, identity || %{}, reason)
+                      broadcast_preview_rejected(
+                        root,
+                        source,
+                        name,
+                        identity || %{},
+                        Document.sha256(bytes),
+                        reason
+                      )
+
                       Map.update!(acc, :rejected, &[{name, reason} | &1])
 
                     :same_owner_replaced ->
@@ -181,7 +190,15 @@ defmodule Ecrits.Fuse.DocFs do
                       )
 
                     :other_owner_or_gone ->
-                      broadcast_preview_rejected(root, source, name, identity || %{}, reason)
+                      broadcast_preview_rejected(
+                        root,
+                        source,
+                        name,
+                        identity || %{},
+                        Document.sha256(bytes),
+                        reason
+                      )
+
                       Map.update!(acc, :rejected, &[{name, reason} | &1])
                   end
                 else
@@ -562,8 +579,13 @@ defmodule Ecrits.Fuse.DocFs do
 
         socket =
           case result do
-            {:error, reason} -> reject_release_preview(socket, state.root, name, reason)
-            _other -> socket
+            {:error, reason} ->
+              socket
+              |> discard_terminal_release_stage(state.root, name, key, reason)
+              |> reject_release_preview(state.root, name, reason)
+
+            _other ->
+              socket
           end
 
         socket = socket |> clear_key(key) |> clear_preview_metadata(name) |> delete_handle(event)
@@ -804,9 +826,10 @@ defmodule Ecrits.Fuse.DocFs do
 
   # A VFS editor may save either by replacing a temp file or by rewriting the
   # projected file in place. FSKit can deliver chunks out of order in both
-  # cases, so publish a semantic preview only once the accumulated bytes form a
-  # complete valid projection. `Projection.preview_write_back/3` never mutates
-  # the source; the subsequent direct commit or rename reuses its edit id.
+  # cases, so validate the candidate once the accumulated bytes form a complete
+  # projection. `Projection.preview_write_back/3` never mutates the source; the
+  # owning rail renders its transient candidate revision. The subsequent direct
+  # commit or rename reuses that exact edit id and revision for commit/rejection.
   defp maybe_preview_buffer(socket, root, name, buf) do
     if OpenDocs.canonical_echo_temp?(root, name) do
       socket
@@ -831,7 +854,9 @@ defmodule Ecrits.Fuse.DocFs do
              buf,
              Keyword.put(identity_opts(identity), :root, root)
            ) do
-      put_preview_hash(socket, name, hash)
+      socket
+      |> put_preview_hash(name, hash)
+      |> put_preview_revision(name, Document.sha256(buf))
     else
       _reason -> socket
     end
@@ -907,15 +932,30 @@ defmodule Ecrits.Fuse.DocFs do
   defp put_preview_hash(socket, name, hash),
     do: Exfuse.Socket.assign(socket, :preview_hashes, Map.put(preview_hashes(socket), name, hash))
 
+  defp preview_revisions(socket),
+    do: Exfuse.Socket.get_assign(socket, :preview_revisions, %{})
+
+  defp preview_revision(socket, name), do: Map.get(preview_revisions(socket), name)
+
+  defp put_preview_revision(socket, name, revision) do
+    Exfuse.Socket.assign(
+      socket,
+      :preview_revisions,
+      Map.put(preview_revisions(socket), name, revision)
+    )
+  end
+
   defp clear_preview_metadata(socket, name) do
     socket
     |> Exfuse.Socket.assign(:vfs_edit_identities, Map.delete(edit_identities(socket), name))
     |> Exfuse.Socket.assign(:preview_hashes, Map.delete(preview_hashes(socket), name))
+    |> Exfuse.Socket.assign(:preview_revisions, Map.delete(preview_revisions(socket), name))
   end
 
   defp move_edit_metadata(socket, source_name, target_name) do
     identities = edit_identities(socket)
     hashes = preview_hashes(socket)
+    revisions = preview_revisions(socket)
 
     identities =
       case Map.fetch(identities, source_name) do
@@ -929,9 +969,19 @@ defmodule Ecrits.Fuse.DocFs do
         :error -> Map.delete(hashes, source_name)
       end
 
+    revisions =
+      case Map.fetch(revisions, source_name) do
+        {:ok, revision} ->
+          revisions |> Map.delete(source_name) |> Map.put(target_name, revision)
+
+        :error ->
+          Map.delete(revisions, source_name)
+      end
+
     socket
     |> Exfuse.Socket.assign(:vfs_edit_identities, identities)
     |> Exfuse.Socket.assign(:preview_hashes, hashes)
+    |> Exfuse.Socket.assign(:preview_revisions, revisions)
   end
 
   defp vfs_edit_opts(socket, _root, name, _source),
@@ -967,6 +1017,7 @@ defmodule Ecrits.Fuse.DocFs do
           source,
           mounted_source_name(target_name),
           identity,
+          preview_revision(socket, source_name),
           reason
         )
       end
@@ -985,6 +1036,7 @@ defmodule Ecrits.Fuse.DocFs do
           source,
           mounted_source_name(name),
           identity,
+          preview_revision(socket, name),
           reason
         )
       end
@@ -993,21 +1045,32 @@ defmodule Ecrits.Fuse.DocFs do
     socket
   end
 
-  defp broadcast_preview_rejected(root, source, source_name, identity, reason) do
+  defp broadcast_preview_rejected(root, source, source_name, identity, revision, reason) do
+    canonical_root = DocMount.canonical_root(root)
+
     info = %{
+      phase: :rejected,
+      turn_id: Map.get(identity, :turn_id),
+      edit_id: Map.get(identity, :edit_id),
+      document_id: Document.id_for(canonical_root, Path.relative_to(source, canonical_root)),
       path: source,
       doc: source_name,
-      edit_id: Map.get(identity, :edit_id),
+      revision: revision,
+      ops: [],
+      sets: [],
+      highlights: [],
+      preview_snapshot: nil,
+      preview_snapshot_error: nil,
       agent_id: Map.get(identity, :agent_id),
       instance_id: Map.get(identity, :instance_id),
-      turn_id: Map.get(identity, :turn_id),
+      preview_only: true,
       reason: inspect(reason, limit: 8, printable_limit: 240)
     }
 
     Phoenix.PubSub.broadcast(
       Ecrits.PubSub,
-      "doc_vfs:" <> DocMount.canonical_root(root),
-      {:vfs_doc_edit_rejected, info}
+      "doc_vfs:" <> canonical_root,
+      {:vfs_doc_edited, info}
     )
   rescue
     _error -> :ok
@@ -1407,6 +1470,41 @@ defmodule Ecrits.Fuse.DocFs do
   defp terminal_rejectable_staged_error?({:structural_change, _detail}), do: true
   defp terminal_rejectable_staged_error?(_reason), do: false
 
+  defp discardable_release_stage_error?(
+         {:structural_change, "expanded table invariant requires nested projection lists"}
+       ),
+       do: true
+
+  defp discardable_release_stage_error?(_reason), do: false
+
+  defp discard_terminal_release_stage(socket, root, name, key, reason) do
+    if discardable_release_stage_error?(reason) do
+      bytes = buffer(socket, key) || buffer(socket, path_key(name))
+
+      staged =
+        if is_binary(bytes) do
+          Enum.find(OpenDocs.staged_with_identity(root), fn
+            {staged_name, staged_bytes, staged_reason, _identity} ->
+              staged_name == mounted_source_name(name) and staged_bytes == bytes and
+                staged_reason == reason
+
+            _other ->
+              false
+          end)
+        end
+
+      case staged do
+        {staged_name, ^bytes, ^reason, identity} ->
+          _ = OpenDocs.discard_staged(root, staged_name, bytes, reason, identity)
+
+        _other ->
+          :ok
+      end
+    end
+
+    socket
+  end
+
   defp settle_staged_cleanup(
          acc,
          root,
@@ -1462,8 +1560,9 @@ defmodule Ecrits.Fuse.DocFs do
       source_name = mounted_source_name(name)
 
       case OpenDocs.staged(root, source_name) do
-        {:ok, bytes, reason} when reason == :structural_change or
-                                    (is_tuple(reason) and elem(reason, 0) == :structural_change) ->
+        {:ok, bytes, reason}
+        when reason == :structural_change or
+               (is_tuple(reason) and elem(reason, 0) == :structural_change) ->
           {:ok, bytes}
 
         :error ->

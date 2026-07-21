@@ -318,7 +318,7 @@ defmodule EcritsWeb.CoreComponents do
     ~H"""
     <div
       id="mount-root"
-      class="flex min-h-[calc(100vh-60px)] items-center justify-center px-5 py-8"
+      class="flex min-h-dvh items-center justify-center px-5 py-8"
     >
       <section
         id="native-directory-picker"

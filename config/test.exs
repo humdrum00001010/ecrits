@@ -12,7 +12,9 @@ config :bcrypt_elixir, :log_rounds, 1
 # server must be running for `:browser`-tagged feature tests. Plain ConnTest
 # / LiveViewTest cases don't need the server but tolerate `server: true`.
 config :ecrits, EcritsWeb.Endpoint,
-  http: [ip: {127, 0, 0, 1}, port: 4002],
+  # PORT override lets concurrent checkouts/sessions run the suite without
+  # colliding on the listener.
+  http: [ip: {127, 0, 0, 1}, port: String.to_integer(System.get_env("PORT", "4002"))],
   secret_key_base: "fdSwy2CndhpkOt1n+miKuBzwIMBkBxzGfg7azoR3klip6hL9cvK0cL69X7pnOQLF",
   server: true
 

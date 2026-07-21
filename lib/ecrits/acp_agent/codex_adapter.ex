@@ -8,9 +8,34 @@ defmodule Ecrits.AcpAgent.CodexAdapter do
   @impl true
   defdelegate init(opts), to: Codex
   @impl true
-  defdelegate command(opts), to: Codex
+  def command(opts) do
+    explicit_path = Keyword.get(opts, :codex_path) || System.get_env("CODEX_PATH")
+    search_path = Keyword.get(opts, :codex_search_path, System.get_env("PATH", ""))
+
+    opts =
+      opts
+      |> Keyword.delete(:codex_search_path)
+      |> maybe_put_codex_path(explicit_path || resolve_codex_path(search_path))
+
+    Codex.command(opts)
+  end
+
+  @doc false
+  def resolve_codex_path(search_path \\ System.get_env("PATH", "")) do
+    candidates =
+      search_path
+      |> String.split(path_separator(), trim: true)
+      |> Enum.uniq()
+      |> Enum.flat_map(&codex_candidates/1)
+      |> Enum.filter(&executable?/1)
+
+    Enum.find(candidates, &(not transient_package_shim?(&1))) || List.first(candidates)
+  end
+
   @impl true
   defdelegate capabilities(), to: Codex
+  @impl true
+  defdelegate auth_methods(opts), to: Codex
   @impl true
   defdelegate modes(), to: Codex
   @impl true
@@ -55,4 +80,33 @@ defmodule Ecrits.AcpAgent.CodexAdapter do
   end
 
   defp mcp_startup_update(_line, _state), do: nil
+
+  defp maybe_put_codex_path(opts, nil), do: opts
+  defp maybe_put_codex_path(opts, path), do: Keyword.put(opts, :codex_path, path)
+
+  defp codex_candidates(dir) do
+    names =
+      if match?({:win32, _}, :os.type()), do: ["codex.exe", "codex.cmd", "codex"], else: ["codex"]
+
+    Enum.map(names, &Path.join(dir, &1))
+  end
+
+  defp executable?(path) do
+    case File.stat(path) do
+      {:ok, %{type: :regular, mode: mode}} ->
+        match?({:win32, _}, :os.type()) or Bitwise.band(mode, 0o111) != 0
+
+      _stat ->
+        false
+    end
+  end
+
+  defp transient_package_shim?(path) do
+    normalized = String.replace(path, "\\", "/")
+    String.contains?(normalized, "/node_modules/.bin/")
+  end
+
+  defp path_separator do
+    if match?({:win32, _}, :os.type()), do: ";", else: ":"
+  end
 end

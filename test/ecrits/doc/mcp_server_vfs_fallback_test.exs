@@ -126,40 +126,60 @@ defmodule Ecrits.Doc.MCPServerVFSFallbackTest do
      state: state}
   end
 
-  test "actual handler requires a changed committed projection, not staged or mounted bytes",
+  test "commit-evidence failures do not consume find and the same lookup succeeds after commit",
        ctx do
     args = find_args(ctx)
-    {:ok, primary_sequence} = AgentSession.doc_vfs_sequence(ctx.agent_pid, ctx.turn_id)
 
-    assert_terminal_find_error("acp_commit_required", call("doc.find", args, ctx.state))
+    assert_error("acp_commit_required", call("doc.find", args, ctx.state))
 
-    assert {:ok, %{phase: :native_marker_find_spent}} =
+    assert {:ok, %{phase: :acp_primary} = waiting_sequence} =
              AgentSession.doc_vfs_sequence(ctx.agent_pid, ctx.turn_id)
 
-    assert_terminal_find_error(
-      "native_marker_find_already_used",
-      call("doc.find", args, ctx.state)
-    )
+    refute Map.get(waiting_sequence, :native_marker_find_spent?)
+    refute Map.get(waiting_sequence, :find_retry_used?)
 
     changed = projection(@marker_text)
     OpenDocs.cache_committed(ctx.root, "contract.hwp", changed)
     OpenDocs.stage(ctx.root, "contract.hwp", changed, :partial_write)
-    :ok = AgentSession.put_doc_vfs_sequence(ctx.agent_pid, ctx.turn_id, primary_sequence)
-    assert_terminal_find_error("acp_commit_required", call("doc.find", args, ctx.state))
+    assert_error("acp_commit_required", call("doc.find", args, ctx.state))
+
+    assert {:ok, %{phase: :acp_primary} = staged_sequence} =
+             AgentSession.doc_vfs_sequence(ctx.agent_pid, ctx.turn_id)
+
+    refute Map.get(staged_sequence, :native_marker_find_spent?)
+    refute Map.get(staged_sequence, :find_retry_used?)
 
     OpenDocs.unstage(ctx.root, "contract.hwp")
     OpenDocs.uncache_committed(ctx.root, "contract.hwp")
-    :ok = AgentSession.put_doc_vfs_sequence(ctx.agent_pid, ctx.turn_id, primary_sequence)
 
     # The mounted file exists and can contain anything, but it is never accepted
     # as post-commit authority without OpenDocs.committed/2.
     File.write!(ctx.mounted_at, changed)
-    assert_terminal_find_error("acp_commit_required", call("doc.find", args, ctx.state))
+    assert_error("acp_commit_required", call("doc.find", args, ctx.state))
+
+    assert {:ok, %{phase: :acp_primary} = mounted_only_sequence} =
+             AgentSession.doc_vfs_sequence(ctx.agent_pid, ctx.turn_id)
+
+    refute Map.get(mounted_only_sequence, :native_marker_find_spent?)
+    refute Map.get(mounted_only_sequence, :find_retry_used?)
 
     OpenDocs.cache_committed(ctx.root, "contract.hwp", changed)
     OpenDocs.record_write_failure(ctx.root, "contract.hwp", :engine_write_failed)
-    :ok = AgentSession.put_doc_vfs_sequence(ctx.agent_pid, ctx.turn_id, primary_sequence)
-    assert_terminal_find_error("acp_commit_required", call("doc.find", args, ctx.state))
+    assert_error("acp_commit_required", call("doc.find", args, ctx.state))
+
+    assert {:ok, %{phase: :acp_primary} = rejected_sequence} =
+             AgentSession.doc_vfs_sequence(ctx.agent_pid, ctx.turn_id)
+
+    refute Map.get(rejected_sequence, :native_marker_find_spent?)
+    refute Map.get(rejected_sequence, :find_retry_used?)
+
+    OpenDocs.clear_write_failure(ctx.root, "contract.hwp")
+
+    assert {:ok, %{content: [content]}, _state} = call("doc.find", args, ctx.state)
+    assert %{"matches" => [%{"before_marker_ref" => ref}]} = Jason.decode!(content.text)
+
+    assert {:ok, %{phase: :native_marker_ref_ready, native_marker_ref: ^ref}} =
+             AgentSession.doc_vfs_sequence(ctx.agent_pid, ctx.turn_id)
   end
 
   test "projection broadcasts preserve the explicitly pinned ACP identity", ctx do
@@ -613,13 +633,21 @@ defmodule Ecrits.Doc.MCPServerVFSFallbackTest do
       )
 
     assert %{"result" => %{"tools" => tools}} = post_rpc(ctx, 10, "tools/list", %{})
-    assert Enum.map(tools, & &1["name"]) == ["doc.open_doc", "doc.find", "doc.edit"]
+
+    assert Enum.map(tools, & &1["name"]) == [
+             "doc.open_doc",
+             "doc.find",
+             "doc.edit"
+           ]
 
     open_tool = Enum.find(tools, &(&1["name"] == "doc.open_doc"))
     assert get_in(open_tool, ["inputSchema", "properties", "path", "const"]) == "current"
 
     before_open = post_tool(ctx, 11, "doc.find", Map.delete(find_args(ctx), "_agent_id"))
     assert rpc_tool_error(before_open, "native_marker_find_before_open")
+
+    preflight_call = post_tool(ctx, 111, "doc.preflight", %{})
+    assert rpc_tool_error(preflight_call, "doc_open_required_first")
 
     wrong_open = post_tool(ctx, 12, "doc.open_doc", %{"path" => "contract.hwp"})
     assert rpc_tool_error(wrong_open, "current_document_open_required")
@@ -629,14 +657,22 @@ defmodule Ecrits.Doc.MCPServerVFSFallbackTest do
 
     document = ctx.document
 
+    opened = Jason.decode!(opened_json)
+
     assert %{
              "document" => ^document,
              "mounted_at" => mounted_at,
              "mount_error" => nil,
              "workspace_files" => workspace_files
-           } = Jason.decode!(opened_json)
+           } = opened
 
     assert is_binary(mounted_at) and mounted_at != ""
+    refute Map.has_key?(opened, "preflight_contract")
+
+    tool_context = AgentSession.tool_context(ctx.agent_pid)
+    assert tool_context.agent_id == ctx.agent_id
+    assert tool_context.instance_id == ctx.instance_id
+    assert tool_context.turn_id == ctx.turn_id
 
     assert Enum.any?(workspace_files, &match?(%{"path" => "프로젝트_브리프.md", "kind" => "text"}, &1))
 
@@ -668,11 +704,17 @@ defmodule Ecrits.Doc.MCPServerVFSFallbackTest do
     assert rpc_tool_error(unavailable, "doc_turn_unavailable")
   end
 
-  test "VFS catalog exposes only open, one strict lookup, and picture fallback" do
+  test "VFS catalog exposes open, one strict lookup, and picture fallback" do
     {:ok, state} = MCPServer.init([])
     assert {:ok, tools, nil, ^state} = MCPServer.handle_list_tools(nil, state)
 
-    assert Enum.map(tools, & &1.name) == ["doc.open_doc", "doc.find", "doc.edit"]
+    assert Enum.map(tools, & &1.name) == [
+             "doc.open_doc",
+             "doc.find",
+             "doc.edit"
+           ]
+
+    refute Enum.any?(tools, &(&1.name == "doc.preflight"))
     edit = Enum.find(tools, &(&1.name == "doc.edit"))
     assert edit.inputSchema["required"] == ["document", "op", "fallback"]
   end

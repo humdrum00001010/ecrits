@@ -75,12 +75,14 @@ defmodule Ecrits.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:file_system, "~> 1.0"},
       {:bandit, "~> 1.5"},
-      # Fork of ex_mcp (upstream hex 0.10.0). The ACP Codex/Claude adapters forward
-      # `mcpServers` into the agent launch config (codex app-server `-c mcp_servers.*`
-      # + `features.rmcp_client`) and handle codex 0.137 server->client elicitation/
-      # approval requests — none of which the published package does. `override: true`
-      # because orchex pulls ex_mcp ~> 0.10.0.
-      {:ex_mcp, git: "https://github.com/humdrum00001010/ex_mcp", branch: "main", override: true},
+      # Pin the ecrits integration branch: upstream PR #12's structured decisions
+      # plus upstream PR #13's Codex file-change snapshots and the Claude
+      # streamed-text deduplication fix. `override: true` is required because
+      # orchex still constrains ex_mcp 0.10.x.
+      {:ex_mcp,
+       git: "https://github.com/humdrum00001010/ex_mcp",
+       ref: "7bb2e323228aa1e774664ad80968d8b702803f11",
+       override: true},
       # Headless HWP/HWPX NIF runtime backing `Ecrits.Doc.Rhwp` (the server arm of
       # the doc-editing MCP). Provides the `Ehwp` facade used by the `doc.*` tools.
       {:ehwp, git: "git@code.cloudxyz.org:IlYoung/ehwp.git", branch: "main"},

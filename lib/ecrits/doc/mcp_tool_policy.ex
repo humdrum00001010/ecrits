@@ -470,9 +470,10 @@ defmodule Ecrits.Doc.MCPToolPolicy do
   end
 
   # Commit evidence and pattern addressability are separate failures with
-  # separate recoveries: a missing commit is terminal for the turn, while a
-  # stale or repeated pattern earns one corrected retry (see
-  # `retryable_find_error?/1`), because 2026-07-19 field evidence showed a full
+  # separate recoveries: a missing commit has not performed a lookup and can be
+  # retried without consuming one, while a stale or repeated pattern earns one
+  # corrected retry (see `retryable_find_error?/1`), because 2026-07-19 field
+  # evidence showed a full
   # brief-driven fill making every annex signature row byte-identical — the
   # unique-pattern grammar simply cannot address 1-of-N without an ordinal.
   defp check_find_commit_evidence(evidence) do
@@ -508,12 +509,22 @@ defmodule Ecrits.Doc.MCPToolPolicy do
     end
   end
 
-  @doc "Pattern-level find failures that earn the single corrected retry."
+  @doc "Find failures that allow another attempt."
   @spec retryable_find_error?(term()) :: boolean()
   def retryable_find_error?(%{"error" => error}),
-    do: error in ["find_pattern_not_committed", "find_pattern_ambiguous"]
+    do:
+      error in [
+        "acp_commit_required",
+        "find_pattern_not_committed",
+        "find_pattern_ambiguous"
+      ]
 
   def retryable_find_error?(_reason), do: false
+
+  @doc "Find failures raised before any native lookup, so neither retry allowance is consumed."
+  @spec non_consuming_find_error?(term()) :: boolean()
+  def non_consuming_find_error?(%{"error" => "acp_commit_required"}), do: true
+  def non_consuming_find_error?(_reason), do: false
 
   defp validate_native_picture_edit(args, sequence) do
     op = Map.get(args, "op", %{})
@@ -575,7 +586,7 @@ defmodule Ecrits.Doc.MCPToolPolicy do
       "error" => "acp_commit_required",
       "tool" => "doc.find",
       "message" =>
-        "The one native-marker lookup was attempted before a verified ACP commit and is now consumed. Do not call doc.find again in this turn. Finish supported ACP edits and report that the native picture fallback could not run."
+        "No native-marker lookup ran because the primary ACP edit is not durably committed yet. This attempt was not consumed. Wait for or correct the durable commit, then call doc.find again with the same exact marker request."
     }
   end
 

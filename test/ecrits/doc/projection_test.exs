@@ -69,6 +69,75 @@ defmodule Ecrits.Doc.ProjectionTest do
     end
   end
 
+  describe "expanded table prewrite invariants" do
+    test "allows cell fills, derived chars, and compact inserted tables" do
+      pristine = expanded_table_projection()
+
+      edited =
+        update_in(pristine, [Access.at(0), Access.at(0)], fn group ->
+          group
+          |> List.insert_at(1, %{"type" => "char", "text" => "derived detail"})
+          |> replace_cell_paragraph(1, 1, "미기재")
+          |> replace_cell_paragraph(2, 1, "미기재")
+          |> Kernel.++([
+            %{
+              "type" => "table",
+              "cells" => [["단계", "산출물"], ["착수", "진단 계획서"]],
+              "header" => true
+            }
+          ])
+        end)
+
+      assert :ok = Projection.validate_expanded_table_invariants(pristine, edited)
+    end
+
+    test "rejects filling a blank or whitespace aggregate before the first table cell" do
+      for structural_text <- ["", "   "] do
+        pristine =
+          update_in(expanded_table_projection(), [Access.at(0), Access.at(0), Access.at(0)], fn
+            paragraph -> %{paragraph | "text" => structural_text}
+          end)
+
+        edited =
+          update_in(pristine, [Access.at(0), Access.at(0)], fn group ->
+            group
+            |> List.replace_at(0, %{"type" => "paragraph", "text" => "미기재"})
+            |> List.insert_at(1, %{"type" => "char", "text" => "미기재"})
+            |> replace_cell_paragraph(1, 1, "미기재")
+            |> replace_cell_paragraph(2, 1, "미기재")
+          end)
+
+        assert {:error, {:structural_change, detail}} =
+                 Projection.validate_expanded_table_invariants(pristine, edited)
+
+        assert detail =~ "blank paragraph outside a table cell changed"
+        assert detail =~ "expanded table 1"
+        assert detail =~ "anchor 1"
+      end
+    end
+
+    test "rejects changes to existing expanded table cell coordinates and order" do
+      pristine = expanded_table_projection()
+
+      edited =
+        update_in(pristine, [Access.at(0), Access.at(0)], fn group ->
+          Enum.map(group, fn
+            %{"type" => "cell", "row" => 2, "col" => 1} = cell ->
+              %{cell | "row" => 1, "col" => 1}
+
+            node ->
+              node
+          end)
+        end)
+
+      assert {:error, {:structural_change, detail}} =
+               Projection.validate_expanded_table_invariants(pristine, edited)
+
+      assert detail =~ "cell coordinates or order changed"
+      assert detail =~ "expanded table 1"
+    end
+  end
+
   describe "project_file/2 error handling (no NIF required)" do
     test "unsupported extension is a clean error, never a raise" do
       assert {:error, {:unsupported, ".txt"}} =
@@ -112,161 +181,39 @@ defmodule Ecrits.Doc.ProjectionTest do
              ]
     end
 
-    test "browser structural preview steps use the applied table control ref" do
-      change =
-        {:insert_table,
+    test "persisted highlight selection follows document order instead of ehwp writeback order" do
+      changes = [
+        {:text,
          %{
-           "op" => "insert_table",
-           "ref" => %{"section" => 0, "paragraph" => 8, "offset" => 0},
-           "rows" => 1,
-           "cols" => 2,
-           "cells" => [["항목", "내용"]]
-         }, "항목"}
-
-      applied = %{"paraIdx" => 9, "controlIdx" => 2}
-
-      assert [%{"highlights" => highlights}] =
-               Projection.__browser_preview_steps_for_test__(
-                 [[change]],
-                 [change],
-                 [applied]
-               )
-
-      assert Enum.map(highlights, & &1["ref"]["cell"]) == [
-               %{
-                 "parentParaIndex" => 9,
-                 "controlIndex" => 2,
-                 "cellIndex" => 0,
-                 "cellParaIndex" => 0
-               },
-               %{
-                 "parentParaIndex" => 9,
-                 "controlIndex" => 2,
-                 "cellIndex" => 1,
-                 "cellParaIndex" => 0
-               }
-             ]
-    end
-
-    test "browser paragraph preview expands multiline text into paced token steps" do
-      stale_cell_ref = %{
-        "section" => 0,
-        "paragraph" => 17,
-        "offset" => 4,
-        "cell" => %{
-          "parentParaIndex" => 17,
-          "controlIndex" => 0,
-          "cellIndex" => 22,
-          "cellParaIndex" => 0
-        }
-      }
-
-      text = "Sonnet 😀 now\nShall I compare"
-
-      change =
-        {:text, %{"op" => "insert_paragraph", "ref" => stale_cell_ref, "text" => text}, text}
-
-      steps =
-        Projection.__browser_preview_steps_for_test__(
-          [[change]],
-          [change],
-          [%{"paragraph" => 17, "inserted" => String.length(text)}]
-        )
-
-      assert length(steps) == 6
-
-      assert [
-               %{
-                 "op" => "insert_paragraph",
-                 "ref" => %{"section" => 0, "paragraph" => 17, "offset" => 0},
-                 "text" => "Sonnet "
-               },
-               %{
-                 "op" => "insert_text",
-                 "ref" => %{"section" => 0, "paragraph" => 17, "offset" => 7},
-                 "text" => "😀 "
-               },
-               %{
-                 "op" => "insert_text",
-                 "ref" => %{"section" => 0, "paragraph" => 17, "offset" => 10},
-                 "text" => "now"
-               },
-               %{
-                 "op" => "insert_paragraph",
-                 "ref" => %{"section" => 0, "paragraph" => 18, "offset" => 0},
-                 "text" => "Shall "
-               },
-               %{
-                 "op" => "insert_text",
-                 "ref" => %{"section" => 0, "paragraph" => 18, "offset" => 6},
-                 "text" => "I "
-               },
-               %{
-                 "op" => "insert_text",
-                 "ref" => %{"section" => 0, "paragraph" => 18, "offset" => 8},
-                 "text" => "compare"
-               }
-             ] = Enum.flat_map(steps, & &1["ops"])
-
-      assert Enum.all?(steps, fn %{"highlights" => [highlight]} ->
-               highlight["length"] == String.length(highlight["text"])
-             end)
-    end
-
-    test "replacement preview keeps both raw ops and one final ranged highlight" do
-      ref = %{"section" => 0, "paragraph" => 11, "offset" => 0}
-      replacement = " ◇ 계약명  : 프리뷰 중복 추적"
-
-      delete =
-        {:text, %{"op" => "delete_range", "ref" => ref, "count" => 34}, replacement}
-
-      insert =
-        {:text, %{"op" => "insert_text", "ref" => ref, "text" => replacement}, replacement}
-
-      changes = [delete, insert]
-      assert [^changes] = Projection.__browser_preview_groups_for_test__(changes)
-
-      assert [%{"ops" => ops, "highlights" => [highlight]}] =
-               Projection.__browser_preview_steps_for_test__(
-                 [changes],
-                 changes,
-                 [%{}, %{}]
-               )
-
-      assert Enum.map(ops, & &1["op"]) == ["delete_range", "insert_text"]
-
-      assert highlight == %{
-               "kind" => "text",
-               "op" => "insert_text",
-               "ref" => ref,
-               "offset" => 0,
-               "length" => String.length(replacement),
-               "text" => replacement
+           "op" => "insert_text",
+           "ref" => %{
+             "section" => 0,
+             "paragraph" => 860,
+             "offset" => 0,
+             "cell" => %{
+               "parentParaIndex" => 860,
+               "controlIndex" => 0,
+               "cellIndex" => 3,
+               "cellParaIndex" => 0
              }
-    end
-
-    test "browser picture preview keeps placement coupled to its insertion" do
-      change =
-        {:insert_picture,
+           },
+           "text" => "뒤쪽"
+         }, "뒤쪽"},
+        {:text,
          %{
-           "op" => "insert_picture",
-           "ref" => %{"section" => 0, "paragraph" => 8, "offset" => 0},
-           "src" => "/tmp/signature.png"
-         }, "signature.png", %{"treatAsChar" => false, "horzOffset" => 120, "vertOffset" => 80}}
+           "op" => "insert_text",
+           "ref" => %{"section" => 0, "paragraph" => 14, "offset" => 2},
+           "text" => "앞쪽"
+         }, "앞쪽"}
+      ]
 
-      assert [%{"ops" => [op], "sets" => []}] =
-               Projection.__browser_preview_steps_for_test__(
-                 [[change]],
-                 [change],
-                 [%{"paraIdx" => 8, "controlIdx" => 2}]
-               )
+      highlights = Projection.__highlights_for_changes_for_test__(changes, [%{}, %{}])
 
-      assert op["post_insert_props"] == %{
-               "kind" => "picture",
-               "treatAsChar" => false,
-               "horzOffset" => 120,
-               "vertOffset" => 80
-             }
+      assert Enum.map(highlights, fn highlight ->
+               ref = highlight["ref"]
+               cell = ref["cell"]
+               if is_map(cell), do: cell["parentParaIndex"], else: ref["paragraph"]
+             end) == [14, 860]
     end
 
     test "browser property sets translate IR paragraph kind to the editor vocabulary" do
@@ -402,6 +349,12 @@ defmodule Ecrits.Doc.ProjectionTest do
 
       changes = [
         {:insert_table, %{"op" => "insert_table", "ref" => table_ref}, "단계"},
+        {:text,
+         %{
+           "op" => "insert_paragraph",
+           "ref" => table_ref,
+           "text" => "업무 1\n업무 2\n업무 3"
+         }, "업무 1\n업무 2\n업무 3"},
         {:insert_picture, %{"op" => "insert_picture", "ref" => picture_ref}, "brand", %{}}
       ]
 
@@ -415,17 +368,56 @@ defmodule Ecrits.Doc.ProjectionTest do
         %{"op" => "insert_text", "ref" => %{"section" => 0, "paragraph" => 630}},
         %{"op" => "insert_text", "ref" => %{"section" => 0, "paragraph" => 74}},
         %{"op" => "set_cell", "ref" => cell_ref},
+        %{"op" => "insert_table", "ref" => %{"section" => 0, "paragraph" => 17}},
+        %{"op" => "insert_paragraph", "ref" => %{"section" => 0, "paragraph" => 17}},
         %{"op" => "insert_picture", "ref" => picture_ref}
       ]
 
-      assert [jurisdiction, date, signature, picture] =
+      assert [jurisdiction, date, signature, table, inserted_paragraph, picture] =
                Projection.__remap_persisted_highlights_for_test__(highlights, changes)
 
-      assert jurisdiction["ref"]["paragraph"] == 632
-      assert date["ref"]["paragraph"] == 76
-      assert signature["ref"]["paragraph"] == 78
-      assert signature["ref"]["cell"]["parentParaIndex"] == 78
+      assert jurisdiction["ref"]["paragraph"] == 637
+      assert date["ref"]["paragraph"] == 81
+      assert signature["ref"]["paragraph"] == 83
+      assert signature["ref"]["cell"]["parentParaIndex"] == 83
+      assert table["ref"]["paragraph"] == 20
+      assert inserted_paragraph["ref"]["paragraph"] == 17
       assert picture["ref"] == picture_ref
+    end
+
+    test "persisted highlights count the native table paragraph bundle" do
+      changes = [
+        {:insert_table, %{"op" => "insert_table", "ref" => %{"section" => 0, "paragraph" => 630}},
+         "단계"},
+        {:text,
+         %{
+           "op" => "insert_paragraph",
+           "ref" => %{"section" => 0, "paragraph" => 630},
+           "text" => "업무 1\n업무 2\n업무 3"
+         }, "업무 1\n업무 2\n업무 3"}
+      ]
+
+      highlights = [
+        %{
+          "op" => "replace_text",
+          "ref" => %{
+            "section" => 0,
+            "paragraph" => 697,
+            "cell" => %{
+              "parentParaIndex" => 697,
+              "controlIndex" => 0,
+              "cellIndex" => 2,
+              "cellParaIndex" => 0
+            }
+          }
+        }
+      ]
+
+      assert [highlight] =
+               Projection.__remap_persisted_highlights_for_test__(highlights, changes)
+
+      assert highlight["ref"]["paragraph"] == 703
+      assert highlight["ref"]["cell"]["parentParaIndex"] == 703
     end
 
     test "persisted highlight remapping applies later insertion coordinates sequentially" do
@@ -447,7 +439,7 @@ defmodule Ecrits.Doc.ProjectionTest do
         }
       ]
 
-      assert [%{"ref" => %{"paragraph" => 860}}] =
+      assert [%{"ref" => %{"paragraph" => 862}}] =
                Projection.__remap_persisted_highlights_for_test__(highlights, changes)
     end
   end
@@ -829,13 +821,17 @@ defmodule Ecrits.Doc.ProjectionTest do
         end)
 
       assert_receive {:postcommit_result, {:ok, %{applied: 1}}}, 1_000
-      refute_receive {:vfs_doc_edited, %{edit_id: ^edit_id}}, 20
+
+      assert_receive {:vfs_doc_edited,
+                      %{edit_id: ^edit_id, phase: :committed, preview_snapshot: nil}},
+                     1_000
 
       :ok = :sys.resume(file_server)
 
       assert_receive {:vfs_doc_edited,
                       %{
                         edit_id: ^edit_id,
+                        phase: :snapshot_ready,
                         preview_snapshot: %{sha256: snapshot_sha256}
                       }},
                      1_000
@@ -844,7 +840,7 @@ defmodule Ecrits.Doc.ProjectionTest do
       assert File.read!(path) == browser_export
     end
 
-    test "a blocked older snapshot cannot publish after a newer edit" do
+    test "committed snapshots publish once each in save order when an older snapshot blocks" do
       root =
         Path.join(
           System.tmp_dir!(),
@@ -890,21 +886,8 @@ defmodule Ecrits.Doc.ProjectionTest do
 
       assert_receive {:old_snapshot_started, old_task, _document_id, ^old_bytes}
 
-      :ok =
-        Projection.__broadcast_edit_for_test__(
-          path,
-          browser_text_change("new"),
-          [%{}],
-          root: root,
-          edit_id: "newer-edit",
-          preview_only: true,
-          progress_index: 0,
-          progress_total: 1
-        )
-
-      assert_receive {:vfs_doc_edited, %{edit_id: "newer-edit", preview_only: true}}
-      send(old_task, :release_old_snapshot)
-      refute_receive {:vfs_doc_edited, %{edit_id: "older-edit"}}, 100
+      assert_receive {:vfs_doc_edited,
+                      %{edit_id: "older-edit", phase: :committed, preview_snapshot: nil}}
 
       immediate_snapshot = fn document_id, bytes ->
         id = Document.sha256(bytes)
@@ -923,10 +906,30 @@ defmodule Ecrits.Doc.ProjectionTest do
                )
 
       assert_receive {:vfs_doc_edited,
-                      %{edit_id: "newer-edit", preview_snapshot: %{sha256: new_sha}}},
+                      %{edit_id: "newer-edit", phase: :committed, preview_snapshot: nil}}
+
+      refute_receive {:vfs_doc_edited, %{phase: :snapshot_ready}}, 50
+      send(old_task, :release_old_snapshot)
+
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        edit_id: "older-edit",
+                        phase: :snapshot_ready,
+                        preview_snapshot: %{sha256: old_sha}
+                      }},
                      1_000
 
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        edit_id: "newer-edit",
+                        phase: :snapshot_ready,
+                        preview_snapshot: %{sha256: new_sha}
+                      }},
+                     1_000
+
+      assert old_sha == Document.sha256(old_bytes)
       assert new_sha == Document.sha256(new_bytes)
+      refute_receive {:vfs_doc_edited, _info}, 50
     end
 
     test "snapshot persistence failure still publishes the terminal edit event" do
@@ -1044,6 +1047,128 @@ defmodule Ecrits.Doc.ProjectionTest do
       assert :stale = OpenDocs.publish_preview_if_current(root, path, token, info)
       assert_receive {:vfs_doc_edited, ^info}
       refute_receive {:vfs_doc_edited, ^info}, 50
+    end
+
+    test "committed edit facts publish before their durable snapshot is ready" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_committed_fact_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      committed_bytes = <<4, 5, 6, 7>>
+      revision = Document.sha256("complete accepted projection")
+      owner = self()
+
+      File.mkdir_p!(root)
+      File.write!(path, committed_bytes)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+      )
+
+      blocking_snapshot = fn document_id, bytes ->
+        send(owner, {:lifecycle_snapshot_started, self(), document_id, bytes})
+
+        receive do
+          :release_lifecycle_snapshot ->
+            id = Document.sha256(bytes)
+            {:ok, %{id: id, document_id: document_id, byte_size: byte_size(bytes), sha256: id}}
+        end
+      end
+
+      :ok =
+        Projection.__broadcast_edit_for_test__(
+          path,
+          browser_text_change("committed"),
+          [%{}],
+          root: root,
+          edit_id: "committed-edit",
+          phase: :committed,
+          revision: revision,
+          turn_id: "turn-a",
+          agent_id: "agent-a",
+          instance_id: "instance-a",
+          preview_snapshot_bytes_result: {:ok, committed_bytes},
+          preview_snapshot_fun: blocking_snapshot
+        )
+
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        phase: :committed,
+                        edit_id: "committed-edit",
+                        revision: ^revision,
+                        preview_snapshot: nil,
+                        preview_snapshot_error: nil
+                      } = committed}
+
+      assert committed.document_id == Document.id_for(root, "contract.hwp")
+      assert_receive {:lifecycle_snapshot_started, snapshot_task, _document_id, ^committed_bytes}
+      refute_receive {:vfs_doc_edited, %{phase: :snapshot_ready}}, 20
+
+      send(snapshot_task, :release_lifecycle_snapshot)
+
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        phase: :snapshot_ready,
+                        edit_id: "committed-edit",
+                        revision: ^revision,
+                        preview_snapshot: %{sha256: snapshot_sha}
+                      }}
+
+      assert snapshot_sha == Document.sha256(committed_bytes)
+    end
+
+    test "a complete candidate publishes one phase-explicit revision without preview steps" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "projection_candidate_fact_#{System.unique_integer([:positive])}"
+        )
+
+      path = Path.join(root, "contract.hwp")
+      revision = Document.sha256("complete candidate")
+
+      File.mkdir_p!(root)
+      File.write!(path, <<0>>)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      Phoenix.PubSub.subscribe(
+        Ecrits.PubSub,
+        "doc_vfs:" <> Ecrits.Fuse.DocMount.canonical_root(root)
+      )
+
+      :ok =
+        Projection.__broadcast_edit_for_test__(
+          path,
+          browser_text_change("candidate"),
+          [%{}],
+          root: root,
+          edit_id: "candidate-edit",
+          phase: :candidate,
+          revision: revision,
+          preview_only: true,
+          turn_id: "turn-a",
+          agent_id: "agent-a",
+          instance_id: "instance-a"
+        )
+
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        phase: :candidate,
+                        edit_id: "candidate-edit",
+                        revision: ^revision,
+                        preview_only: true,
+                        preview_snapshot: nil,
+                        preview_snapshot_error: nil
+                      } = candidate}
+
+      assert candidate.document_id == Document.id_for(root, "contract.hwp")
+      refute Map.has_key?(candidate, :preview_steps)
+      refute_receive {:vfs_doc_edited, _info}, 20
     end
   end
 
@@ -1180,6 +1305,16 @@ defmodule Ecrits.Doc.ProjectionTest do
                       %{
                         edit_id: ^edit_id,
                         marker: ^marker,
+                        phase: :committed,
+                        preview_snapshot: nil
+                      }},
+                     2_000
+
+      assert_receive {:vfs_doc_edited,
+                      %{
+                        edit_id: ^edit_id,
+                        marker: ^marker,
+                        phase: :snapshot_ready,
                         preview_snapshot: %{sha256: snapshot_sha256}
                       }},
                      2_000
@@ -1220,7 +1355,63 @@ defmodule Ecrits.Doc.ProjectionTest do
       end
     end
 
-    test "streams multi-node write-back as ordered semantic edit ranges", %{ehwp: ehwp} do
+    test "validate_write_back rejects the same structural mismatch as commit without mutating", %{
+      ehwp: ehwp
+    } do
+      if not ehwp do
+        IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection validate_write_back HWPX e2e")
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_validate_writeback_structure", ".hwpx")
+        on_exit(fn -> cleanup_tmp(path) end)
+
+        {:ok, pristine_bytes} = Projection.project_file(path)
+        {_lines, pristine} = decode_projection(pristine_bytes)
+        {node_path, paragraph} = first_text_paragraph(pristine)
+
+        malformed_bytes =
+          pristine
+          |> replace_payload_node(node_path, Map.put(paragraph, "type", "char"))
+          |> encode_projection()
+
+        assert {:error, {:structural_change, detail}} =
+                 Projection.validate_write_back(path, malformed_bytes)
+
+        assert detail == "node type changed \"paragraph\" -> \"char\""
+        assert {:ok, ^pristine_bytes} = Projection.project_file(path)
+
+        assert {:error, {:structural_change, ^detail}} =
+                 Projection.write_back(path, malformed_bytes)
+      end
+    end
+
+    test "round-trip validation reprojects an isolated copy without mutating the source", %{
+      ehwp: ehwp
+    } do
+      if not ehwp do
+        IO.puts(
+          "\n[skip] ehwp NIF unavailable; skipping Projection write-back round-trip validation e2e"
+        )
+      else
+        path = copy_to_tmp(@hwpx_fixture, "projection_validate_writeback_round_trip", ".hwpx")
+        on_exit(fn -> cleanup_tmp(path) end)
+
+        {:ok, pristine_bytes} = Projection.project_file(path)
+        {_lines, pristine} = decode_projection(pristine_bytes)
+        {node_path, paragraph} = first_text_paragraph(pristine)
+        replacement = paragraph["text"] <> " ROUND_TRIP_PROOF"
+
+        candidate =
+          pristine
+          |> replace_payload_node(node_path, Map.put(paragraph, "text", replacement))
+          |> encode_projection()
+
+        assert {:ok, replayed_bytes} = Projection.round_trip_write_back(path, candidate)
+        assert replayed_bytes =~ replacement
+        assert {:ok, ^pristine_bytes} = Projection.project_file(path)
+      end
+    end
+
+    test "publishes one preview update for one committed multi-node write", %{ehwp: ehwp} do
       if not ehwp do
         IO.puts("\n[skip] ehwp NIF unavailable; skipping Projection streaming write_back e2e")
       else
@@ -1254,31 +1445,27 @@ defmodule Ecrits.Doc.ProjectionTest do
         assert {:ok, %{applied: applied_total}} =
                  Projection.write_back(path, new_bytes, root: root)
 
-        assert_receive {:vfs_doc_edited, first}
-
         expected_total = 2
 
-        assert first.progress_total == expected_total
+        assert_receive {:vfs_doc_edited, committed}
+        assert committed.phase == :committed
+        assert committed.preview_snapshot == nil
+        assert committed.progress_index == expected_total
+        assert committed.progress_total == expected_total
+        assert committed.applied == applied_total
 
-        events =
-          Enum.reduce(2..expected_total, [first], fn _index, acc ->
-            assert_receive {:vfs_doc_edited, event}
-            [event | acc]
-          end)
-          |> Enum.reverse()
+        assert_receive {:vfs_doc_edited,
+                        %{
+                          phase: :snapshot_ready,
+                          edit_id: snapshot_edit_id,
+                          preview_snapshot: %{
+                            id: snapshot_id,
+                            document_id: snapshot_document_id,
+                            sha256: snapshot_sha256
+                          }
+                        }}
 
-        assert events |> Enum.map(& &1.edit_id) |> Enum.uniq() == [first.edit_id]
-        assert Enum.map(events, & &1.progress_index) == Enum.to_list(1..expected_total)
-        assert Enum.all?(events, &(&1.progress_total == expected_total))
-        assert List.last(events).applied == applied_total
-
-        assert Enum.all?(Enum.drop(events, -1), &is_nil(Map.get(&1, :preview_snapshot)))
-
-        assert %{
-                 id: snapshot_id,
-                 document_id: snapshot_document_id,
-                 sha256: snapshot_sha256
-               } = List.last(events).preview_snapshot
+        assert snapshot_edit_id == committed.edit_id
 
         expected_document_id = Document.id_for(root, Path.basename(path))
         assert snapshot_document_id == expected_document_id
@@ -1292,9 +1479,9 @@ defmodule Ecrits.Doc.ProjectionTest do
           File.rm_rf(Path.dirname(snapshot_path))
         end)
 
-        markers = MapSet.new(events, & &1.marker)
-        assert MapSet.member?(markers, "STREAMED_WRITEBACK_TOKEN_ONE")
-        assert MapSet.member?(markers, "STREAMED_WRITEBACK_TOKEN_TWO")
+        highlighted_text = MapSet.new(committed.highlights, & &1["text"])
+        assert MapSet.member?(highlighted_text, "STREAMED_WRITEBACK_TOKEN_ONE")
+        assert MapSet.member?(highlighted_text, "STREAMED_WRITEBACK_TOKEN_TWO")
 
         refute_receive {:vfs_doc_edited, _info}
       end
@@ -1378,7 +1565,7 @@ defmodule Ecrits.Doc.ProjectionTest do
                    identity_opts ++ [preview_continuation: true]
                  )
 
-        refute_receive {:vfs_doc_edit_rejected, _rejected}
+        refute_receive {:vfs_doc_edited, %{phase: :rejected}}
         refute_receive {:vfs_doc_edited, %{progress_index: 1}}
         refute_receive {:vfs_doc_edited, %{progress_index: 2}}
 
@@ -1463,15 +1650,17 @@ defmodule Ecrits.Doc.ProjectionTest do
 
         assert_receive {:vfs_doc_edited,
                         %{
+                          phase: :candidate,
                           edit_id: ^edit_id,
                           preview_only: true,
-                          preview_steps: [first_step, _second_step]
+                          ops: preview_ops,
+                          sets: preview_sets
                         }}
 
-        first_group_command_count =
-          length(Map.fetch!(first_step, "ops")) + length(Map.fetch!(first_step, "sets"))
+        first_group_command_count = 1
 
         assert first_group_command_count > 0
+        assert length(preview_ops) + length(preview_sets) > first_group_command_count
         assert %{handle: %{ehwp: %Ehwp.Handle{id: ehwp_handle_id}}} = :sys.get_state(editor)
         assert [{ehwp_session, _value}] = Registry.lookup(Ehwp.Registry, ehwp_handle_id)
 
@@ -1495,7 +1684,7 @@ defmodule Ecrits.Doc.ProjectionTest do
                    identity_opts ++ [preview_continuation: true]
                  )
 
-        refute_receive {:vfs_doc_edit_rejected, _rejected}
+        refute_receive {:vfs_doc_edited, %{phase: :rejected}}
         refute_receive {:vfs_doc_edited, %{progress_index: 1}}
         refute_receive {:vfs_doc_edited, %{progress_index: 2}}
 
@@ -2678,6 +2867,39 @@ defmodule Ecrits.Doc.ProjectionTest do
       {:doc_browser_request_completed, ^from, ^ref, ack_ref} ->
         send(from, {:doc_browser_request_completion_ack, ack_ref, :ok})
     end
+  end
+
+  defp expanded_table_projection do
+    [
+      [
+        [
+          %{"type" => "paragraph", "text" => ""},
+          %{"type" => "table"},
+          %{"type" => "cell", "row" => 0, "col" => 0},
+          %{"type" => "paragraph", "text" => "미연동 사유"},
+          %{"type" => "cell", "row" => 1, "col" => 0},
+          %{"type" => "paragraph", "text" => "원사업자"},
+          %{"type" => "cell", "row" => 1, "col" => 1},
+          %{"type" => "paragraph", "text" => ""},
+          %{"type" => "cell", "row" => 2, "col" => 0},
+          %{"type" => "paragraph", "text" => "수급사업자"},
+          %{"type" => "cell", "row" => 2, "col" => 1},
+          %{"type" => "paragraph", "text" => ""}
+        ]
+      ]
+    ]
+  end
+
+  defp replace_cell_paragraph(group, row, col, text) do
+    index =
+      group
+      |> Enum.with_index()
+      |> Enum.find_value(fn
+        {%{"type" => "cell", "row" => ^row, "col" => ^col}, index} -> index + 1
+        _other -> nil
+      end)
+
+    List.replace_at(group, index, %{"type" => "paragraph", "text" => text})
   end
 
   defp browser_text_change(marker) do

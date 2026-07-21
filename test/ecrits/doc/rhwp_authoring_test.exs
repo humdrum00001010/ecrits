@@ -15,7 +15,7 @@ defmodule Ecrits.Doc.RhwpAuthoringTest do
   """
   use ExUnit.Case, async: false
 
-  alias Ecrits.Doc.{MCPToolPolicy, Pool, Tools}
+  alias Ecrits.Doc.{MCPToolPolicy, Pool, Projection, Tools}
   alias Ehwp.Pool, as: EPool
 
   setup do
@@ -89,6 +89,86 @@ defmodule Ecrits.Doc.RhwpAuthoringTest do
              {1, "제1조(목적)"},
              {2, "제2조(임금)"},
              {3, "제3조(근로시간)"}
+           ]
+  end
+
+  test "projection inserts stay after a shortened middle paragraph and before their table", %{
+    native: true,
+    ctx: ctx,
+    path: path
+  } do
+    {:ok, %{"document" => doc}} = Tools.call(ctx, "doc.create", %{"path" => path})
+
+    original_anchor =
+      "ANCHOR_PARAGRAPH_WITH_ENOUGH_TEXT_TO_MAKE_THE_REPLACEMENT_MUCH_SHORTER"
+
+    for text <- ["BEFORE_ANCHOR", original_anchor, "AFTER_ANCHOR"] do
+      assert {:ok, %{"ok" => true}} =
+               Tools.call(ctx, "doc.edit", %{
+                 "document" => doc,
+                 "op" => %{"op" => "insert_paragraph", "ref" => "end", "text" => text}
+               })
+    end
+
+    assert {:ok, %{"ok" => true}} = Tools.call(ctx, "doc.save", %{"document" => doc})
+    assert {:ok, bytes} = Projection.project_file(path)
+    [section] = Jason.decode!(bytes)
+
+    anchor_index =
+      Enum.find_index(section, fn group ->
+        Enum.any?(group, &(&1["type"] == "paragraph" and &1["text"] == original_anchor))
+      end)
+
+    anchor_group =
+      section
+      |> Enum.at(anchor_index)
+      |> Enum.map(fn
+        %{"type" => "paragraph", "text" => ^original_anchor} = node ->
+          Map.put(node, "text", "SHORT_ANCHOR")
+
+        node ->
+          node
+      end)
+
+    paragraph_markers = ["INSERTED_ONE", "INSERTED_TWO", "INSERTED_THREE"]
+
+    inserted_groups =
+      Enum.map(paragraph_markers, fn marker ->
+        [%{"type" => "paragraph", "text" => marker}]
+      end) ++
+        [
+          [
+            %{
+              "type" => "table",
+              "header" => true,
+              "cells" => [["STEP", "OUTPUT"], ["DONE", "REPORT"]]
+            }
+          ]
+        ]
+
+    edited_section =
+      Enum.take(section, anchor_index) ++
+        [anchor_group] ++ inserted_groups ++ Enum.drop(section, anchor_index + 1)
+
+    assert {:ok, %{applied: applied}} =
+             Projection.write_back(path, Jason.encode!([edited_section]) <> "\n")
+
+    assert applied > 0
+
+    ordered =
+      path
+      |> paragraphs()
+      |> Enum.filter(fn {_index, text} ->
+        text in ["SHORT_ANCHOR" | paragraph_markers] or text == "AFTER_ANCHOR"
+      end)
+      |> Enum.map(&elem(&1, 1))
+
+    assert ordered == [
+             "SHORT_ANCHOR",
+             "INSERTED_ONE",
+             "INSERTED_TWO",
+             "INSERTED_THREE",
+             "AFTER_ANCHOR"
            ]
   end
 

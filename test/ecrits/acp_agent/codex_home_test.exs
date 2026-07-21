@@ -3,7 +3,7 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
 
   alias Ecrits.AcpAgent.CodexHome
   alias ExMCP.ACP.AdapterBridge
-  alias ExMCP.ACP.Adapters.Codex
+  alias EcritsWeb.EnvProbeAcpAdapter
 
   setup do
     root =
@@ -48,10 +48,7 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     assert isolation.permission_profile == "ecrits_workspace"
 
     opts = CodexHome.adapter_opts(isolation)
-    assert opts[:env] == isolation.env
-    assert opts[:use_permission_profile]
-    assert opts[:expected_permission_profile] == "ecrits_workspace"
-    assert is_function(opts[:on_terminate], 0)
+    assert opts == [env: isolation.env]
 
     assert :ok = CodexHome.cleanup(isolation)
     refute File.exists?(isolation.home)
@@ -89,9 +86,9 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     assert File.read!(rollout) == "thread history"
     assert File.read!(Path.join(second.home, "config.toml")) =~ "/Library/Ruby/**"
 
-    # Adapter teardown must NOT delete a conversation home...
-    on_terminate = CodexHome.adapter_opts(second)[:on_terminate]
-    _ = on_terminate.()
+    # Official ex_mcp receives only the isolated environment. Ecrits owns the
+    # lifecycle policy, so a conversation home survives session teardown.
+    assert CodexHome.adapter_opts(second) == [env: second.env]
     assert File.exists?(rollout)
 
     # ...while a different conversation gets its own home and an ephemeral
@@ -101,7 +98,7 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
 
     assert {:ok, ephemeral} = CodexHome.prepare(Keyword.delete(opts, :conversation_id))
     assert ephemeral.ephemeral?
-    _ = CodexHome.adapter_opts(ephemeral)[:on_terminate].()
+    assert :ok = CodexHome.cleanup(ephemeral)
     refute File.exists?(ephemeral.home)
   end
 
@@ -119,7 +116,7 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
              )
 
     assert {"PATH", "/opt/tools/bun-node-legitimate:/usr/bin:/opt/homebrew/bin"} in isolation.env
-    assert {"NODE", false} in isolation.env
+    assert {"NODE", ""} in isolation.env
   end
 
   test "the ACP adapter child receives the safe PATH and observes failed node renames", %{
@@ -154,10 +151,10 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
       bridge =
         start_supervised!({
           AdapterBridge,
-          adapter: Codex,
+          adapter: EnvProbeAcpAdapter,
           adapter_opts:
             CodexHome.adapter_opts(isolation) ++
-              [command_wrapper: {node, [script, proof, source, target]}]
+              [command: {node, [script, proof, source, target]}]
         })
 
       assert {:error, reason} = AdapterBridge.receive_message(bridge, 5_000)
@@ -193,7 +190,7 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     assert :ok = CodexHome.cleanup(isolation)
   end
 
-  test "document mode gives shell read-only workspace search while ACP owns writes", %{
+  test "document mode creates its isolated profile and provider-native playbook", %{
     root: root,
     auth_source: auth_source
   } do
@@ -229,8 +226,8 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
            "/Library/Frameworks/**" = "read"
            "/Users/someone/.gem/**" = "read"
            "/Users/someone/Library/Python/**" = "read"
-           "#{Path.expand(workspace_root)}" = "read"
-           "#{Path.expand(workspace_root)}/**" = "read"
+           "#{Path.expand(workspace_root)}" = "write"
+           "#{Path.expand(workspace_root)}/**" = "write"
            "#{Path.expand(isolation.home)}/**" = "deny"
            "#{Path.expand(global_home)}/**" = "deny"
            """
@@ -242,17 +239,73 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
     # the model does not re-derive the surface's shape every turn.
     playbook = File.read!(Path.join(isolation.home, "AGENTS.md"))
     assert playbook =~ "one paragraph group per line"
-    assert playbook =~ "compare-and-swap"
-    assert playbook =~ "one read, one write"
+    assert playbook =~ "two opening `[` wrapper lines and two closing `]` wrapper lines"
+    assert playbook =~ "comma after every inner group line except the last"
+    assert playbook =~ "Do not serialize the whole root as one line"
+    assert playbook =~ "native search/read plus `apply_patch` or Python/Ruby"
+    assert playbook =~ "apply that line-sized patch"
     assert playbook =~ "occurrence"
 
     # New paragraphs are an ordinary mounted-file write (a new line holding one
     # bare paragraph node) — the playbook must teach that shape and must not
     # route paragraphs through the doc.edit fallback (2026-07-19 direction:
-    # "inserting para is done simply with ACP not mcp tools").
+    # "inserting para is done through the projection, not MCP tools").
     assert playbook =~ ~s([{"type":"paragraph","text":"..."}])
     assert playbook =~ "Never tell the user a"
     refute playbook =~ ~s(doc.edit {op: "insert_paragraph")
+  end
+
+  test "document playbook teaches Codex native bounded projection edits", %{
+    root: root,
+    auth_source: auth_source
+  } do
+    assert {:ok, isolation} =
+             CodexHome.prepare(
+               root: Path.join(root, "homes"),
+               auth_source: auth_source,
+               workspace_root: Path.join(root, "contract-workspace"),
+               document_lane?: true,
+               path: "/opt/toolchain/bin",
+               user_home: "/Users/someone"
+             )
+
+    playbook = File.read!(Path.join(isolation.home, "AGENTS.md"))
+
+    assert playbook =~ "Call `doc.open_doc` once and use the returned mount path"
+    assert playbook =~ "Use native search/read plus `apply_patch` or Python/Ruby"
+    assert playbook =~ ~r/Python\/Ruby\s+writes are allowed/
+    assert playbook =~ "Never truncate the mounted target in place"
+    assert playbook =~ "sibling `.tmp` file"
+    assert playbook =~ ~r/atomically rename it over\s+the target once/
+    assert playbook =~ ~r/one writer and one rename per\s+batch/
+    assert playbook =~ ~r/discard\s+every saved line number/
+    assert playbook =~ ~r/Never delete or rename a rejected projection temp\s+file/
+    assert playbook =~ ~r/For a small edit, patch the required JSONL group lines/
+    assert playbook =~ "append only the `table` payload"
+    assert playbook =~ "append it to the Article 51 group's payload array"
+
+    assert playbook =~
+             ~r/Never append a paragraph\s+or title payload to that existing group/i
+
+    assert playbook =~
+             ~r/Never put embedded newlines inside\s+an existing paragraph or text node/
+
+    assert playbook =~ "separate ref-less paragraph groups"
+    assert playbook =~ "`acp_commit_required` does not consume the marker lookup"
+
+    assert playbook =~ "wait for the VFS write-back to settle"
+    assert playbook =~ "valid UTF-8 JSONL"
+    assert playbook =~ "do not repair or rewrite transient bytes"
+
+    assert playbook =~
+             ~r/Use `doc\.edit` only for an IR-inexpressible native operation such as image\s+or signature insertion/
+
+    assert playbook =~ "Boundedly"
+    assert playbook =~ ~r/verify the durable document and preview/i
+
+    refute playbook =~ "FileLane"
+    refute playbook =~ "search_text_file"
+    refute playbook =~ "edit_text_file"
   end
 
   test "read-only document mode selects its document-specific profile", %{
@@ -295,7 +348,7 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
              ~s([permissions.ecrits_document_read_only]\nextends = ":read-only")
   end
 
-  test "document shell can search only its workspace and cannot mutate or read secrets", %{
+  test "document shell can search and patch its workspace without reaching secrets", %{
     auth_source: auth_source
   } do
     codex = System.find_executable("codex") || flunk("Codex CLI is required for sandbox proof")
@@ -381,15 +434,23 @@ defmodule Ecrits.AcpAgent.CodexHomeTest do
       assert output =~ "Operation not permitted"
     end
 
-    assert {output, status} =
+    assert {_output, 0} =
              sandbox_cmd(codex, isolation, workspace_root, env, [
                "touch",
                Path.join(workspace_root, "shell-mutation")
              ])
 
+    assert File.exists?(Path.join(workspace_root, "shell-mutation"))
+
+    assert {output, status} =
+             sandbox_cmd(codex, isolation, workspace_root, env, [
+               "touch",
+               Path.join(host_home, "outside-mutation")
+             ])
+
     assert status != 0
     assert output =~ "Operation not permitted"
-    refute File.exists?(Path.join(workspace_root, "shell-mutation"))
+    refute File.exists?(Path.join(host_home, "outside-mutation"))
   end
 
   defp non_bun_node do
