@@ -35,6 +35,7 @@ defmodule Ecrits.Workspace.Session do
   alias Ecrits.Workspace.Foreground
   alias Ecrits.Workspace.Session.{Agent, Document}
   alias Ecrits.Workspace.TurnFinalizer
+  alias Ecrits.Workspace.TurnOwner
 
   @registry Ecrits.Workspace.SessionRegistry
   @supervisor Ecrits.Workspace.SessionSupervisor
@@ -1662,27 +1663,22 @@ defmodule Ecrits.Workspace.Session do
 
     state
     |> normalize_turn_finalizations()
-    |> normalize_agent_turn_owners()
+    |> cast_agent_turn_owners()
   end
 
-  defp normalize_agent_turn_owners(state) do
+  defp cast_agent_turn_owners(state) do
     owners =
       state.agent_turn_owners
-      |> Enum.filter(fn
-        {key,
-         %{
-           owner_pid: owner_pid,
-           owner_ref: owner_ref,
-           task_pid: task_pid,
-           status: status
-         }} ->
-          turn_finalization_key?(key) and is_pid(owner_pid) and is_reference(owner_ref) and
-            is_pid(task_pid) and status in [:active, :awaiting_task_down, :crashed]
+      |> Enum.reduce(%{}, fn
+        {key, owner}, casted when is_map(owner) ->
+          case {turn_finalization_key?(key), TurnOwner.cast(owner)} do
+            {true, {:ok, typed_owner}} -> Map.put(casted, key, typed_owner)
+            _invalid -> casted
+          end
 
-        _other ->
-          false
+        _entry, casted ->
+          casted
       end)
-      |> Map.new()
 
     %{state | agent_turn_owners: owners}
   end
@@ -1716,15 +1712,18 @@ defmodule Ecrits.Workspace.Session do
       true ->
         owner_ref = Process.monitor(owner_pid)
 
-        put_in(state.agent_turn_owners[key], %{
-          owner_pid: owner_pid,
-          owner_ref: owner_ref,
-          task_pid: task_pid,
-          worker_down?: false,
-          guardian_down?: false,
-          shutdown_ack?: false,
-          status: :active
-        })
+        put_in(
+          state.agent_turn_owners[key],
+          TurnOwner.cast!(%{
+            owner_pid: owner_pid,
+            owner_ref: owner_ref,
+            task_pid: task_pid,
+            worker_down?: false,
+            guardian_down?: false,
+            shutdown_ack?: false,
+            status: :active
+          })
+        )
     end
   end
 
@@ -1739,7 +1738,7 @@ defmodule Ecrits.Workspace.Session do
       %{task_pid: ^guardian_pid, worker_pid: ^worker_pid} ->
         state
 
-      %{task_pid: ^guardian_pid} = owner when not is_map_key(owner, :worker_pid) ->
+      %{task_pid: ^guardian_pid, worker_pid: nil} = owner ->
         worker_ref = Process.monitor(worker_pid)
 
         owner =
@@ -1812,7 +1811,7 @@ defmodule Ecrits.Workspace.Session do
     state =
       put_in(
         state.agent_turn_owners[key],
-        owner |> Map.delete(:task_ref) |> Map.put(:guardian_down?, true)
+        %{owner | task_ref: nil, guardian_down?: true}
       )
 
     maybe_finish_crashed_agent_turn(state, key)
@@ -1824,7 +1823,7 @@ defmodule Ecrits.Workspace.Session do
     state =
       put_in(
         state.agent_turn_owners[key],
-        owner |> Map.delete(:worker_ref) |> Map.put(:worker_down?, true)
+        %{owner | worker_ref: nil, worker_down?: true}
       )
 
     maybe_finish_crashed_agent_turn(state, key)
