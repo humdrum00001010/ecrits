@@ -135,20 +135,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
           if ("native" in result) return null;
           return result;
         }
-        function normalizeOfficeNearby(input) {
-          const n = input && typeof input === "object" ? input : {};
-          const clamp = (value, fallback) => {
-            const x = Number(value);
-            return Number.isFinite(x) ? Math.max(0, Math.min(10, Math.floor(x))) : fallback;
-          };
-          return {
-            before: clamp(n.before, 2),
-            after: clamp(n.after, 2),
-            row: n.row !== false,
-            column: n.column === true,
-            headers: n.headers !== false
-          };
-        }
         function officeReadRefCandidates(ref) {
           const s = String(ref || "");
           const refs = [s];
@@ -160,7 +146,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
         }
         function readOfficeElements(elements, refInput, nearbyInput, tableContext = {}) {
           const ref = String(refInput || "");
-          const nearby = normalizeOfficeNearby(nearbyInput);
+          const nearby = nearbyInput;
           const matches = elements.filter((el) => el.type !== "run");
           const candidates = officeReadRefCandidates(ref);
           const hit = findOfficeReadMatch(matches, candidates);
@@ -273,7 +259,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
           return () => document.removeEventListener(PICKER_STATE_EVENT, onState)
         }
 
-        const normalizeOfficeNearbyValue = normalizeOfficeNearby
         const officeReadRefCandidatesValue = officeReadRefCandidates
         // Browser-WASM office (docx/pptx) editor hook — the CLIENT INTERACTIVE ARM of
         // the office dual-arch.
@@ -6024,10 +6009,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.OfficeWasm do
 
           officeReadRefCandidates(ref) {
             return officeReadRefCandidatesValue(ref)
-          },
-
-          normalizeOfficeNearby(input) {
-            return normalizeOfficeNearbyValue(input)
           },
 
           officeCompactTableRead(ref, nearby) {

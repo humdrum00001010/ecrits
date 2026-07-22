@@ -130,13 +130,13 @@ defmodule Ecrits.Workspace.SessionRestartTest do
                foreground_transitions: %{
                  ^key => %{operation: :restart, rail_key: rail_key}
                },
-               turn_finalization_active: %{key: ^key, pid: finalizer_pid}
+               turn_finalization_state: %{active: %{key: ^key, pid: finalizer_pid}}
              } =
                await_workspace_state(session_pid, fn state ->
                  match?(
                    %{
                      foreground_transitions: %{^key => %{operation: :restart}},
-                     turn_finalization_active: %{key: ^key}
+                     turn_finalization_state: %{active: %{key: ^key}}
                    },
                    state
                  )
@@ -163,7 +163,7 @@ defmodule Ecrits.Workspace.SessionRestartTest do
 
       assert %{
                foreground_transitions: %{^key => %{operation: :restart}},
-               turn_finalization_active: %{key: ^key, pid: ^finalizer_pid}
+               turn_finalization_state: %{active: %{key: ^key, pid: ^finalizer_pid}}
              } = :sys.get_state(session_pid)
 
       assert AcpAgent.whereis(agent_id) == old_pid
@@ -541,7 +541,7 @@ defmodule Ecrits.Workspace.SessionRestartTest do
 
       assert Process.alive?(guardian_pid)
       assert Process.alive?(provider_worker_pid)
-      refute Map.has_key?(:sys.get_state(session_pid).turn_finalizations, key)
+      refute Map.has_key?(:sys.get_state(session_pid).turn_finalization_state.finalizations, key)
 
       send(
         agent_pid,
@@ -571,7 +571,7 @@ defmodule Ecrits.Workspace.SessionRestartTest do
 
       assert is_reference(late_worker_ref)
       assert Process.alive?(provider_worker_pid)
-      refute Map.has_key?(:sys.get_state(session_pid).turn_finalizations, key)
+      refute Map.has_key?(:sys.get_state(session_pid).turn_finalization_state.finalizations, key)
 
       # Fire the exact timeout identity rather than sleeping five seconds. A
       # stale token or task pid would be ignored by the production handler.
@@ -588,10 +588,10 @@ defmodule Ecrits.Workspace.SessionRestartTest do
       assert %{terminal_finalization: %{key: ^key}} =
                await_agent_state(agent_pid, &match?(%{key: ^key}, &1.terminal_finalization))
 
-      assert %{turn_finalization_active: %{key: ^key}} =
+      assert %{turn_finalization_state: %{active: %{key: ^key}}} =
                await_workspace_state(
                  session_pid,
-                 &match?(%{turn_finalization_active: %{key: ^key}}, &1)
+                 &match?(%{turn_finalization_state: %{active: %{key: ^key}}}, &1)
                )
     after
       if Process.info(provider_worker_pid, :status) == {:status, :suspended},
@@ -689,13 +689,13 @@ defmodule Ecrits.Workspace.SessionRestartTest do
                  agent_turn_owners: %{
                    ^key => %{status: :awaiting_task_down, task_ref: old_task_ref}
                  },
-                 turn_finalization_active: nil
+                 turn_finalization_state: %{active: nil}
                } =
                  await_workspace_state(session_pid, fn state ->
                    match?(
                      %{
                        agent_turn_owners: %{^key => %{status: :awaiting_task_down}},
-                       turn_finalization_active: nil
+                       turn_finalization_state: %{active: nil}
                      },
                      state
                    )
@@ -703,7 +703,11 @@ defmodule Ecrits.Workspace.SessionRestartTest do
 
         assert Process.alive?(provider_worker_pid)
         assert Process.alive?(guarded_task_pid)
-        refute Map.has_key?(:sys.get_state(session_pid).turn_finalizations, key)
+
+        refute Map.has_key?(
+                 :sys.get_state(session_pid).turn_finalization_state.finalizations,
+                 key
+               )
 
         assert_receive {:DOWN, ^provider_worker_monitor, :process, ^provider_worker_pid, :killed},
                        2_000
@@ -740,14 +744,14 @@ defmodule Ecrits.Workspace.SessionRestartTest do
         assert %{
                  agent_turn_owners: %{^key => %{status: :crashed}},
                  foreground_transitions: %{^key => %{operation: :start}},
-                 turn_finalization_active: %{key: ^key}
+                 turn_finalization_state: %{active: %{key: ^key}}
                } =
                  await_workspace_state(session_pid, fn state ->
                    match?(
                      %{
                        agent_turn_owners: %{^key => %{status: :crashed}},
                        foreground_transitions: %{^key => %{operation: :start}},
-                       turn_finalization_active: %{key: ^key}
+                       turn_finalization_state: %{active: %{key: ^key}}
                      },
                      state
                    )
@@ -793,7 +797,7 @@ defmodule Ecrits.Workspace.SessionRestartTest do
              agents: %{^agent_id => %{pid: ^new_agent_pid}},
              agent_turn_owners: owners,
              foreground_transitions: %{},
-             turn_finalizations: %{^key => %{status: :completed}}
+             turn_finalization_state: %{finalizations: %{^key => %{status: :completed}}}
            } = :sys.get_state(session_pid)
 
     assert agent_id == ws.agent_id
@@ -870,13 +874,13 @@ defmodule Ecrits.Workspace.SessionRestartTest do
     try do
       assert %{
                foreground_transitions: %{^key => %{operation: :start}},
-               turn_finalization_active: %{key: ^key}
+               turn_finalization_state: %{active: %{key: ^key}}
              } =
                await_workspace_state(session_pid, fn state ->
                  match?(
                    %{
                      foreground_transitions: %{^key => %{operation: :start}},
-                     turn_finalization_active: %{key: ^key}
+                     turn_finalization_state: %{active: %{key: ^key}}
                    },
                    state
                  )
@@ -993,9 +997,13 @@ defmodule Ecrits.Workspace.SessionRestartTest do
       try do
         assert {:pending, _pending_ws} = Session.restart_foreground(path, replacement_settings)
 
-        assert %{turn_finalization_active: %{key: ^key, pid: old_finalizer_pid}} =
+        assert %{
+                 turn_finalization_state: %{
+                   active: %{key: ^key, pid: old_finalizer_pid}
+                 }
+               } =
                  await_workspace_state(old_session_pid, fn state ->
-                   match?(%{turn_finalization_active: %{key: ^key}}, state)
+                   match?(%{turn_finalization_state: %{active: %{key: ^key}}}, state)
                  end)
 
         old_session_ref = Process.monitor(old_session_pid)
@@ -1018,13 +1026,15 @@ defmodule Ecrits.Workspace.SessionRestartTest do
                    ^pending_rail_key => %{agent_id: ^agent_id, provider: "codex"}
                  },
                  foreground_transitions: %{^key => %{operation: :restart}},
-                 turn_finalization_active: %{key: ^key, pid: replacement_finalizer_pid}
+                 turn_finalization_state: %{
+                   active: %{key: ^key, pid: replacement_finalizer_pid}
+                 }
                } =
                  await_workspace_state(replacement_session_pid, fn state ->
                    match?(
                      %{
                        foreground_transitions: %{^key => %{operation: :restart}},
-                       turn_finalization_active: %{key: ^key}
+                       turn_finalization_state: %{active: %{key: ^key}}
                      },
                      state
                    )

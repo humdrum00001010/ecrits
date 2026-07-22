@@ -32,8 +32,12 @@ defmodule Ecrits.Workspace.Session do
   alias Ecrits.Doc.Pool
   alias Ecrits.AcpAgent
   alias Ecrits.WorkspaceHandoff
+  alias Ecrits.Workspace.Foreground
   alias Ecrits.Workspace.Session.{Agent, Document}
+  alias Ecrits.Workspace.TurnFinalizationState
+  alias Ecrits.Workspace.TurnFinalizationState.Active, as: ActiveTurnFinalization
   alias Ecrits.Workspace.TurnFinalizer
+  alias Ecrits.Workspace.TurnOwner
 
   @registry Ecrits.Workspace.SessionRegistry
   @supervisor Ecrits.Workspace.SessionSupervisor
@@ -81,30 +85,7 @@ defmodule Ecrits.Workspace.Session do
           optional(:document_element_picker_enabled?) => boolean(),
           optional(:owners) => %{optional(String.t()) => Agent.id()},
           optional(:viewers) => %{optional(String.t()) => [pid()]},
-          optional(:turn_finalizations) => %{
-            optional(turn_finalization_key()) =>
-              %{
-                optional(:retry_token) => reference(),
-                optional(:retry_reason) => term(),
-                status: :queued,
-                attempts: non_neg_integer()
-              }
-              | %{status: :running, pid: pid(), ref: reference(), attempts: pos_integer()}
-              | %{status: :completed, summary: turn_finalization_summary()}
-          },
-          optional(:turn_finalization_order) => [turn_finalization_key()],
-          optional(:turn_finalization_queue) => [turn_finalization_key()],
-          optional(:turn_finalization_waiters) => %{
-            optional(turn_finalization_key()) => MapSet.t(pid())
-          },
-          optional(:turn_finalization_active) =>
-            %{
-              key: turn_finalization_key(),
-              pid: pid(),
-              ref: reference(),
-              attempts: pos_integer()
-            }
-            | nil,
+          optional(:turn_finalization_state) => TurnFinalizationState.t(),
           optional(:foreground_transitions) => %{
             optional(turn_finalization_key()) => %{
               operation: :restart | :start,
@@ -932,11 +913,7 @@ defmodule Ecrits.Workspace.Session do
        # Terminal document work is serialized once per workspace. Completed
        # keys remain in a bounded ledger so a late duplicate PubSub delivery
        # cannot repeat a save or staged projection flush.
-       turn_finalizations: %{},
-       turn_finalization_order: [],
-       turn_finalization_queue: [],
-       turn_finalization_waiters: %{},
-       turn_finalization_active: nil,
+       turn_finalization_state: TurnFinalizationState.cast!(%{}),
        foreground_transitions: %{},
        # Exact in-flight turn ownership published before provider work begins.
        # Workspace monitors both the owning Session and its guarded turn task so
@@ -1173,7 +1150,8 @@ defmodule Ecrits.Workspace.Session do
     state = state |> ensure_maps() |> ensure_foregrounds() |> ensure_turn_finalizations()
     key = {agent_id, instance_id, turn_id}
 
-    case {known_agent?(state, agent_id), Map.get(state.turn_finalizations, key)} do
+    case {known_agent?(state, agent_id),
+          Map.get(state.turn_finalization_state.finalizations, key)} do
       {false, _entry} ->
         {:reply, {:error, :unknown_agent}, state}
 
@@ -1328,18 +1306,12 @@ defmodule Ecrits.Workspace.Session do
     state = ensure_document_state(state)
 
     with {:ok, path} <- normalize_document_path(document_path),
-         %Document{} = document <- Map.get(state.documents, path) do
-      document = %{
-        document
-        | scroll_top:
-            scroll_coordinate(attr_value(attrs, :top) || attr_value(attrs, :scroll_top)),
-          scroll_left:
-            scroll_coordinate(attr_value(attrs, :left) || attr_value(attrs, :scroll_left))
-      }
-
+         %Document{} = document <- Map.get(state.documents, path),
+         {:ok, document} <- Document.cast(attrs, document) do
       {:reply, :ok, %{state | documents: Map.put(state.documents, path, document)}}
     else
       nil -> {:reply, {:error, :not_open}, state}
+      {:error, %Ecto.Changeset{}} -> {:reply, {:error, :invalid_scroll}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -1515,7 +1487,7 @@ defmodule Ecrits.Workspace.Session do
           # only then may finalization read and commit staged mutations.
           state
         else
-          case Map.get(state.turn_finalizations, key) do
+          case Map.get(state.turn_finalization_state.finalizations, key) do
             %{status: :completed, summary: summary} ->
               acknowledge_turn_finalization(state, key, summary)
 
@@ -1541,7 +1513,7 @@ defmodule Ecrits.Workspace.Session do
       ) do
     state = ensure_turn_finalizations(state)
 
-    case state.turn_finalization_active do
+    case state.turn_finalization_state.active do
       %{key: ^key, pid: ^task_pid, ref: ref} ->
         Process.demonitor(ref, [:flush])
         {:noreply, retry_or_complete_turn_finalization_result(state, key, result)}
@@ -1555,20 +1527,20 @@ defmodule Ecrits.Workspace.Session do
     state = ensure_turn_finalizations(state)
 
     state =
-      case Map.get(state.turn_finalizations, key) do
+      case Map.get(state.turn_finalization_state.finalizations, key) do
         %{status: :queued, retry_token: ^retry_token} = entry ->
           finalizations =
             Map.put(
-              state.turn_finalizations,
+              state.turn_finalization_state.finalizations,
               key,
               Map.drop(entry, [:retry_token, :retry_reason])
             )
 
           state
-          |> Map.put(:turn_finalizations, finalizations)
-          |> Map.put(
-            :turn_finalization_queue,
-            state.turn_finalization_queue ++ [key]
+          |> put_in([:turn_finalization_state, Access.key(:finalizations)], finalizations)
+          |> put_in(
+            [:turn_finalization_state, Access.key(:queue)],
+            state.turn_finalization_state.queue ++ [key]
           )
           |> maybe_start_queued_turn_finalization()
 
@@ -1585,7 +1557,7 @@ defmodule Ecrits.Workspace.Session do
     state = state |> ensure_maps() |> ensure_foregrounds() |> ensure_turn_finalizations()
 
     state =
-      case state.turn_finalization_active do
+      case state.turn_finalization_state.active do
         %{key: key, pid: ^pid, ref: ^ref} ->
           retry_or_complete_turn_finalization(state, key, reason)
 
@@ -1655,39 +1627,64 @@ defmodule Ecrits.Workspace.Session do
   end
 
   defp ensure_turn_finalizations(state) do
-    state =
-      state
-      |> Map.put_new(:turn_finalizations, %{})
-      |> Map.put_new(:turn_finalization_order, [])
-      |> Map.put_new(:turn_finalization_queue, [])
-      |> Map.put_new(:turn_finalization_waiters, %{})
-      |> Map.put_new(:turn_finalization_active, nil)
-      |> Map.put_new(:foreground_transitions, %{})
-      |> Map.put_new(:agent_turn_owners, %{})
+    finalization_attrs =
+      case Map.get(state, :turn_finalization_state) do
+        %TurnFinalizationState{} = finalization_state ->
+          finalization_state
+
+        finalization_state when is_map(finalization_state) ->
+          finalization_state
+
+        _legacy ->
+          %{
+            finalizations: Map.get(state, :turn_finalizations, %{}),
+            order: Map.get(state, :turn_finalization_order, []),
+            queue: Map.get(state, :turn_finalization_queue, []),
+            waiters: Map.get(state, :turn_finalization_waiters, %{}),
+            active: Map.get(state, :turn_finalization_active)
+          }
+      end
+
+    finalization_state = cast_turn_finalization_state(finalization_attrs)
 
     state
-    |> normalize_turn_finalizations()
-    |> normalize_agent_turn_owners()
+    |> Map.put(:turn_finalization_state, finalization_state)
+    |> Map.put_new(:foreground_transitions, %{})
+    |> Map.put_new(:agent_turn_owners, %{})
+    |> Map.drop([
+      :turn_finalizations,
+      :turn_finalization_order,
+      :turn_finalization_queue,
+      :turn_finalization_waiters,
+      :turn_finalization_active
+    ])
+    |> cast_agent_turn_owners()
   end
 
-  defp normalize_agent_turn_owners(state) do
+  defp cast_turn_finalization_state(attrs) do
+    case TurnFinalizationState.cast(attrs) do
+      {:ok, state} ->
+        state
+
+      {:error, _changeset} ->
+        discard_legacy_turn_finalization_active(Map.get(attrs, :active))
+        attrs |> Map.put(:active, nil) |> TurnFinalizationState.cast!()
+    end
+  end
+
+  defp cast_agent_turn_owners(state) do
     owners =
       state.agent_turn_owners
-      |> Enum.filter(fn
-        {key,
-         %{
-           owner_pid: owner_pid,
-           owner_ref: owner_ref,
-           task_pid: task_pid,
-           status: status
-         }} ->
-          turn_finalization_key?(key) and is_pid(owner_pid) and is_reference(owner_ref) and
-            is_pid(task_pid) and status in [:active, :awaiting_task_down, :crashed]
+      |> Enum.reduce(%{}, fn
+        {key, owner}, casted when is_map(owner) ->
+          case {turn_finalization_key?(key), TurnOwner.cast(owner)} do
+            {true, {:ok, typed_owner}} -> Map.put(casted, key, typed_owner)
+            _invalid -> casted
+          end
 
-        _other ->
-          false
+        _entry, casted ->
+          casted
       end)
-      |> Map.new()
 
     %{state | agent_turn_owners: owners}
   end
@@ -1707,7 +1704,10 @@ defmodule Ecrits.Workspace.Session do
       not known_agent?(state, agent_id) ->
         state
 
-      match?(%{status: :completed}, Map.get(state.turn_finalizations, key)) ->
+      match?(
+        %{status: :completed},
+        Map.get(state.turn_finalization_state.finalizations, key)
+      ) ->
         state
 
       match?(%{owner_pid: ^owner_pid, task_pid: ^task_pid}, Map.get(state.agent_turn_owners, key)) ->
@@ -1721,15 +1721,18 @@ defmodule Ecrits.Workspace.Session do
       true ->
         owner_ref = Process.monitor(owner_pid)
 
-        put_in(state.agent_turn_owners[key], %{
-          owner_pid: owner_pid,
-          owner_ref: owner_ref,
-          task_pid: task_pid,
-          worker_down?: false,
-          guardian_down?: false,
-          shutdown_ack?: false,
-          status: :active
-        })
+        put_in(
+          state.agent_turn_owners[key],
+          TurnOwner.cast!(%{
+            owner_pid: owner_pid,
+            owner_ref: owner_ref,
+            task_pid: task_pid,
+            worker_down?: false,
+            guardian_down?: false,
+            shutdown_ack?: false,
+            status: :active
+          })
+        )
     end
   end
 
@@ -1744,7 +1747,7 @@ defmodule Ecrits.Workspace.Session do
       %{task_pid: ^guardian_pid, worker_pid: ^worker_pid} ->
         state
 
-      %{task_pid: ^guardian_pid} = owner when not is_map_key(owner, :worker_pid) ->
+      %{task_pid: ^guardian_pid, worker_pid: nil} = owner ->
         worker_ref = Process.monitor(worker_pid)
 
         owner =
@@ -1817,7 +1820,7 @@ defmodule Ecrits.Workspace.Session do
     state =
       put_in(
         state.agent_turn_owners[key],
-        owner |> Map.delete(:task_ref) |> Map.put(:guardian_down?, true)
+        %{owner | task_ref: nil, guardian_down?: true}
       )
 
     maybe_finish_crashed_agent_turn(state, key)
@@ -1829,7 +1832,7 @@ defmodule Ecrits.Workspace.Session do
     state =
       put_in(
         state.agent_turn_owners[key],
-        owner |> Map.delete(:worker_ref) |> Map.put(:worker_down?, true)
+        %{owner | worker_ref: nil, worker_down?: true}
       )
 
     maybe_finish_crashed_agent_turn(state, key)
@@ -1870,7 +1873,7 @@ defmodule Ecrits.Workspace.Session do
   end
 
   defp enqueue_crashed_agent_turn_finalization(state, key) do
-    case Map.get(state.turn_finalizations, key) do
+    case Map.get(state.turn_finalization_state.finalizations, key) do
       %{status: :completed} -> release_agent_turn_owner(state, key)
       nil -> state |> enqueue_turn_finalization(key) |> maybe_start_queued_turn_finalization()
       _queued_or_running -> state
@@ -1904,11 +1907,16 @@ defmodule Ecrits.Workspace.Session do
   end
 
   defp enqueue_turn_finalization(state, key) do
+    finalization_state = state.turn_finalization_state
+
     %{
       state
-      | turn_finalizations:
-          Map.put(state.turn_finalizations, key, %{status: :queued, attempts: 0}),
-        turn_finalization_queue: state.turn_finalization_queue ++ [key]
+      | turn_finalization_state: %{
+          finalization_state
+          | finalizations:
+              Map.put(finalization_state.finalizations, key, %{status: :queued, attempts: 0}),
+            queue: finalization_state.queue ++ [key]
+        }
     }
   end
 
@@ -1924,13 +1932,16 @@ defmodule Ecrits.Workspace.Session do
   end
 
   defp start_next_turn_finalization(
-         %{turn_finalization_active: nil, turn_finalization_queue: [key | rest]} = state
+         %{
+           turn_finalization_state: %TurnFinalizationState{active: nil, queue: [key | rest]}
+         } = state
        ) do
     parent = self()
     path = state.path
+    finalization_state = state.turn_finalization_state
 
     attempts =
-      state.turn_finalizations
+      finalization_state.finalizations
       |> Map.get(key, %{})
       |> Map.get(:attempts, 0)
       |> Kernel.+(1)
@@ -1939,15 +1950,24 @@ defmodule Ecrits.Workspace.Session do
 
     state = %{
       state
-      | turn_finalization_active: %{key: key, pid: pid, ref: ref, attempts: attempts},
-        turn_finalization_queue: rest,
-        turn_finalizations:
-          Map.put(state.turn_finalizations, key, %{
-            status: :running,
-            pid: pid,
-            ref: ref,
-            attempts: attempts
-          })
+      | turn_finalization_state: %{
+          finalization_state
+          | active:
+              ActiveTurnFinalization.cast!(%{
+                key: key,
+                pid: pid,
+                ref: ref,
+                attempts: attempts
+              }),
+            queue: rest,
+            finalizations:
+              Map.put(finalization_state.finalizations, key, %{
+                status: :running,
+                pid: pid,
+                ref: ref,
+                attempts: attempts
+              })
+        }
     }
 
     {state, key}
@@ -1957,7 +1977,7 @@ defmodule Ecrits.Workspace.Session do
 
   defp retry_or_complete_turn_finalization(state, key, reason) do
     attempts =
-      state.turn_finalizations
+      state.turn_finalization_state.finalizations
       |> Map.get(key, %{})
       |> Map.get(:attempts, 1)
 
@@ -1966,7 +1986,7 @@ defmodule Ecrits.Workspace.Session do
 
   defp retry_or_complete_turn_finalization_result(state, key, result) do
     attempts =
-      state.turn_finalizations
+      state.turn_finalization_state.finalizations
       |> Map.get(key, %{})
       |> Map.get(:attempts, 1)
 
@@ -1990,17 +2010,22 @@ defmodule Ecrits.Workspace.Session do
       turn_finalization_retry_delay(attempts)
     )
 
+    finalization_state = state.turn_finalization_state
+
     state = %{
       state
-      | turn_finalization_active: nil,
-        turn_finalization_queue: List.delete(state.turn_finalization_queue, key),
-        turn_finalizations:
-          Map.put(state.turn_finalizations, key, %{
-            status: :queued,
-            attempts: attempts,
-            retry_reason: reason,
-            retry_token: retry_token
-          })
+      | turn_finalization_state: %{
+          finalization_state
+          | active: nil,
+            queue: List.delete(finalization_state.queue, key),
+            finalizations:
+              Map.put(finalization_state.finalizations, key, %{
+                status: :queued,
+                attempts: attempts,
+                retry_reason: reason,
+                retry_token: retry_token
+              })
+        }
     }
 
     {state, _started_key} = start_next_turn_finalization(state)
@@ -2051,15 +2076,16 @@ defmodule Ecrits.Workspace.Session do
 
   defp complete_turn_finalization(state, key, result) do
     summary = turn_finalization_summary(result)
+    finalization_state = state.turn_finalization_state
 
     order =
-      [key | List.delete(state.turn_finalization_order, key)]
+      [key | List.delete(finalization_state.order, key)]
       |> Enum.take(@max_turn_finalizations)
 
     retained = MapSet.new(order)
 
     finalizations =
-      state.turn_finalizations
+      finalization_state.finalizations
       |> Map.put(key, %{status: :completed, summary: summary})
       |> Enum.reject(fn
         {entry_key, %{status: :completed}} -> not MapSet.member?(retained, entry_key)
@@ -2069,9 +2095,12 @@ defmodule Ecrits.Workspace.Session do
 
     state = %{
       state
-      | turn_finalization_active: nil,
-        turn_finalization_order: order,
-        turn_finalizations: finalizations
+      | turn_finalization_state: %{
+          finalization_state
+          | active: nil,
+            order: order,
+            finalizations: finalizations
+        }
     }
 
     Phoenix.PubSub.broadcast(
@@ -2101,70 +2130,29 @@ defmodule Ecrits.Workspace.Session do
   defp put_turn_finalization_waiter(state, _key, nil), do: state
 
   defp put_turn_finalization_waiter(state, key, reply_to) when is_pid(reply_to) do
+    finalization_state = state.turn_finalization_state
+
     waiters =
-      Map.update(state.turn_finalization_waiters, key, MapSet.new([reply_to]), fn existing ->
+      Map.update(finalization_state.waiters, key, MapSet.new([reply_to]), fn existing ->
         existing
         |> waiter_pids()
         |> MapSet.put(reply_to)
       end)
 
-    %{state | turn_finalization_waiters: waiters}
+    %{state | turn_finalization_state: %{finalization_state | waiters: waiters}}
   end
 
   defp acknowledge_turn_finalization(state, key, summary) do
-    state.turn_finalization_waiters
+    finalization_state = state.turn_finalization_state
+
+    finalization_state.waiters
     |> Map.get(key, MapSet.new())
     |> waiter_pids()
     |> Enum.each(&send(&1, {:workspace_turn_finalization_ack, key, summary}))
 
-    %{state | turn_finalization_waiters: Map.delete(state.turn_finalization_waiters, key)}
+    waiters = Map.delete(finalization_state.waiters, key)
+    %{state | turn_finalization_state: %{finalization_state | waiters: waiters}}
   end
-
-  defp normalize_turn_finalizations(state) do
-    finalizations =
-      state.turn_finalizations
-      |> Enum.filter(fn {key, _entry} -> turn_finalization_key?(key) end)
-      |> Map.new()
-
-    queue =
-      state.turn_finalization_queue
-      |> Enum.filter(&turn_finalization_key?/1)
-      |> Enum.filter(&Map.has_key?(finalizations, &1))
-      |> Enum.uniq()
-
-    order =
-      state.turn_finalization_order
-      |> Enum.filter(&turn_finalization_key?/1)
-      |> Enum.filter(&Map.has_key?(finalizations, &1))
-      |> Enum.uniq()
-
-    waiters =
-      state.turn_finalization_waiters
-      |> Enum.filter(fn {key, _waiters} -> turn_finalization_key?(key) end)
-      |> Map.new(fn {key, waiters} -> {key, waiter_pids(waiters)} end)
-
-    active = normalize_turn_finalization_active(state.turn_finalization_active)
-
-    %{
-      state
-      | turn_finalizations: finalizations,
-        turn_finalization_queue: queue,
-        turn_finalization_order: order,
-        turn_finalization_waiters: waiters,
-        turn_finalization_active: active
-    }
-  end
-
-  defp normalize_turn_finalization_active(%{key: key} = active) do
-    if turn_finalization_key?(key) do
-      active
-    else
-      discard_legacy_turn_finalization_active(active)
-      nil
-    end
-  end
-
-  defp normalize_turn_finalization_active(_active), do: nil
 
   defp discard_legacy_turn_finalization_active(active) do
     case Map.get(active, :ref) do
@@ -2234,7 +2222,7 @@ defmodule Ecrits.Workspace.Session do
     documents =
       state
       |> Map.get(:documents, %{})
-      |> normalize_session_documents()
+      |> cast_session_documents()
 
     open_document_paths =
       state
@@ -2254,19 +2242,21 @@ defmodule Ecrits.Workspace.Session do
     |> Map.put_new(:document_element_picker_enabled?, false)
   end
 
-  defp normalize_session_documents(documents) when is_map(documents) do
+  defp cast_session_documents(documents) when is_map(documents) do
     documents
     |> Enum.flat_map(fn
       {path, %Document{} = document} ->
-        case normalize_document_path(document.path || path) do
-          {:ok, normalized} -> [{normalized, %{document | path: normalized}}]
+        attrs = document |> Map.from_struct() |> Map.put(:path, document.path || path)
+
+        case Document.cast(attrs) do
+          {:ok, normalized} -> [{normalized.path, normalized}]
           {:error, _} -> []
         end
 
       {path, document} when is_map(document) ->
         attrs = Map.put_new(document, :path, path)
 
-        case session_document(attrs, %{}) do
+        case Document.cast(attrs) do
           {:ok, %Document{} = normalized} -> [{normalized.path, normalized}]
           {:error, _} -> []
         end
@@ -2277,7 +2267,7 @@ defmodule Ecrits.Workspace.Session do
     |> Map.new()
   end
 
-  defp normalize_session_documents(_documents), do: %{}
+  defp cast_session_documents(_documents), do: %{}
 
   defp document_snapshot_payload(state) do
     %{
@@ -2298,21 +2288,10 @@ defmodule Ecrits.Workspace.Session do
     with {:ok, path} <- normalize_document_path(attr_value(attrs, :path)) do
       existing = Map.get(existing_documents, path, %Document{path: path})
 
-      {:ok,
-       %{
-         existing
-         | path: path,
-           id: attr_value(attrs, :id) || existing.id,
-           pool_document_id: attr_value(attrs, :pool_document_id) || existing.pool_document_id,
-           scroll_top:
-             scroll_coordinate(
-               attr_value(attrs, :top) || attr_value(attrs, :scroll_top) || existing.scroll_top
-             ),
-           scroll_left:
-             scroll_coordinate(
-               attr_value(attrs, :left) || attr_value(attrs, :scroll_left) || existing.scroll_left
-             )
-       }}
+      attrs
+      |> Map.new()
+      |> Map.put(:path, path)
+      |> Document.cast(existing)
     end
   end
 
@@ -2356,23 +2335,6 @@ defmodule Ecrits.Workspace.Session do
   end
 
   defp attr_value(_attrs, _key), do: nil
-
-  defp scroll_coordinate(value) when is_integer(value) and value >= 0, do: value
-
-  defp scroll_coordinate(value) when is_float(value) and value >= 0 do
-    value
-    |> Float.round()
-    |> trunc()
-  end
-
-  defp scroll_coordinate(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {integer, _rest} when integer >= 0 -> integer
-      _ -> 0
-    end
-  end
-
-  defp scroll_coordinate(_value), do: 0
 
   defp ensure_file_watcher(state) do
     state = ensure_maps(state)
@@ -3358,7 +3320,7 @@ defmodule Ecrits.Workspace.Session do
     # fakes) — they stay in live state for revives but never enter the handoff
     # store; a reload re-remembers them at the next attach.
     persistable =
-      Map.new(foregrounds, fn {rail_key, meta} -> {rail_key, Map.delete(meta, :settings)} end)
+      Map.new(foregrounds, fn {rail_key, meta} -> {rail_key, %{meta | settings: nil}} end)
 
     rail_state = state |> Map.take(@chat_rail_state_keys) |> Map.put(:foregrounds, persistable)
     _ = WorkspaceHandoff.put_chat_rail_state(state.path, rail_state)
@@ -3374,7 +3336,7 @@ defmodule Ecrits.Workspace.Session do
         _ ->
           legacy_foregrounds(state)
       end
-      |> normalize_foregrounds()
+      |> cast_foregrounds()
 
     active_foregrounds =
       state
@@ -3431,31 +3393,18 @@ defmodule Ecrits.Workspace.Session do
     end
   end
 
-  defp normalize_foregrounds(foregrounds) do
-    Map.new(foregrounds, fn {rail_key, meta} when is_map(meta) ->
-      owner_session_id = Map.get(meta, :owner_session_id) || rail_key
+  defp cast_foregrounds(foregrounds) do
+    Enum.reduce(foregrounds, %{}, fn
+      {rail_key, meta}, casted when is_binary(rail_key) and is_map(meta) ->
+        attrs = Map.put_new(meta, :owner_session_id, rail_key)
 
-      normalized = %{
-        agent_id: meta[:agent_id],
-        provider: Map.get(meta, :provider),
-        owner_session_id: owner_session_id
-      }
-
-      normalized =
-        case Map.get(meta, :agent_state) do
-          agent_state when is_map(agent_state) -> Map.put(normalized, :agent_state, agent_state)
-          _missing -> normalized
+        case Foreground.cast(attrs) do
+          {:ok, foreground} -> Map.put(casted, rail_key, foreground)
+          {:error, _changeset} -> casted
         end
 
-      # The rail's remembered attach settings feed a mid-conversation revive;
-      # normalization must not scrub them from live state.
-      normalized =
-        case Map.get(meta, :settings) do
-          settings when is_list(settings) -> Map.put(normalized, :settings, settings)
-          _missing -> normalized
-        end
-
-      {rail_key, normalized}
+      _entry, casted ->
+        casted
     end)
   end
 
@@ -3533,11 +3482,15 @@ defmodule Ecrits.Workspace.Session do
     new_rail? = not Map.has_key?(state.foregrounds, rail_key)
 
     foregrounds =
-      Map.put(state.foregrounds, rail_key, %{
-        agent_id: agent_id,
-        provider: provider,
-        owner_session_id: live_session_id
-      })
+      Map.put(
+        state.foregrounds,
+        rail_key,
+        Foreground.cast!(%{
+          agent_id: agent_id,
+          provider: provider,
+          owner_session_id: live_session_id
+        })
+      )
 
     state =
       %{state | foregrounds: foregrounds}

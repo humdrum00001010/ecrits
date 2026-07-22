@@ -38,6 +38,8 @@ defmodule Ecrits.AcpAgent.Session do
   @behaviour Ecrits.Agent.SessionContract
 
   alias Ecrits.Agent
+  alias Ecrits.Agent.DurableState
+  alias Ecrits.Agent.Item
   alias Ecrits.Context
   alias Ecrits.AcpAgent.AcpStream
   alias Ecrits.AcpAgent.Content
@@ -255,7 +257,7 @@ defmodule Ecrits.AcpAgent.Session do
     Process.flag(:trap_exit, true)
 
     id = Keyword.fetch!(opts, :id)
-    restored = normalize_durable_restore(Keyword.get(opts, :durable_restore), id)
+    restored = cast_durable_restore(Keyword.get(opts, :durable_restore), id)
     adapter_opts = merge_restored_adapter_opts(Keyword.get(opts, :adapter_opts, []), restored)
     transcript = restored_transcript(restored)
     title = Map.get(restored, :title)
@@ -2369,7 +2371,7 @@ defmodule Ecrits.AcpAgent.Session do
     items =
       current
       |> Map.get(:items, [])
-      |> normalize_file_activity_items()
+      |> merge_file_activity_items()
       |> Enum.map(&terminalize_running_file_activity/1)
 
     # Map.get: a session hot-reloaded mid-turn may hold a pre-picks current map.
@@ -2531,7 +2533,7 @@ defmodule Ecrits.AcpAgent.Session do
       |> Enum.map(fn dialog ->
         items =
           dialog.items
-          |> normalize_file_activity_items()
+          |> merge_file_activity_items()
           |> Enum.map(&terminalize_running_file_activity/1)
 
         Agent.new_dialog!(%{dialog | items: items})
@@ -2539,36 +2541,18 @@ defmodule Ecrits.AcpAgent.Session do
     end)
   end
 
-  defp normalize_file_activity_item(item) when is_map(item) do
-    operation = item_field(item, :operation) || item_field(item, :name)
-
-    if file_activity_item?(item) do
-      file_operation_id = file_activity_id(item)
-      input = file_activity_input(item)
-      path = item_field(item, :path) || item_field(input, :path)
-      query = item_field(item, :query) || item_field(input, :query)
-      reason = file_activity_failure_reason(item)
-
-      item
-      |> Map.put(:role, :file_activity)
-      |> Map.put(:file_operation_id, file_operation_id)
-      |> Map.put(:tool_call_id, file_operation_id)
-      |> Map.put(:operation, operation)
-      |> Map.put(:name, operation)
-      |> put_file_activity_value(:path, path)
-      |> put_file_activity_value(:query, query)
-      |> put_file_activity_value(:reason, reason)
-      |> maybe_put_file_activity_failure_body(reason)
-    else
-      item
-    end
-  end
-
-  defp normalize_file_activity_item(item), do: item
-
-  defp normalize_file_activity_items(items) when is_list(items) do
+  defp merge_file_activity_items(items) when is_list(items) do
     Enum.reduce(items, [], fn raw_item, normalized_items ->
-      item = normalize_file_activity_item(raw_item)
+      item =
+        if file_activity_item?(raw_item) do
+          raw_item
+          |> Map.put(:role, :file_activity)
+          |> Item.cast!()
+          |> Item.dump()
+        else
+          raw_item
+        end
+
       file_operation_id = if(file_activity_item?(item), do: file_activity_id(item))
 
       if is_nil(file_operation_id) do
@@ -2596,97 +2580,37 @@ defmodule Ecrits.AcpAgent.Session do
           else: previous_value
       end)
 
-    if terminal_file_activity_status?(item_field(previous, :status)) and
-         not terminal_file_activity_status?(item_field(current, :status)) do
-      merged
-      |> Map.put(:status, item_field(previous, :status))
-      |> put_file_activity_value(:reason, item_field(previous, :reason))
-      |> put_file_activity_value(:body, item_field(previous, :body))
-      |> put_file_activity_value(:output, item_field(previous, :output))
-    else
-      merged
-    end
+    merged =
+      if terminal_file_activity_status?(item_field(previous, :status)) and
+           not terminal_file_activity_status?(item_field(current, :status)) do
+        merged
+        |> Map.put(:status, item_field(previous, :status))
+        |> put_file_activity_value(:reason, item_field(previous, :reason))
+        |> put_file_activity_value(:body, item_field(previous, :body))
+        |> put_file_activity_value(:output, item_field(previous, :output))
+      else
+        merged
+      end
+
+    merged |> Item.cast!() |> Item.dump()
   end
 
   defp terminalize_running_file_activity(item) when is_map(item) do
     if file_activity_item?(item) and
          item_field(item, :status) in [:pending, "pending", :running, "running"] do
       item
-      |> normalize_file_activity_item()
       |> Map.put(:status, :failed)
       |> Map.put(:reason, @dangling_file_operation_reason)
       |> Map.put(:body, @dangling_file_operation_reason)
+      |> Map.put(:role, :file_activity)
+      |> Item.cast!()
+      |> Item.dump()
     else
       item
     end
   end
 
   defp terminalize_running_file_activity(item), do: item
-
-  defp file_activity_input(item) do
-    [:arguments, :args, :input]
-    |> Enum.find_value(%{}, fn key ->
-      case decode_file_activity_map(item_field(item, key)) do
-        map when map != %{} -> map
-        _ -> nil
-      end
-    end)
-  end
-
-  defp decode_file_activity_map(value) when is_map(value), do: value
-
-  defp decode_file_activity_map(value) when is_binary(value) do
-    value = String.trim(value)
-
-    with {:error, _reason} <- Jason.decode(value),
-         [input] <-
-           Regex.run(~r/(?:^|\n)Input:\n(.*?)(?:\n\nOutput:|\z)/s, value, capture: :all_but_first),
-         {:ok, decoded} when is_map(decoded) <- Jason.decode(String.trim(input)) do
-      decoded
-    else
-      {:ok, decoded} when is_map(decoded) -> decoded
-      _ -> %{}
-    end
-  end
-
-  defp decode_file_activity_map(_value), do: %{}
-
-  defp file_activity_failure_reason(item) do
-    if item_field(item, :status) in [:failed, "failed"] do
-      item_field(item, :reason) ||
-        file_activity_text(item_field(item, :output)) ||
-        file_activity_body_output(item_field(item, :body)) ||
-        file_activity_text(item_field(item, :body))
-    end
-  end
-
-  defp file_activity_body_output(body) when is_binary(body) do
-    case Regex.run(~r/(?:^|\n)Output:\n(.*)\z/s, body, capture: :all_but_first) do
-      [output] -> file_activity_text(output)
-      _ -> nil
-    end
-  end
-
-  defp file_activity_body_output(_body), do: nil
-
-  defp file_activity_text(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> nil
-      text -> text
-    end
-  end
-
-  defp file_activity_text(value) when is_map(value) or is_list(value),
-    do: Jason.encode!(value)
-
-  defp file_activity_text(nil), do: nil
-  defp file_activity_text(value), do: inspect(value)
-
-  defp maybe_put_file_activity_failure_body(item, nil), do: item
-
-  defp maybe_put_file_activity_failure_body(item, reason) do
-    put_file_activity_value(item, :body, reason)
-  end
 
   defp put_file_activity_value(item, _key, value) when value in [nil, ""], do: item
   defp put_file_activity_value(item, key, value), do: Map.put(item, key, value)
@@ -2727,19 +2651,22 @@ defmodule Ecrits.AcpAgent.Session do
 
     operation = Map.get(event, :operation) || (previous && item_field(previous, :operation))
 
-    item = %{
-      role: :file_activity,
-      file_operation_id: file_operation_id,
-      tool_call_id: file_operation_id,
-      operation: operation,
-      name: operation,
-      path: Map.get(event, :path) || (previous && item_field(previous, :path)),
-      query: Map.get(event, :query) || (previous && item_field(previous, :query)),
-      kind: Map.get(event, :kind) || (previous && item_field(previous, :kind)),
-      status: status,
-      reason: if(status == :failed, do: Map.get(event, :reason, ""), else: nil),
-      body: if(status == :failed, do: Map.get(event, :reason, ""), else: nil)
-    }
+    item =
+      %{
+        role: :file_activity,
+        file_operation_id: file_operation_id,
+        tool_call_id: file_operation_id,
+        operation: operation,
+        name: operation,
+        path: Map.get(event, :path) || (previous && item_field(previous, :path)),
+        query: Map.get(event, :query) || (previous && item_field(previous, :query)),
+        kind: Map.get(event, :kind) || (previous && item_field(previous, :kind)),
+        status: status,
+        reason: if(status == :failed, do: Map.get(event, :reason, ""), else: nil),
+        body: if(status == :failed, do: Map.get(event, :reason, ""), else: nil)
+      }
+      |> Item.cast!()
+      |> Item.dump()
 
     items = Map.get(current, :items, [])
 
@@ -2992,15 +2919,11 @@ defmodule Ecrits.AcpAgent.Session do
       thread_covers_from: Map.get(state, :thread_covers_from, 0),
       title: Map.get(state, :title),
       title_user_edited?: Map.get(state, :title_user_edited?, false),
-      transcript:
-        state.transcript
-        |> Enum.reverse()
-        |> Enum.map(&Agent.dump_dialog/1),
-      adapter_opts:
-        state.adapter_opts
-        |> Keyword.take(@persisted_adapter_opt_keys)
-        |> Map.new(fn {key, value} -> {Atom.to_string(key), durable_scalar(value)} end)
+      transcript: Enum.reverse(state.transcript),
+      adapter_opts: state.adapter_opts |> Keyword.take(@persisted_adapter_opt_keys) |> Map.new()
     }
+    |> DurableState.cast!()
+    |> DurableState.runtime_map()
   end
 
   defp persist_durable_state(%{workspace_root: workspace_root, id: id} = state)
@@ -3039,25 +2962,14 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp persist_durable_state_async(state), do: state
 
-  defp normalize_durable_restore(restore, expected_id) when is_map(restore) do
-    id = restore_field(restore, :id)
-
-    if is_binary(id) and id == expected_id do
-      %{
-        id: id,
-        provider_session_id: durable_string(restore_field(restore, :provider_session_id)),
-        thread_covers_from: durable_count(restore_field(restore, :thread_covers_from)),
-        title: durable_string(restore_field(restore, :title)),
-        title_user_edited?: restore_field(restore, :title_user_edited?) == true,
-        transcript: restore_field(restore, :transcript) || [],
-        adapter_opts: restore_field(restore, :adapter_opts) || %{}
-      }
-    else
-      %{}
+  defp cast_durable_restore(restore, expected_id) when is_map(restore) do
+    case DurableState.cast(restore) do
+      {:ok, %DurableState{id: ^expected_id} = state} -> DurableState.runtime_map(state)
+      _invalid_or_mismatched -> %{}
     end
   end
 
-  defp normalize_durable_restore(_restore, _expected_id), do: %{}
+  defp cast_durable_restore(_restore, _expected_id), do: %{}
 
   defp restored_transcript(%{transcript: transcript}) when is_list(transcript) do
     Enum.map(transcript, &Agent.load_dialog!/1)
@@ -3082,21 +2994,6 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp merge_restored_adapter_opts(runtime_opts, _restore), do: runtime_opts
 
-  defp restore_field(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
-
-  defp durable_string(value) when is_binary(value), do: value
-  defp durable_string(_value), do: nil
-
-  defp durable_count(value) when is_integer(value) and value >= 0, do: value
-  defp durable_count(_value), do: 0
-
-  defp durable_scalar(value) when is_atom(value), do: Atom.to_string(value)
-
-  defp durable_scalar(value) when is_binary(value) or is_number(value) or is_boolean(value),
-    do: value
-
-  defp durable_scalar(_value), do: nil
-
   # This is a value snapshot of the current turn, not the mutable `current`
   # state map itself. Pending prose/reasoning remain separate from already
   # ordered items so a joining LiveView can render the current bytes and then
@@ -3110,7 +3007,7 @@ defmodule Ecrits.AcpAgent.Session do
     current_items =
       current
       |> Map.get(:items, [])
-      |> normalize_file_activity_items()
+      |> merge_file_activity_items()
 
     %{
       id: current.turn_id,

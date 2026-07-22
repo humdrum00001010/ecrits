@@ -22,6 +22,30 @@ defmodule Ecrits.AcpAgent.ContentTest do
   end
 
   describe "normalize/1 — content blocks" do
+    test "file and media payloads are changeset validated" do
+      attrs = %{
+        type: :file,
+        uri: "file:///tmp/x.pdf",
+        name: "x.pdf",
+        mime_type: "application/pdf"
+      }
+
+      assert {:ok, %Ecrits.AcpAgent.Content.File{}} =
+               Ecrits.AcpAgent.Content.Block.cast(attrs)
+
+      assert {:ok, [file]} = Content.normalize([attrs])
+
+      assert file == %{
+               type: :file,
+               uri: "file:///tmp/x.pdf",
+               name: "x.pdf",
+               mime_type: "application/pdf"
+             }
+
+      assert {:error, {:invalid_block, :image}} =
+               Content.normalize([%{type: :image, mime_type: "image/png"}])
+    end
+
     test "a text block list normalizes" do
       assert {:ok, [%{type: :text, text: "hi"}]} =
                Content.normalize([%{type: :text, text: "hi"}])

@@ -4,6 +4,15 @@ defmodule Ecrits.AgentTest do
   alias Ecrits.Agent
   alias Ecrits.Agent.Dialog
 
+  test "dialog items are validated by their bounded item schemas" do
+    assert_raise ArgumentError, fn ->
+      Agent.new_dialog!(%{
+        turn_id: "turn-invalid-tool",
+        items: [%{role: :tool, status: :completed}]
+      })
+    end
+  end
+
   test "dialog dump/load preserves polymorphic item order and metadata" do
     dialog =
       Agent.new_dialog!(%{

@@ -3674,9 +3674,12 @@ defmodule EcritsWeb.Workspace.MountWorkspaceLiveTest do
                status: :completed,
                summary: %{successful?: true}
              }
-           } = state.turn_finalizations
+           } = state.turn_finalization_state.finalizations
 
-    refute Map.has_key?(state.turn_finalizations[{session_id, instance_id, turn_id}], :result)
+    refute Map.has_key?(
+             state.turn_finalization_state.finalizations[{session_id, instance_id, turn_id}],
+             :result
+           )
   end
 
   @tag :edit_failure

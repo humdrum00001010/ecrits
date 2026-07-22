@@ -8,26 +8,13 @@ defmodule Ecrits.Agent do
   JSON dump/load seam used by persisted session state.
   """
 
-  alias Ecrits.Agent.Dialog
+  alias Ecrits.Agent.{Dialog, Item}
 
   @dialog_keys ~w(turn_id user agent items)a
-  @item_keys ~w(
-    role status body reason segment picks tool_call_id file_operation_id operation query id name title
-    kind input output turn_id
-    document_path document document_id doc applied failed composition_ops ops sets
-    delta_count revision_count revision highlights preview_steps scroll marker summary source path relative_path
-    backend format ref hash version mode preview_snapshot edit_id preview_identity
-    preview_unavailable preview_error composed_tool_call_ids
-  )a
-  @item_key_lookup Map.new(@item_keys, &{Atom.to_string(&1), &1})
-  @roles ~w(user agent thinking tool file_activity edit_preview)a
-  @statuses ~w(pending running queued sent completed failed cancelled approval_required)a
-  @role_lookup Map.new(@roles, &{Atom.to_string(&1), &1})
-  @status_lookup Map.new(@statuses, &{Atom.to_string(&1), &1})
 
   @doc "Builds and validates one typed dialog aggregate."
   @spec new_dialog(map() | Dialog.t()) :: {:ok, Dialog.t()} | {:error, Ecto.Changeset.t()}
-  def new_dialog(%Dialog{} = dialog), do: {:ok, dialog}
+  def new_dialog(%Dialog{} = dialog), do: new_dialog(Map.from_struct(dialog))
 
   def new_dialog(attrs) when is_map(attrs) do
     %Dialog{}
@@ -55,7 +42,7 @@ defmodule Ecrits.Agent do
   @spec upsert_dialog_item([map()], map(), String.t() | nil) :: [map()]
   def upsert_dialog_item(items, item, fallback_turn_id \\ nil)
       when is_list(items) and is_map(item) do
-    item = normalize_item(item)
+    item = item |> Item.cast!() |> Item.dump()
 
     case edit_preview_identity(item, fallback_turn_id) do
       nil ->
@@ -138,7 +125,7 @@ defmodule Ecrits.Agent do
 
   @doc "Restores a typed dialog from its embedded JSON representation."
   @spec load_dialog(map() | Dialog.t()) :: {:ok, Dialog.t()} | {:error, Ecto.Changeset.t()}
-  def load_dialog(%Dialog{} = dialog), do: {:ok, dialog}
+  def load_dialog(%Dialog{} = dialog), do: new_dialog(dialog)
   def load_dialog(attrs) when is_map(attrs), do: new_dialog(attrs)
 
   @doc "Restores a typed dialog and raises when the representation is invalid."
@@ -157,26 +144,9 @@ defmodule Ecrits.Agent do
   defp normalize_dialog_value(:items, nil), do: []
 
   defp normalize_dialog_value(:items, items) when is_list(items),
-    do: Enum.map(items, &normalize_item/1)
+    do: Enum.map(items, fn item -> item |> Item.cast!() |> Item.dump() end)
 
   defp normalize_dialog_value(_key, value), do: value
-
-  defp normalize_item(item) when is_map(item) do
-    Enum.reduce(item, %{}, fn {key, value}, normalized ->
-      key = Map.get(@item_key_lookup, key, key)
-      Map.put(normalized, key, normalize_item_value(key, value))
-    end)
-  end
-
-  defp normalize_item(item), do: item
-
-  defp normalize_item_value(:role, value) when is_binary(value),
-    do: Map.get(@role_lookup, value, value)
-
-  defp normalize_item_value(:status, value) when is_binary(value),
-    do: Map.get(@status_lookup, value, value)
-
-  defp normalize_item_value(_key, value), do: value
 
   defp identity_field(map, key) when is_map(map), do: field(map, key)
   defp identity_field(_map, _key), do: nil

@@ -4,6 +4,27 @@ defmodule Ecrits.Workspace.SessionDocumentStateTest do
   alias Ecrits.Workspace.Session
   alias Ecrits.Workspace.Session.Document
 
+  test "session document casts string keys and scroll defaults" do
+    assert {:ok,
+            %Document{
+              path: "drafts/reference.docx",
+              id: "doc-id",
+              pool_document_id: "pool-id",
+              scroll_top: 0,
+              scroll_left: 0
+            }} =
+             Document.cast(%{
+               "path" => "drafts/reference.docx",
+               "id" => "doc-id",
+               "pool_document_id" => "pool-id"
+             })
+  end
+
+  test "session document rejects unsafe paths and negative scroll" do
+    assert {:error, %Ecto.Changeset{}} =
+             Document.cast(%{path: "../outside.docx", scroll_top: -1})
+  end
+
   setup do
     path =
       Path.join(

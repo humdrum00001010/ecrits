@@ -9,6 +9,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
 
   alias Ecrits.Agent
   alias Ecrits.AcpAgent.AcpStream
+  alias Ecrits.Doc.EditLifecycleEvent
   alias Ecrits.Doc.Pool, as: DocPool
   alias Ecrits.Document.EditTimeline
   alias Ecrits.Fuse.DocMount
@@ -1436,7 +1437,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # A DIRECT edit of a mounted `.jsonl` was routed onto the document (doc VFS
   # write-back). Drop a file-viewer card in the chat rail showing where it landed.
   def handle_info({:vfs_doc_edited, info}, socket) when is_map(info) do
-    info = normalize_vfs_edit_lifecycle_event(socket, info)
+    info = cast_vfs_edit_lifecycle_event(socket, info)
     turn_id = vfs_doc_edit_turn_id(info)
 
     socket =
@@ -3412,7 +3413,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp normalize_vfs_edit_lifecycle_event(socket, info) do
+  defp cast_vfs_edit_lifecycle_event(socket, info) do
     explicit_phase = lifecycle_phase(item_field(info, :phase))
 
     info =
@@ -3431,19 +3432,16 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     edit_id = item_field(info, :edit_id) || lifecycle_legacy_edit_id(revision)
 
     info
-    |> Map.put(:phase, phase)
-    |> Map.put(:turn_id, item_field(info, :turn_id))
-    |> Map.put(:edit_id, edit_id)
-    |> Map.put(:document_id, document_id)
-    |> Map.put(:revision, revision)
-    |> Map.put(:legacy_lifecycle, is_nil(explicit_phase))
-    |> Map.put(:ops, List.wrap(item_field(info, :ops)))
-    |> Map.put(:sets, List.wrap(item_field(info, :sets)))
-    |> Map.put(:highlights, List.wrap(item_field(info, :highlights)))
-    |> Map.put(:preview_snapshot, item_field(info, :preview_snapshot))
-    |> Map.put(:preview_snapshot_error, item_field(info, :preview_snapshot_error))
-    |> Map.put(:agent_id, item_field(info, :agent_id))
-    |> Map.put(:instance_id, item_field(info, :instance_id))
+    |> Map.merge(%{
+      phase: phase,
+      turn_id: item_field(info, :turn_id),
+      edit_id: edit_id,
+      document_id: document_id,
+      revision: revision,
+      legacy_lifecycle: is_nil(explicit_phase)
+    })
+    |> EditLifecycleEvent.cast!()
+    |> EditLifecycleEvent.dump()
   end
 
   defp lifecycle_phase(phase) when phase in [:candidate, :committed, :rejected, :snapshot_ready],

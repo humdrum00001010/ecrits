@@ -34,6 +34,7 @@ defmodule Ecrits.AcpAgent.Content do
   editing on the structured MCP path (not ACP-native fs).
   """
 
+  alias Ecrits.AcpAgent.Content.Block
   alias ExMCP.ACP.Types
 
   @type block ::
@@ -74,72 +75,12 @@ defmodule Ecrits.AcpAgent.Content do
 
   def normalize(_other), do: {:error, :invalid_input}
 
-  # A single block may also be passed (sugar for a one-element list).
-  defp normalize_block(%{type: type} = block) when is_atom(type) do
-    do_normalize_block(type, block)
-  end
-
-  defp normalize_block(%{"type" => type} = block) when is_binary(type) do
-    case safe_type(type) do
-      nil -> {:error, {:unknown_block_type, type}}
-      atom -> do_normalize_block(atom, atomize_keys(block))
-    end
-  end
-
-  defp normalize_block(other), do: {:error, {:invalid_block, other}}
-
-  defp do_normalize_block(:text, block) do
-    case Map.get(block, :text) do
-      text when is_binary(text) -> {:ok, %{type: :text, text: text}}
-      _ -> {:error, {:invalid_block, :text}}
-    end
-  end
-
-  defp do_normalize_block(:image, block), do: normalize_media(:image, block)
-  defp do_normalize_block(:audio, block), do: normalize_media(:audio, block)
-
-  defp do_normalize_block(:file, block) do
-    case Map.get(block, :uri) do
-      uri when is_binary(uri) and uri != "" ->
-        {:ok,
-         %{type: :file, uri: uri}
-         |> put_opt(:name, Map.get(block, :name))
-         |> put_opt(:mime_type, Map.get(block, :mime_type))}
-
-      _ ->
-        {:error, {:invalid_block, :file}}
-    end
-  end
-
-  defp do_normalize_block(:doc_ref, block) do
-    case Map.get(block, :document_id) do
-      id when is_binary(id) and id != "" ->
-        {:ok,
-         %{type: :doc_ref, document_id: id}
-         |> put_opt(:ref, Map.get(block, :ref))}
-
-      _ ->
-        {:error, {:invalid_block, :doc_ref}}
-    end
-  end
-
-  defp do_normalize_block(type, _block), do: {:error, {:unknown_block_type, type}}
-
-  # image/audio accept inline base64 `:data` (with `:mime_type`) OR a `:uri`.
-  defp normalize_media(type, block) do
-    mime = Map.get(block, :mime_type)
-    data = Map.get(block, :data)
-    uri = Map.get(block, :uri)
-
-    cond do
-      is_binary(mime) and is_binary(data) and data != "" ->
-        {:ok, %{type: type, mime_type: mime, data: data} |> put_opt(:uri, uri)}
-
-      is_binary(uri) and uri != "" ->
-        {:ok, %{type: type, uri: uri} |> put_opt(:mime_type, mime)}
-
-      true ->
-        {:error, {:invalid_block, type}}
+  defp normalize_block(block) do
+    case Block.cast(block) do
+      {:ok, typed} -> {:ok, Block.dump(typed)}
+      {:error, type, _changeset} -> {:error, {:invalid_block, type}}
+      {:error, {:unknown_block_type, type}} -> {:error, {:unknown_block_type, type}}
+      {:error, {:invalid_block, invalid}} -> {:error, {:invalid_block, invalid}}
     end
   end
 
@@ -225,41 +166,7 @@ defmodule Ecrits.AcpAgent.Content do
 
   # ── helpers ─────────────────────────────────────────────────────────
 
-  defp put_opt(map, _key, nil), do: map
-  defp put_opt(map, _key, ""), do: map
-  defp put_opt(map, key, value), do: Map.put(map, key, value)
-
   defp kw_opt(opts, _key, nil), do: opts
   defp kw_opt(opts, _key, ""), do: opts
   defp kw_opt(opts, key, value), do: Keyword.put(opts, key, value)
-
-  defp safe_type(type) when is_binary(type) do
-    case type do
-      "text" -> :text
-      "image" -> :image
-      "audio" -> :audio
-      "file" -> :file
-      "doc_ref" -> :doc_ref
-      _ -> nil
-    end
-  end
-
-  defp atomize_keys(map) do
-    Map.new(map, fn
-      {k, v} when is_binary(k) -> {safe_key(k), v}
-      {k, v} -> {k, v}
-    end)
-  end
-
-  defp safe_key("type"), do: :type
-  defp safe_key("text"), do: :text
-  defp safe_key("data"), do: :data
-  defp safe_key("uri"), do: :uri
-  defp safe_key("name"), do: :name
-  defp safe_key("ref"), do: :ref
-  defp safe_key("mime_type"), do: :mime_type
-  defp safe_key("mimeType"), do: :mime_type
-  defp safe_key("document_id"), do: :document_id
-  defp safe_key("documentId"), do: :document_id
-  defp safe_key(other), do: other
 end

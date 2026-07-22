@@ -2,9 +2,9 @@ defmodule Ecrits.Agent.Dialog do
   @moduledoc """
   Durable display transcript for one completed agent turn.
 
-  `items` is intentionally a polymorphic map array: ACP text, reasoning, tool
-  execution, and document-preview rows have different payloads, but their list
-  position is the canonical execution order shown by the chat rail.
+  `items` remains a polymorphic map array at the durable wire boundary. Each
+  map is validated and dumped by its bounded `Ecrits.Agent.Item` schema before
+  storage, while list position stays the canonical chat-rail execution order.
   """
 
   use Ecto.Schema

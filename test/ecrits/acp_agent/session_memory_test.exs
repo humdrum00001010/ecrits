@@ -86,4 +86,27 @@ defmodule Ecrits.AcpAgent.SessionMemoryTest do
 
     refute_received {:fake_acp_session, :new, _}
   end
+
+  test "invalid persisted adapter options are not restored" do
+    id = "invalid-restore-" <> Ecto.UUID.generate()
+
+    pid =
+      start_supervised!(
+        {Session,
+         id: id,
+         ctx: nil,
+         provider: %{id: "codex"},
+         exmcp_adapter: EcritsWeb.FakeAcpAdapter,
+         adapter_opts: [test_pid: self()],
+         durable_restore: %{
+           id: id,
+           transcript: [],
+           adapter_opts: %{"model" => %{"unexpected" => true}}
+         },
+         workspace_root: File.cwd!(),
+         mcp_servers: []}
+      )
+
+    refute Keyword.has_key?(Session.agent_snapshot(pid).adapter_opts, :model)
+  end
 end
