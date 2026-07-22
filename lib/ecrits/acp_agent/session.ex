@@ -38,6 +38,7 @@ defmodule Ecrits.AcpAgent.Session do
   @behaviour Ecrits.Agent.SessionContract
 
   alias Ecrits.Agent
+  alias Ecrits.Agent.DurableState
   alias Ecrits.Context
   alias Ecrits.AcpAgent.AcpStream
   alias Ecrits.AcpAgent.Content
@@ -255,7 +256,7 @@ defmodule Ecrits.AcpAgent.Session do
     Process.flag(:trap_exit, true)
 
     id = Keyword.fetch!(opts, :id)
-    restored = normalize_durable_restore(Keyword.get(opts, :durable_restore), id)
+    restored = cast_durable_restore(Keyword.get(opts, :durable_restore), id)
     adapter_opts = merge_restored_adapter_opts(Keyword.get(opts, :adapter_opts, []), restored)
     transcript = restored_transcript(restored)
     title = Map.get(restored, :title)
@@ -2992,15 +2993,11 @@ defmodule Ecrits.AcpAgent.Session do
       thread_covers_from: Map.get(state, :thread_covers_from, 0),
       title: Map.get(state, :title),
       title_user_edited?: Map.get(state, :title_user_edited?, false),
-      transcript:
-        state.transcript
-        |> Enum.reverse()
-        |> Enum.map(&Agent.dump_dialog/1),
-      adapter_opts:
-        state.adapter_opts
-        |> Keyword.take(@persisted_adapter_opt_keys)
-        |> Map.new(fn {key, value} -> {Atom.to_string(key), durable_scalar(value)} end)
+      transcript: Enum.reverse(state.transcript),
+      adapter_opts: state.adapter_opts |> Keyword.take(@persisted_adapter_opt_keys) |> Map.new()
     }
+    |> DurableState.cast!()
+    |> DurableState.dump()
   end
 
   defp persist_durable_state(%{workspace_root: workspace_root, id: id} = state)
@@ -3039,25 +3036,14 @@ defmodule Ecrits.AcpAgent.Session do
 
   defp persist_durable_state_async(state), do: state
 
-  defp normalize_durable_restore(restore, expected_id) when is_map(restore) do
-    id = restore_field(restore, :id)
-
-    if is_binary(id) and id == expected_id do
-      %{
-        id: id,
-        provider_session_id: durable_string(restore_field(restore, :provider_session_id)),
-        thread_covers_from: durable_count(restore_field(restore, :thread_covers_from)),
-        title: durable_string(restore_field(restore, :title)),
-        title_user_edited?: restore_field(restore, :title_user_edited?) == true,
-        transcript: restore_field(restore, :transcript) || [],
-        adapter_opts: restore_field(restore, :adapter_opts) || %{}
-      }
-    else
-      %{}
+  defp cast_durable_restore(restore, expected_id) when is_map(restore) do
+    case DurableState.cast(restore) do
+      {:ok, %DurableState{id: ^expected_id} = state} -> DurableState.runtime_map(state)
+      _invalid_or_mismatched -> %{}
     end
   end
 
-  defp normalize_durable_restore(_restore, _expected_id), do: %{}
+  defp cast_durable_restore(_restore, _expected_id), do: %{}
 
   defp restored_transcript(%{transcript: transcript}) when is_list(transcript) do
     Enum.map(transcript, &Agent.load_dialog!/1)
@@ -3081,21 +3067,6 @@ defmodule Ecrits.AcpAgent.Session do
   end
 
   defp merge_restored_adapter_opts(runtime_opts, _restore), do: runtime_opts
-
-  defp restore_field(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
-
-  defp durable_string(value) when is_binary(value), do: value
-  defp durable_string(_value), do: nil
-
-  defp durable_count(value) when is_integer(value) and value >= 0, do: value
-  defp durable_count(_value), do: 0
-
-  defp durable_scalar(value) when is_atom(value), do: Atom.to_string(value)
-
-  defp durable_scalar(value) when is_binary(value) or is_number(value) or is_boolean(value),
-    do: value
-
-  defp durable_scalar(_value), do: nil
 
   # This is a value snapshot of the current turn, not the mutable `current`
   # state map itself. Pending prose/reasoning remain separate from already

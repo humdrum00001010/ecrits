@@ -10,15 +10,12 @@ defmodule Ecrits.WorkspaceHandoff do
 
   use GenServer
 
-  alias Ecrits.Agent
+  alias Ecrits.Agent.DurableState
   require Logger
 
   @name __MODULE__
   @version 1
   @runtime_version 2
-  @persisted_adapter_opt_keys ~w(
-    model reasoning_effort sandbox permission_mode approval_policy access_control
-  )
   @durable_tool_text_edge_chars 16_000
 
   def start_link(opts) when is_list(opts) do
@@ -259,7 +256,7 @@ defmodule Ecrits.WorkspaceHandoff do
   end
 
   defp put_agent_state_in_memory(state, workspace_path, agent_id, agent_state) do
-    with {:ok, normalized_agent} <- normalize_agent_state(agent_state),
+    with {:ok, normalized_agent} <- cast_agent_state(agent_state),
          true <- normalized_agent.id == agent_id,
          {:ok, rail_state} <- Map.fetch(state.chat_rails, workspace_path) do
       case Enum.find(rail_state.foregrounds, fn {_rail_key, meta} ->
@@ -550,7 +547,7 @@ defmodule Ecrits.WorkspaceHandoff do
       normalized =
         case field(meta, :agent_state) do
           agent_state when is_map(agent_state) ->
-            case normalize_agent_state(agent_state) do
+            case cast_agent_state(agent_state) do
               {:ok, %{id: ^agent_id} = state} -> Map.put(normalized, :agent_state, state)
               {:error, _reason} -> normalized
               {:ok, _mismatched_state} -> normalized
@@ -568,73 +565,22 @@ defmodule Ecrits.WorkspaceHandoff do
 
   defp normalize_foreground(_rail_key, _meta), do: :error
 
-  defp normalize_agent_state(value) when is_map(value) do
-    id = field(value, :id)
-    instance_id = field(value, :instance_id)
-    provider_session_id = field(value, :provider_session_id)
-    title = field(value, :title)
-    title_user_edited? = field(value, :title_user_edited?) == true
-    transcript = field(value, :transcript) || []
-    adapter_opts = field(value, :adapter_opts) || %{}
+  defp cast_agent_state(value) when is_map(value) do
+    case DurableState.cast(value) do
+      {:ok, state} ->
+        normalized = DurableState.runtime_map(state)
 
-    thread_covers_from =
-      case field(value, :thread_covers_from) do
-        count when is_integer(count) and count >= 0 -> count
-        _missing -> 0
-      end
+        {:ok,
+         Map.update!(normalized, :transcript, fn dialogs ->
+           Enum.map(dialogs, &compact_durable_dialog/1)
+         end)}
 
-    with true <- is_binary(id) and id != "",
-         true <- is_nil(instance_id) or is_binary(instance_id),
-         true <- is_nil(provider_session_id) or is_binary(provider_session_id),
-         true <- is_nil(title) or is_binary(title),
-         true <- is_list(transcript),
-         true <- is_map(adapter_opts),
-         {:ok, dialogs} <- normalize_dialogs(transcript) do
-      {:ok,
-       %{
-         id: id,
-         instance_id: instance_id,
-         provider_session_id: provider_session_id,
-         thread_covers_from: thread_covers_from,
-         title: title,
-         title_user_edited?: title_user_edited?,
-         transcript: Enum.map(dialogs, &compact_durable_dialog/1),
-         adapter_opts: normalize_adapter_opts(adapter_opts)
-       }}
-    else
-      _ -> {:error, :invalid_agent_state}
+      {:error, _changeset} ->
+        {:error, :invalid_agent_state}
     end
   end
 
-  defp normalize_agent_state(_value), do: {:error, :invalid_agent_state}
-
-  defp normalize_dialogs(dialogs) do
-    {:ok,
-     Enum.map(dialogs, fn dialog ->
-       dialog
-       |> Agent.load_dialog!()
-       |> Agent.dump_dialog()
-     end)}
-  rescue
-    _error -> {:error, :invalid_agent_transcript}
-  end
-
-  defp normalize_adapter_opts(opts) do
-    opts
-    |> Enum.reduce(%{}, fn {key, value}, acc ->
-      key = to_string(key)
-
-      if key in @persisted_adapter_opt_keys and json_scalar?(value) do
-        Map.put(acc, key, if(is_atom(value), do: Atom.to_string(value), else: value))
-      else
-        acc
-      end
-    end)
-  end
-
-  defp json_scalar?(value),
-    do:
-      is_nil(value) or is_binary(value) or is_boolean(value) or is_number(value) or is_atom(value)
+  defp cast_agent_state(_value), do: {:error, :invalid_agent_state}
 
   defp dump_rail_state(rail_state) do
     %{
@@ -656,15 +602,10 @@ defmodule Ecrits.WorkspaceHandoff do
   defp dump_agent_state(nil), do: nil
 
   defp dump_agent_state(agent_state) do
-    %{
-      "id" => agent_state.id,
-      "instance_id" => agent_state.instance_id,
-      "provider_session_id" => agent_state.provider_session_id,
-      "title" => agent_state.title,
-      "title_user_edited?" => agent_state.title_user_edited?,
-      "transcript" => Enum.map(agent_state.transcript, &compact_durable_dialog/1),
-      "adapter_opts" => agent_state.adapter_opts
-    }
+    agent_state
+    |> DurableState.cast!()
+    |> DurableState.dump()
+    |> Map.update!("transcript", &Enum.map(&1, fn dialog -> compact_durable_dialog(dialog) end))
   end
 
   defp compact_durable_dialog(dialog) when is_map(dialog) do
