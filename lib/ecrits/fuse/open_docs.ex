@@ -18,6 +18,8 @@ defmodule Ecrits.Fuse.OpenDocs do
 
   use GenServer
 
+  alias Ecrits.Fuse.OpenDocs.Lifecycle
+
   @table :ecrits_fuse_open_docs
   @access_key :__vfs_access__
   @stage_key :__vfs_stage__
@@ -183,7 +185,12 @@ defmodule Ecrits.Fuse.OpenDocs do
   end
 
   def handle_call({:cache_committed, root, name, bytes}, _from, state) do
-    put_lifecycle(root, name, clean_lifecycle(bytes, next_generation(root, name)))
+    put_lifecycle(
+      root,
+      name,
+      Lifecycle.cast!(%{bytes: bytes, generation: next_generation(root, name)})
+    )
+
     {:reply, :ok, state}
   end
 
@@ -1197,23 +1204,13 @@ defmodule Ecrits.Fuse.OpenDocs do
   end
 
   defp accepted_lifecycle(name, accepted_bytes, pending, metadata, generation) do
-    %{
+    Lifecycle.cast!(%{
       bytes: accepted_bytes,
       dirty_owner: dirty_owner_entry(name, metadata, generation),
       generation: generation,
       in_flight: nil,
       pending: pending
-    }
-  end
-
-  defp clean_lifecycle(bytes, generation) do
-    %{
-      bytes: bytes,
-      dirty_owner: nil,
-      generation: generation,
-      in_flight: nil,
-      pending: nil
-    }
+    })
   end
 
   defp do_complete_canonical_echo(root, temp_name, target_name, bytes) do
@@ -1241,6 +1238,7 @@ defmodule Ecrits.Fuse.OpenDocs do
   end
 
   defp put_lifecycle(root, name, lifecycle) do
+    lifecycle = Lifecycle.cast!(lifecycle)
     :ets.insert(@table, {{@committed_key, root, name}, lifecycle})
     :ok
   end
@@ -1364,7 +1362,7 @@ defmodule Ecrits.Fuse.OpenDocs do
       [{key, %{bytes: bytes, generation: generation, pending: pending} = lifecycle}]
       when is_binary(bytes) and is_integer(generation) and generation >= 0 and
              (is_map(pending) or is_nil(pending)) ->
-        upgraded = upgrade_lifecycle(root, name, lifecycle)
+        upgraded = root |> upgrade_lifecycle(name, lifecycle) |> Lifecycle.cast!()
 
         if upgraded != lifecycle do
           :ets.insert(@table, {key, upgraded})
@@ -1375,7 +1373,11 @@ defmodule Ecrits.Fuse.OpenDocs do
       # Upgrade an old in-memory row defensively during code reload. A new
       # runtime always writes the consolidated lifecycle shape directly.
       [{key, bytes}] when is_binary(bytes) ->
-        lifecycle = upgrade_lifecycle(root, name, clean_lifecycle(bytes, 0))
+        lifecycle =
+          root
+          |> upgrade_lifecycle(name, Lifecycle.cast!(%{bytes: bytes, generation: 0}))
+          |> Lifecycle.cast!()
+
         :ets.insert(@table, {key, lifecycle})
         {:ok, lifecycle}
 
