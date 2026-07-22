@@ -59,6 +59,7 @@ defmodule Ecrits.Doc.Projection do
   require Logger
 
   alias Ecrits.Doc.BrowserBridge
+  alias Ecrits.Doc.EditLifecycleEvent
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Pool
   alias Ecrits.AcpAgent.Session, as: AgentSession
@@ -2513,6 +2514,7 @@ defmodule Ecrits.Doc.Projection do
       |> Map.put(:phase, :snapshot_ready)
       |> Map.put(:preview_snapshot, preview_snapshot)
       |> Map.put(:preview_snapshot_error, preview_snapshot_error)
+      |> cast_edit_lifecycle_event()
 
     _ = OpenDocs.publish_preview_if_current(root, abs_path, token, info)
     :ok
@@ -2524,6 +2526,7 @@ defmodule Ecrits.Doc.Projection do
       |> Map.put(:phase, :snapshot_ready)
       |> Map.put(:preview_snapshot, nil)
       |> Map.put(:preview_snapshot_error, preview_snapshot_error(reason))
+      |> cast_edit_lifecycle_event()
 
     _ = OpenDocs.publish_preview_if_current(root, abs_path, token, info)
     :ok
@@ -2535,11 +2538,17 @@ defmodule Ecrits.Doc.Projection do
   end
 
   defp publish_edit(root, info) do
+    info = cast_edit_lifecycle_event(info)
+
     Phoenix.PubSub.broadcast(
       Ecrits.PubSub,
       "doc_vfs:" <> DocMount.canonical_root(root),
       {:vfs_doc_edited, info}
     )
+  end
+
+  defp cast_edit_lifecycle_event(info) do
+    info |> EditLifecycleEvent.cast!() |> EditLifecycleEvent.dump()
   end
 
   defp durable_preview_snapshot(abs_path, root, opts) do
