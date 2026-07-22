@@ -141,12 +141,8 @@ defmodule Ecrits.Workspace.DurableChatRailStoreTest do
 
     assert {:ok, rail_state} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
 
-    assert get_in(rail_state, [
-             :foregrounds,
-             first_ws.rail_key,
-             :agent_state,
-             :instance_id
-           ]) == first_after.instance_id
+    assert rail_state.foregrounds[first_ws.rail_key].agent_state.instance_id ==
+             first_after.instance_id
 
     stop_workspace_owners(workspace)
     assert :ok = WorkspaceHandoff.delete_chat_rail(workspace, second_ws.rail_key)
@@ -238,7 +234,7 @@ defmodule Ecrits.Workspace.DurableChatRailStoreTest do
              )
 
     assert {:ok, stored} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
-    transcript = get_in(stored, [:foregrounds, "rail-merge", :agent_state, :transcript])
+    transcript = stored.foregrounds["rail-merge"].agent_state.transcript
     assert Enum.map(transcript, row_user) == ["one", "two", "three-updated"]
 
     # Wholesale rail write from a NEW instance carrying one new row: nothing
@@ -247,19 +243,19 @@ defmodule Ecrits.Workspace.DurableChatRailStoreTest do
     assert :ok = WorkspaceHandoff.put_chat_rail_state(workspace, rail_state.(meta.(successor)))
 
     assert {:ok, stored} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
-    transcript = get_in(stored, [:foregrounds, "rail-merge", :agent_state, :transcript])
+    transcript = stored.foregrounds["rail-merge"].agent_state.transcript
     assert Enum.map(transcript, row_user) == ["one", "two", "three-updated", "four"]
-    assert get_in(stored, [:foregrounds, "rail-merge", :agent_state, :instance_id]) == "i2"
+    assert stored.foregrounds["rail-merge"].agent_state.instance_id == "i2"
 
     # Explicit reset: the old conversation must NOT resurrect into the next write.
     assert :ok = WorkspaceHandoff.reset_agent_state(workspace, "agent-merge")
     assert {:ok, stored} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
-    assert get_in(stored, [:foregrounds, "rail-merge", :agent_state]) == nil
+    assert stored.foregrounds["rail-merge"].agent_state == nil
 
     fresh = agent_state.("i3", [dialog.("t5", "fresh conversation")])
     assert :ok = WorkspaceHandoff.put_chat_rail_state(workspace, rail_state.(meta.(fresh)))
     assert {:ok, stored} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
-    transcript = get_in(stored, [:foregrounds, "rail-merge", :agent_state, :transcript])
+    transcript = stored.foregrounds["rail-merge"].agent_state.transcript
     assert Enum.map(transcript, row_user) == ["fresh conversation"]
   end
 
@@ -327,7 +323,7 @@ defmodule Ecrits.Workspace.DurableChatRailStoreTest do
     assert :ok = WorkspaceHandoff.put_chat_rail_state(workspace, rail_state)
 
     assert {:ok, live_state} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
-    [live_dialog] = get_in(live_state, [:foregrounds, "rail-large", :agent_state, :transcript])
+    [live_dialog] = live_state.foregrounds["rail-large"].agent_state.transcript
     [live_tool] = live_dialog.items
     assert live_tool.input =~ "input-start"
     assert live_tool.input =~ "input-end"
@@ -342,8 +338,7 @@ defmodule Ecrits.Workspace.DurableChatRailStoreTest do
     restart_handoff_store()
     assert {:ok, restored_state} = WorkspaceHandoff.fetch_chat_rail_state(workspace)
 
-    [restored_dialog] =
-      get_in(restored_state, [:foregrounds, "rail-large", :agent_state, :transcript])
+    [restored_dialog] = restored_state.foregrounds["rail-large"].agent_state.transcript
 
     [restored_tool] = restored_dialog.items
     assert restored_tool.input =~ "input-start"
@@ -471,7 +466,7 @@ defmodule Ecrits.Workspace.DurableChatRailStoreTest do
     assert {:ok, rail_state} =
              GenServer.call(pid, {:fetch_chat_rail_state, Path.expand(workspace)})
 
-    assert get_in(rail_state, [:foregrounds, rail_key, :agent_id]) == agent_id
+    assert rail_state.foregrounds[rail_key].agent_id == agent_id
     assert Process.alive?(pid)
     assert Jason.decode!(File.read!(store_path))["version"] == 1
   end

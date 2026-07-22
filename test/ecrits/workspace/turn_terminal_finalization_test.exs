@@ -331,14 +331,30 @@ defmodule Ecrits.Workspace.TurnTerminalFinalizationTest do
                    mode: :drain
                  },
                  queue: [%{turn_id: ^queued_turn}]
-               } = :sys.get_state(agent_pid)
+               } =
+                 await_agent_state(agent_pid, fn state ->
+                   match?(
+                     %{
+                       terminal_finalization: %{
+                         key: {_agent_id, _instance_id, ^first_turn},
+                         mode: :drain
+                       },
+                       queue: [%{turn_id: ^queued_turn}]
+                     },
+                     state
+                   )
+                 end)
 
         assert agent_id == terminal.ws.agent_id
         assert instance_id == terminal.instance_id
 
         key = {agent_id, instance_id, first_turn}
 
-        assert %{turn_finalization_active: %{key: ^key, pid: first_pid, attempts: 1}} =
+        assert %{
+                 turn_finalization_state: %{
+                   active: %{key: ^key, pid: first_pid, attempts: 1}
+                 }
+               } =
                  :sys.get_state(session_pid)
 
         failed_result = %{
@@ -367,7 +383,11 @@ defmodule Ecrits.Workspace.TurnTerminalFinalizationTest do
           {:workspace_turn_finalization_finished, key, first_pid, failed_result}
         )
 
-        assert %{turn_finalization_active: %{key: ^key, pid: second_pid, attempts: 2}} =
+        assert %{
+                 turn_finalization_state: %{
+                   active: %{key: ^key, pid: second_pid, attempts: 2}
+                 }
+               } =
                  await_finalizer_attempt(session_pid, key, first_pid, 2)
 
         assert :pending =
@@ -383,11 +403,13 @@ defmodule Ecrits.Workspace.TurnTerminalFinalizationTest do
         )
 
         assert %{
-                 turn_finalization_active: nil,
-                 turn_finalizations: %{
-                   ^key => %{status: :queued, attempts: 2, retry_token: retry_token}
-                 },
-                 turn_finalization_waiters: %{^key => waiters}
+                 turn_finalization_state: %{
+                   active: nil,
+                   finalizations: %{
+                     ^key => %{status: :queued, attempts: 2, retry_token: retry_token}
+                   },
+                   waiters: %{^key => waiters}
+                 }
                } = :sys.get_state(session_pid)
 
         assert MapSet.member?(waiters, agent_pid)
@@ -410,7 +432,11 @@ defmodule Ecrits.Workspace.TurnTerminalFinalizationTest do
 
         send(session_pid, {:retry_workspace_turn_finalization, key, retry_token})
 
-        assert %{turn_finalization_active: %{key: ^key, pid: third_pid, attempts: 3}} =
+        assert %{
+                 turn_finalization_state: %{
+                   active: %{key: ^key, pid: third_pid, attempts: 3}
+                 }
+               } =
                  await_finalizer_attempt(session_pid, key, second_pid, 3)
 
         send(
@@ -791,7 +817,7 @@ defmodule Ecrits.Workspace.TurnTerminalFinalizationTest do
   defp await_finalizer_attempt(session_pid, key, previous_pid, attempts, remaining) do
     state = :sys.get_state(session_pid)
 
-    case state.turn_finalization_active do
+    case state.turn_finalization_state.active do
       %{key: ^key, pid: pid, attempts: ^attempts} when pid != previous_pid ->
         state
 

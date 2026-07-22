@@ -533,6 +533,8 @@ defmodule Ecrits.WorkspaceHandoff do
   defp normalize_chat_rail_state(_value), do: {:error, :invalid_chat_rail_state}
 
   defp cast_foreground(rail_key, meta) when is_binary(rail_key) and is_map(meta) do
+    meta = cast_foreground_agent_state(meta)
+
     case Foreground.cast(meta) do
       {:ok,
        %Foreground{agent_id: agent_id, agent_state: %DurableState{id: agent_id}} = foreground} ->
@@ -550,6 +552,19 @@ defmodule Ecrits.WorkspaceHandoff do
   end
 
   defp cast_foreground(_rail_key, _meta), do: :error
+
+  defp cast_foreground_agent_state(meta) do
+    case field(meta, :agent_state) do
+      agent_state when is_map(agent_state) ->
+        case cast_agent_state(agent_state) do
+          {:ok, state} -> Map.put(meta, :agent_state, state)
+          {:error, _reason} -> Map.put(meta, :agent_state, nil)
+        end
+
+      _missing ->
+        meta
+    end
+  end
 
   defp cast_agent_state(value) when is_map(value) do
     case DurableState.cast(value) do
