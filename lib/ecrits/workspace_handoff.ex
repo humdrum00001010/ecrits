@@ -11,6 +11,7 @@ defmodule Ecrits.WorkspaceHandoff do
   use GenServer
 
   alias Ecrits.Agent.DurableState
+  alias Ecrits.Workspace.Foreground
   require Logger
 
   @name __MODULE__
@@ -164,7 +165,7 @@ defmodule Ecrits.WorkspaceHandoff do
         foregrounds =
           Map.new(rail_state.foregrounds, fn
             {rail_key, %{agent_id: ^agent_id} = meta} ->
-              {rail_key, Map.delete(meta, :agent_state)}
+              {rail_key, %{meta | agent_state: nil}}
 
             entry ->
               entry
@@ -499,7 +500,7 @@ defmodule Ecrits.WorkspaceHandoff do
          true <- is_list(order) do
       normalized_foregrounds =
         Enum.reduce(foregrounds, %{}, fn {rail_key, meta}, acc ->
-          case normalize_foreground(rail_key, meta) do
+          case cast_foreground(rail_key, meta) do
             {:ok, key, normalized} -> Map.put(acc, key, normalized)
             :error -> acc
           end
@@ -531,39 +532,24 @@ defmodule Ecrits.WorkspaceHandoff do
 
   defp normalize_chat_rail_state(_value), do: {:error, :invalid_chat_rail_state}
 
-  defp normalize_foreground(rail_key, meta) when is_binary(rail_key) and is_map(meta) do
-    agent_id = field(meta, :agent_id)
-    owner_session_id = field(meta, :owner_session_id)
-    provider = field(meta, :provider)
+  defp cast_foreground(rail_key, meta) when is_binary(rail_key) and is_map(meta) do
+    case Foreground.cast(meta) do
+      {:ok,
+       %Foreground{agent_id: agent_id, agent_state: %DurableState{id: agent_id}} = foreground} ->
+        {:ok, rail_key, foreground}
 
-    if is_binary(agent_id) and agent_id != "" and is_binary(owner_session_id) and
-         owner_session_id != "" and (is_nil(provider) or is_binary(provider)) do
-      normalized = %{
-        agent_id: agent_id,
-        owner_session_id: owner_session_id,
-        provider: provider
-      }
+      {:ok, %Foreground{agent_state: nil} = foreground} ->
+        {:ok, rail_key, foreground}
 
-      normalized =
-        case field(meta, :agent_state) do
-          agent_state when is_map(agent_state) ->
-            case cast_agent_state(agent_state) do
-              {:ok, %{id: ^agent_id} = state} -> Map.put(normalized, :agent_state, state)
-              {:error, _reason} -> normalized
-              {:ok, _mismatched_state} -> normalized
-            end
+      {:ok, %Foreground{} = foreground} ->
+        {:ok, rail_key, %{foreground | agent_state: nil}}
 
-          _missing ->
-            normalized
-        end
-
-      {:ok, rail_key, normalized}
-    else
-      :error
+      {:error, _changeset} ->
+        :error
     end
   end
 
-  defp normalize_foreground(_rail_key, _meta), do: :error
+  defp cast_foreground(_rail_key, _meta), do: :error
 
   defp cast_agent_state(value) when is_map(value) do
     case DurableState.cast(value) do

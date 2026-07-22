@@ -32,6 +32,7 @@ defmodule Ecrits.Workspace.Session do
   alias Ecrits.Doc.Pool
   alias Ecrits.AcpAgent
   alias Ecrits.WorkspaceHandoff
+  alias Ecrits.Workspace.Foreground
   alias Ecrits.Workspace.Session.{Agent, Document}
   alias Ecrits.Workspace.TurnFinalizer
 
@@ -3326,7 +3327,7 @@ defmodule Ecrits.Workspace.Session do
     # fakes) — they stay in live state for revives but never enter the handoff
     # store; a reload re-remembers them at the next attach.
     persistable =
-      Map.new(foregrounds, fn {rail_key, meta} -> {rail_key, Map.delete(meta, :settings)} end)
+      Map.new(foregrounds, fn {rail_key, meta} -> {rail_key, %{meta | settings: nil}} end)
 
     rail_state = state |> Map.take(@chat_rail_state_keys) |> Map.put(:foregrounds, persistable)
     _ = WorkspaceHandoff.put_chat_rail_state(state.path, rail_state)
@@ -3342,7 +3343,7 @@ defmodule Ecrits.Workspace.Session do
         _ ->
           legacy_foregrounds(state)
       end
-      |> normalize_foregrounds()
+      |> cast_foregrounds()
 
     active_foregrounds =
       state
@@ -3399,31 +3400,18 @@ defmodule Ecrits.Workspace.Session do
     end
   end
 
-  defp normalize_foregrounds(foregrounds) do
-    Map.new(foregrounds, fn {rail_key, meta} when is_map(meta) ->
-      owner_session_id = Map.get(meta, :owner_session_id) || rail_key
+  defp cast_foregrounds(foregrounds) do
+    Enum.reduce(foregrounds, %{}, fn
+      {rail_key, meta}, casted when is_binary(rail_key) and is_map(meta) ->
+        attrs = Map.put_new(meta, :owner_session_id, rail_key)
 
-      normalized = %{
-        agent_id: meta[:agent_id],
-        provider: Map.get(meta, :provider),
-        owner_session_id: owner_session_id
-      }
-
-      normalized =
-        case Map.get(meta, :agent_state) do
-          agent_state when is_map(agent_state) -> Map.put(normalized, :agent_state, agent_state)
-          _missing -> normalized
+        case Foreground.cast(attrs) do
+          {:ok, foreground} -> Map.put(casted, rail_key, foreground)
+          {:error, _changeset} -> casted
         end
 
-      # The rail's remembered attach settings feed a mid-conversation revive;
-      # normalization must not scrub them from live state.
-      normalized =
-        case Map.get(meta, :settings) do
-          settings when is_list(settings) -> Map.put(normalized, :settings, settings)
-          _missing -> normalized
-        end
-
-      {rail_key, normalized}
+      _entry, casted ->
+        casted
     end)
   end
 
@@ -3501,11 +3489,15 @@ defmodule Ecrits.Workspace.Session do
     new_rail? = not Map.has_key?(state.foregrounds, rail_key)
 
     foregrounds =
-      Map.put(state.foregrounds, rail_key, %{
-        agent_id: agent_id,
-        provider: provider,
-        owner_session_id: live_session_id
-      })
+      Map.put(
+        state.foregrounds,
+        rail_key,
+        Foreground.cast!(%{
+          agent_id: agent_id,
+          provider: provider,
+          owner_session_id: live_session_id
+        })
+      )
 
     state =
       %{state | foregrounds: foregrounds}

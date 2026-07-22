@@ -33,6 +33,8 @@ defmodule Ecrits.Agent.DurableState do
   @type t :: %__MODULE__{}
 
   @spec cast(map()) :: {:ok, t()} | {:error, Ecto.Changeset.t()}
+  def cast(%__MODULE__{} = state), do: {:ok, state}
+
   def cast(attrs) when is_map(attrs) do
     %__MODULE__{adapter_opts: %AdapterOptions{}}
     |> Ecto.Changeset.cast(normalize_attrs(attrs), @fields, empty_values: [])
