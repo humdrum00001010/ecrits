@@ -62,7 +62,7 @@ Polymorphic records use one schema per semantic variant rather than a single nul
 1. **`Ecrits.Agent.Item.*`** owns transcript item variants, including file activity and edit preview. This replaces the 50-plus-key registry in `Ecrits.Agent` and the second file-activity normalizer in `Ecrits.AcpAgent.Session`.
 2. **`Ecrits.AcpAgent.Content.*`** owns text, image, audio, file, and document-reference blocks. File and media variants can reach four fields.
 3. **`Ecrits.Agent.DurableState`** owns restored and handed-off agent state. `Ecrits.AcpAgent.Session` and `Ecrits.WorkspaceHandoff` must use the same schema instead of maintaining seven- and eight-field normalizers.
-4. **`Ecrits.Agent.AdapterOptions`** owns the seven persisted adapter options and rejects non-scalar persisted values through its changeset.
+4. **`Ecrits.Agent.AdapterOptions`** owns the six persisted adapter options and rejects non-scalar persisted values through its changeset.
 
 ### Document and VFS
 
@@ -79,7 +79,7 @@ Polymorphic records use one schema per semantic variant rather than a single nul
 12. **`Ecrits.Workspace.TurnOwner`** owns owner pid, owner monitor reference, task pid, and status.
 13. **`Ecrits.Workspace.TurnFinalizationState`** owns the finalization map, order, queue, waiters, and active record.
 
-Runtime-only values such as pids, references, functions, and test adapters use `field ..., :any, virtual: true` with explicit changeset validation. They are never passed to `Ecto.embedded_dump/2`. Durable schemas contain only serializable fields.
+Runtime-only values such as pids, references, functions, and test adapters use named `:any` virtual fields with explicit changeset validation. They are never passed to `Ecto.embedded_dump/2`. Durable schemas contain only serializable fields.
 
 ## Existing Compliant Boundaries
 
