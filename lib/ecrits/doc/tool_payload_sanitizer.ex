@@ -7,6 +7,8 @@ defmodule Ecrits.Doc.ToolPayloadSanitizer do
   ordinary payload fields are retained.
   """
 
+  alias Ecrits.Doc.ToolPayload.CompactDeck
+
   def encode_tool_payload(name, payload) when is_binary(payload) do
     sanitize_tool_body(name, payload)
   end
@@ -126,35 +128,18 @@ defmodule Ecrits.Doc.ToolPayloadSanitizer do
 
   defp compact_create_payload(%{} = payload) do
     case static_get(payload, "deck") do
-      %{} = deck -> Map.put(payload, "deck", compact_deck(deck))
-      _other -> payload
+      %{} = deck ->
+        case CompactDeck.cast(deck) do
+          {:ok, summary} -> Map.put(payload, "deck", CompactDeck.dump(summary))
+          {:error, _changeset} -> payload
+        end
+
+      _other ->
+        payload
     end
   end
 
   defp compact_create_payload(payload), do: payload
-
-  defp compact_deck(deck) do
-    slides =
-      deck
-      |> static_get("slides")
-      |> case do
-        list when is_list(list) -> list
-        _other -> []
-      end
-
-    %{
-      "title" => static_get(deck, "title"),
-      "subtitle" => static_get(deck, "subtitle"),
-      "slides" => length(slides),
-      "slide_titles" =>
-        slides
-        |> Enum.map(&static_get(&1, "title"))
-        |> Enum.reject(&is_nil/1)
-        |> Enum.take(8)
-    }
-    |> Enum.reject(fn {_key, value} -> value in [nil, "", []] end)
-    |> Map.new()
-  end
 
   defp ok_payload?(%{} = payload), do: static_get(payload, "ok") == true
   defp ok_payload?(_payload), do: false
