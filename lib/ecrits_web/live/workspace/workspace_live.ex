@@ -1437,7 +1437,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
   # A DIRECT edit of a mounted `.jsonl` was routed onto the document (doc VFS
   # write-back). Drop a file-viewer card in the chat rail showing where it landed.
   def handle_info({:vfs_doc_edited, info}, socket) when is_map(info) do
-    info = normalize_vfs_edit_lifecycle_event(socket, info)
+    info = cast_vfs_edit_lifecycle_event(socket, info)
     turn_id = vfs_doc_edit_turn_id(info)
 
     socket =
@@ -3413,7 +3413,7 @@ defmodule EcritsWeb.Workspace.WorkspaceLive do
     end
   end
 
-  defp normalize_vfs_edit_lifecycle_event(socket, info) do
+  defp cast_vfs_edit_lifecycle_event(socket, info) do
     explicit_phase = lifecycle_phase(item_field(info, :phase))
 
     info =
