@@ -60,6 +60,7 @@ defmodule Ecrits.Doc.Tools do
   alias Ecrits.Doc.Editor
   alias Ecrits.Doc.Op
   alias Ecrits.Doc.Pool
+  alias Ecrits.Doc.Read.Nearby
   alias Ecrits.Fuse.DocMount
   alias Ecrits.Fuse.OpenDocs
   alias Ecrits.Document.ByteSpool
@@ -811,6 +812,13 @@ defmodule Ecrits.Doc.Tools do
 
   def call(ctx, "doc.read", args) do
     with {:ok, _ref} <- require_string(args, "ref") do
+      nearby = args |> get(["nearby"]) |> Nearby.cast!() |> Nearby.dump()
+
+      args =
+        args
+        |> Map.delete(:nearby)
+        |> Map.put("nearby", nearby)
+
       route_doc(ctx, args,
         browser: fn lv ->
           browser_call(lv, args, :read, %{
@@ -2471,7 +2479,7 @@ defmodule Ecrits.Doc.Tools do
 
   defp server_read_nearby(editor, args) do
     ref = get(args, ["ref"])
-    nearby = normalize_nearby(get(args, ["nearby"]))
+    nearby = get(args, ["nearby"])
 
     case Editor.elements(editor) do
       {:ok, nodes} when is_list(nodes) ->
@@ -2588,25 +2596,6 @@ defmodule Ecrits.Doc.Tools do
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
   end
-
-  defp normalize_nearby(%{} = nearby) do
-    %{
-      "before" => bounded_int(get(nearby, ["before"]), 2, 0, 10),
-      "after" => bounded_int(get(nearby, ["after"]), 2, 0, 10),
-      "row" => get(nearby, ["row"]) != false,
-      "column" => get(nearby, ["column"]) == true,
-      "headers" => get(nearby, ["headers"]) != false
-    }
-  end
-
-  defp normalize_nearby(_nearby),
-    do: %{"before" => 2, "after" => 2, "row" => true, "column" => false, "headers" => true}
-
-  defp bounded_int(value, _default, min_value, max_value)
-       when is_integer(value) and value >= min_value,
-       do: min(value, max_value)
-
-  defp bounded_int(_value, default, _min_value, _max_value), do: default
 
   defp read_ref_candidates(ref) do
     ([ref_to_string(ref)] ++ parent_read_refs(ref))

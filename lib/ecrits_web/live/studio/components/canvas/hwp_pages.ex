@@ -7540,7 +7540,7 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
           },
           applyAgentReadNearby(o) {
             const ref = String(o.ref || "");
-            const nearby = this.normalizeAgentNearby(o.nearby);
+            const nearby = o.nearby;
             const elements = this.collectElements();
             const matches = elements.map((el) => this.agentElementMatch(el));
             const candidates = this.agentReadRefCandidates(ref);
@@ -7629,20 +7629,6 @@ defmodule EcritsWeb.Live.Studio.Components.Canvas.HwpPages do
               refs.push(`hwp:s${sec}/p${para}`);
             }
             return Array.from(new Set(refs.filter(Boolean)));
-          },
-          normalizeAgentNearby(input) {
-            const n = input && typeof input === "object" ? input : {};
-            const clamp = (value, fallback) => {
-              const x = Number(value);
-              return Number.isFinite(x) ? Math.max(0, Math.min(10, Math.floor(x))) : fallback;
-            };
-            return {
-              before: clamp(n.before, 2),
-              after: clamp(n.after, 2),
-              row: n.row !== false,
-              column: n.column === true,
-              headers: n.headers !== false
-            };
           },
           agentElementMatch(el) {
             const m = {
