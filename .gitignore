@@ -22,6 +22,9 @@ erl_crash.dump
 # Temporary files, for example, from tests.
 /tmp/
 
+# Isolated local feature worktrees.
+/.worktrees/
+
 # Ignore package tarball (built via "mix hex.build").
 contract-*.tar
 
@@ -89,4 +92,3 @@ contract-*.tar
 # Burrito release/package output. These artifacts are built locally and attached
 # to releases instead of committed.
 /burrito_out/
-
