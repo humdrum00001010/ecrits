@@ -21,4 +21,23 @@ defmodule Ecrits.NormalizationSchemaBoundaryTest do
     refute sources =~ "defp clean_lifecycle("
     refute sources =~ "defp normalize_vfs_edit_lifecycle_event("
   end
+
+  test "workspace records have one schema authority" do
+    sources =
+      ["lib/ecrits/workspace/session.ex", "lib/ecrits/workspace_handoff.ex"]
+      |> Enum.map_join("\n", &File.read!/1)
+
+    for name <- [
+          "normalize_agent_state",
+          "normalize_adapter_opts",
+          "normalize_foreground",
+          "normalize_foregrounds",
+          "normalize_session_documents",
+          "normalize_agent_turn_owners",
+          "normalize_turn_finalizations",
+          "normalize_turn_finalization_active"
+        ] do
+      refute sources =~ "defp #{name}("
+    end
+  end
 end
