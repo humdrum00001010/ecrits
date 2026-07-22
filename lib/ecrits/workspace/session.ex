@@ -1328,18 +1328,12 @@ defmodule Ecrits.Workspace.Session do
     state = ensure_document_state(state)
 
     with {:ok, path} <- normalize_document_path(document_path),
-         %Document{} = document <- Map.get(state.documents, path) do
-      document = %{
-        document
-        | scroll_top:
-            scroll_coordinate(attr_value(attrs, :top) || attr_value(attrs, :scroll_top)),
-          scroll_left:
-            scroll_coordinate(attr_value(attrs, :left) || attr_value(attrs, :scroll_left))
-      }
-
+         %Document{} = document <- Map.get(state.documents, path),
+         {:ok, document} <- Document.cast(attrs, document) do
       {:reply, :ok, %{state | documents: Map.put(state.documents, path, document)}}
     else
       nil -> {:reply, {:error, :not_open}, state}
+      {:error, %Ecto.Changeset{}} -> {:reply, {:error, :invalid_scroll}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -2234,7 +2228,7 @@ defmodule Ecrits.Workspace.Session do
     documents =
       state
       |> Map.get(:documents, %{})
-      |> normalize_session_documents()
+      |> cast_session_documents()
 
     open_document_paths =
       state
@@ -2254,19 +2248,21 @@ defmodule Ecrits.Workspace.Session do
     |> Map.put_new(:document_element_picker_enabled?, false)
   end
 
-  defp normalize_session_documents(documents) when is_map(documents) do
+  defp cast_session_documents(documents) when is_map(documents) do
     documents
     |> Enum.flat_map(fn
       {path, %Document{} = document} ->
-        case normalize_document_path(document.path || path) do
-          {:ok, normalized} -> [{normalized, %{document | path: normalized}}]
+        attrs = document |> Map.from_struct() |> Map.put(:path, document.path || path)
+
+        case Document.cast(attrs) do
+          {:ok, normalized} -> [{normalized.path, normalized}]
           {:error, _} -> []
         end
 
       {path, document} when is_map(document) ->
         attrs = Map.put_new(document, :path, path)
 
-        case session_document(attrs, %{}) do
+        case Document.cast(attrs) do
           {:ok, %Document{} = normalized} -> [{normalized.path, normalized}]
           {:error, _} -> []
         end
@@ -2277,7 +2273,7 @@ defmodule Ecrits.Workspace.Session do
     |> Map.new()
   end
 
-  defp normalize_session_documents(_documents), do: %{}
+  defp cast_session_documents(_documents), do: %{}
 
   defp document_snapshot_payload(state) do
     %{
@@ -2298,21 +2294,10 @@ defmodule Ecrits.Workspace.Session do
     with {:ok, path} <- normalize_document_path(attr_value(attrs, :path)) do
       existing = Map.get(existing_documents, path, %Document{path: path})
 
-      {:ok,
-       %{
-         existing
-         | path: path,
-           id: attr_value(attrs, :id) || existing.id,
-           pool_document_id: attr_value(attrs, :pool_document_id) || existing.pool_document_id,
-           scroll_top:
-             scroll_coordinate(
-               attr_value(attrs, :top) || attr_value(attrs, :scroll_top) || existing.scroll_top
-             ),
-           scroll_left:
-             scroll_coordinate(
-               attr_value(attrs, :left) || attr_value(attrs, :scroll_left) || existing.scroll_left
-             )
-       }}
+      attrs
+      |> Map.new()
+      |> Map.put(:path, path)
+      |> Document.cast(existing)
     end
   end
 
@@ -2356,23 +2341,6 @@ defmodule Ecrits.Workspace.Session do
   end
 
   defp attr_value(_attrs, _key), do: nil
-
-  defp scroll_coordinate(value) when is_integer(value) and value >= 0, do: value
-
-  defp scroll_coordinate(value) when is_float(value) and value >= 0 do
-    value
-    |> Float.round()
-    |> trunc()
-  end
-
-  defp scroll_coordinate(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {integer, _rest} when integer >= 0 -> integer
-      _ -> 0
-    end
-  end
-
-  defp scroll_coordinate(_value), do: 0
 
   defp ensure_file_watcher(state) do
     state = ensure_maps(state)
